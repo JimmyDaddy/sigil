@@ -2926,10 +2926,12 @@ const TERMINAL_DISPLAY_STATUSES: readonly ConversationTerminalObservation["statu
   "failed",
   "cancelled",
   "interrupted",
+  "paused",
+  "blocked",
   "awaiting_user_input",
 ] as const;
 
-function toContinuityPage(page: BridgeConversationDisplayPage): ConversationDisplayPage {
+export function toContinuityPage(page: BridgeConversationDisplayPage): ConversationDisplayPage {
   if (page.items.some((item) => item.source === "live_transient")) {
     throw new Error("The canonical conversation projection returned a transient item.");
   }
@@ -2944,7 +2946,7 @@ function toContinuityPage(page: BridgeConversationDisplayPage): ConversationDisp
   return page as ConversationDisplayPage;
 }
 
-function terminalObservationFromRun(
+export function terminalObservationFromRun(
   run: RunSummary,
 ): ConversationTerminalObservation | undefined {
   switch (run.status) {
@@ -2955,7 +2957,12 @@ function terminalObservationFromRun(
     case "cancelled":
       return { runId: run.id, status: "cancelled" };
     case "paused":
-      return { runId: run.id, status: "cancelled" };
+      // HTTP's paused snapshot also represents AwaitingUserInput. The exact domain terminal
+      // remains available from the replayed event or canonical display frontier, so this
+      // ambiguous snapshot can only prove that a terminal refresh is required.
+      return undefined;
+    case "blocked":
+      return { runId: run.id, status: "blocked" };
     case "interrupted":
       return { runId: run.id, status: "interrupted" };
     default:

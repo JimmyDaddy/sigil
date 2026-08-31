@@ -156,6 +156,118 @@ fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
 }
 
 #[test]
+fn machine_terminal_projection_error_does_not_guess_a_blocked_result() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("corrupt-session.jsonl");
+    fs::write(
+        &path,
+        b"{\"schema_version\":999,\"event_type\":\"run_finalized\"}\n",
+    )?;
+    assert!(
+        super::machine_terminal_state(
+            sigil_runtime::application_run::ApplicationRunTerminalStatus::Blocked,
+            path.to_str().expect("UTF-8 test path"),
+        )
+        .is_err()
+    );
+    let pending = temp.path().join("pending-session.jsonl");
+    write_application_run_test_config(&temp.path().join("sigil.toml"), "http://127.0.0.1:1")?;
+    session_with_pending_plan_draft(&pending)?;
+    let (status, artifact) = super::machine_terminal_state(
+        sigil_runtime::application_run::ApplicationRunTerminalStatus::Blocked,
+        pending.to_str().expect("UTF-8 test path"),
+    )?;
+    assert_eq!(
+        status,
+        sigil_runtime::machine_protocol::MachineRunStatus::AwaitingPlanDecision
+    );
+    assert!(artifact.is_some());
+    Ok(())
+}
+
+#[test]
+fn machine_result_uses_durable_terminal_after_execution_or_cancellation_errors() -> Result<()> {
+    use sigil_kernel::{
+        ConversationRunFinalizedEntryV1, ConversationRunStartedEntryV1,
+        ConversationRunTerminalStatusV1 as Terminal, PublicEventOutboxEntryV1, PublicRunEvent,
+        SecretRedactor,
+    };
+    use sigil_runtime::machine_protocol::MachineRunStatus;
+    for (terminal, kind, expected) in [
+        (
+            Terminal::Failed,
+            PublicRunEventKind::RunFailed {
+                error: "execution failed".to_owned(),
+            },
+            MachineRunStatus::Failed,
+        ),
+        (
+            Terminal::Interrupted,
+            PublicRunEventKind::RunInterrupted {
+                reason: "cleanup unknown".to_owned(),
+            },
+            MachineRunStatus::Interrupted,
+        ),
+        (
+            Terminal::Cancelled,
+            PublicRunEventKind::RunCancelled,
+            MachineRunStatus::Cancelled,
+        ),
+        (
+            Terminal::Succeeded,
+            PublicRunEventKind::RunFinished {
+                final_text: "durable answer".to_owned(),
+            },
+            MachineRunStatus::Succeeded,
+        ),
+    ] {
+        let temp = tempfile::tempdir()?;
+        write_application_run_test_config(&temp.path().join("sigil.toml"), "http://127.0.0.1:1")?;
+        let path = temp.path().join("session.jsonl");
+        session_with_pending_plan_draft(&path)?;
+        let store = JsonlSessionStore::new(&path)?;
+        let session = sigil_kernel::Session::load_from_store("provider", "model", store)?;
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&ConversationRunStartedEntryV1::new("run-durable", 10)?)?;
+        let public = PublicRunEvent::new(session.session_scope_id(), "run-durable", 1, kind);
+        let outbox = PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: "public-terminal".to_owned(),
+            domain_event_id: "domain-terminal".to_owned(),
+            run_id: "run-durable".to_owned(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&public)?),
+            event: public,
+        };
+        lifecycle.append_finalized_with_outbox(
+            &ConversationRunFinalizedEntryV1::new(
+                "run-durable",
+                terminal,
+                (terminal == Terminal::Succeeded).then(|| "final-message".to_owned()),
+                None,
+                20,
+                &SecretRedactor::empty(),
+            )?,
+            &outbox,
+        )?;
+        let result = super::durable_machine_run_result(
+            session.session_scope_id(),
+            "run-durable",
+            path.to_str().expect("UTF-8 test path"),
+        )?
+        .expect("paired domain terminal must be a result");
+        assert_eq!(result.status, expected);
+        if terminal == Terminal::Succeeded {
+            assert_eq!(result.final_text, "durable answer");
+        }
+        assert_eq!(result.run_id, "run-durable");
+        // Pending plan metadata cannot change a failure/cancellation/interruption into waiting.
+        assert!(result.plan_review.is_some());
+    }
+    Ok(())
+}
+
+#[test]
 fn fresh_cli_session_projects_unknown_workspace_trust() -> Result<()> {
     let workspace = unique_temp_workspace("sigil-cli-workspace-trust")?;
     let store = JsonlSessionStore::new(workspace.join("session.jsonl"))?;
@@ -1579,7 +1691,7 @@ async fn run_json_emits_exactly_one_terminal_result_record() -> Result<()> {
         .collect::<serde_json::Result<Vec<_>>>()?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["record_type"], "result");
-    assert_eq!(lines[0]["protocol_version"], 1);
+    assert_eq!(lines[0]["protocol_version"], 2);
     assert_eq!(lines[0]["result"]["status"], "succeeded");
     assert_eq!(lines[0]["result"]["final_text"], "json answer");
     assert!(

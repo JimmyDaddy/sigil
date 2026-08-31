@@ -2006,7 +2006,6 @@ fn map_terminal_status(
         ConversationRunTerminalStatusV1::AwaitingUserInput => {
             ConversationDisplayStatusV1::AwaitingUserInput
         }
-        _ => bail!("unsupported conversation run terminal status"),
     })
 }
 

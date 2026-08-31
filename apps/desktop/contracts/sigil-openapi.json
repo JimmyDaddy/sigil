@@ -2625,6 +2625,7 @@
           "failed",
           "cancelled",
           "interrupted",
+          "paused",
           "blocked",
           "awaiting_user_input"
         ],

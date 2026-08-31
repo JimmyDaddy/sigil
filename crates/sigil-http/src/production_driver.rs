@@ -22,13 +22,13 @@ use sigil_kernel::{
     ConversationQueueDurableProjection, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, ExecutionContainmentRequest,
     JsonlSessionStore, ModelMessage, PermissionDecisionReason, PermissionRisk,
-    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection, PublicRouteRecoveryAction,
-    PublicRouteRecoveryCode, PublicRunEvent, PublicRunEventKind, RootConfig, SecretString,
-    SessionLogEntry, SessionRef, ToolAnalysisStatus, ToolApproval, ToolApprovalContext,
-    ToolApprovalUserDecision, ToolArtifactAvailability, ToolArtifactDescriptorV1,
-    ToolArtifactEncoding, ToolArtifactRefV1, ToolCall, ToolOperation,
-    ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect, ToolPermissionSummary, ToolSpec,
-    ToolSubject, conversation_promotion_capability_digest,
+    ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
+    PublicEventOutboxProjectionV1, PublicRouteRecoveryAction, PublicRouteRecoveryCode,
+    PublicRunEvent, PublicRunEventKind, RootConfig, SecretString, SessionLogEntry, SessionRef,
+    ToolAnalysisStatus, ToolApproval, ToolApprovalContext, ToolApprovalUserDecision,
+    ToolArtifactAvailability, ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactRefV1,
+    ToolCall, ToolOperation, ToolOutputArchivedArtifactBindingV1, ToolPermissionEffect,
+    ToolPermissionSummary, ToolSpec, ToolSubject, conversation_promotion_capability_digest,
     project_conversation_prompt_for_persistence,
     project_user_message_for_persistence_with_nonce_and_issued_at, safe_persistence_text,
     stable_event_uuid,
@@ -67,7 +67,7 @@ use sigil_runtime::application_run::{
     prepare_application_run, prepare_application_task_continuation,
     prepare_application_user_input_decision,
     record_application_preparation_cancellation_with_attachment,
-    rerun_application_verification_with_attachment,
+    replay_pending_application_terminal_outbox, rerun_application_verification_with_attachment,
 };
 use sigil_runtime::conversation_display::{
     ConversationDisplayProjectionError, conversation_display_page_with_artifact_store,
@@ -96,10 +96,10 @@ use crate::{
     HttpModelSelectionPolicy, HttpPendingApproval, HttpPendingApprovalDisplay,
     HttpPendingApprovalSubject, HttpPermissionMode, HttpPlanDecisionCommandReceipt,
     HttpPlanDecisionRequest, HttpPlanReviewDetail, HttpQueuedRunAdmission,
-    HttpQueuedRunDriverStart, HttpRunAdmissionError, HttpRunContextView, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunSnapshot, HttpRunStartRequest,
-    HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
+    HttpQueuedRunDriverStart, HttpRegistryError, HttpRunAdmissionError, HttpRunContextView,
+    HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError,
+    HttpRunDriverStart, HttpRunDriverTaskPause, HttpRunDriverTerminalTaskCancel, HttpRunSnapshot,
+    HttpRunStartRequest, HttpRunTerminalOutcome, HttpSessionBinding, HttpSessionOpenBindingError,
     HttpSessionRouteRecoveryCode, HttpSessionRunRegistry, HttpSessionSnapshot,
     HttpSessionTranscriptMessage, HttpSessionTranscriptPage, HttpTaskIntegrationAcceptanceView,
     HttpTaskIntegrationReviewRequest, HttpTaskIntegrationReviewView, HttpToolArtifactPage,
@@ -667,7 +667,19 @@ fn publish_plan_review_revision_terminal(
     run_id: &str,
     outcome: &std::result::Result<sigil_runtime::PlanReviewRunOutcome, anyhow::Error>,
 ) {
-    let kind = match outcome {
+    let kind = plan_review_revision_terminal_event(outcome);
+    let _ = event_bus.publish_next_run_event_and_close_stream(PublicRunEvent::new(
+        durable_session_scope_id,
+        run_id,
+        1,
+        kind,
+    ));
+}
+
+fn plan_review_revision_terminal_event(
+    outcome: &std::result::Result<sigil_runtime::PlanReviewRunOutcome, anyhow::Error>,
+) -> PublicRunEventKind {
+    match outcome {
         Ok(sigil_runtime::PlanReviewRunOutcome::DraftReady { draft }) => {
             PublicRunEventKind::RunFinished {
                 final_text: format!("Plan ready: {}", draft.summary),
@@ -694,8 +706,12 @@ fn publish_plan_review_revision_terminal(
         Ok(sigil_runtime::PlanReviewRunOutcome::Paused(reason)) => PublicRunEventKind::RunPaused {
             reason: reason.clone(),
         },
-        Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(error))
-        | Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error))
+        Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(reason)) => {
+            PublicRunEventKind::RunInterrupted {
+                reason: reason.clone(),
+            }
+        }
+        Ok(sigil_runtime::PlanReviewRunOutcome::Failed(error))
         | Ok(sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error)) => {
             PublicRunEventKind::RunFailed {
                 error: error.clone(),
@@ -704,13 +720,7 @@ fn publish_plan_review_revision_terminal(
         Err(error) => PublicRunEventKind::RunFailed {
             error: format!("{error:#}"),
         },
-    };
-    let _ = event_bus.publish_next_run_event_and_close_stream(PublicRunEvent::new(
-        durable_session_scope_id,
-        run_id,
-        1,
-        kind,
-    ));
+    }
 }
 
 /// Rolls back a partially registered plan review revision: removes only the run-map entry this
@@ -1601,6 +1611,21 @@ impl HttpProductionRunDriver {
         }
         self.reconcile_terminal_session_once(durable_session_scope_id, &canonical_session_path)
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        replay_pending_http_terminal_outboxes(
+            &canonical_session_path,
+            durable_session_scope_id,
+            &self.event_bus,
+        )
+        .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        if let Some(registry) = self.registry.get().and_then(Weak::upgrade) {
+            reconcile_registered_http_terminal_outboxes(
+                &canonical_session_path,
+                durable_session_scope_id,
+                &registry,
+                &self.event_bus,
+            )
+            .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        }
         let mut attachments = self
             .session_attachments
             .lock()
@@ -4713,16 +4738,15 @@ impl HttpRunSupervisor {
             tokio::select! {
                 biased;
                 result = &mut execution => {
-                let terminal_was_delivered = control
-                    .terminal_was_delivered()
-                    .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-                let mut recovery_handler = event_handler.clone();
-                let terminal = ensure_application_execution_terminal(
-                    terminal_was_delivered,
-                    &result,
+                let terminal = require_durable_application_terminal(
+                    durable_application_execution_terminal(&control, &result)?,
+                    "application execution ended",
+                )?;
+                replay_pending_http_terminal_outbox(
+                    Path::new(&self.start.session.session_log_path),
                     &self.start.session.durable_session_scope_id,
                     &self.start.run.id,
-                    &mut recovery_handler,
+                    &self.event_bus,
                 )?;
                 record_run_terminal_and_reconcile_stream(
                     &registry,
@@ -4787,12 +4811,13 @@ impl HttpRunSupervisor {
                             ),
                         );
                         let natural_result = (&mut execution).await;
-                        if record_natural_terminal_if_delivered(
+                        if record_natural_terminal_if_committed(
                             &control,
                             &registry,
                             &self.event_bus,
                             &self.start.session.durable_session_scope_id,
                             &self.start.run.id,
+                            Path::new(&self.start.session.session_log_path),
                             &natural_result,
                         )? {
                             return Ok(());
@@ -4813,12 +4838,13 @@ impl HttpRunSupervisor {
                             Ok(request) => request,
                             Err(_) => {
                                 let natural_result = (&mut execution).await;
-                                if record_natural_terminal_if_delivered(
+                                if record_natural_terminal_if_committed(
                                     &control,
                                     &registry,
                                     &self.event_bus,
                                     &self.start.session.durable_session_scope_id,
                                     &self.start.run.id,
+                                    Path::new(&self.start.session.session_log_path),
                                     &natural_result,
                                 )? {
                                     return Ok(());
@@ -4855,12 +4881,13 @@ impl HttpRunSupervisor {
                                         )
                                     };
                                     let natural_result = (&mut execution).await;
-                                    if record_natural_terminal_if_delivered(
+                                    if record_natural_terminal_if_committed(
                                         &control,
                                         &registry,
                                         &self.event_bus,
                                         &self.start.session.durable_session_scope_id,
                                         &self.start.run.id,
+                                        Path::new(&self.start.session.session_log_path),
                                         &natural_result,
                                     )? {
                                         return Ok(());
@@ -4868,10 +4895,28 @@ impl HttpRunSupervisor {
                                     return Err(error);
                                 }
                             };
-                            let terminal_was_delivered = match control.terminal_was_delivered() {
-                                Ok(delivered) => delivered,
+                            let terminal = match durable_application_execution_terminal(
+                                &control,
+                                &natural_result,
+                            ) {
+                                Ok(Some(terminal)) => terminal,
+                                Ok(None) => {
+                                    let error = HttpRunDriverError::new(
+                                        "natural run completion won cancellation without an atomically committed domain terminal and public outbox",
+                                    );
+                                    let error = if acknowledgement_sent {
+                                        error
+                                    } else {
+                                        quarantine_cancellation_failure(
+                                            &registry,
+                                            &self.start.run.id,
+                                            &acknowledgement,
+                                            error,
+                                        )
+                                    };
+                                    return Err(error);
+                                }
                                 Err(error) => {
-                                    let error = HttpRunDriverError::new(error.to_string());
                                     let error = if acknowledgement_sent {
                                         error
                                     } else {
@@ -4885,10 +4930,12 @@ impl HttpRunSupervisor {
                                     return Err(error);
                                 }
                             };
-                            if !terminal_was_delivered {
-                                let error = HttpRunDriverError::new(
-                                    "natural run completion won cancellation without a durable protocol terminal",
-                                );
+                            if let Err(error) = replay_pending_http_terminal_outbox(
+                                Path::new(&self.start.session.session_log_path),
+                                &self.start.session.durable_session_scope_id,
+                                &self.start.run.id,
+                                &self.event_bus,
+                            ) {
                                 let error = if acknowledgement_sent {
                                     error
                                 } else {
@@ -4901,7 +4948,6 @@ impl HttpRunSupervisor {
                                 };
                                 return Err(error);
                             }
-                            let terminal = http_terminal_from_application_result(&natural_result);
                             if let Err(error) = record_run_terminal_and_reconcile_stream(
                                 &registry,
                                 &self.event_bus,
@@ -5015,10 +5061,41 @@ impl HttpRunSupervisor {
                 if !execution_joined {
                     let _ = (&mut execution).await;
                 }
-                let terminal_was_delivered = match control.terminal_was_delivered() {
-                    Ok(delivered) => delivered,
+                let terminal = match durable_application_terminal(&control) {
+                    Ok(Some(observed)) if observed == terminal => observed,
+                    Ok(Some(_)) => {
+                        let error = HttpRunDriverError::new(
+                            "production cancellation outcome conflicts with its durable application terminal",
+                        );
+                        let error = if acknowledgement_sent {
+                            error
+                        } else {
+                            quarantine_cancellation_failure(
+                                &registry,
+                                &self.start.run.id,
+                                &acknowledgement,
+                                error,
+                            )
+                        };
+                        return Err(error);
+                    }
+                    Ok(None) => {
+                        let error = HttpRunDriverError::new(
+                            "production cancellation ended without an atomically committed domain terminal and public outbox",
+                        );
+                        let error = if acknowledgement_sent {
+                            error
+                        } else {
+                            quarantine_cancellation_failure(
+                                &registry,
+                                &self.start.run.id,
+                                &acknowledgement,
+                                error,
+                            )
+                        };
+                        return Err(error);
+                    }
                     Err(error) => {
-                        let error = HttpRunDriverError::new(error.to_string());
                         let error = if acknowledgement_sent {
                             error
                         } else {
@@ -5032,10 +5109,12 @@ impl HttpRunSupervisor {
                         return Err(error);
                     }
                 };
-                if !terminal_was_delivered {
-                    let error = HttpRunDriverError::new(
-                        "production cancellation ended without a durable protocol terminal",
-                    );
+                if let Err(error) = replay_pending_http_terminal_outbox(
+                    Path::new(&self.start.session.session_log_path),
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    &self.event_bus,
+                ) {
                     let error = if acknowledgement_sent {
                         error
                     } else {
@@ -5110,12 +5189,13 @@ impl HttpRunSupervisor {
                         HttpRunDriverError::new("production Task pause activation worker failed"),
                     );
                     let natural_result = (&mut *execution).await;
-                    if record_natural_terminal_if_delivered(
+                    if record_natural_terminal_if_committed(
                         &control,
                         registry,
                         &self.event_bus,
                         &self.start.session.durable_session_scope_id,
                         &self.start.run.id,
+                        Path::new(&self.start.session.session_log_path),
                         &natural_result,
                     )? {
                         return Ok(true);
@@ -5138,12 +5218,13 @@ impl HttpRunSupervisor {
                             Some(ticket) => Ok(ticket),
                             None => {
                                 let natural_result = (&mut *execution).await;
-                                if record_natural_terminal_if_delivered(
+                                if record_natural_terminal_if_committed(
                                     &control,
                                     registry,
                                     &self.event_bus,
                                     &self.start.session.durable_session_scope_id,
                                     &self.start.run.id,
+                                    Path::new(&self.start.session.session_log_path),
                                     &natural_result,
                                 )? {
                                     return Ok(true);
@@ -5248,13 +5329,57 @@ impl HttpRunSupervisor {
         if !execution_joined {
             let _ = (&mut *execution).await;
         }
-        let terminal_was_delivered = control
-            .terminal_was_delivered()
-            .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-        if !terminal_was_delivered {
-            let error = HttpRunDriverError::new(
-                "production Task pause ended without a durable protocol terminal",
-            );
+        let terminal = match durable_application_terminal(&control) {
+            Ok(Some(observed)) if observed == terminal => observed,
+            Ok(Some(_)) => {
+                let error = HttpRunDriverError::new(
+                    "production Task pause outcome conflicts with its durable application terminal",
+                );
+                return Err(if acknowledgement_sent {
+                    error
+                } else {
+                    quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        error,
+                    )
+                });
+            }
+            Ok(None) => {
+                let error = HttpRunDriverError::new(
+                    "production Task pause ended without an atomically committed domain terminal and public outbox",
+                );
+                return Err(if acknowledgement_sent {
+                    error
+                } else {
+                    quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        error,
+                    )
+                });
+            }
+            Err(error) => {
+                return Err(if acknowledgement_sent {
+                    error
+                } else {
+                    quarantine_cancellation_failure(
+                        registry,
+                        &self.start.run.id,
+                        &acknowledgement,
+                        error,
+                    )
+                });
+            }
+        };
+        if let Err(error) = replay_pending_http_terminal_outbox(
+            Path::new(&self.start.session.session_log_path),
+            &self.start.session.durable_session_scope_id,
+            &self.start.run.id,
+            &self.event_bus,
+        ) {
             return Err(if acknowledgement_sent {
                 error
             } else {
@@ -5420,16 +5545,8 @@ impl HttpRunSupervisor {
                     "pre-execution cancellation terminal could not be durably proven: {error}"
                 ))
             })
-            .and_then(|terminal| {
-                if !control
-                    .terminal_was_delivered()
-                    .map_err(|error| HttpRunDriverError::new(error.to_string()))?
-                {
-                    return Err(HttpRunDriverError::new(
-                        "pre-execution cancellation ended without a durable protocol terminal",
-                    ));
-                }
-                let terminal = match terminal {
+            .and_then(|expected_terminal| {
+                let expected_terminal = match expected_terminal {
                     sigil_kernel::RunCancellationTerminalOutcome::Cancelled => {
                         HttpRunTerminalOutcome::Cancelled
                     }
@@ -5437,6 +5554,22 @@ impl HttpRunSupervisor {
                         HttpRunTerminalOutcome::Interrupted
                     }
                 };
+                let terminal = durable_application_terminal(&control)?.ok_or_else(|| {
+                    HttpRunDriverError::new(
+                        "pre-execution cancellation ended without an atomically committed domain terminal and public outbox",
+                    )
+                })?;
+                if terminal != expected_terminal {
+                    return Err(HttpRunDriverError::new(
+                        "pre-execution cancellation outcome conflicts with its durable application terminal",
+                    ));
+                }
+                replay_pending_http_terminal_outbox(
+                    Path::new(&self.start.session.session_log_path),
+                    &self.start.session.durable_session_scope_id,
+                    &self.start.run.id,
+                    &self.event_bus,
+                )?;
                 record_run_terminal_and_reconcile_stream(
                     registry,
                     &self.event_bus,
@@ -5615,6 +5748,12 @@ struct HttpProductionEventHandler {
     event_bus: Arc<HttpLiveEventBus>,
 }
 
+struct HttpPendingTerminalOutboxHandler {
+    durable_session_scope_id: String,
+    run_id: String,
+    event_bus: Arc<HttpLiveEventBus>,
+}
+
 struct HttpProductionTerminalLifecycleHandler {
     durable_session_scope_id: String,
     run_id: String,
@@ -5690,6 +5829,70 @@ impl sigil_runtime::ApplicationTerminalLifecycleHandler for HttpProductionTermin
     }
 }
 
+fn is_application_terminal_public_event(event: &PublicRunEventKind) -> bool {
+    matches!(
+        event,
+        PublicRunEventKind::RunFinished { .. }
+            | PublicRunEventKind::RunFailed { .. }
+            | PublicRunEventKind::RunCancelled
+            | PublicRunEventKind::RunInterrupted { .. }
+            | PublicRunEventKind::RunPaused { .. }
+            | PublicRunEventKind::RunBlocked { .. }
+            | PublicRunEventKind::RunAwaitingUserInput { .. }
+    )
+}
+
+fn publish_exact_http_terminal_outbox_event(
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    event: PublicRunEvent,
+) -> Result<()> {
+    if event.session_id != durable_session_scope_id || event.run_id != run_id {
+        return Err(anyhow!(
+            "pending public outbox event belongs to another production run"
+        ));
+    }
+    if !is_application_terminal_public_event(&event.event) {
+        return Err(anyhow!(
+            "pending public outbox replay requires a terminal event"
+        ));
+    }
+    let canonical = crate::HttpProtocolEvent::from_run_event(event.clone())?;
+    let existing = event_bus
+        .replay_run_after(durable_session_scope_id, run_id, None)
+        .map_err(|error| anyhow!("HTTP terminal replay state is unavailable: {error}"))?
+        .into_iter()
+        .find(|existing| existing.run_event.sequence == event.sequence);
+    if let Some(existing) = existing {
+        if serde_json::to_value(existing.run_event)? == serde_json::to_value(canonical.run_event)? {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "HTTP terminal replay sequence conflicts with the durable public outbox payload"
+        ));
+    }
+    event_bus
+        .publish_run_event_with_stream_continuation(event)
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+}
+
+impl ApplicationRunEventHandler for HttpPendingTerminalOutboxHandler {
+    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        publish_exact_http_terminal_outbox_event(
+            &self.event_bus,
+            &self.durable_session_scope_id,
+            &self.run_id,
+            event,
+        )
+    }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        "http"
+    }
+}
+
 impl ApplicationRunEventHandler for HttpProductionEventHandler {
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
         if event.run_id != self.run_id {
@@ -5708,16 +5911,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
             }
             _ => None,
         };
-        let application_terminal = matches!(
-            &event.event,
-            PublicRunEventKind::RunFinished { .. }
-                | PublicRunEventKind::RunFailed { .. }
-                | PublicRunEventKind::RunBlocked { .. }
-                | PublicRunEventKind::RunPaused { .. }
-                | PublicRunEventKind::RunInterrupted { .. }
-                | PublicRunEventKind::RouteRecoveryRequired { .. }
-                | PublicRunEventKind::RunCancelled
-        );
+        let application_terminal = is_application_terminal_public_event(&event.event);
         match &event.event {
             PublicRunEventKind::ApprovalResolved {
                 call_id,
@@ -5776,7 +5970,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     .upgrade()
                     .ok_or_else(|| anyhow!("production approval registry is closed"))?;
                 let display = pending_approval_display(
-                    event.sequence.max(1),
+                    event.sequence,
                     effects,
                     analysis,
                     containment,
@@ -5810,14 +6004,9 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     return Err(anyhow!(error));
                 }
                 approval_request = Some(pending.clone());
-                let published = self.event_bus.publish_next_run_event_with_approval(
-                    event.clone(),
-                    |event_sequence| {
-                        let mut published_pending = pending.clone();
-                        published_pending.display.event_sequence = event_sequence;
-                        Ok(published_pending)
-                    },
-                );
+                let published = self
+                    .event_bus
+                    .publish_run_event_with_approval(event.clone(), Some(pending.clone()));
                 if let Ok(protocol) = &published {
                     registry.update_approval_event_sequence(
                         &self.run_id,
@@ -5829,12 +6018,19 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                         approval.display.event_sequence = protocol.run_event.sequence;
                     }
                 }
-                published
+                published.map(|_| ()).map_err(anyhow::Error::new)
             }
-            _ if application_terminal => self
+            _ if application_terminal => publish_exact_http_terminal_outbox_event(
+                &self.event_bus,
+                &self.durable_session_scope_id,
+                &self.run_id,
+                event,
+            ),
+            _ => self
                 .event_bus
-                .publish_next_run_event_with_stream_continuation(event),
-            _ => self.event_bus.publish_next_run_event(event),
+                .publish_run_event(event)
+                .map(|_| ())
+                .map_err(anyhow::Error::new),
         };
         if let Err(error) = publication {
             if let Some(approval) = approval_request {
@@ -5848,7 +6044,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     );
                 }
             }
-            return Err(anyhow!(error));
+            return Err(error);
         }
         if let Some(transition) = route_transition {
             self.registry
@@ -5857,6 +6053,10 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                 .record_session_route_transition(&self.durable_session_scope_id, transition)?;
         }
         Ok(())
+    }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        "http"
     }
 }
 
@@ -6286,76 +6486,224 @@ pub(crate) fn record_run_terminal_and_reconcile_stream(
         .map_err(registry_driver_error)
 }
 
-fn record_natural_terminal_if_delivered(
+fn record_natural_terminal_if_committed(
     control: &ApplicationRunControl,
     registry: &HttpSessionRunRegistry,
-    event_bus: &HttpLiveEventBus,
+    event_bus: &Arc<HttpLiveEventBus>,
     durable_session_scope_id: &str,
     run_id: &str,
+    session_log_path: &Path,
     result: &Result<ApplicationRunTerminalStatus>,
 ) -> Result<bool, HttpRunDriverError> {
-    if !control
-        .terminal_was_delivered()
-        .map_err(|error| HttpRunDriverError::new(error.to_string()))?
-    {
+    let Some(terminal) = durable_application_execution_terminal(control, result)? else {
         return Ok(false);
-    }
+    };
+    replay_pending_http_terminal_outbox(
+        session_log_path,
+        durable_session_scope_id,
+        run_id,
+        event_bus,
+    )?;
     record_run_terminal_and_reconcile_stream(
         registry,
         event_bus,
         durable_session_scope_id,
         run_id,
-        http_terminal_from_application_result(result),
+        terminal,
     )?;
     Ok(true)
 }
 
-fn http_terminal_from_application_result(
-    result: &Result<ApplicationRunTerminalStatus>,
-) -> HttpRunTerminalOutcome {
-    match result {
-        Ok(terminal_status) => match terminal_status {
-            ApplicationRunTerminalStatus::Succeeded => HttpRunTerminalOutcome::Finished,
-            ApplicationRunTerminalStatus::Interrupted => HttpRunTerminalOutcome::Interrupted,
-            ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Blocked,
-            ApplicationRunTerminalStatus::AwaitingUserInput => HttpRunTerminalOutcome::Paused,
+fn replay_pending_http_terminal_outbox(
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    event_bus: &Arc<HttpLiveEventBus>,
+) -> Result<usize, HttpRunDriverError> {
+    let mut handler = HttpPendingTerminalOutboxHandler {
+        durable_session_scope_id: durable_session_scope_id.to_owned(),
+        run_id: run_id.to_owned(),
+        event_bus: Arc::clone(event_bus),
+    };
+    replay_pending_application_terminal_outbox(session_log_path, run_id, &mut handler).map_err(
+        |error| {
+            HttpRunDriverError::new(format!("pending terminal outbox replay failed: {error:#}"))
         },
-        Err(_) => HttpRunTerminalOutcome::Failed,
+    )
+}
+
+fn replay_pending_http_terminal_outboxes(
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    event_bus: &Arc<HttpLiveEventBus>,
+) -> Result<usize, HttpRunDriverError> {
+    let store = JsonlSessionStore::new(session_log_path)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let records = store
+        .read_event_records_writer()
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let projection = PublicEventOutboxProjectionV1::from_records(&records)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let run_ids = projection
+        .pending_for_adapter("http")
+        .into_iter()
+        .filter(|entry| is_application_terminal_public_event(&entry.event.event))
+        .map(|entry| entry.run_id.as_str())
+        .collect::<BTreeSet<_>>();
+    run_ids.into_iter().try_fold(0, |replayed, run_id| {
+        replay_pending_http_terminal_outbox(
+            session_log_path,
+            durable_session_scope_id,
+            run_id,
+            event_bus,
+        )
+        .map(|count| replayed + count)
+    })
+}
+
+/// Restores this process-local registry from already validated durable terminal pairs.
+///
+/// Receipt state is intentionally not consulted: a prior process can acknowledge the HTTP event
+/// and still die before completing its in-memory registry transition. Only run ids that this
+/// registry already owns are projected; historical durable runs remain untouched until a caller
+/// explicitly re-registers them.
+fn reconcile_registered_http_terminal_outboxes(
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+) -> Result<usize, HttpRunDriverError> {
+    let canonical_session_path = canonical_http_session_path(session_log_path)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let store = JsonlSessionStore::new(&canonical_session_path)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let records = store
+        .read_event_records_writer()
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let projection = PublicEventOutboxProjectionV1::from_records(&records)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let mut reconciled = 0usize;
+    for entry in projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| is_application_terminal_public_event(&entry.event.event))
+    {
+        if entry.event.session_id != durable_session_scope_id {
+            return Err(HttpRunDriverError::new(
+                "durable terminal outbox session does not match the attached HTTP session",
+            ));
+        }
+        let outcome =
+            http_terminal_from_durable_public_event(&entry.event.event).ok_or_else(|| {
+                HttpRunDriverError::new(
+                    "durable terminal outbox entry has no HTTP terminal outcome",
+                )
+            })?;
+        match registry.get_run(&entry.run_id) {
+            Ok(run) => {
+                let session = registry
+                    .get_session(&run.session_id)
+                    .map_err(registry_driver_error)?;
+                if session.durable_session_scope_id != durable_session_scope_id
+                    || canonical_http_session_path(Path::new(&session.session_log_path))
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))?
+                        .as_path()
+                        != canonical_session_path.as_path()
+                {
+                    return Err(HttpRunDriverError::new(
+                        "registered HTTP run does not belong to the durable terminal outbox attachment",
+                    ));
+                }
+                record_run_terminal_and_reconcile_stream(
+                    registry,
+                    event_bus,
+                    durable_session_scope_id,
+                    &entry.run_id,
+                    outcome,
+                )?;
+                reconciled = reconciled.saturating_add(1);
+            }
+            Err(HttpRegistryError::RunNotFound { .. }) => {}
+            Err(error) => return Err(registry_driver_error(error)),
+        }
+    }
+    Ok(reconciled)
+}
+
+fn durable_application_execution_terminal(
+    control: &ApplicationRunControl,
+    result: &Result<ApplicationRunTerminalStatus>,
+) -> Result<Option<HttpRunTerminalOutcome>, HttpRunDriverError> {
+    let durable_status = control
+        .durable_terminal_status()
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let Some(durable_status) = durable_status else {
+        return Ok(None);
+    };
+    if let Ok(execution_status) = result
+        && *execution_status != durable_status
+    {
+        return Err(HttpRunDriverError::new(
+            "application execution result conflicts with its durable terminal",
+        ));
+    }
+    Ok(Some(http_terminal_from_durable_application_status(
+        durable_status,
+    )))
+}
+
+fn durable_application_terminal(
+    control: &ApplicationRunControl,
+) -> Result<Option<HttpRunTerminalOutcome>, HttpRunDriverError> {
+    let status = control
+        .durable_terminal_status()
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    Ok(status.map(http_terminal_from_durable_application_status))
+}
+
+fn require_durable_application_terminal(
+    terminal: Option<HttpRunTerminalOutcome>,
+    context: &str,
+) -> Result<HttpRunTerminalOutcome, HttpRunDriverError> {
+    terminal.ok_or_else(|| {
+        HttpRunDriverError::new(format!(
+            "{context} without an atomically committed domain terminal and public outbox"
+        ))
+    })
+}
+
+fn http_terminal_from_durable_application_status(
+    terminal_status: ApplicationRunTerminalStatus,
+) -> HttpRunTerminalOutcome {
+    match terminal_status {
+        ApplicationRunTerminalStatus::Succeeded => HttpRunTerminalOutcome::Finished,
+        ApplicationRunTerminalStatus::Failed => HttpRunTerminalOutcome::Failed,
+        ApplicationRunTerminalStatus::Cancelled => HttpRunTerminalOutcome::Cancelled,
+        ApplicationRunTerminalStatus::Interrupted => HttpRunTerminalOutcome::Interrupted,
+        ApplicationRunTerminalStatus::Paused => HttpRunTerminalOutcome::Paused,
+        ApplicationRunTerminalStatus::Blocked => HttpRunTerminalOutcome::Blocked,
+        // HTTP keeps the existing snapshot contract (`Paused`), while the original durable
+        // `RunAwaitingUserInput` event remains in the outbox/SSE stream for consumers that need
+        // to distinguish input-required from an ordinary pause.
+        ApplicationRunTerminalStatus::AwaitingUserInput => HttpRunTerminalOutcome::Paused,
     }
 }
 
-fn ensure_application_execution_terminal<H>(
-    terminal_was_delivered: bool,
-    result: &Result<ApplicationRunTerminalStatus>,
-    durable_session_scope_id: &str,
-    run_id: &str,
-    handler: &mut H,
-) -> Result<HttpRunTerminalOutcome, HttpRunDriverError>
-where
-    H: ApplicationRunEventHandler,
-{
-    if terminal_was_delivered {
-        return Ok(http_terminal_from_application_result(result));
+fn http_terminal_from_durable_public_event(
+    event: &PublicRunEventKind,
+) -> Option<HttpRunTerminalOutcome> {
+    match event {
+        PublicRunEventKind::RunFinished { .. } => Some(HttpRunTerminalOutcome::Finished),
+        PublicRunEventKind::RunFailed { .. } => Some(HttpRunTerminalOutcome::Failed),
+        PublicRunEventKind::RunCancelled => Some(HttpRunTerminalOutcome::Cancelled),
+        PublicRunEventKind::RunInterrupted { .. } => Some(HttpRunTerminalOutcome::Interrupted),
+        PublicRunEventKind::RunPaused { .. } => Some(HttpRunTerminalOutcome::Paused),
+        PublicRunEventKind::RunBlocked { .. } => Some(HttpRunTerminalOutcome::Blocked),
+        // The durable public DTO remains distinct for SSE consumers; the HTTP snapshot contract
+        // represents unresolved input as its existing paused outcome.
+        PublicRunEventKind::RunAwaitingUserInput { .. } => Some(HttpRunTerminalOutcome::Paused),
+        _ => None,
     }
-
-    let message = if result.is_ok() {
-        "run execution completed before its terminal status was published"
-    } else {
-        "run execution failed before its terminal status was published"
-    };
-    handler
-        .handle_public_event(PublicRunEvent::new(
-            durable_session_scope_id,
-            run_id,
-            1,
-            PublicRunEventKind::RunFailed {
-                error: message.to_owned(),
-            },
-        ))
-        .map_err(|_| {
-            HttpRunDriverError::new("production execution fallback terminal publication failed")
-        })?;
-    Ok(HttpRunTerminalOutcome::Failed)
 }
 
 fn registry_driver_error(error: crate::HttpRegistryError) -> HttpRunDriverError {

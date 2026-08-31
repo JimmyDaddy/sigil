@@ -3016,7 +3016,7 @@ export interface components {
         /** @enum {string} */
         ConversationDisplaySource: "durable_transcript" | "durable_run_event" | "live_transient";
         /** @enum {string} */
-        ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "blocked" | "awaiting_user_input";
+        ConversationDisplayStatus: "recorded" | "requested" | "waiting_for_approval" | "approved" | "denied" | "completed" | "succeeded" | "failed" | "cancelled" | "interrupted" | "paused" | "blocked" | "awaiting_user_input";
         ConversationForkPointView: {
             /** Format: uint64 */
             source_boundary_stream_sequence: number;

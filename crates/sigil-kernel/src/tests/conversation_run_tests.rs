@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 
+use super::test_fixtures::terminal_outbox;
 use super::*;
 use crate::{
     DurableEventType, EventClass, JsonlSessionStore, MessageRole, ModelMessage, SecretRedactor,
@@ -48,10 +49,11 @@ fn recorder_retries_exact_start_and_terminal_as_no_ops() -> Result<()> {
 
     assert!(recorder.append_started(&start)?);
     assert!(!recorder.append_started(&start)?);
-    assert!(recorder.append_finalized(&final_entry)?);
-    assert!(!recorder.append_finalized(&final_entry)?);
+    let outbox = terminal_outbox(session.session_scope_id(), &final_entry)?;
+    assert!(recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
+    assert!(!recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
     assert!(
-        !recorder.append_finalized(&succeeded("run-1", 21)?)?,
+        !recorder.append_finalized_with_outbox(&succeeded("run-1", 21)?, &outbox)?,
         "a retry of the same terminal intent must keep the first durable timestamp"
     );
 
@@ -120,7 +122,10 @@ fn recorder_rejects_missing_start_and_conflicting_reuse() -> Result<()> {
     let missing = succeeded("missing-run", 20)?;
     assert!(
         recorder
-            .append_finalized(&missing)
+            .append_finalized_with_outbox(
+                &missing,
+                &terminal_outbox(session.session_scope_id(), &missing)?
+            )
             .expect_err("terminal without start must fail")
             .to_string()
             .contains("matching durable start")
@@ -135,7 +140,11 @@ fn recorder_rejects_missing_start_and_conflicting_reuse() -> Result<()> {
             .contains("conflicting start")
     );
 
-    assert!(recorder.append_finalized(&succeeded("run-1", 20)?)?);
+    let terminal = succeeded("run-1", 20)?;
+    assert!(recorder.append_finalized_with_outbox(
+        &terminal,
+        &terminal_outbox(session.session_scope_id(), &terminal)?
+    )?);
     let conflict = ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Failed,
@@ -146,7 +155,10 @@ fn recorder_rejects_missing_start_and_conflicting_reuse() -> Result<()> {
     )?;
     assert!(
         recorder
-            .append_finalized(&conflict)
+            .append_finalized_with_outbox(
+                &conflict,
+                &terminal_outbox(session.session_scope_id(), &conflict)?
+            )
             .expect_err("conflicting terminal must fail")
             .to_string()
             .contains("conflicting terminal")
@@ -326,14 +338,15 @@ fn persisted_reopen_keeps_lifecycle_idempotent_and_session_decoding_canonical() 
     let start = started("run-reopen", 10)?;
     let final_entry = succeeded("run-reopen", 20)?;
     assert!(recorder.append_started(&start)?);
-    assert!(recorder.append_finalized(&final_entry)?);
+    let outbox = terminal_outbox(session.session_scope_id(), &final_entry)?;
+    assert!(recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
     drop(recorder);
     drop(session);
 
     let reopened = Session::load_from_store("fallback-provider", "fallback-model", store.clone())?;
     let recorder = reopened.conversation_run_lifecycle_recorder()?;
     assert!(!recorder.append_started(&start)?);
-    assert!(!recorder.append_finalized(&final_entry)?);
+    assert!(!recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
 
     let records = JsonlSessionStore::read_event_records(store.path())?;
     let lifecycle = records
@@ -354,5 +367,272 @@ fn persisted_reopen_keeps_lifecycle_idempotent_and_session_decoding_canonical() 
                     && message.content.as_deref() == Some("durable request")
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn terminal_bundle_recovers_exact_domain_and_outbox_after_torn_append() -> Result<()> {
+    use crate::session::SessionWriterFault;
+    for fault in [
+        SessionWriterFault::BeforeWrite,
+        SessionWriterFault::PartialFirstRecord,
+        SessionWriterFault::PartialSecondRecord,
+        SessionWriterFault::BeforeSync,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("session.jsonl");
+        let store = JsonlSessionStore::new(&path)?;
+        let session = Session::new("provider", "model").with_store(store.clone());
+        let recorder = session.conversation_run_lifecycle_recorder()?;
+        recorder.append_started(&started("run-atomic", 10)?)?;
+        let terminal = succeeded("run-atomic", 20)?;
+        let outbox = terminal_outbox(session.session_scope_id(), &terminal)?;
+        store.inject_writer_fault(fault)?;
+        assert!(
+            recorder
+                .append_finalized_with_outbox(&terminal, &outbox)
+                .is_err(),
+            "{fault:?}"
+        );
+        drop(recorder);
+        drop(session);
+        drop(store);
+
+        let reopened = JsonlSessionStore::new(&path)?;
+        let session = Session::new("provider", "model").with_store(reopened.clone());
+        let recorder = session.conversation_run_lifecycle_recorder()?;
+        assert_eq!(
+            recorder.finalized_for_run("run-atomic")?,
+            Some(terminal.clone()),
+            "durable query must recover the original prepared terminal: {fault:?}"
+        );
+        assert!(
+            !recorder.reconcile_unfinished(30)?,
+            "must recover the committed outcome, not invent Interrupted: {fault:?}"
+        );
+        assert!(!recorder.append_finalized_with_outbox(&terminal, &outbox)?);
+        let records = JsonlSessionStore::read_event_records(&path)?;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.stored_event().event_id == outbox.domain_event_id)
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.stored_event().event_id == outbox.public_event_id)
+                .count(),
+            1
+        );
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        assert_eq!(
+            serde_json::to_value(projection.entry(&outbox.public_event_id))?,
+            serde_json::to_value(Some(&outbox))?
+        );
+        assert_eq!(projection.pending_for_adapter("http").len(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_bundle_rejects_split_writes_wrong_outcome_and_cross_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("provider", "model").with_store(store.clone());
+    let recorder = session.conversation_run_lifecycle_recorder()?;
+    recorder.append_started(&started("run-1", 10)?)?;
+    let terminal = succeeded("run-1", 20)?;
+    let outbox = terminal_outbox(session.session_scope_id(), &terminal)?;
+    assert!(
+        crate::PublicEventOutboxRecorder::new(store.clone())
+            .append_outbox(&outbox)
+            .is_err()
+    );
+    let wrong_session = terminal_outbox("different-session", &terminal)?;
+    assert!(
+        recorder
+            .append_finalized_with_outbox(&terminal, &wrong_session)
+            .is_err()
+    );
+    let failed = ConversationRunFinalizedEntryV1::new(
+        "run-1",
+        ConversationRunTerminalStatusV1::Failed,
+        None,
+        Some("failure"),
+        20,
+        &SecretRedactor::empty(),
+    )?;
+    assert!(
+        recorder
+            .append_finalized_with_outbox(&failed, &outbox)
+            .is_err()
+    );
+
+    // A valid, old split record is rejected, never used to fabricate public history.
+    store.append_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        serde_json::to_value(
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(terminal.clone()),
+        )?,
+    )?;
+    assert!(
+        recorder
+            .append_finalized_with_outbox(&terminal, &outbox)
+            .is_err()
+    );
+    assert!(
+        PublicEventOutboxProjectionV1::from_records(&JsonlSessionStore::read_event_records(
+            store.path()
+        )?)
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn all_terminal_outcomes_commit_without_collapsing_statuses() -> Result<()> {
+    for status in [
+        ConversationRunTerminalStatusV1::Succeeded,
+        ConversationRunTerminalStatusV1::Failed,
+        ConversationRunTerminalStatusV1::Cancelled,
+        ConversationRunTerminalStatusV1::Interrupted,
+        ConversationRunTerminalStatusV1::Paused,
+        ConversationRunTerminalStatusV1::Blocked,
+        ConversationRunTerminalStatusV1::AwaitingUserInput,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let session = Session::new("provider", "model").with_store(store.clone());
+        let recorder = session.conversation_run_lifecycle_recorder()?;
+        recorder.append_started(&started("run-1", 10)?)?;
+        let terminal = ConversationRunFinalizedEntryV1::new(
+            "run-1",
+            status,
+            (status == ConversationRunTerminalStatusV1::Succeeded)
+                .then(|| "final-message".to_owned()),
+            Some("terminal summary"),
+            20,
+            &SecretRedactor::empty(),
+        )?;
+        let outbox = terminal_outbox(session.session_scope_id(), &terminal)?;
+        assert!(recorder.append_finalized_with_outbox(&terminal, &outbox)?);
+        assert!(!recorder.append_finalized_with_outbox(&terminal, &outbox)?);
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let lifecycle = conversation_run_lifecycle_state(&records)?;
+        assert_eq!(
+            lifecycle["run-1"]
+                .finalized
+                .as_ref()
+                .map(|entry| entry.status()),
+            Some(status)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_projection_rejects_outbox_only_and_mismatched_terminal_pairs() -> Result<()> {
+    let terminal = succeeded("run-1", 20)?;
+    let outbox = terminal_outbox("session-1", &terminal)?;
+    let start = StoredEvent::new(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        "start-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::to_value(ConversationRunLifecycleRecordV1::ConversationRunStartedV1(
+            started("run-1", 10)?,
+        ))?,
+    )?;
+    let public = StoredEvent::new(
+        DurableEventType::PublicEventOutbox,
+        EventClass::Critical,
+        outbox.public_event_id.clone(),
+        "session-1".to_owned(),
+        3,
+        serde_json::to_value(&outbox)?,
+    )?;
+    assert!(
+        PublicEventOutboxProjectionV1::from_records(&[SessionStreamRecord::Stored(public.clone())])
+            .is_err()
+    );
+    let domain = StoredEvent::new(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        outbox.domain_event_id.clone(),
+        "session-1".to_owned(),
+        2,
+        serde_json::to_value(
+            ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(terminal.clone()),
+        )?,
+    )?;
+    let exact = vec![
+        SessionStreamRecord::Stored(start.clone()),
+        SessionStreamRecord::Stored(domain.clone()),
+        SessionStreamRecord::Stored(public.clone()),
+    ];
+    assert_eq!(
+        PublicEventOutboxProjectionV1::from_records(&exact)?
+            .pending_for_adapter("http")
+            .len(),
+        1
+    );
+    let mut duplicate_domain = domain.clone();
+    duplicate_domain.event_id = "second-domain".to_owned();
+    duplicate_domain.stream_sequence = 4;
+    duplicate_domain.record_checksum = duplicate_domain.compute_record_checksum()?;
+    let mut duplicate_outbox = outbox.clone();
+    duplicate_outbox.domain_event_id = duplicate_domain.event_id.clone();
+    duplicate_outbox.public_event_id = "second-public".to_owned();
+    duplicate_outbox.sequence = 2;
+    duplicate_outbox.event.sequence = 2;
+    duplicate_outbox.payload_digest =
+        crate::stable_event_hash(serde_json::to_vec(&duplicate_outbox.event)?);
+    let duplicate_public = StoredEvent::new(
+        DurableEventType::PublicEventOutbox,
+        EventClass::Critical,
+        duplicate_outbox.public_event_id.clone(),
+        "session-1".to_owned(),
+        5,
+        serde_json::to_value(&duplicate_outbox)?,
+    )?;
+    let mut duplicate_terminals = exact.clone();
+    duplicate_terminals.extend([
+        SessionStreamRecord::Stored(duplicate_domain),
+        SessionStreamRecord::Stored(duplicate_public),
+    ]);
+    assert!(PublicEventOutboxProjectionV1::from_records(&duplicate_terminals).is_err());
+    for mutation in 0..3 {
+        let mut wrong = domain.clone();
+        match mutation {
+            0 => wrong.event_id = "different-domain-id".to_owned(),
+            1 => wrong.session_id = "different-session".to_owned(),
+            _ => {
+                let failed = ConversationRunFinalizedEntryV1::new(
+                    "run-1",
+                    ConversationRunTerminalStatusV1::Failed,
+                    None,
+                    Some("failure"),
+                    20,
+                    &SecretRedactor::empty(),
+                )?;
+                wrong.payload = serde_json::to_value(
+                    ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(failed),
+                )?;
+            }
+        }
+        wrong.record_checksum = wrong.compute_record_checksum()?;
+        assert!(
+            PublicEventOutboxProjectionV1::from_records(&[
+                SessionStreamRecord::Stored(start.clone()),
+                SessionStreamRecord::Stored(wrong),
+                SessionStreamRecord::Stored(public.clone())
+            ])
+            .is_err()
+        );
+    }
     Ok(())
 }

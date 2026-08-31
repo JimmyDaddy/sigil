@@ -12,22 +12,24 @@ use sigil_kernel::{
     Agent, AgentProfileId, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentThreadStatus, ApprovalHandler,
     AssistantMessageKind, ConnectionId, ControlEntry, ConversationRunFinalizedEntryV1,
-    ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, EgressDisclosurePresenter, EventHandler,
-    FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, McpServerStartup,
-    MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler,
+    ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1, EgressDisclosurePresenter,
+    EventHandler, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
+    McpServerStartup, MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler,
     PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionMode, PublicEventDeliveryReceiptV1,
-    PublicEventOutboxEntryV1, PublicEventOutboxRecorder, PublicRunEvent, PublicRunEventKind,
-    PublicTaskEventProjector, ReasoningEffort, ResolvedModelRoute, RootConfig,
-    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
-    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
-    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
-    Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskRunStatus,
-    TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope, VerificationProductView,
-    WorkspaceTrust, conversation_route_routing_contract_material, rerun_task_verification_check,
-    resolve_workspace_root, safe_persistence_text, verification_product_view,
-    workspace_trust_from_entries,
+    PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1, PublicEventOutboxRecorder,
+    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
+    ResolvedModelRoute, RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle,
+    RunCancellationOwner, RunCancellationRecorder, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
+    RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
+    TaskRunStatus, TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope,
+    VerificationProductView, WorkspaceTrust, conversation_route_routing_contract_material,
+    rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
+    verification_product_view, workspace_trust_from_entries,
 };
+
+/// The kernel owns the sole exhaustive conversation/application terminal status table.
+pub use sigil_kernel::ConversationRunTerminalStatusV1 as ApplicationRunTerminalStatus;
 
 use crate::{
     activate_eager_remote_mcp_server,
@@ -1200,6 +1202,22 @@ impl ApplicationRunControl {
         self.events.terminal_was_delivered()
     }
 
+    /// Returns the terminal classification only after its domain record and exact public outbox
+    /// event committed in the same durable bundle.
+    ///
+    /// A failed adapter delivery intentionally does not clear this fact. Callers must replay the
+    /// pending outbox event instead of manufacturing a different terminal outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when writer recovery or the durable lifecycle/outbox projection fails.
+    pub fn durable_terminal_status(&self) -> Result<Option<ApplicationRunTerminalStatus>> {
+        Ok(self
+            .conversation_lifecycle
+            .finalized_for_run(self.conversation_start.run_id())?
+            .map(|terminal| terminal.status()))
+    }
+
     /// Returns whether a public adapter or its durable outbox acknowledgement degraded while the
     /// domain run continued. Callers must retry/replay delivery; they must not replace the domain
     /// terminal with a generic failure.
@@ -1380,28 +1398,28 @@ impl ApplicationRunControl {
                 crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
                 "application Task cancellation request could not be durably audited",
             );
+            if let Ok(Some(task_stop)) = task_stop.as_ref() {
+                self.emit_task_stop_state(handler, task_stop)?;
+            }
+            let terminal_event = PublicRunEventKind::RunInterrupted {
+                reason: "run interrupted because its cancellation request could not be audited"
+                    .to_owned(),
+            };
             let conversation_terminal = if conversation_start.is_ok() {
-                append_application_conversation_terminal(
+                emit_application_conversation_terminal(
                     &self.conversation_lifecycle,
+                    &self.events,
+                    handler,
                     self.conversation_start.run_id(),
-                    ConversationRunTerminalStatusV1::Interrupted,
+                    ApplicationRunTerminalStatus::Interrupted,
                     None,
                     Some("cancellation request could not be durably audited"),
                     &sigil_kernel::SecretRedactor::empty(),
+                    terminal_event,
                 )
             } else {
                 Ok(())
             };
-            if let Ok(Some(task_stop)) = task_stop.as_ref() {
-                self.emit_task_stop_state(handler, task_stop)?;
-            }
-            self.events.emit(
-                handler,
-                PublicRunEventKind::RunInterrupted {
-                    reason: "run interrupted because its cancellation request could not be audited"
-                        .to_owned(),
-                },
-            )?;
             task_stop?;
             conversation_terminal?;
             conversation_start?;
@@ -1428,34 +1446,35 @@ impl ApplicationRunControl {
                 }
             },
         )?;
-        let (conversation_status, conversation_summary) = match outcome {
+        let (terminal_status, conversation_summary, terminal) = match outcome {
             RunCancellationTerminalOutcome::Cancelled => (
-                ConversationRunTerminalStatusV1::Cancelled,
+                ApplicationRunTerminalStatus::Cancelled,
                 "cancellation quiescence confirmed",
+                PublicRunEventKind::RunCancelled,
             ),
             RunCancellationTerminalOutcome::Interrupted => (
-                ConversationRunTerminalStatusV1::Interrupted,
+                ApplicationRunTerminalStatus::Interrupted,
                 "cancellation cleanup could not be confirmed",
+                PublicRunEventKind::RunInterrupted {
+                    reason: "run interrupted before cancellation cleanup could be confirmed"
+                        .to_owned(),
+                },
             ),
         };
-        append_application_conversation_terminal(
-            &self.conversation_lifecycle,
-            self.conversation_start.run_id(),
-            conversation_status,
-            None,
-            Some(conversation_summary),
-            &sigil_kernel::SecretRedactor::empty(),
-        )?;
         if let Some(task_stop) = task_stop.as_ref() {
             self.emit_task_stop_state(handler, task_stop)?;
         }
-        let terminal = match outcome {
-            RunCancellationTerminalOutcome::Cancelled => PublicRunEventKind::RunCancelled,
-            RunCancellationTerminalOutcome::Interrupted => PublicRunEventKind::RunInterrupted {
-                reason: "run interrupted before cancellation cleanup could be confirmed".to_owned(),
-            },
-        };
-        self.events.emit(handler, terminal)?;
+        emit_application_conversation_terminal(
+            &self.conversation_lifecycle,
+            &self.events,
+            handler,
+            self.conversation_start.run_id(),
+            terminal_status,
+            None,
+            Some(conversation_summary),
+            &sigil_kernel::SecretRedactor::empty(),
+            terminal,
+        )?;
         Ok(outcome)
     }
 
@@ -1503,28 +1522,28 @@ impl ApplicationRunControl {
                 )
                 .map_err(Into::into)
             });
+            if let Ok(Some(task_stop)) = task_stop.as_ref() {
+                self.emit_task_stop_state(handler, task_stop)?;
+            }
+            let terminal_event = PublicRunEventKind::RunInterrupted {
+                reason: "Task interrupted because its pause request could not be audited"
+                    .to_owned(),
+            };
             let conversation_terminal = if conversation_start.is_ok() {
-                append_application_conversation_terminal(
+                emit_application_conversation_terminal(
                     &self.conversation_lifecycle,
+                    &self.events,
+                    handler,
                     self.conversation_start.run_id(),
-                    ConversationRunTerminalStatusV1::Interrupted,
+                    ApplicationRunTerminalStatus::Interrupted,
                     None,
                     Some("Task pause request could not be durably audited"),
                     &sigil_kernel::SecretRedactor::empty(),
+                    terminal_event,
                 )
             } else {
                 Ok(())
             };
-            if let Ok(Some(task_stop)) = task_stop.as_ref() {
-                self.emit_task_stop_state(handler, task_stop)?;
-            }
-            self.events.emit(
-                handler,
-                PublicRunEventKind::RunInterrupted {
-                    reason: "Task interrupted because its pause request could not be audited"
-                        .to_owned(),
-                },
-            )?;
             task_stop?;
             conversation_terminal?;
             conversation_start?;
@@ -1568,16 +1587,16 @@ impl ApplicationRunControl {
         )?
         .context("exact application Task was not available during pause finalization")?;
         let task_status = task_stop.status();
-        let (conversation_status, terminal_summary, terminal) = match task_status {
+        let (terminal_status, terminal_summary, terminal) = match task_status {
             TaskRunStatus::Paused => (
-                ConversationRunTerminalStatusV1::Paused,
+                ApplicationRunTerminalStatus::Paused,
                 "Task paused",
                 PublicRunEventKind::RunPaused {
                     reason: "Task is durably paused".to_owned(),
                 },
             ),
             TaskRunStatus::Interrupted => (
-                ConversationRunTerminalStatusV1::Interrupted,
+                ApplicationRunTerminalStatus::Interrupted,
                 "Task pause could not be confirmed",
                 PublicRunEventKind::RunInterrupted {
                     reason: "Task interrupted before pause cleanup could be confirmed".to_owned(),
@@ -1585,16 +1604,18 @@ impl ApplicationRunControl {
             ),
             _ => bail!("application Task pause wrote an invalid terminal status"),
         };
-        append_application_conversation_terminal(
+        self.emit_task_stop_state(handler, &task_stop)?;
+        emit_application_conversation_terminal(
             &self.conversation_lifecycle,
+            &self.events,
+            handler,
             self.conversation_start.run_id(),
-            conversation_status,
+            terminal_status,
             None,
             Some(terminal_summary),
             &sigil_kernel::SecretRedactor::empty(),
+            terminal,
         )?;
-        self.emit_task_stop_state(handler, &task_stop)?;
-        self.events.emit(handler, terminal)?;
         Ok(ApplicationTaskPauseOutcome {
             task_id: request.task_id,
             task_status,
@@ -2100,19 +2121,6 @@ enum ApplicationRunExecutionKind {
     },
 }
 
-/// Provider-neutral terminal classification for one completed application run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApplicationRunTerminalStatus {
-    /// A final assistant answer was accepted.
-    Succeeded,
-    /// The configured turn bound was reached without a final answer.
-    Interrupted,
-    /// A required delegation contract was not satisfied.
-    Blocked,
-    /// The physical run stopped safely after durably requesting user input.
-    AwaitingUserInput,
-}
-
 /// Successful terminal output from one shared application run.
 #[derive(Debug, Clone)]
 pub struct ApplicationRunOutput {
@@ -2199,13 +2207,16 @@ impl ApplicationRunExecution {
             prompt: self.prompt.clone(),
         }) {
             let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-            append_application_conversation_terminal(
+            bridge.emit_conversation_terminal(
                 &self.conversation_lifecycle,
                 &self.run_id,
-                ConversationRunTerminalStatusV1::Failed,
+                ApplicationRunTerminalStatus::Failed,
                 None,
                 Some(&safe_error),
                 &self.redactor,
+                PublicRunEventKind::RunFailed {
+                    error: safe_error.clone(),
+                },
             )?;
             return Err(error).context("application run start event delivery failed");
         }
@@ -2215,13 +2226,16 @@ impl ApplicationRunExecution {
         for warning in std::mem::take(&mut self.warnings) {
             if let Err(error) = bridge.emit(PublicRunEventKind::Notice { message: warning }) {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-                append_application_conversation_terminal(
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    ConversationRunTerminalStatusV1::Failed,
+                    ApplicationRunTerminalStatus::Failed,
                     None,
                     Some(&safe_error),
                     &self.redactor,
+                    PublicRunEventKind::RunFailed {
+                        error: safe_error.clone(),
+                    },
                 )?;
                 return Err(error).context("application run notice delivery failed");
             }
@@ -2235,15 +2249,17 @@ impl ApplicationRunExecution {
                 Ok(request) => request,
                 Err(error) => {
                     let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-                    append_application_conversation_terminal(
+                    bridge.emit_conversation_terminal(
                         &self.conversation_lifecycle,
                         &self.run_id,
-                        ConversationRunTerminalStatusV1::Failed,
+                        ApplicationRunTerminalStatus::Failed,
                         None,
                         Some(&safe_error),
                         &self.redactor,
+                        PublicRunEventKind::RunFailed {
+                            error: safe_error.clone(),
+                        },
                     )?;
-                    bridge.emit(PublicRunEventKind::RunFailed { error: safe_error })?;
                     return Err(error).context("failed to start user-input continuation");
                 }
             };
@@ -2255,13 +2271,16 @@ impl ApplicationRunExecution {
                     context,
                 );
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-                append_application_conversation_terminal(
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    ConversationRunTerminalStatusV1::Failed,
+                    ApplicationRunTerminalStatus::Failed,
                     None,
                     Some(&safe_error),
                     &self.redactor,
+                    PublicRunEventKind::RunFailed {
+                        error: safe_error.clone(),
+                    },
                 )?;
                 if let Err(resolution_error) = resolution {
                     return Err(error).context(format!(
@@ -2455,39 +2474,25 @@ impl ApplicationRunExecution {
             Ok(agent_output) => {
                 let (terminal_status, terminal_event) =
                     application_terminal_projection(&agent_output);
-                let durable_status = match terminal_status {
-                    ApplicationRunTerminalStatus::Succeeded => {
-                        ConversationRunTerminalStatusV1::Succeeded
-                    }
-                    ApplicationRunTerminalStatus::Interrupted => {
-                        ConversationRunTerminalStatusV1::Interrupted
-                    }
-                    ApplicationRunTerminalStatus::Blocked => {
-                        ConversationRunTerminalStatusV1::Blocked
-                    }
-                    ApplicationRunTerminalStatus::AwaitingUserInput => {
-                        ConversationRunTerminalStatusV1::AwaitingUserInput
-                    }
-                };
                 let summary = match &terminal_event {
-                    PublicRunEventKind::RunFailed { error } => Some(error.as_str()),
+                    PublicRunEventKind::RunFailed { error } => Some(error.clone()),
                     PublicRunEventKind::RunBlocked { reason }
                     | PublicRunEventKind::RunPaused { reason }
-                    | PublicRunEventKind::RunInterrupted { reason } => Some(reason.as_str()),
+                    | PublicRunEventKind::RunInterrupted { reason } => Some(reason.clone()),
                     _ => None,
                 };
                 let final_message_id = (terminal_status == ApplicationRunTerminalStatus::Succeeded)
                     .then(|| agent_output.result.final_message_id.clone())
                     .flatten();
-                append_application_conversation_terminal(
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    durable_status,
+                    terminal_status,
                     final_message_id,
-                    summary,
+                    summary.as_deref(),
                     &self.redactor,
+                    terminal_event,
                 )?;
-                bridge.emit(terminal_event)?;
                 if let Some(managed_session_log) = self.managed_session_log.take() {
                     managed_session_log
                         .finalize()
@@ -2525,21 +2530,24 @@ impl ApplicationRunExecution {
                 let recovery = error
                     .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
                     .expect("recovery error was checked by the match guard");
-                // The kernel already emitted the public recovery projection and durably paused
-                // the logical run.  Preserve that actionable terminal for every application
-                // adapter instead of allowing this outer async-error boundary to overwrite it
-                // with a generic failed conversation run.
+                // The kernel already emitted the recovery detail and durably paused its logical
+                // run. Commit the adapter-owned foreground terminal with its exact public
+                // outbox event instead of allowing this outer async-error boundary to overwrite
+                // it with a generic failed conversation run.
                 let summary = format!(
                     "provider turn recovery {:?}: {}",
                     recovery.disposition, recovery.reason_code
                 );
-                append_application_conversation_terminal(
+                let (terminal_status, terminal_event) =
+                    application_provider_recovery_terminal(recovery, &summary);
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    ConversationRunTerminalStatusV1::Blocked,
+                    terminal_status,
                     None,
                     Some(&summary),
                     &self.redactor,
+                    terminal_event,
                 )?;
                 if let Some(managed_session_log) = self.managed_session_log.take() {
                     managed_session_log
@@ -2555,10 +2563,20 @@ impl ApplicationRunExecution {
                     session_id: self.session_id,
                     run_id: self.run_id,
                     session_log_path: self.session_log_path,
-                    terminal_status: ApplicationRunTerminalStatus::Blocked,
+                    terminal_status,
                     route_transition: self.route_transition,
                     agent_output: AgentRunOutput {
-                        disposition: AgentRunDisposition::Blocked,
+                        disposition: match terminal_status {
+                            ApplicationRunTerminalStatus::Paused => AgentRunDisposition::Blocked,
+                            ApplicationRunTerminalStatus::Blocked => AgentRunDisposition::Blocked,
+                            ApplicationRunTerminalStatus::Cancelled
+                            | ApplicationRunTerminalStatus::Interrupted
+                            | ApplicationRunTerminalStatus::Failed
+                            | ApplicationRunTerminalStatus::Succeeded
+                            | ApplicationRunTerminalStatus::AwaitingUserInput => {
+                                AgentRunDisposition::Blocked
+                            }
+                        },
                         result: AgentRunResult {
                             final_text: String::new(),
                             tool_calls: 0,
@@ -2576,15 +2594,17 @@ impl ApplicationRunExecution {
             }
             Err(error) => {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-                append_application_conversation_terminal(
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    ConversationRunTerminalStatusV1::Failed,
+                    ApplicationRunTerminalStatus::Failed,
                     None,
                     Some(&safe_error),
                     &self.redactor,
+                    PublicRunEventKind::RunFailed {
+                        error: safe_error.clone(),
+                    },
                 )?;
-                bridge.emit(PublicRunEventKind::RunFailed { error: safe_error })?;
                 Err(error)
             }
         }
@@ -6376,7 +6396,11 @@ impl ApplicationRunEventSequence {
             .sequence
             .checked_add(1)
             .context("application run event sequence exhausted")?;
-        let terminal = is_terminal_public_run_event(&event);
+        if is_terminal_public_run_event(&event) {
+            bail!(
+                "application run terminal requires an atomically committed conversation terminal and public outbox"
+            );
+        }
         let public = PublicRunEvent::new(
             self.session_id.clone(),
             self.run_id.clone(),
@@ -6387,6 +6411,10 @@ impl ApplicationRunEventSequence {
             "application-public:{}:{}:{}",
             self.session_id, self.run_id, sequence
         );
+        let payload_digest = sigil_kernel::stable_event_hash(
+            &serde_json::to_vec(&public)
+                .context("failed to encode application public outbox event")?,
+        );
         let outbox_recorded = self.outbox.as_ref().is_none_or(|outbox| {
             let entry = PublicEventOutboxEntryV1 {
                 schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
@@ -6394,16 +6422,12 @@ impl ApplicationRunEventSequence {
                 domain_event_id: format!("application-domain:{}:{}", self.run_id, sequence),
                 run_id: self.run_id.clone(),
                 sequence,
-                payload_digest: serde_json::to_vec(&public).map_or_else(
-                    |_| sigil_kernel::stable_event_hash(b"unencodable-public-run-event"),
-                    |encoded| sigil_kernel::stable_event_hash(&encoded),
-                ),
+                payload_digest: payload_digest.clone(),
                 event: public.clone(),
             };
             outbox.append_outbox(&entry).is_ok()
         });
         let delivered = handler.handle_public_event(public).is_ok();
-        let mut receipt_recorded = self.outbox.is_none();
         if outbox_recorded && delivered {
             if let Some(outbox) = self.outbox.as_ref() {
                 let receipt = PublicEventDeliveryReceiptV1 {
@@ -6412,7 +6436,7 @@ impl ApplicationRunEventSequence {
                     adapter: handler.public_event_adapter_id().to_owned(),
                     delivered_at_unix_ms: current_unix_time_ms(),
                 };
-                receipt_recorded = outbox.append_delivery(&receipt).is_ok();
+                let receipt_recorded = outbox.append_delivery(&receipt).is_ok();
                 if !receipt_recorded {
                     state.delivery_degraded = true;
                 }
@@ -6424,10 +6448,86 @@ impl ApplicationRunEventSequence {
             state.delivery_degraded = true;
         }
         state.sequence = sequence;
-        if terminal {
-            state.terminal = true;
-            state.terminal_delivered = outbox_recorded && delivered && receipt_recorded;
+        Ok(())
+    }
+
+    fn emit_terminal<H>(
+        &self,
+        lifecycle: &ConversationRunLifecycleRecorder,
+        handler: &mut H,
+        terminal: &ConversationRunFinalizedEntryV1,
+        event: PublicRunEventKind,
+    ) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        if !is_terminal_public_run_event(&event) {
+            bail!("application conversation terminal requires a terminal public run event");
         }
+        let outbox = self
+            .outbox
+            .as_ref()
+            .context("application conversation terminal requires a durable public event outbox")?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        let public = PublicRunEvent::new(
+            self.session_id.clone(),
+            self.run_id.clone(),
+            sequence,
+            event,
+        );
+        let public_event_id = format!(
+            "application-public:{}:{}:{}",
+            self.session_id, self.run_id, sequence
+        );
+        let outbox_entry = PublicEventOutboxEntryV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: public_event_id.clone(),
+            domain_event_id: format!("application-domain:{}:{}", self.run_id, sequence),
+            run_id: self.run_id.clone(),
+            sequence,
+            payload_digest: sigil_kernel::stable_event_hash(
+                &serde_json::to_vec(&public)
+                    .context("failed to encode application terminal public outbox event")?,
+            ),
+            event: public.clone(),
+        };
+        // The kernel validates this exact public event against `terminal.status()` while it
+        // atomically persists the durable conversation finalizer and its outbox record.
+        lifecycle
+            .append_finalized_with_outbox(terminal, &outbox_entry)
+            .context(
+                "failed to atomically persist application conversation terminal and public outbox",
+            )?;
+
+        // From this point on, the terminal fact is durable. Adapter delivery and receipt writes
+        // are recoverable transport concerns and must never revise this business conclusion.
+        state.sequence = sequence;
+        state.terminal = true;
+        let delivered = handler.handle_public_event(public).is_ok();
+        let mut receipt_recorded = false;
+        if delivered {
+            let receipt = PublicEventDeliveryReceiptV1 {
+                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id,
+                adapter: handler.public_event_adapter_id().to_owned(),
+                delivered_at_unix_ms: current_unix_time_ms(),
+            };
+            receipt_recorded = outbox.append_delivery(&receipt).is_ok();
+        }
+        if !delivered || !receipt_recorded {
+            state.delivery_degraded = true;
+        }
+        state.terminal_delivered = delivered && receipt_recorded;
         Ok(())
     }
 
@@ -6446,6 +6546,60 @@ impl ApplicationRunEventSequence {
     }
 }
 
+/// Replays the exact pending terminal public events for one application run to one adapter.
+///
+/// This is a transport-recovery operation only: it reads the already committed outbox entry,
+/// forwards its original id/sequence/payload to the adapter, and appends that adapter's receipt
+/// only after acceptance. It never appends or derives a new domain terminal.
+///
+/// # Errors
+///
+/// Returns an error when the durable outbox cannot be rebuilt, the adapter rejects an exact
+/// pending event, or the corresponding delivery receipt cannot be persisted.
+pub fn replay_pending_application_terminal_outbox<H>(
+    session_log_path: &Path,
+    run_id: &str,
+    handler: &mut H,
+) -> Result<usize>
+where
+    H: ApplicationRunEventHandler,
+{
+    let store = JsonlSessionStore::new(session_log_path)?;
+    let records = store.read_event_records_writer()?;
+    let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+    let adapter = handler.public_event_adapter_id();
+    let pending_ids = projection
+        .pending_for_adapter(adapter)
+        .into_iter()
+        .filter(|entry| entry.run_id == run_id && is_terminal_public_run_event(&entry.event.event))
+        .map(|entry| entry.public_event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let recorder = PublicEventOutboxRecorder::new(store);
+    let mut replayed = 0;
+    for entry in projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| pending_ids.contains(entry.public_event_id.as_str()))
+    {
+        handler
+            .handle_public_event(entry.event.clone())
+            .with_context(|| {
+                format!(
+                    "adapter {adapter} rejected pending application terminal public event {}",
+                    entry.public_event_id
+                )
+            })?;
+        recorder.append_delivery(&PublicEventDeliveryReceiptV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: entry.public_event_id.clone(),
+            adapter: adapter.to_owned(),
+            delivered_at_unix_ms: current_unix_time_ms(),
+        })?;
+        replayed += 1;
+    }
+    Ok(replayed)
+}
+
 fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
     matches!(
         event,
@@ -6455,6 +6609,7 @@ fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
             | PublicRunEventKind::RunPaused { .. }
             | PublicRunEventKind::RunInterrupted { .. }
             | PublicRunEventKind::RunCancelled
+            | PublicRunEventKind::RunAwaitingUserInput { .. }
     )
 }
 
@@ -6758,6 +6913,29 @@ where
     fn emit(&mut self, event: PublicRunEventKind) -> Result<()> {
         self.events.emit(self.handler, event)
     }
+
+    fn emit_conversation_terminal(
+        &mut self,
+        lifecycle: &ConversationRunLifecycleRecorder,
+        run_id: &str,
+        terminal_status: ApplicationRunTerminalStatus,
+        final_message_id: Option<String>,
+        summary: Option<&str>,
+        redactor: &sigil_kernel::SecretRedactor,
+        event: PublicRunEventKind,
+    ) -> Result<()> {
+        emit_application_conversation_terminal(
+            lifecycle,
+            &self.events,
+            self.handler,
+            run_id,
+            terminal_status,
+            final_message_id,
+            summary,
+            redactor,
+            event,
+        )
+    }
 }
 
 impl<H> EventHandler for PublicApplicationEventBridge<'_, H>
@@ -6884,26 +7062,59 @@ fn application_terminal_projection(
     }
 }
 
-fn append_application_conversation_terminal(
+fn application_provider_recovery_terminal(
+    recovery: &sigil_kernel::ProviderTurnRecoveryTerminalError,
+    summary: &str,
+) -> (ApplicationRunTerminalStatus, PublicRunEventKind) {
+    match recovery.disposition {
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Blocked => (
+            ApplicationRunTerminalStatus::Blocked,
+            PublicRunEventKind::RunBlocked {
+                reason: summary.to_owned(),
+            },
+        ),
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Paused => (
+            ApplicationRunTerminalStatus::Paused,
+            PublicRunEventKind::RunPaused {
+                reason: summary.to_owned(),
+            },
+        ),
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled => (
+            ApplicationRunTerminalStatus::Cancelled,
+            PublicRunEventKind::RunCancelled,
+        ),
+        sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Irrecoverable => (
+            ApplicationRunTerminalStatus::Failed,
+            PublicRunEventKind::RunFailed {
+                error: summary.to_owned(),
+            },
+        ),
+    }
+}
+
+fn emit_application_conversation_terminal<H>(
     recorder: &ConversationRunLifecycleRecorder,
+    events: &ApplicationRunEventSequence,
+    handler: &mut H,
     run_id: &str,
-    status: ConversationRunTerminalStatusV1,
+    terminal_status: ApplicationRunTerminalStatus,
     final_message_id: Option<String>,
     summary: Option<&str>,
     redactor: &sigil_kernel::SecretRedactor,
-) -> Result<()> {
+    event: PublicRunEventKind,
+) -> Result<()>
+where
+    H: ApplicationRunEventHandler,
+{
     let terminal = ConversationRunFinalizedEntryV1::new(
         run_id,
-        status,
+        terminal_status,
         final_message_id,
         summary,
         current_unix_time_ms(),
         redactor,
     )?;
-    recorder
-        .append_finalized(&terminal)
-        .context("failed to persist application conversation run terminal")?;
-    Ok(())
+    events.emit_terminal(recorder, handler, &terminal, event)
 }
 
 fn optional_eager_mcp_warning(
@@ -6918,3 +7129,7 @@ fn optional_eager_mcp_warning(
 #[cfg(test)]
 #[path = "tests/application_run_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/application_task_terminal_tests.rs"]
+mod application_task_terminal_tests;

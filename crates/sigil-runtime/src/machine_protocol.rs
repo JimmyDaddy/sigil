@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::{PublicRouteRecoveryAction, PublicRunEvent, PublicSessionRouteTransitionView};
 
 /// Current version of the provider-neutral machine record envelope.
-pub const MACHINE_PROTOCOL_VERSION: u16 = 1;
+pub const MACHINE_PROTOCOL_VERSION: u16 = 2;
 
 /// One machine-readable record emitted by an automation adapter.
 ///
@@ -71,6 +71,12 @@ pub enum MachineRunStatus {
     Succeeded,
     /// The run reached a terminal execution failure.
     Failed,
+    /// The run stopped without a clean cancellation proof.
+    Interrupted,
+    /// The run cannot advance until its explicit precondition is resolved.
+    Blocked,
+    /// The run deliberately paused without becoming a failure.
+    Paused,
     /// Cooperative cancellation reached the run boundary.
     Cancelled,
     /// An automatic or explicit plan review committed a draft; execution waits for a typed plan
@@ -231,6 +237,9 @@ impl MachineExitCode {
         match status {
             MachineRunStatus::Succeeded => Self::Success,
             MachineRunStatus::Failed => Self::ExecutionFailed,
+            MachineRunStatus::Interrupted
+            | MachineRunStatus::Blocked
+            | MachineRunStatus::Paused => Self::ExecutionFailed,
             MachineRunStatus::Cancelled => Self::Cancelled,
             MachineRunStatus::AwaitingPlanDecision => Self::AwaitingPlanDecision,
             MachineRunStatus::AwaitingUserInput => Self::AwaitingUserInput,

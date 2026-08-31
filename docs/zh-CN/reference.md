@@ -89,7 +89,7 @@
 
 ## 脚本输出与本地服务
 
-`sigil run --output json` 会向 stdout 写入一条结果；`jsonl` 会写入有序事件，最后再写一条结果或错误。供人阅读的进度与安全网络提示保留在 stderr。退出码：`0` 表示成功，`1` 表示执行失败，`2` 表示调用方式或配置无效，`130` 表示已取消。
+`sigil run --output json` 会向 stdout 写入一条结果；`jsonl` 会写入有序事件，最后再写一条结果或错误。供人阅读的进度与安全网络提示保留在 stderr。run 使用 `protocol_version: 2`，不提供 V1 输出模式。结果状态分别保留 `succeeded`、`failed`、`cancelled`、`interrupted`、`blocked`、`paused`、`awaiting_user_input` 和 `awaiting_plan_decision`，不会把阻塞或暂停说成失败。退出码：`0` 成功，`1` 失败/中断/阻塞/暂停，`2` 调用方式或配置无效，`3` 等待计划决策，`4` 等待用户输入，`130` 已取消。脚本需要区分非成功退出的具体原因时，应读取结果中的 status。
 
 `sigil intent` 始终只向 stdout 写一条带版本的 JSON result 或安全 typed error。它只从当前
 workspace catalog 解析精确 durable session id，不接受 session path，也不接受 client 提交的

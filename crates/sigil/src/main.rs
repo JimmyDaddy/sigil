@@ -1141,6 +1141,84 @@ fn pending_plan_review_artifact(
     Ok(None)
 }
 
+fn machine_terminal_state(
+    terminal: ApplicationRunTerminalStatus,
+    session_log_path: &str,
+) -> Result<(
+    MachineRunStatus,
+    Option<sigil_runtime::machine_protocol::MachinePlanReviewArtifact>,
+)> {
+    let plan_review = pending_plan_review_artifact(session_log_path)?;
+    let status = if plan_review.is_some() && terminal == ApplicationRunTerminalStatus::Blocked {
+        MachineRunStatus::AwaitingPlanDecision
+    } else {
+        match terminal {
+            ApplicationRunTerminalStatus::Succeeded => MachineRunStatus::Succeeded,
+            ApplicationRunTerminalStatus::Failed => MachineRunStatus::Failed,
+            ApplicationRunTerminalStatus::Interrupted => MachineRunStatus::Interrupted,
+            ApplicationRunTerminalStatus::Blocked => MachineRunStatus::Blocked,
+            ApplicationRunTerminalStatus::Cancelled => MachineRunStatus::Cancelled,
+            ApplicationRunTerminalStatus::Paused => MachineRunStatus::Paused,
+            ApplicationRunTerminalStatus::AwaitingUserInput => MachineRunStatus::AwaitingUserInput,
+        }
+    };
+    Ok((status, plan_review))
+}
+
+/// Projects an exact, paired durable terminal even when execution/cleanup returned an error.
+fn durable_machine_run_result(
+    session_id: &str,
+    run_id: &str,
+    session_log_path: &str,
+) -> Result<Option<MachineRunResult>> {
+    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
+    let records = store.read_event_records_writer()?;
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    for record in &records {
+        let Some(sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(
+            terminal,
+        )) = sigil_kernel::conversation_run_lifecycle_record_from_stream(record)?
+        else {
+            continue;
+        };
+        if terminal.run_id() != run_id {
+            continue;
+        }
+        let events = outbox.events_in_order();
+        let public = events
+            .iter()
+            .find(|entry| entry.domain_event_id == record.event_id())
+            .context("machine terminal has no exact public outbox")?;
+        if public.event.session_id != session_id {
+            anyhow::bail!("machine terminal belongs to another session");
+        }
+        let (status, plan_review) = machine_terminal_state(terminal.status(), session_log_path)?;
+        let final_text = match &public.event.event {
+            PublicRunEventKind::RunFinished { final_text } => final_text.clone(),
+            _ => String::new(),
+        };
+        let route_transition = events.iter().rev().find_map(|entry| {
+            if entry.run_id != run_id {
+                return None;
+            }
+            match &entry.event.event {
+                PublicRunEventKind::RouteTransition { transition } => Some(transition.clone()),
+                _ => None,
+            }
+        });
+        return Ok(Some(MachineRunResult {
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+            status,
+            final_text,
+            route_transition,
+            session_log_path: session_log_path.to_owned(),
+            plan_review,
+        }));
+    }
+    Ok(None)
+}
+
 async fn plan_decision_command(
     config_path: &Path,
     launch_cwd: &Path,
@@ -1519,13 +1597,11 @@ where
     let mut approval_handler = AutoApproveHandler;
     let mut execution = Box::pin(execution.execute(&mut handler, &mut approval_handler));
     let mut cancellation_ticket = None;
-    let mut cancellation_trigger_failed = false;
     let mut execution_joined = true;
     let executed = tokio::select! {
         biased;
         trigger = &mut cancellation => {
-            cancellation_trigger_failed = trigger.is_err();
-            let reason = if cancellation_trigger_failed {
+            let reason = if trigger.is_err() {
                 "machine cancellation signal watcher failed"
             } else {
                 "machine run interrupted by SIGINT"
@@ -1550,102 +1626,36 @@ where
         result = &mut execution => result,
     };
     drop(execution);
-    if let Some(ticket) = cancellation_ticket {
-        let finalized = control
+    if let Some(ticket) = cancellation_ticket
+        && control
             .finalize_cancellation(ticket, execution_joined, &mut handler)
-            .await;
-        return match finalized {
-            Ok(sigil_kernel::RunCancellationTerminalOutcome::Cancelled)
-                if !cancellation_trigger_failed =>
-            {
-                write_machine_terminal(
-                    handler.writer,
-                    MachineRecord::result(MachineRunResult {
-                        session_id,
-                        run_id,
-                        status: MachineRunStatus::Cancelled,
-                        final_text: String::new(),
-                        route_transition: None,
-                        session_log_path,
-                        plan_review: None,
-                    }),
-                    MachineExitCode::Cancelled,
-                )
-            }
-            Ok(sigil_kernel::RunCancellationTerminalOutcome::Cancelled) => {
-                eprintln!("sigil run: cancellation signal watcher failed");
-                write_machine_terminal(
-                    handler.writer,
-                    MachineRecord::error(MachineError::new(
-                        MachineErrorCode::Internal,
-                        "application run supervision failed",
-                        false,
-                    )),
-                    MachineExitCode::ExecutionFailed,
-                )
-            }
-            Ok(sigil_kernel::RunCancellationTerminalOutcome::Interrupted) | Err(_) => {
-                eprintln!("sigil run: application run cancellation did not reach clean quiescence");
-                write_machine_terminal(
-                    handler.writer,
-                    MachineRecord::error(MachineError::new(
-                        MachineErrorCode::ExecutionFailed,
-                        "application run cancellation was interrupted",
-                        false,
-                    )),
-                    MachineExitCode::ExecutionFailed,
-                )
-            }
-        };
+            .await
+            .is_err()
+    {
+        eprintln!("sigil run: cancellation settlement needs recovery");
     }
-    match executed {
-        Ok(run) => {
-            let mut status = match run.terminal_status {
-                ApplicationRunTerminalStatus::Succeeded => MachineRunStatus::Succeeded,
-                ApplicationRunTerminalStatus::Interrupted
-                | ApplicationRunTerminalStatus::Blocked => MachineRunStatus::Failed,
-                ApplicationRunTerminalStatus::AwaitingUserInput => {
-                    MachineRunStatus::AwaitingUserInput
-                }
-            };
-            // RFC-0063 9.3: a headless run that committed a plan draft without a decision must
-            // terminate as `awaiting_plan_decision`, never auto-accept or execute.
-            let plan_review = match pending_plan_review_artifact(&session_log_path) {
-                Ok(artifact) => artifact,
-                Err(error) => {
-                    eprintln!("sigil run: pending plan artifact projection failed: {error:#}");
-                    None
-                }
-            };
-            if plan_review.is_some() {
-                status = MachineRunStatus::AwaitingPlanDecision;
-            }
-            let result = MachineRunResult {
-                session_id: run.session_id,
-                run_id: run.run_id,
-                status,
-                final_text: run.agent_output.result.final_text,
-                route_transition: Some(
-                    sigil_runtime::application_run::application_public_route_transition(
-                        &run.route_transition,
-                    ),
-                ),
-                session_log_path,
-                plan_review,
-            };
-            write_machine_terminal(
-                handler.writer,
-                MachineRecord::result(result),
-                MachineExitCode::for_status(status),
-            )
+    if executed.is_err() {
+        eprintln!("sigil run: execution stopped; resolving its durable outcome");
+    }
+    match durable_machine_run_result(&session_id, &run_id, &session_log_path) {
+        Ok(Some(result)) => {
+            let exit = MachineExitCode::for_status(result.status);
+            write_machine_terminal(handler.writer, MachineRecord::result(result), exit)
         }
-        Err(_error) => {
-            let error = MachineError::new(
-                MachineErrorCode::ExecutionFailed,
-                "application run execution failed",
-                false,
-            );
-            eprintln!("sigil run: application run execution failed");
+        result => {
+            let (code, message) = if result.is_err() {
+                (
+                    MachineErrorCode::SessionStreamInvalid,
+                    "run result projection is unavailable; the durable outcome was not changed",
+                )
+            } else {
+                (
+                    MachineErrorCode::ExecutionFailed,
+                    "application run has no durable terminal result",
+                )
+            };
+            let error = MachineError::new(code, message, false);
+            eprintln!("sigil run: {message}");
             write_machine_terminal(
                 handler.writer,
                 MachineRecord::error(error),

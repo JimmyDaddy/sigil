@@ -272,6 +272,33 @@ impl JsonlSessionStore {
         }
     }
 
+    /// Commits preallocated event identities through the existing crash-safe bundle protocol.
+    /// The predicate and durable intent publication share the session's single writer.
+    pub(crate) fn append_crash_safe_events_if<F>(
+        &self,
+        events: Vec<(EventId, DurableEventType, EventClass, serde_json::Value)>,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        let pending = events
+            .into_iter()
+            .map(
+                |(event_id, event_type, event_class, payload)| PendingStoredEvent {
+                    event_type,
+                    event_class,
+                    payload,
+                    event_id: Some(event_id),
+                    correlation_id: None,
+                    causation_id: None,
+                },
+            )
+            .collect();
+        self.writer
+            .append_crash_safe_bundle_if_records(pending, should_append)
+    }
+
     pub(crate) fn append_event_if<F>(
         &self,
         event_type: DurableEventType,

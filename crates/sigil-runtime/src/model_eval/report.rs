@@ -435,22 +435,28 @@ fn load_execution_session(execution: &ModelEvalRunExecution) -> Result<Session> 
 
 fn run_status(execution: &ModelEvalRunExecution) -> RunStatus {
     match execution.status {
-        ModelEvalRunExecutionStatus::Completed => match execution
+        ModelEvalRunExecutionStatus::Completed => execution
             .output
             .as_ref()
             .map(|output| output.terminal_status)
-        {
-            Some(ApplicationRunTerminalStatus::Succeeded) => RunStatus::Completed,
-            Some(ApplicationRunTerminalStatus::Blocked) => RunStatus::Blocked,
-            Some(ApplicationRunTerminalStatus::Interrupted) => RunStatus::Interrupted,
-            Some(ApplicationRunTerminalStatus::AwaitingUserInput) => RunStatus::Interrupted,
-            None => RunStatus::Failed,
-        },
+            .map_or(RunStatus::Failed, terminal_run_status),
         ModelEvalRunExecutionStatus::PreparationFailed
         | ModelEvalRunExecutionStatus::ExecutionFailed => RunStatus::Failed,
         ModelEvalRunExecutionStatus::TimedOut => RunStatus::Interrupted,
         ModelEvalRunExecutionStatus::BudgetSkipped
         | ModelEvalRunExecutionStatus::DeadlineSkipped => RunStatus::Blocked,
+    }
+}
+
+fn terminal_run_status(status: ApplicationRunTerminalStatus) -> RunStatus {
+    match status {
+        ApplicationRunTerminalStatus::Succeeded => RunStatus::Completed,
+        ApplicationRunTerminalStatus::Blocked => RunStatus::Blocked,
+        ApplicationRunTerminalStatus::Failed => RunStatus::Failed,
+        ApplicationRunTerminalStatus::Cancelled => RunStatus::Cancelled,
+        ApplicationRunTerminalStatus::Paused => RunStatus::Paused,
+        ApplicationRunTerminalStatus::Interrupted => RunStatus::Interrupted,
+        ApplicationRunTerminalStatus::AwaitingUserInput => RunStatus::Paused,
     }
 }
 
@@ -738,3 +744,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
         values.push(value);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/model_eval_terminal_tests.rs"]
+mod terminal_tests;

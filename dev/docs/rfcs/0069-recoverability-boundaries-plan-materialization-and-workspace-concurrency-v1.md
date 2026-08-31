@@ -839,6 +839,26 @@ PublicEventDeliveryReceiptV1 {
 - approval authority未可靠交付时暂停对应 effect admission，但 Task保持 Blocked；
 - terminal delivery失败重试同一个 terminal，禁止补造 `RunFailed`。
 
+实现约束（2026-08-31，E06）：
+
+- conversation lifecycle recorder 是 root terminal 的唯一提交入口；`RunFinalized`
+  与完整 public outbox payload 使用既有 session append-bundle intent 一起提交。
+- bundle 在首次物理追加前固定两条 StoredEvent 的 ID、public sequence 和 payload digest；
+  恢复只补齐该 intent 的原始字节。delivery receipt 独立追加，不改变 domain terminal。
+- 普通 `append_outbox` 拒绝 root terminal。没有完整 bundle intent 的旧 split terminal
+  不能反推、补造 outbox；这不是旧 session 的迁移或 upcast 入口。
+- unfinished current-schema start 的恢复产生 `Interrupted + outbox` 同一 bundle；若已存在
+  可恢复的 terminal bundle，先恢复原结局，不能另写 Interrupted。
+- `Failed / Blocked / Interrupted / Cancelled / Paused / AwaitingUserInput / Succeeded`
+  在 runtime 与公共事件间保留区别。HTTP 的等待输入 snapshot 可归于 Paused，必须保留
+  原始 `RunAwaitingUserInput` 事件；CLI machine V2 保留全部 root terminal 状态。
+- Desktop continuity 必须识别 Paused/Blocked，不能把 Paused 映成 Cancelled；TUI 的
+  application projection 在 AwaitingUserInput 后不再保持 active，待答问题仍保留。
+
+以上实施记录仅覆盖 root ConversationRun terminal bundle。PlanReview revision 的
+attempt/draft/decision 恢复和非终态 public event 的交付仍须分别满足本节的通用约束；
+不能据此认定这两条独立生命周期已经接入 root recorder 或完成 outbox 闭环。
+
 ### 13.3 ProjectionDegraded
 
 projector apply失败返回：

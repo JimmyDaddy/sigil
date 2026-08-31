@@ -1,6 +1,6 @@
 # RFC-0026 Stable Machine Protocol and Real Local Serve
 
-状态：accepted / P26.1-P26.5 implemented / complete
+状态：accepted / P26.1-P26.5 implemented；当前 machine envelope 为 V2（见 §5.5）
 
 创建日期：2026-07-15
 
@@ -122,6 +122,20 @@ V1 固定：
 | `130` | run was cooperatively cancelled |
 
 Clap 自身的 usage error 继续使用 `2`。未被可靠分类的错误必须归入 `1`，不得根据 provider 错误字符串猜测更细分类。
+
+### 5.5 Machine Protocol V2：保留领域终态（2026-08-31）
+
+本节替代 §5.1–5.4 中与当前终态来源、envelope version 不一致的旧约定；旧 V1 只作历史记录，
+当前 binary 不提供 V1 输出开关或降级映射。
+
+- `protocol_version = 2`；record kinds 和 `PublicRunEvent` 自身 schema 不变。
+- `result.status` 为 `succeeded | failed | cancelled | interrupted | blocked | paused |
+  awaiting_user_input | awaiting_plan_decision`；Blocked/Interrupted/Paused 不再改写为 Failed。
+- exit `0/1/2/3/4/130` 保持已有语义：成功为 0，失败/中断/阻塞/暂停为非成功 1，非法输入为 2，
+  等待计划决策为 3，等待用户输入为 4，已确认取消为 130。脚本需要精确原因时读取 status。
+- terminal 由 runtime 经 kernel lifecycle/outbox bundle 提交，adapter 只投影和交付；
+  stdout/SSE 失败不能生成第二个 domain terminal，也不能把已提交结局改成失败。
+- 本次版本提升只涉及 run machine record；独立 intent automation 协议不随之改号。
 
 ## 6. Shared Application Service
 

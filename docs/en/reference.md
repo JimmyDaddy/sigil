@@ -89,7 +89,7 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
 ## Machine Output And Local Server
 
-`sigil run --output json` writes one result to stdout. `jsonl` writes ordered events followed by one result or error. Human progress and safe network notices stay on stderr. Exit codes are `0` success, `1` execution failure, `2` invalid invocation/configuration, and `130` cancellation.
+`sigil run --output json` writes one result to stdout. `jsonl` writes ordered events followed by one result or error. Human progress and safe network notices stay on stderr. The run envelope uses `protocol_version: 2`; there is no V1 output mode. Result status preserves `succeeded`, `failed`, `cancelled`, `interrupted`, `blocked`, `paused`, `awaiting_user_input`, and `awaiting_plan_decision` separately. Exit codes are `0` success, `1` failure/interruption/block/pause, `2` invalid invocation/configuration, `3` awaiting a plan decision, `4` awaiting user input, and `130` cancellation. Read the result status when a script needs the precise reason for a non-success exit.
 
 `sigil intent` writes exactly one versioned JSON result or safe typed error to stdout. It resolves
 only an exact durable session id from the current workspace catalog; it does not accept a session

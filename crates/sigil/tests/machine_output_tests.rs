@@ -238,6 +238,7 @@ fn json_process_stdout_is_one_parseable_result_and_exit_zero() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "result");
+    assert_eq!(record["protocol_version"], 2);
     assert_eq!(record["result"]["status"], "succeeded");
     assert_eq!(record["result"]["final_text"], "process answer");
     assert!(!stdout.contains("session log:"));
@@ -268,6 +269,7 @@ fn json_process_configuration_error_is_structured_and_exits_two() {
     assert_eq!(stdout.lines().count(), 1);
     let record: serde_json::Value = serde_json::from_str(&stdout).expect("stdout should be JSON");
     assert_eq!(record["record_type"], "error");
+    assert_eq!(record["protocol_version"], 2);
     // Missing config is a typed current-schema boot failure; the message never leaks raw paths.
     assert_eq!(record["error"]["code"], "configuration_invalid");
     assert!(!stdout.contains("missing.toml"));
@@ -320,6 +322,7 @@ fn jsonl_process_sigint_persists_cancelled_terminal_and_exits_130() {
         .collect::<serde_json::Result<Vec<_>>>()
         .expect("every JSONL line should parse");
     assert!(records.len() >= 2);
+    assert!(records.iter().all(|record| record["protocol_version"] == 2));
     assert!(records.iter().any(|record| {
         record["record_type"] == "event" && record["event"]["event"]["type"] == "run_cancelled"
     }));

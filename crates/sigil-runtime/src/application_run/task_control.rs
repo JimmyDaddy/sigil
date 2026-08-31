@@ -494,38 +494,40 @@ impl ApplicationTaskContinuationExecution {
             }
             Err(error) => {
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
-                append_application_conversation_terminal(
+                bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
                     &self.run_id,
-                    ConversationRunTerminalStatusV1::Failed,
+                    ApplicationRunTerminalStatus::Failed,
                     None,
                     Some(&safe_error),
                     &self.redactor,
+                    PublicRunEventKind::RunFailed {
+                        error: safe_error.clone(),
+                    },
                 )?;
-                bridge.emit(PublicRunEventKind::RunFailed { error: safe_error })?;
                 return Err(error);
             }
         };
-        let (terminal_status, durable_status, final_answer, terminal_event) =
+        let (terminal_status, final_answer, terminal_event) =
             application_task_continuation_terminal(&self.session, &self.task.task_id, task_status)?;
         let terminal_summary = match &terminal_event {
-            PublicRunEventKind::RunFailed { error } => Some(error.as_str()),
+            PublicRunEventKind::RunFailed { error } => Some(error.clone()),
             PublicRunEventKind::RunBlocked { reason }
             | PublicRunEventKind::RunPaused { reason }
-            | PublicRunEventKind::RunInterrupted { reason } => Some(reason.as_str()),
+            | PublicRunEventKind::RunInterrupted { reason } => Some(reason.clone()),
             _ => None,
         };
-        append_application_conversation_terminal(
+        bridge.emit_conversation_terminal(
             &self.conversation_lifecycle,
             &self.run_id,
-            durable_status,
+            terminal_status,
             final_answer
                 .as_ref()
                 .map(|answer| answer.message_id.clone()),
-            terminal_summary,
+            terminal_summary.as_deref(),
             &self.redactor,
+            terminal_event,
         )?;
-        bridge.emit(terminal_event)?;
         if let Some(managed_session_log) = self.managed_session_log.take() {
             managed_session_log
                 .finalize()
@@ -549,13 +551,12 @@ impl ApplicationTaskContinuationExecution {
     }
 }
 
-fn application_task_continuation_terminal(
+pub(super) fn application_task_continuation_terminal(
     session: &Session,
     task_id: &TaskId,
     status: TaskRunStatus,
 ) -> Result<(
     ApplicationRunTerminalStatus,
-    ConversationRunTerminalStatusV1,
     Option<ApplicationTaskFinalAnswer>,
     PublicRunEventKind,
 )> {
@@ -565,30 +566,22 @@ fn application_task_continuation_terminal(
             let event = PublicRunEventKind::RunFinished {
                 final_text: answer.text.clone(),
             };
-            Ok((
-                ApplicationRunTerminalStatus::Succeeded,
-                ConversationRunTerminalStatusV1::Succeeded,
-                Some(answer),
-                event,
-            ))
+            Ok((ApplicationRunTerminalStatus::Succeeded, Some(answer), event))
         }
         TaskRunStatus::Cancelled => Ok((
-            ApplicationRunTerminalStatus::Interrupted,
-            ConversationRunTerminalStatusV1::Cancelled,
+            ApplicationRunTerminalStatus::Cancelled,
             None,
             PublicRunEventKind::RunCancelled,
         )),
         TaskRunStatus::Interrupted => Ok((
             ApplicationRunTerminalStatus::Interrupted,
-            ConversationRunTerminalStatusV1::Interrupted,
             None,
             PublicRunEventKind::RunInterrupted {
                 reason: "Task continuation was interrupted".to_owned(),
             },
         )),
         TaskRunStatus::Paused => Ok((
-            ApplicationRunTerminalStatus::Blocked,
-            ConversationRunTerminalStatusV1::Blocked,
+            ApplicationRunTerminalStatus::Paused,
             None,
             PublicRunEventKind::RunPaused {
                 reason: "Task continuation is durably paused".to_owned(),
@@ -596,7 +589,6 @@ fn application_task_continuation_terminal(
         )),
         TaskRunStatus::Started | TaskRunStatus::Running => Ok((
             ApplicationRunTerminalStatus::Blocked,
-            ConversationRunTerminalStatusV1::Blocked,
             None,
             PublicRunEventKind::RunBlocked {
                 reason: format!(
@@ -606,8 +598,7 @@ fn application_task_continuation_terminal(
             },
         )),
         TaskRunStatus::Failed => Ok((
-            ApplicationRunTerminalStatus::Blocked,
-            ConversationRunTerminalStatusV1::Failed,
+            ApplicationRunTerminalStatus::Failed,
             None,
             PublicRunEventKind::RunFailed {
                 error: "Task continuation failed".to_owned(),

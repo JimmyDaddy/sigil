@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -17,15 +17,16 @@ use sigil_kernel::{
     AgentRole, ApprovalMode, AssistantMessageKind, CandidateCheck, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
     EvidenceScope, JsonlSessionStore, NetworkEffect, PermissionConfirmation, PermissionDecision,
-    PlanDraftCreatedEntry, ReadinessEvaluatedEntry, ReadinessEvaluation, RequiredAction, RunStatus,
-    SessionLogEntry, SessionRef, TaskId, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
-    TaskStepStatus, ToolAccess, ToolApproval, ToolApprovalSessionGrantUnavailableReason,
-    ToolApprovalSessionGrantUnavailableReasonCode, ToolArtifactDescriptorV1, ToolArtifactEncoding,
-    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolEffect,
-    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, ToolSubject,
-    VerificationPolicy, VerificationPolicyChangedEntry, VerificationProductAction,
-    VerificationVerdict, VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
+    PlanDraftCreatedEntry, PublicRunEvent, PublicRunEventKind, ReadinessEvaluatedEntry,
+    ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, ToolAccess, ToolApproval,
+    ToolApprovalSessionGrantUnavailableReason, ToolApprovalSessionGrantUnavailableReasonCode,
+    ToolArtifactDescriptorV1, ToolArtifactEncoding, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolCall, ToolCategory, ToolEffect, ToolPreviewCapability, ToolResult, ToolResultMeta,
+    ToolResultRecordedV3, ToolSpec, ToolSubject, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationProductAction, VerificationVerdict,
+    VisibleCompletionState, build_workspace_snapshot, stable_workspace_id,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -155,6 +156,50 @@ credential = {{ source = "none" }}
 "#
     );
     std::fs::write(path, config).expect("production test config should write");
+}
+
+fn write_production_preparation_failure_config(path: &std::path::Path, workspace_root: &str) {
+    write_production_test_config(path, workspace_root);
+    let mut config =
+        std::fs::read_to_string(path).expect("production test config should be readable");
+    // Root-config parsing and read-only route projection deliberately accept this. Provider
+    // construction is the first owner that resolves request timeouts, so this drives the real
+    // pre-Started preparation branch without a mock preparer or network dependency.
+    config.push_str(
+        r#"
+
+[model_request]
+request_timeout_secs = 0
+stream_idle_timeout_secs = 1
+"#,
+    );
+    std::fs::write(path, config).expect("preparation failure config should write");
+}
+
+fn write_production_bounded_network_failure_config(path: &std::path::Path, workspace_root: &str) {
+    write_production_test_config(path, workspace_root);
+    let mut config =
+        std::fs::read_to_string(path).expect("production test config should be readable");
+    // Keep the real unreachable endpoint, but bound both the transport and its durable recovery
+    // policy. The resulting terminal is a paused recovery exhaustion, not a fabricated failure.
+    config.push_str(
+        r#"
+
+[model_request]
+request_timeout_secs = 1
+stream_idle_timeout_secs = 1
+stream_total_timeout_secs = 1
+
+[recovery.provider]
+max_transport_retries = 0
+max_partial_output_retries = 0
+initial_delay_ms = 0
+max_delay_ms = 0
+jitter_ratio = 0.0
+max_cumulative_delay_ms = 0
+"#,
+    );
+    std::fs::write(path, config).expect("bounded network failure config should write");
 }
 
 fn write_reasoning_test_config(path: &std::path::Path) {
@@ -3597,10 +3642,11 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
 }
 
 #[tokio::test]
-async fn production_driver_uses_shared_runtime_preparation_and_records_typed_failure() {
+async fn production_driver_projects_pre_started_runtime_preparation_failure_without_forging_domain_terminal()
+ {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let config_path = temp.path().join("sigil.toml");
-    write_production_test_config(&config_path, ".");
+    write_production_preparation_failure_config(&config_path, ".");
     let protocol_journal = Arc::new(
         HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 32)
             .expect("protocol journal should initialize"),
@@ -3648,28 +3694,33 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
         )
         .expect("owned production supervisor should accept the run");
 
-    // Windows hosted runners can spend several seconds in the first managed authority/provider
-    // preparation while the production failure remains fully bounded. Keep this as a finite
-    // regression budget, but do not mistake the local 10-second scheduling budget for the
-    // production cancellation deadline.
-    let terminal = tokio::time::timeout(Duration::from_secs(30), async {
+    let preparation_event = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = subscriber
                 .recv()
                 .await
                 .expect("production failure event should remain observable");
             if event.run_event.run_id == run.id
-                && matches!(&event.run_event.event, PublicRunEventKind::RunFailed { .. })
+                && matches!(
+                    &event.run_event.event,
+                    PublicRunEventKind::RouteRecoveryRequired {
+                        code: PublicRouteRecoveryCode::ProviderUnavailable,
+                        ..
+                    }
+                )
             {
                 break event;
             }
         }
     })
     .await
-    .expect("preparation failure should terminate promptly");
+    .expect("pre-Started preparation failure should publish its typed recovery promptly");
     assert!(matches!(
-        terminal.run_event.event,
-        PublicRunEventKind::RunFailed { .. }
+        preparation_event.run_event.event,
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::ProviderUnavailable,
+            ..
+        }
     ));
 
     let projected_status = tokio::time::timeout(Duration::from_secs(10), async {
@@ -3682,54 +3733,571 @@ async fn production_driver_uses_shared_runtime_preparation_and_records_typed_fai
         }
     })
     .await
-    .expect("terminal event should be followed by the terminal run projection");
+    .expect("typed preparation event should be followed by the terminal run projection");
     assert_eq!(projected_status, HttpRunStatus::Failed);
     assert!(session.session_log_path.ends_with(".jsonl"));
     let replay = event_bus
         .replay_run_after(&session.durable_session_scope_id, &run.id, None)
-        .expect("typed preparation failure should be durable");
+        .expect("typed preparation failure should remain replayable by HTTP");
     assert!(matches!(
         replay.last().map(|event| &event.run_event.event),
-        Some(PublicRunEventKind::RunFailed { .. })
+        Some(PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::ProviderUnavailable,
+            ..
+        })
+    ));
+    assert!(
+        JsonlSessionStore::read_event_records(&session.session_log_path)
+            .expect("preparation failure session records should read")
+            .iter()
+            .all(|record| record.stored_event().event_kind()
+                != Some(sigil_kernel::DurableEventType::RunFinalized)),
+        "pre-Started preparation failure must not forge a durable domain terminal"
+    );
+}
+
+#[tokio::test]
+async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_and_exact_http_delivery()
+ {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    write_production_bounded_network_failure_config(&config_path, ".");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol.json"), 32)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures.json"), 16)
+            .expect("disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            Arc::clone(&event_bus),
+            tokio::runtime::Handle::current(),
+        )
+        .expect("production driver should accept a durable event bus"),
+    );
+    let command_store = Arc::new(
+        HttpDurableCommandStore::open(temp.path().join("commands.json"), 32)
+            .expect("command store should initialize"),
+    );
+    let registry = driver
+        .build_registry(command_store)
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("durable session binding should not require provider assembly");
+    let mut subscriber = event_bus.subscribe();
+    let run = registry
+        .start_run(
+            &session.id,
+            HttpRunStartRequest {
+                prompt: "hello".to_owned(),
+                permission_mode: Some(HttpPermissionMode::Manual),
+                model_ref: None,
+                model_selection_binding: None,
+                route_recovery_binding: None,
+                reasoning_effort: None,
+                reasoning_effort_binding: None,
+                skill_binding: None,
+                agent_binding: None,
+                task_continuation: None,
+            },
+        )
+        .expect("owned production supervisor should accept the run");
+
+    let terminal = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = subscriber
+                .recv()
+                .await
+                .expect("network recovery terminal should remain observable");
+            if event.run_event.run_id == run.id
+                && matches!(&event.run_event.event, PublicRunEventKind::RunPaused { .. })
+            {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("bounded network recovery should terminalize promptly");
+    assert!(matches!(
+        terminal.run_event.event,
+        PublicRunEventKind::RunPaused { .. }
+    ));
+
+    let projected_status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = registry.get_run(&run.id).expect("run should exist").status;
+            if status.is_terminal() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("durable terminal should be followed by the registry projection");
+    assert_eq!(projected_status, HttpRunStatus::Paused);
+
+    let records = JsonlSessionStore::read_event_records(&session.session_log_path)
+        .expect("network terminal records should read");
+    let projection = PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("network terminal must retain an exact domain/outbox pair");
+    assert!(projection.pending_for_adapter("http").is_empty());
+    assert!(projection.events_in_order().iter().any(|entry| {
+        entry.run_id == run.id && matches!(&entry.event.event, PublicRunEventKind::RunPaused { .. })
+    }));
+    let replay = event_bus
+        .replay_run_after(&session.durable_session_scope_id, &run.id, None)
+        .expect("durable HTTP terminal should remain replayable");
+    assert!(matches!(
+        replay.last().map(|event| &event.run_event.event),
+        Some(PublicRunEventKind::RunPaused { .. })
     ));
 }
 
 #[test]
-fn production_execution_without_a_public_terminal_is_closed_as_failed() {
-    #[derive(Default)]
-    struct Recorder(Vec<PublicRunEvent>);
+fn production_execution_without_a_durable_terminal_is_refused_without_forging_failure() {
+    let error = require_durable_application_terminal(None, "application execution ended")
+        .expect_err("missing domain terminal must not be rewritten as RunFailed");
 
-    impl ApplicationRunEventHandler for Recorder {
-        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-            self.0.push(event);
+    assert!(
+        error
+            .to_string()
+            .contains("without an atomically committed domain terminal and public outbox")
+    );
+}
+
+#[test]
+fn durable_application_terminal_maps_every_status_without_losing_failed_or_input_required() {
+    let mappings = [
+        (
+            ApplicationRunTerminalStatus::Succeeded,
+            HttpRunTerminalOutcome::Finished,
+        ),
+        (
+            ApplicationRunTerminalStatus::Failed,
+            HttpRunTerminalOutcome::Failed,
+        ),
+        (
+            ApplicationRunTerminalStatus::Cancelled,
+            HttpRunTerminalOutcome::Cancelled,
+        ),
+        (
+            ApplicationRunTerminalStatus::Interrupted,
+            HttpRunTerminalOutcome::Interrupted,
+        ),
+        (
+            ApplicationRunTerminalStatus::Paused,
+            HttpRunTerminalOutcome::Paused,
+        ),
+        (
+            ApplicationRunTerminalStatus::Blocked,
+            HttpRunTerminalOutcome::Blocked,
+        ),
+        (
+            ApplicationRunTerminalStatus::AwaitingUserInput,
+            HttpRunTerminalOutcome::Paused,
+        ),
+    ];
+
+    for (status, expected) in mappings {
+        assert_eq!(
+            http_terminal_from_durable_application_status(status),
+            expected
+        );
+    }
+}
+
+#[test]
+fn plan_review_revision_interrupted_terminal_is_not_collapsed_to_failed() {
+    let outcome = Ok(sigil_runtime::PlanReviewRunOutcome::Interrupted(
+        "review worker reached its turn limit".to_owned(),
+    ));
+
+    assert!(matches!(
+        plan_review_revision_terminal_event(&outcome),
+        PublicRunEventKind::RunInterrupted { reason }
+            if reason == "review worker reached its turn limit"
+    ));
+}
+
+#[test]
+fn terminal_outbox_replay_keeps_the_original_gapped_http_sequence() -> anyhow::Result<()> {
+    let event_bus = HttpLiveEventBus::new(8);
+    event_bus.publish_run_event(PublicRunEvent::new(
+        "session-terminal-replay",
+        "run-terminal-replay",
+        3,
+        PublicRunEventKind::RunStarted {
+            prompt: "start".to_owned(),
+        },
+    ))?;
+    let terminal = PublicRunEvent::new(
+        "session-terminal-replay",
+        "run-terminal-replay",
+        9,
+        PublicRunEventKind::RunInterrupted {
+            reason: "delivery recovered".to_owned(),
+        },
+    );
+
+    publish_exact_http_terminal_outbox_event(
+        &event_bus,
+        "session-terminal-replay",
+        "run-terminal-replay",
+        terminal.clone(),
+    )?;
+    publish_exact_http_terminal_outbox_event(
+        &event_bus,
+        "session-terminal-replay",
+        "run-terminal-replay",
+        terminal,
+    )?;
+
+    let replay =
+        event_bus.replay_run_after("session-terminal-replay", "run-terminal-replay", None)?;
+    assert_eq!(
+        replay
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 9]
+    );
+    Ok(())
+}
+
+#[test]
+fn attachment_reprojects_registered_uncertain_run_after_terminal_receipt_was_already_acknowledged()
+-> anyhow::Result<()> {
+    struct RegistryOnlyDriver {
+        binding: HttpSessionBinding,
+    }
+
+    impl HttpRunDriver for RegistryOnlyDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            Ok(self.binding.clone())
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
             Ok(())
         }
     }
 
-    let result = Err(anyhow!("private provider transport detail"));
-    let mut recorder = Recorder::default();
-    let terminal = ensure_application_execution_terminal(
-        false,
-        &result,
-        "durable-session-1",
-        "run-1",
-        &mut recorder,
-    )
-    .expect("missing terminal should be recovered");
+    fn append_acknowledged_terminal(
+        lifecycle: &sigil_kernel::ConversationRunLifecycleRecorder,
+        session_scope_id: &str,
+        run_id: &str,
+        terminal: &sigil_kernel::ConversationRunFinalizedEntryV1,
+        event: PublicRunEvent,
+        store: JsonlSessionStore,
+    ) -> anyhow::Result<()> {
+        let outbox = sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: format!("application-public:{session_scope_id}:{run_id}:1"),
+            domain_event_id: format!("application-domain:{run_id}:1"),
+            run_id: run_id.to_owned(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+            event,
+        };
+        lifecycle.append_finalized_with_outbox(terminal, &outbox)?;
+        sigil_kernel::PublicEventOutboxRecorder::new(store).append_delivery(
+            &sigil_kernel::PublicEventDeliveryReceiptV1 {
+                schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: outbox.public_event_id,
+                adapter: "http".to_owned(),
+                delivered_at_unix_ms: 1,
+            },
+        )?;
+        Ok(())
+    }
 
-    assert_eq!(terminal, HttpRunTerminalOutcome::Failed);
+    let temp = tempfile::tempdir()?;
+    write_production_test_config(&temp.path().join("sigil.toml"), ".");
+    let session_path = temp.path().join("attachment-terminal-replay.jsonl");
+    let (provider_name, route) = production_test_model_route(&temp);
+    let session_store = JsonlSessionStore::new(&session_path)?;
+    let session =
+        sigil_kernel::Session::new_with_route(provider_name, route).with_store(session_store);
+    let durable_session_scope_id = session.session_scope_id().to_owned();
+    let registry = HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: durable_session_scope_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    }));
+    let adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let run = registry.start_run(
+        &adapter_session.id,
+        HttpRunStartRequest {
+            prompt: "repair the terminal registry".to_owned(),
+            permission_mode: Some(HttpPermissionMode::Manual),
+            model_ref: None,
+            model_selection_binding: None,
+            route_recovery_binding: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+            task_continuation: None,
+        },
+    )?;
+    registry.record_run_execution_uncertain(&run.id)?;
+
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+        &run.id, 1,
+    )?)?;
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        &run.id,
+        sigil_kernel::ConversationRunTerminalStatusV1::AwaitingUserInput,
+        None,
+        Some("exact input is required"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    append_acknowledged_terminal(
+        &lifecycle,
+        &durable_session_scope_id,
+        &run.id,
+        &terminal,
+        PublicRunEvent::new(
+            &durable_session_scope_id,
+            &run.id,
+            1,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: "input-request-1".to_owned(),
+                generation: 1,
+                request_hash: "input-request-hash-1".to_owned(),
+            },
+        ),
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+
+    // A durable historical terminal that has no process-local HTTP run must not be recreated.
+    lifecycle.append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+        "durable-only-terminal",
+        3,
+    )?)?;
+    let durable_only_terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        "durable-only-terminal",
+        sigil_kernel::ConversationRunTerminalStatusV1::Failed,
+        None,
+        Some("historical failure"),
+        4,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    append_acknowledged_terminal(
+        &lifecycle,
+        &durable_session_scope_id,
+        "durable-only-terminal",
+        &durable_only_terminal,
+        PublicRunEvent::new(
+            &durable_session_scope_id,
+            "durable-only-terminal",
+            1,
+            PublicRunEventKind::RunFailed {
+                error: "historical failure".to_owned(),
+            },
+        ),
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+
+    let projection = PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&session_path)?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
+
+    let event_bus = HttpLiveEventBus::new(8);
+    assert_eq!(
+        reconcile_registered_http_terminal_outboxes(
+            &session_path,
+            &durable_session_scope_id,
+            &registry,
+            &event_bus,
+        )?,
+        1
+    );
+    assert_eq!(registry.get_run(&run.id)?.status, HttpRunStatus::Paused);
     assert!(matches!(
-        recorder.0.as_slice(),
-        [PublicRunEvent {
-            session_id,
-            run_id,
-            event: PublicRunEventKind::RunFailed { error },
-            ..
-        }] if session_id == "durable-session-1"
-            && run_id == "run-1"
-            && error == "run execution failed before its terminal status was published"
-            && !error.contains("private provider")
+        registry.get_run("durable-only-terminal"),
+        Err(crate::HttpRegistryError::RunNotFound { .. })
     ));
+    Ok(())
+}
+
+#[test]
+fn attachment_rejects_terminal_for_registered_run_bound_to_another_durable_session()
+-> anyhow::Result<()> {
+    struct MultipleBindingsDriver {
+        bindings: Mutex<VecDeque<HttpSessionBinding>>,
+    }
+
+    impl HttpRunDriver for MultipleBindingsDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            self.bindings
+                .lock()
+                .expect("test binding queue lock")
+                .pop_front()
+                .ok_or_else(|| crate::HttpRunDriverError::new("test binding queue exhausted"))
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    write_production_test_config(&temp.path().join("sigil.toml"), ".");
+    let attached_path = temp.path().join("attached-terminal-replay.jsonl");
+    let foreign_path = temp.path().join("foreign-terminal-replay.jsonl");
+    let (provider_name, route) = production_test_model_route(&temp);
+    let attached_store = JsonlSessionStore::new(&attached_path)?;
+    let attached_session =
+        sigil_kernel::Session::new_with_route(provider_name, route).with_store(attached_store);
+    let attached_scope_id = attached_session.session_scope_id().to_owned();
+    JsonlSessionStore::new(&foreign_path)?;
+    let registry = HttpSessionRunRegistry::new(Arc::new(MultipleBindingsDriver {
+        bindings: Mutex::new(VecDeque::from([
+            HttpSessionBinding {
+                session_scope_id: attached_scope_id.clone(),
+                session_log_path: canonical_http_session_path(&attached_path)?
+                    .display()
+                    .to_string(),
+                route_transition: None,
+                route_recovery: None,
+            },
+            HttpSessionBinding {
+                session_scope_id: "foreign-durable-scope".to_owned(),
+                session_log_path: canonical_http_session_path(&foreign_path)?
+                    .display()
+                    .to_string(),
+                route_transition: None,
+                route_recovery: None,
+            },
+        ])),
+    }));
+    let _attached_adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let foreign_adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let foreign_run = registry.start_run(
+        &foreign_adapter_session.id,
+        HttpRunStartRequest {
+            prompt: "must remain owned by the foreign session".to_owned(),
+            permission_mode: Some(HttpPermissionMode::Manual),
+            model_ref: None,
+            model_selection_binding: None,
+            route_recovery_binding: None,
+            reasoning_effort: None,
+            reasoning_effort_binding: None,
+            skill_binding: None,
+            agent_binding: None,
+            task_continuation: None,
+        },
+    )?;
+    registry.record_run_execution_uncertain(&foreign_run.id)?;
+
+    let lifecycle = attached_session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+        &foreign_run.id,
+        1,
+    )?)?;
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        &foreign_run.id,
+        sigil_kernel::ConversationRunTerminalStatusV1::Failed,
+        None,
+        Some("durable log must not cross registry session ownership"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    let event = PublicRunEvent::new(
+        &attached_scope_id,
+        &foreign_run.id,
+        1,
+        PublicRunEventKind::RunFailed {
+            error: "durable log must not cross registry session ownership".to_owned(),
+        },
+    );
+    let outbox = sigil_kernel::PublicEventOutboxEntryV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: format!(
+            "application-public:{attached_scope_id}:{}:1",
+            foreign_run.id
+        ),
+        domain_event_id: format!("application-domain:{}:1", foreign_run.id),
+        run_id: foreign_run.id.clone(),
+        sequence: 1,
+        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+        event,
+    };
+    lifecycle.append_finalized_with_outbox(&terminal, &outbox)?;
+
+    let error = reconcile_registered_http_terminal_outboxes(
+        &attached_path,
+        &attached_scope_id,
+        &registry,
+        &HttpLiveEventBus::new(8),
+    )
+    .expect_err("cross-session run id must not be reconciled from this attachment");
+    assert!(
+        error
+            .to_string()
+            .contains("does not belong to the durable terminal outbox attachment")
+    );
+    assert_eq!(
+        registry.get_run(&foreign_run.id)?.status,
+        HttpRunStatus::ExecutionUncertain
+    );
+    Ok(())
 }
 
 #[tokio::test]

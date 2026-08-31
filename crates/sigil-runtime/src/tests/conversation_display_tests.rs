@@ -10,7 +10,8 @@ use sigil_kernel::{
     ConversationInputKind, ConversationInputPromotedEntry, ConversationInputQueueId,
     ConversationInputQueuedEntry, ConversationInputTarget, ConversationRunFinalizedEntryV1,
     ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DurableEventType, EventClass,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PermissionRisk,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+    PermissionRisk, PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind,
     RuntimeContextCandidates, SecretRedactor, Session, SessionLogEntry, SessionRef,
     SessionStreamRecord, SkillLoadEntry, SkillSource, StoredEvent, TaskId, TaskIsolationMode,
     TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
@@ -43,6 +44,24 @@ fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> 
         .with_store(store.clone())
         .with_tool_artifact_store_override(artifact_store);
     Ok((temp, store, session))
+}
+
+fn terminal_outbox(
+    session_id: &str,
+    run_id: &str,
+    sequence: u64,
+    event: PublicRunEventKind,
+) -> Result<PublicEventOutboxEntryV1> {
+    let public = PublicRunEvent::new(session_id, run_id, sequence, event);
+    Ok(PublicEventOutboxEntryV1 {
+        schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: format!("display-public:{run_id}:{sequence}"),
+        domain_event_id: format!("display-domain:{run_id}:{sequence}"),
+        run_id: run_id.to_owned(),
+        sequence,
+        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&public)?),
+        event: public,
+    })
 }
 
 fn internal_context_fixture() -> RuntimeContextCandidates {
@@ -188,14 +207,25 @@ fn canonical_projection_has_stable_ids_orders_and_run_binding() -> Result<()> {
         ToolArtifactSensitivity::Ordinary,
     )?;
     session.append(SessionLogEntry::ToolResultV3(recorded))?;
-    recorder.append_finalized(&ConversationRunFinalizedEntryV1::new(
+    let terminal = ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Succeeded,
         Some(final_message_id.clone()),
         Some("complete"),
         20,
         &SecretRedactor::empty(),
-    )?)?;
+    )?;
+    recorder.append_finalized_with_outbox(
+        &terminal,
+        &terminal_outbox(
+            &scope,
+            "run-1",
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        )?,
+    )?;
 
     let first = conversation_display_page(store.path(), &scope, None, 20, None)?;
     let second = conversation_display_page(store.path(), &scope, None, 20, None)?;
@@ -508,14 +538,25 @@ fn terminal_must_match_the_unique_durable_final_for_its_active_run() -> Result<(
         AssistantMessageKind::FinalAnswer,
     );
     session.append_assistant_message(final_message)?;
-    recorder.append_finalized(&ConversationRunFinalizedEntryV1::new(
+    let terminal = ConversationRunFinalizedEntryV1::new(
         "run-1",
         ConversationRunTerminalStatusV1::Succeeded,
         Some("another-message".to_owned()),
         Some("complete"),
         20,
         &SecretRedactor::empty(),
-    )?)?;
+    )?;
+    recorder.append_finalized_with_outbox(
+        &terminal,
+        &terminal_outbox(
+            &scope,
+            "run-1",
+            1,
+            PublicRunEventKind::RunFinished {
+                final_text: "durable answer".to_owned(),
+            },
+        )?,
+    )?;
 
     assert!(
         conversation_display_page(store.path(), &scope, None, 20, None)

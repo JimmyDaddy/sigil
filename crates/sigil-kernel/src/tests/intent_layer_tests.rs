@@ -114,14 +114,19 @@ fn setup_chat_layer(
     )?;
     let lifecycle = session.conversation_run_lifecycle_recorder()?;
     lifecycle.append_started(&ConversationRunStartedEntryV1::new("root-layer-run", 1)?)?;
-    lifecycle.append_finalized(&ConversationRunFinalizedEntryV1::new(
+    let terminal = ConversationRunFinalizedEntryV1::new(
         "root-layer-run",
         ConversationRunTerminalStatusV1::Succeeded,
         Some("assistant-layer-final".to_owned()),
         Some("completed"),
         2,
         &SecretRedactor::empty(),
-    )?)?;
+    )?;
+    let outbox = crate::conversation_run::test_fixtures::terminal_outbox(
+        session.session_scope_id(),
+        &terminal,
+    )?;
+    lifecycle.append_finalized_with_outbox(&terminal, &outbox)?;
     Ok((store, session, intent_ref, execution_id))
 }
 

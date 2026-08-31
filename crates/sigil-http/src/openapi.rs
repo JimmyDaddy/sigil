@@ -1862,7 +1862,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplayStatus": {
                     "type": "string",
-                    "enum": ["recorded", "requested", "waiting_for_approval", "approved", "denied", "completed", "succeeded", "failed", "cancelled", "interrupted", "blocked", "awaiting_user_input"]
+                    "enum": ["recorded", "requested", "waiting_for_approval", "approved", "denied", "completed", "succeeded", "failed", "cancelled", "interrupted", "paused", "blocked", "awaiting_user_input"]
                 },
                 "ConversationDisplaySkillReference": {
                     "type": "object",

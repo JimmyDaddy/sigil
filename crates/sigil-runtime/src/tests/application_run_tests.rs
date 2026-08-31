@@ -60,7 +60,8 @@ use super::{
     default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
     prepare_application_run_blocking, prepare_application_task_continuation,
     prepare_application_user_input_decision, record_application_preparation_cancellation,
-    rerun_application_verification, validate_execution_contract,
+    replay_pending_application_terminal_outbox, rerun_application_verification,
+    validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -70,6 +71,18 @@ fn application_conversation_lifecycle(
         .iter()
         .filter_map(|record| conversation_run_lifecycle_record_from_stream(record).transpose())
         .collect()
+}
+
+fn durable_application_event_sequence(
+    session_id: &str,
+    run_id: &str,
+    path: &Path,
+) -> Result<ApplicationRunEventSequence> {
+    Ok(ApplicationRunEventSequence::with_outbox(
+        session_id.to_owned(),
+        run_id.to_owned(),
+        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(path)?),
+    ))
 }
 
 fn application_internal_context_fixture() -> RuntimeContextCandidates {
@@ -352,10 +365,7 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
     let mut events = RecordingApplicationRunEvents::default();
     let mut approvals = AutoApproveHandler;
     let output = execution.execute(&mut events, &mut approvals).await?;
-    assert_eq!(
-        output.terminal_status,
-        ApplicationRunTerminalStatus::Blocked
-    );
+    assert_eq!(output.terminal_status, ApplicationRunTerminalStatus::Paused);
     assert!(matches!(
         output.agent_output.disposition,
         sigil_kernel::AgentRunDisposition::Blocked
@@ -2811,7 +2821,7 @@ fn externally_interactive_runs_reject_automated_approval_handlers() {
 }
 
 #[test]
-fn public_event_bridge_sequences_lifecycle_and_kernel_events() -> Result<()> {
+fn public_event_bridge_rejects_a_root_terminal_without_a_durable_finalizer() -> Result<()> {
     #[derive(Default)]
     struct Recorder(Vec<PublicRunEvent>);
 
@@ -2829,9 +2839,13 @@ fn public_event_bridge_sequences_lifecycle_and_kernel_events() -> Result<()> {
         prompt: "hello".to_owned(),
     })?;
     sigil_kernel::EventHandler::handle(&mut bridge, RunEvent::TextDelta("hi".to_owned()))?;
-    bridge.emit(PublicRunEventKind::RunFinished {
-        final_text: "hi".to_owned(),
-    })?;
+    assert!(
+        bridge
+            .emit(PublicRunEventKind::RunFinished {
+                final_text: "hi".to_owned(),
+            })
+            .is_err()
+    );
     drop(bridge);
 
     assert_eq!(
@@ -2840,7 +2854,7 @@ fn public_event_bridge_sequences_lifecycle_and_kernel_events() -> Result<()> {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        vec![1, 2]
     );
     assert!(matches!(
         recorder.0[0].event,
@@ -2850,10 +2864,12 @@ fn public_event_bridge_sequences_lifecycle_and_kernel_events() -> Result<()> {
         recorder.0[1].event,
         PublicRunEventKind::TextDelta { .. }
     ));
-    assert!(matches!(
-        recorder.0[2].event,
-        PublicRunEventKind::RunFinished { .. }
-    ));
+    assert!(
+        recorder
+            .0
+            .iter()
+            .all(|event| { !matches!(event.event, PublicRunEventKind::RunFinished { .. }) })
+    );
     Ok(())
 }
 
@@ -2917,7 +2933,7 @@ fn public_event_bridge_projects_task_controls_and_preserves_unknown_controls() -
 }
 
 #[test]
-fn public_event_sequence_seals_after_root_terminal() -> Result<()> {
+fn public_event_sequence_rejects_a_root_terminal_without_a_durable_finalizer() -> Result<()> {
     #[derive(Default)]
     struct Recorder(Vec<PublicRunEvent>);
 
@@ -2936,12 +2952,16 @@ fn public_event_sequence_seals_after_root_terminal() -> Result<()> {
             prompt: "hello".to_owned(),
         },
     )?;
-    sequence.emit(
-        &mut recorder,
-        PublicRunEventKind::RunFailed {
-            error: "interrupted".to_owned(),
-        },
-    )?;
+    assert!(
+        sequence
+            .emit(
+                &mut recorder,
+                PublicRunEventKind::RunFailed {
+                    error: "interrupted".to_owned(),
+                },
+            )
+            .is_err()
+    );
     assert!(
         sequence
             .emit(
@@ -2950,7 +2970,7 @@ fn public_event_sequence_seals_after_root_terminal() -> Result<()> {
                     text: "late".to_owned(),
                 },
             )
-            .is_err()
+            .is_ok()
     );
     assert_eq!(recorder.0.len(), 2);
     Ok(())
@@ -2975,18 +2995,62 @@ fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_doma
         }
     }
 
-    let sequence = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let session = Session::load_from_store("deepseek", "model", store)?;
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("run-1", 1)?)?;
+    let sequence = ApplicationRunEventSequence::with_outbox(
+        session.session_scope_id().to_owned(),
+        "run-1".to_owned(),
+        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
+    );
     let mut handler = FailFirstTerminal {
         failed: false,
         events: Vec::new(),
     };
-    sequence.emit(
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        "run-1",
+        ConversationRunTerminalStatusV1::Interrupted,
+        None,
+        Some("first terminal"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    sequence.emit_terminal(
+        &lifecycle,
         &mut handler,
+        &terminal,
         PublicRunEventKind::RunInterrupted {
             reason: "first terminal".to_owned(),
         },
     )?;
+    assert_eq!(
+        lifecycle
+            .finalized_for_run("run-1")?
+            .map(|entry| entry.status()),
+        Some(ApplicationRunTerminalStatus::Interrupted)
+    );
     assert!(sequence.delivery_is_degraded()?);
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert!(records.iter().any(|record| {
+        record.stored_event().event_id == "application-domain:run-1:1"
+            && record.stored_event().event_kind()
+                == Some(sigil_kernel::DurableEventType::RunFinalized)
+    }));
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert!(
+        projection
+            .pending_for_adapter("application")
+            .iter()
+            .any(|event| {
+                event.public_event_id
+                    == format!("application-public:{}:run-1:1", session.session_scope_id())
+                    && event.domain_event_id == "application-domain:run-1:1"
+                    && matches!(event.event.event, PublicRunEventKind::RunInterrupted { .. })
+            })
+    );
     assert!(
         sequence
             .emit(
@@ -3002,7 +3066,7 @@ fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_doma
 }
 
 #[test]
-fn durable_outbox_replays_a_failed_terminal_with_its_original_public_event_id() -> Result<()> {
+fn durable_outbox_replays_a_terminal_with_its_original_public_event_id() -> Result<()> {
     struct FailingAdapter;
 
     impl ApplicationRunEventHandler for FailingAdapter {
@@ -3013,14 +3077,28 @@ fn durable_outbox_replays_a_failed_terminal_with_its_original_public_event_id() 
 
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let session = Session::load_from_store("deepseek", "model", store)?;
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new("run-outbox", 1)?)?;
     let sequence = ApplicationRunEventSequence::with_outbox(
-        "session-outbox".to_owned(),
+        session.session_scope_id().to_owned(),
         "run-outbox".to_owned(),
         sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
     );
     let mut adapter = FailingAdapter;
-    sequence.emit(
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        "run-outbox",
+        ConversationRunTerminalStatusV1::Blocked,
+        None,
+        Some("provider route needs recovery"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    sequence.emit_terminal(
+        &lifecycle,
         &mut adapter,
+        &terminal,
         PublicRunEventKind::RunBlocked {
             reason: "provider route needs recovery".to_owned(),
         },
@@ -3035,12 +3113,162 @@ fn durable_outbox_replays_a_failed_terminal_with_its_original_public_event_id() 
     assert_eq!(pending.len(), 1);
     assert_eq!(
         pending[0].public_event_id,
-        "application-public:session-outbox:run-outbox:1"
+        format!(
+            "application-public:{}:run-outbox:1",
+            session.session_scope_id()
+        )
+    );
+    // A fresh control has no emission acknowledgement in memory. Its answer still comes from
+    // the original paired domain terminal, including after an adapter failed to accept it.
+    let control = ApplicationRunControl {
+        owner: RunCancellationOwner::new(),
+        recorder: session.run_cancellation_recorder()?,
+        cancellation_target: RunCancellationTarget::Run,
+        conversation_lifecycle: lifecycle.clone(),
+        conversation_start: ConversationRunStartedEntryV1::new("run-outbox", 1)?,
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-outbox",
+            &path,
+        )?,
+        _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&path)?),
+    };
+    assert!(!control.terminal_was_delivered()?);
+    assert_eq!(
+        control.durable_terminal_status()?,
+        Some(ApplicationRunTerminalStatus::Blocked)
     );
     assert!(matches!(
         pending[0].event.event,
         PublicRunEventKind::RunBlocked { .. }
     ));
+    struct RecordingAdapter {
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for RecordingAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    let mut replay = RecordingAdapter { events: Vec::new() };
+    assert_eq!(
+        replay_pending_application_terminal_outbox(&path, "run-outbox", &mut replay)?,
+        1
+    );
+    assert_eq!(replay.events.len(), 1);
+    assert_eq!(replay.events[0].sequence, 1);
+    assert!(matches!(
+        replay.events[0].event,
+        PublicRunEventKind::RunBlocked { .. }
+    ));
+    assert_eq!(
+        replay_pending_application_terminal_outbox(&path, "run-outbox", &mut replay)?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay() -> Result<()> {
+    struct FailingAdapter;
+
+    impl ApplicationRunEventHandler for FailingAdapter {
+        fn handle_public_event(&mut self, _event: PublicRunEvent) -> Result<()> {
+            anyhow::bail!("adapter is temporarily unavailable")
+        }
+    }
+
+    struct ReceiptWriteFailingAdapter {
+        session_log_path: std::path::PathBuf,
+        parked_session_log_path: std::path::PathBuf,
+        event: Option<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for ReceiptWriteFailingAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            std::fs::rename(&self.session_log_path, &self.parked_session_log_path)?;
+            std::fs::create_dir(&self.session_log_path)?;
+            self.event = Some(event);
+            Ok(())
+        }
+    }
+
+    struct RecordingAdapter {
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for RecordingAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    {
+        let store = JsonlSessionStore::new(&path)?;
+        let session = Session::load_from_store("deepseek", "model", store)?;
+        let lifecycle = session.conversation_run_lifecycle_recorder()?;
+        lifecycle.append_started(&ConversationRunStartedEntryV1::new("run-receipt", 1)?)?;
+        let sequence = ApplicationRunEventSequence::with_outbox(
+            session.session_scope_id().to_owned(),
+            "run-receipt".to_owned(),
+            sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
+        );
+        let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+            "run-receipt",
+            ConversationRunTerminalStatusV1::Paused,
+            None,
+            Some("operator must resume the task"),
+            2,
+            &sigil_kernel::SecretRedactor::empty(),
+        )?;
+        let mut adapter = FailingAdapter;
+        sequence.emit_terminal(
+            &lifecycle,
+            &mut adapter,
+            &terminal,
+            PublicRunEventKind::RunPaused {
+                reason: "operator must resume the task".to_owned(),
+            },
+        )?;
+    }
+
+    let parked = temp.path().join("session-before-receipt.jsonl");
+    let mut receipt_failure = ReceiptWriteFailingAdapter {
+        session_log_path: path.clone(),
+        parked_session_log_path: parked.clone(),
+        event: None,
+    };
+    assert!(
+        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut receipt_failure)
+            .is_err()
+    );
+    let first_delivery = receipt_failure
+        .event
+        .take()
+        .expect("adapter should have accepted the event before its receipt write failed");
+
+    std::fs::remove_dir(&path)?;
+    std::fs::rename(&parked, &path)?;
+
+    let mut replay = RecordingAdapter { events: Vec::new() };
+    assert_eq!(
+        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut replay)?,
+        1
+    );
+    assert_eq!(
+        serde_json::to_value(&replay.events)?,
+        serde_json::to_value(vec![first_delivery])?
+    );
+    assert_eq!(
+        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut replay)?,
+        0
+    );
     Ok(())
 }
 
@@ -5228,10 +5456,11 @@ async fn application_task_pause_writes_paused_only_after_quiescence() -> Result<
         },
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-task-pause", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-task-pause".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-task-pause",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     #[derive(Default)]
@@ -5339,10 +5568,11 @@ async fn stale_application_task_pause_does_not_activate_cancellation() -> Result
         },
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-task-stale-pause", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-task-stale-pause".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-task-stale-pause",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
 
@@ -5390,10 +5620,11 @@ async fn unaudited_application_task_pause_records_interrupted_before_failing() -
         cancellation_target: cancellation_request.target.clone(),
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-task-unaudited-pause", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-task-unaudited-pause".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-task-unaudited-pause",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = ApplicationTaskPauseTicket {
@@ -5471,10 +5702,11 @@ async fn application_task_pause_records_interrupted_when_execution_did_not_join(
         },
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-task-pause-interrupted", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-task-pause-interrupted".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-task-pause-interrupted",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = control.request_task_pause(
@@ -5539,10 +5771,11 @@ async fn cancellation_control_persists_request_then_terminal_after_quiescence() 
         cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-1".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-1",
+            &store_path,
+        )?,
         _session_lease: Arc::new(
             ApplicationSessionLeaseManager::new().acquire(&temp.path().join("session.jsonl"))?,
         ),
@@ -5604,10 +5837,11 @@ async fn cancellation_control_closes_only_the_task_bound_to_its_scope() -> Resul
         cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-task-cancel", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-task-cancel".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-task-cancel",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = control.request_cancellation("cancel exact application Task", None, || {})?;
@@ -5667,10 +5901,11 @@ async fn cancellation_control_does_not_guess_an_unbound_latest_task() -> Result<
         cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-chat-cancel", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-chat-cancel".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-chat-cancel",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = control.request_cancellation("cancel ordinary chat", None, || {})?;
@@ -5728,10 +5963,11 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
         cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-1".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-1",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     let ticket = control.request_cancellation(
@@ -5776,7 +6012,8 @@ async fn cancellation_without_execution_join_persists_interrupted_and_failed_eve
 }
 
 #[tokio::test]
-async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal() -> Result<()> {
+async fn cancellation_audit_failure_still_unblocks_without_inventing_a_public_terminal()
+-> Result<()> {
     let temp = tempfile::tempdir()?;
     let store_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&store_path)?;
@@ -5791,10 +6028,11 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
         cancellation_target: RunCancellationTarget::Run,
         conversation_lifecycle: session.conversation_run_lifecycle_recorder()?,
         conversation_start: ConversationRunStartedEntryV1::new("run-1", 1)?,
-        events: ApplicationRunEventSequence::new(
-            session.session_scope_id().to_owned(),
-            "run-1".to_owned(),
-        ),
+        events: durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-1",
+            &store_path,
+        )?,
         _session_lease: Arc::new(ApplicationSessionLeaseManager::new().acquire(&store_path)?),
     };
     temp.close()?;
@@ -5830,11 +6068,10 @@ async fn cancellation_audit_failure_still_unblocks_and_requires_failed_terminal(
             .is_err()
     );
     assert!(
-        events
-            .0
-            .iter()
-            .any(|event| { matches!(event.event, PublicRunEventKind::RunInterrupted { .. }) })
+        events.0.is_empty(),
+        "no durable start or terminal was written, so no terminal may be published"
     );
+    assert!(control.durable_terminal_status().is_err());
     Ok(())
 }
 

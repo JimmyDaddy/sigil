@@ -5,10 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    PublicRunEvent, PublicRunEventKind,
     event::{DurableEventType, EventClass},
     persistence::safe_persistence_text,
     secret::SecretRedactor,
-    session::{JsonlSessionStore, SessionStreamRecord},
+    session::{
+        JsonlSessionStore, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventOutboxEntryV1,
+        PublicEventOutboxProjectionV1, SessionStreamRecord,
+    },
 };
 
 /// Durable schema version for provider-neutral foreground conversation-run lifecycle records.
@@ -21,8 +25,8 @@ pub const MAX_CONVERSATION_RUN_MESSAGE_ID_BYTES: usize = 256;
 pub const MAX_CONVERSATION_RUN_SUMMARY_BYTES: usize = 4 * 1024;
 
 /// Provider-neutral terminal state for one foreground conversation run.
+/// This is a closed set: adapters must project every outcome explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRunTerminalStatusV1 {
     Succeeded,
@@ -318,24 +322,45 @@ impl ConversationRunLifecycleRecorder {
         )
     }
 
-    /// Appends one terminal boundary exactly once after its matching start.
+    /// Commits a terminal and its exact public outbox event in one crash-safe bundle.
     ///
     /// Returns `false` for a retry of the same terminal intent. The first durable timestamp wins,
     /// so a caller can safely retry after an uncertain append without reproducing the original
-    /// wall-clock value. Conflicting terminals and terminals without a matching start fail closed.
+    /// wall-clock value. The outbox's domain identity is the terminal's stored event identity.
+    /// An incomplete current bundle is repaired by the session writer's durable intent; a lone
+    /// historical terminal is never used to invent a missing outbox payload.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid shape, missing start, conflict, or durable append failure.
-    pub fn append_finalized(&self, entry: &ConversationRunFinalizedEntryV1) -> Result<bool> {
+    /// Returns an error for invalid shape, mismatched outcome or identity, missing start,
+    /// conflicting or unpaired durable records, or durable append failure.
+    pub fn append_finalized_with_outbox(
+        &self,
+        entry: &ConversationRunFinalizedEntryV1,
+        outbox: &PublicEventOutboxEntryV1,
+    ) -> Result<bool> {
         entry.validate_shape()?;
+        validate_terminal_outbox(entry, outbox)?;
         let entry = entry.clone();
-        self.store.append_event_if(
-            DurableEventType::RunFinalized,
-            EventClass::Critical,
-            serde_json::to_value(
-                ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(entry.clone()),
-            )?,
+        let outbox = outbox.clone();
+        let events = vec![
+            (
+                outbox.domain_event_id.clone(),
+                DurableEventType::RunFinalized,
+                EventClass::Critical,
+                serde_json::to_value(
+                    ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(entry.clone()),
+                )?,
+            ),
+            (
+                outbox.public_event_id.clone(),
+                DurableEventType::PublicEventOutbox,
+                EventClass::Critical,
+                serde_json::to_value(&outbox)?,
+            ),
+        ];
+        Ok(self.store.append_crash_safe_events_if(
+            events,
             move |records| {
                 let state = conversation_run_lifecycle_state(records)?;
                 let Some(existing) = state.get(entry.run_id()) else {
@@ -344,13 +369,66 @@ impl ConversationRunLifecycleRecorder {
                 if existing.started.is_none() {
                     bail!("conversation run finalization requires a matching durable start");
                 }
-                match existing.finalized.as_ref() {
-                    Some(finalized) if finalized.has_same_terminal_intent(&entry) => Ok(false),
-                    Some(_) => bail!("conversation run id has a conflicting terminal"),
-                    None => Ok(true),
+                if records.iter().any(|record| record.session_id() != outbox.event.session_id) {
+                    bail!("conversation terminal outbox belongs to a different session");
+                }
+                let projection = PublicEventOutboxProjectionV1::from_records(records)?;
+                match (existing.finalized.as_ref(), projection.entry(&outbox.public_event_id)) {
+                    (Some(finalized), Some(recorded))
+                        if finalized.has_same_terminal_intent(&entry)
+                            && serde_json::to_value(recorded)? == serde_json::to_value(&outbox)? =>
+                    {
+                        let terminal_record = records.iter().find(|record| {
+                            record.stored_event().event_id == outbox.domain_event_id
+                        });
+                        let exact_domain = terminal_record
+                            .map(conversation_run_lifecycle_record_from_stream)
+                            .transpose()?
+                            .flatten();
+                        if !matches!(exact_domain,
+                            Some(ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(recorded))
+                                if &recorded == finalized)
+                        {
+                            bail!("conversation terminal outbox has no exact domain event");
+                        }
+                        Ok(false)
+                    }
+                    (Some(_), Some(_)) => bail!("conversation run id has a conflicting terminal or outbox"),
+                    (Some(_), None) | (None, Some(_)) => {
+                        bail!("conversation terminal and outbox have no matching durable bundle");
+                    }
+                    (None, None) => {
+                        if projection.events_in_order().iter().any(|recorded| {
+                            recorded.run_id == outbox.run_id
+                                && (recorded.sequence >= outbox.sequence
+                                    || recorded.domain_event_id == outbox.domain_event_id)
+                        }) {
+                            bail!("conversation terminal outbox conflicts with the durable sequence");
+                        }
+                        Ok(true)
+                    }
                 }
             },
-        )
+        )?.is_some())
+    }
+
+    /// Returns the exact durable terminal after completing any prepared writer bundle.
+    ///
+    /// This also covers an append whose caller observed an error after its durable intent was
+    /// written. It does not rely on an in-memory acknowledgement or invent a missing public event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when writer recovery fails or lifecycle/outbox records are inconsistent.
+    pub fn finalized_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<ConversationRunFinalizedEntryV1>> {
+        let records = self.store.read_event_records_writer()?;
+        PublicEventOutboxProjectionV1::from_records(&records)?;
+        Ok(conversation_run_lifecycle_state(&records)?
+            .remove(run_id)
+            .and_then(|state| state.finalized))
     }
 
     /// Closes one durable start left open by a previous process interruption.
@@ -367,7 +445,9 @@ impl ConversationRunLifecycleRecorder {
         if recovered_at_ms == 0 {
             bail!("conversation run recovery timestamp must be non-zero");
         }
-        let records = JsonlSessionStore::read_event_records(self.store.path())?;
+        // Complete any exact prepared bundle before deciding whether this run is unfinished.
+        let records = self.store.read_event_records_writer()?;
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
         let Some(started) = active_conversation_run(&records)? else {
             return Ok(false);
         };
@@ -379,8 +459,83 @@ impl ConversationRunLifecycleRecorder {
             recovered_at_ms,
             &SecretRedactor::empty(),
         )?;
-        self.append_finalized(&terminal)
+        let sequence = projection
+            .events_in_order()
+            .iter()
+            .filter(|entry| entry.run_id == started.run_id())
+            .map(|entry| entry.sequence)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("conversation run recovery public sequence exhausted")?;
+        let session_id = records
+            .first()
+            .context("conversation run recovery has no session identity")?
+            .stored_event()
+            .session_id
+            .clone();
+        let public = PublicRunEvent::new(
+            session_id,
+            started.run_id(),
+            sequence,
+            PublicRunEventKind::RunInterrupted {
+                reason: "run interrupted before durable terminal recovery".to_owned(),
+            },
+        );
+        let recovery_id = crate::stable_event_hash(started.run_id().as_bytes());
+        let outbox = PublicEventOutboxEntryV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: format!("conversation-recovery-public:{recovery_id}"),
+            domain_event_id: format!("conversation-recovery-domain:{recovery_id}"),
+            run_id: started.run_id().to_owned(),
+            sequence,
+            payload_digest: crate::stable_event_hash(&serde_json::to_vec(&public)?),
+            event: public,
+        };
+        self.append_finalized_with_outbox(&terminal, &outbox)
     }
+}
+
+pub(crate) fn validate_terminal_outbox(
+    terminal: &ConversationRunFinalizedEntryV1,
+    outbox: &PublicEventOutboxEntryV1,
+) -> Result<()> {
+    PublicEventOutboxProjectionV1::default().apply_outbox(outbox.clone())?;
+    if outbox.run_id != terminal.run_id()
+        || outbox.domain_event_id == outbox.public_event_id
+        || outbox.event.schema_version != crate::PUBLIC_RUN_EVENT_SCHEMA_VERSION
+    {
+        bail!("conversation terminal outbox identity does not match its domain");
+    }
+    let matches = matches!(
+        (terminal.status(), &outbox.event.event),
+        (
+            ConversationRunTerminalStatusV1::Succeeded,
+            PublicRunEventKind::RunFinished { .. }
+        ) | (
+            ConversationRunTerminalStatusV1::Failed,
+            PublicRunEventKind::RunFailed { .. }
+        ) | (
+            ConversationRunTerminalStatusV1::Cancelled,
+            PublicRunEventKind::RunCancelled
+        ) | (
+            ConversationRunTerminalStatusV1::Interrupted,
+            PublicRunEventKind::RunInterrupted { .. }
+        ) | (
+            ConversationRunTerminalStatusV1::Paused,
+            PublicRunEventKind::RunPaused { .. }
+        ) | (
+            ConversationRunTerminalStatusV1::Blocked,
+            PublicRunEventKind::RunBlocked { .. }
+        ) | (
+            ConversationRunTerminalStatusV1::AwaitingUserInput,
+            PublicRunEventKind::RunAwaitingUserInput { .. }
+        )
+    );
+    if !matches {
+        bail!("conversation terminal outbox outcome does not match its domain");
+    }
+    Ok(())
 }
 
 /// Decodes one typed conversation-run lifecycle record from its durable V2 envelope.
@@ -464,6 +619,12 @@ fn conversation_run_lifecycle_state(
         }
     }
     Ok(state)
+}
+
+pub(crate) fn validate_conversation_run_lifecycle(records: &[SessionStreamRecord]) -> Result<()> {
+    conversation_run_lifecycle_state(records)?;
+    active_conversation_run(records)?;
+    Ok(())
 }
 
 fn active_conversation_run(
@@ -571,6 +732,10 @@ fn validate_stable_identity(label: &str, value: &str, max_bytes: usize) -> Resul
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests/conversation_run_fixtures.rs"]
+pub(crate) mod test_fixtures;
 
 #[cfg(test)]
 #[path = "tests/conversation_run_tests.rs"]

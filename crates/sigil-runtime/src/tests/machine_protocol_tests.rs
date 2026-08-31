@@ -7,7 +7,7 @@ use super::{
 };
 
 #[test]
-fn event_record_serializes_with_stable_v1_envelope() {
+fn event_record_serializes_with_stable_v2_envelope() {
     let record = MachineRecord::event(PublicRunEvent::new(
         "session-1",
         "run-1",
@@ -23,7 +23,7 @@ fn event_record_serializes_with_stable_v1_envelope() {
         value,
         json!({
             "record_type": "event",
-            "protocol_version": 1,
+            "protocol_version": 2,
             "event": {
                 "schema_version": sigil_kernel::PUBLIC_RUN_EVENT_SCHEMA_VERSION,
                 "session_id": "session-1",
@@ -74,7 +74,7 @@ fn error_record_uses_stable_code_without_provider_payload() {
     let value = serde_json::to_value(record).expect("machine error should serialize");
 
     assert_eq!(value["record_type"], "error");
-    assert_eq!(value["protocol_version"], 1);
+    assert_eq!(value["protocol_version"], 2);
     assert_eq!(value["error"]["code"], "configuration_invalid");
     assert_eq!(value["error"]["retryable"], false);
     assert_eq!(
@@ -154,4 +154,35 @@ fn exit_codes_are_stable_for_terminal_status_and_error_class() {
         MachineExitCode::for_error(MachineErrorCode::Internal),
         MachineExitCode::ExecutionFailed
     );
+}
+
+#[test]
+fn v2_result_statuses_preserve_nonfailure_terminals() {
+    for (status, expected) in [
+        (MachineRunStatus::Succeeded, "succeeded"),
+        (MachineRunStatus::Failed, "failed"),
+        (MachineRunStatus::Cancelled, "cancelled"),
+        (MachineRunStatus::Interrupted, "interrupted"),
+        (MachineRunStatus::Blocked, "blocked"),
+        (MachineRunStatus::Paused, "paused"),
+        (MachineRunStatus::AwaitingUserInput, "awaiting_user_input"),
+        (
+            MachineRunStatus::AwaitingPlanDecision,
+            "awaiting_plan_decision",
+        ),
+    ] {
+        let encoded = serde_json::to_value(status).expect("terminal serializes");
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            serde_json::from_value::<MachineRunStatus>(encoded).expect("terminal decodes"),
+            status
+        );
+    }
+    for status in [
+        MachineRunStatus::Interrupted,
+        MachineRunStatus::Blocked,
+        MachineRunStatus::Paused,
+    ] {
+        assert_eq!(MachineExitCode::for_status(status).as_i32(), 1);
+    }
 }

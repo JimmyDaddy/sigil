@@ -4787,6 +4787,31 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
 }
 
 #[test]
+fn openapi_conversation_display_status_preserves_every_wire_status() {
+    let document = http_openapi_document();
+    let statuses = [
+        HttpConversationDisplayStatus::Recorded,
+        HttpConversationDisplayStatus::Requested,
+        HttpConversationDisplayStatus::WaitingForApproval,
+        HttpConversationDisplayStatus::Approved,
+        HttpConversationDisplayStatus::Denied,
+        HttpConversationDisplayStatus::Completed,
+        HttpConversationDisplayStatus::Succeeded,
+        HttpConversationDisplayStatus::Failed,
+        HttpConversationDisplayStatus::Cancelled,
+        HttpConversationDisplayStatus::Interrupted,
+        HttpConversationDisplayStatus::Paused,
+        HttpConversationDisplayStatus::Blocked,
+        HttpConversationDisplayStatus::AwaitingUserInput,
+    ];
+    let expected = serde_json::to_value(statuses).expect("display statuses should serialize");
+    assert_eq!(
+        document["components"]["schemas"]["ConversationDisplayStatus"]["enum"],
+        expected
+    );
+}
+
+#[test]
 fn openapi_plan_decision_receipt_exposes_optional_task_admission_fields() {
     let document = http_openapi_document();
     let receipt = &document["components"]["schemas"]["PlanDecisionCommandReceipt"];

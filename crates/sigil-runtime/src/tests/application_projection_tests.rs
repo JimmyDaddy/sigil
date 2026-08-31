@@ -109,6 +109,79 @@ fn projection_state_rebuilds_from_delivered_history() {
 }
 
 #[test]
+fn awaiting_user_input_rebuild_is_inactive_and_preserves_durable_request() {
+    let request = sigil_kernel::PublicUserInputRequestV1 {
+        identity: sigil_kernel::UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new("projection-session")
+                .expect("valid session scope"),
+            root_logical_run_id: sigil_kernel::LogicalRunId::new("projection-root")
+                .expect("valid root logical run"),
+            source_thread_id: sigil_kernel::AgentThreadId::new("main")
+                .expect("valid source thread"),
+            request_id: sigil_kernel::UserInputRequestId::new("input-1").expect("valid request id"),
+            generation: 7,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        request_hash: format!("sha256:{}", "b".repeat(64)),
+        source: sigil_kernel::UserInputSourceV1::Agent,
+        purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+        prompt: "Choose the deployment target.".to_owned(),
+        questions: Vec::new(),
+        allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+        requested_at_unix_ms: 10,
+        status: sigil_kernel::UserInputStatusV1::Requested,
+        answer_receipt: None,
+        resolution: None,
+    };
+    let expected_binding = format!(
+        "{}:{}:{}",
+        request.identity.request_id.as_str(),
+        request.identity.generation,
+        request.request_hash
+    );
+    let started = outbox_entry(
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "run".into(),
+        },
+    );
+    let changed = outbox_entry(
+        2,
+        PublicRunEventKind::UserInputChanged {
+            request_id: request.identity.request_id.as_str().to_owned(),
+            generation: request.identity.generation,
+            request_hash: request.request_hash.clone(),
+            status: request.status,
+            request: Box::new(request.clone()),
+        },
+    );
+    let awaiting = outbox_entry(
+        3,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: request.identity.request_id.as_str().to_owned(),
+            generation: request.identity.generation,
+            request_hash: request.request_hash.clone(),
+        },
+    );
+    let entries = vec![&started, &changed, &awaiting];
+
+    let state = ProjectionEventState::from_events(&entries);
+
+    assert_eq!(state.run_status, "awaiting-user-input");
+    assert!(!state.run_active);
+    assert!(state.run_binding.is_none());
+    assert!(state.user_input_pending);
+    assert_eq!(
+        state.user_input_binding.as_deref(),
+        Some(expected_binding.as_str())
+    );
+    assert_eq!(
+        state.user_input_prompt.as_ref().map(SafeText::as_str),
+        Some("Choose the deployment target.")
+    );
+}
+
+#[test]
 fn terminal_surface_projection_replays_latest_bounded_task_state() {
     let records = vec![
         terminal_record(1, 1, sigil_kernel::TerminalTaskStatus::Starting),

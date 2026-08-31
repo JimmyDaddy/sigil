@@ -672,6 +672,12 @@ impl ProjectionEventState {
                     generation,
                     request_hash,
                 } => {
+                    // Awaiting user input is a durable terminal outcome for this run. The
+                    // request stays pending, but the preceding execution is no longer active
+                    // or cancellable when a projection is rebuilt after a refresh/restart.
+                    state.run_status = "awaiting-user-input";
+                    state.run_active = false;
+                    state.run_binding = None;
                     state.user_input_pending = true;
                     state.user_input_binding =
                         Some(format!("{request_id}:{generation}:{request_hash}"));
