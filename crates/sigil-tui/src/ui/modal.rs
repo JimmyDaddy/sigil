@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -11,7 +13,7 @@ use crate::surface::ModalSurface;
 
 use super::{
     geometry::{centered_rect, halo_rect, shadow_rect},
-    text::wrapped_line_rows,
+    text::{truncate_middle_display_width, wrapped_line_rows},
     theme,
 };
 
@@ -27,7 +29,8 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     let title = app.modal_title().unwrap_or("Modal");
     let desired_inner_width = geometry.inner_width;
     let area = geometry.area;
-    let lines = raw_lines
+    let display_lines = modal_display_lines(&raw_lines, title, desired_inner_width);
+    let lines = display_lines
         .iter()
         .cloned()
         .enumerate()
@@ -71,7 +74,7 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     render_modal_focus_row_bgs(
         frame,
         content_area,
-        &raw_lines,
+        display_lines.as_ref(),
         desired_inner_width,
         &visual,
     );
@@ -82,7 +85,7 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     frame.render_widget(widget, content_area);
 
     if let Some((label, offset, line_index)) = app.modal_input_cursor() {
-        let rows_before = raw_lines
+        let rows_before = display_lines
             .iter()
             .take(line_index)
             .map(|line| wrapped_line_rows(line, desired_inner_width))
@@ -105,38 +108,7 @@ pub(super) struct ModalGeometry {
 
 pub(super) fn modal_geometry(screen: Rect, app: &AppState) -> ModalGeometry {
     let raw_lines = app.modal_lines();
-    let title = app.modal_title().unwrap_or("Modal");
-    let max_inner_width = screen.width.saturating_sub(8).max(24) as usize;
-    let inner_width = raw_lines
-        .iter()
-        .map(|line| line.chars().count())
-        .chain(std::iter::once(title.chars().count()))
-        .max()
-        .unwrap_or(24)
-        .saturating_add(2)
-        .clamp(24, max_inner_width);
-    let body_height = raw_lines
-        .iter()
-        .map(|line| wrapped_line_rows(line, inner_width))
-        .sum::<usize>()
-        .max(4) as u16
-        + 2;
-    let area = centered_rect(
-        inner_width as u16 + 2,
-        body_height.min(screen.height.saturating_sub(2)),
-        screen,
-    );
-    let content = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
-    ModalGeometry {
-        area,
-        content,
-        inner_width,
-    }
+    modal_geometry_from_lines(screen, &raw_lines, app.modal_title())
 }
 
 pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, theme: &theme::Theme) {
@@ -146,8 +118,10 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
     let visual = modal_visual_for(modal.title.as_deref(), modal.config_mode, theme);
     let geometry = modal_geometry_from_lines(frame.area(), &modal.lines, modal.title.as_deref());
     let raw_lines = &modal.lines;
+    let title = modal.title.as_deref().unwrap_or("Modal");
+    let display_lines = modal_display_lines(raw_lines, title, geometry.inner_width);
     let area = geometry.area;
-    let lines = raw_lines
+    let lines = display_lines
         .iter()
         .cloned()
         .enumerate()
@@ -190,7 +164,7 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
     render_modal_focus_row_bgs(
         frame,
         content_area,
-        raw_lines,
+        display_lines.as_ref(),
         geometry.inner_width,
         &visual,
     );
@@ -201,7 +175,7 @@ pub(super) fn render_modal_surface(frame: &mut Frame, modal: &ModalSurface, them
         content_area,
     );
     if let Some((label, offset, line_index)) = modal.input_cursor.as_ref() {
-        let rows_before = raw_lines
+        let rows_before = display_lines
             .iter()
             .take(*line_index)
             .map(|line| wrapped_line_rows(line, geometry.inner_width))
@@ -232,7 +206,8 @@ fn modal_geometry_from_lines(
         .unwrap_or(24)
         .saturating_add(2)
         .clamp(24, max_inner_width);
-    let body_height = raw_lines
+    let display_lines = modal_display_lines(raw_lines, title, inner_width);
+    let body_height = display_lines
         .iter()
         .map(|line| wrapped_line_rows(line, inner_width))
         .sum::<usize>()
@@ -254,6 +229,31 @@ fn modal_geometry_from_lines(
         content,
         inner_width,
     }
+}
+
+fn modal_display_lines<'a>(
+    raw_lines: &'a [String],
+    title: &str,
+    inner_width: usize,
+) -> Cow<'a, [String]> {
+    if title != "Feedback Report" {
+        return Cow::Borrowed(raw_lines);
+    }
+
+    // The feedback flow keeps the full path for its copy/reveal actions; this only keeps its
+    // long storage location from consuming the rows that advertise those actions.
+    Cow::Owned(
+        raw_lines
+            .iter()
+            .map(|line| {
+                if line.starts_with("Folder: ") || line.starts_with("File: ") {
+                    truncate_middle_display_width(line, inner_width)
+                } else {
+                    line.clone()
+                }
+            })
+            .collect(),
+    )
 }
 
 fn modal_visual_for(title: Option<&str>, config_mode: bool, theme: &theme::Theme) -> ModalVisual {

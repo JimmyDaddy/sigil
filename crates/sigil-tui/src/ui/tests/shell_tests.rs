@@ -294,6 +294,49 @@ fn render_main_screen_keeps_feedback_export_actions_visible() -> anyhow::Result<
 }
 
 #[test]
+fn render_feedback_export_keeps_actions_visible_with_a_long_cache_root() -> anyhow::Result<()> {
+    let storage_id = TEST_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut config = test_config();
+    config.storage.cache_root = sigil_kernel::StorageRoot::Path(
+        std::env::temp_dir()
+            .join(format!(
+                "sigil-tui-feedback-export-{storage_id}-{}",
+                "long-cache-root-".repeat(5)
+            ))
+            .display()
+            .to_string(),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(80, 12);
+    app.composer.input = "/feedback".to_owned();
+    assert!(app.submit_input()?.is_none());
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let expected_folder = app
+        .sigil_paths
+        .cache_root
+        .join("support-bundles")
+        .display()
+        .to_string();
+    assert!(
+        app.modal_lines()
+            .iter()
+            .any(|line| line.contains(&expected_folder))
+    );
+
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Folder:"));
+    assert!(rendered.contains("File:"));
+    assert!(rendered.contains("C copy report path"));
+    assert!(rendered.contains("U copy issue URL"));
+    Ok(())
+}
+
+#[test]
 fn render_feedback_json_review_fits_a_short_terminal() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(80, 16);
