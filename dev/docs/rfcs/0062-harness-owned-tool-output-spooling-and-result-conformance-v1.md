@@ -1217,7 +1217,7 @@ created -> writing -> finalized -> published -> descriptor-referenced
 | dual streams cross cap | persisted quotas and canonical hash stay identical across chunking/scheduling variations |
 | PTY output | combined stream ordering preserved under PTY contract |
 | artifact cap reached | process may complete; storage=`TruncatedAtLimit`; source reflects actual exit |
-| observed cap reached | process tree terminated once; source=`ResourceLimited`; no orphan child |
+| observed cap reached | one owner terminates the launch-bound scope once; source=`ResourceLimited`; required ContainedTree proves no in-scope orphan, native reports bounded coverage and any known live/unknown member as cleanup-incomplete; no silent downgrade (RFC-0071 §1.1) |
 | artifact writer failure | bounded fallback; no raw-body fallback; no automatic tool retry |
 | facts projector failure | terminal fallback persists; run does not lose tool-call closure |
 | session writer failure | explicit persistence failure after execution; no duplicate execution |

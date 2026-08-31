@@ -1,5 +1,7 @@
 # Sigil Rust Agent 核心技术方案（Implementation Snapshot v1）
 
+> 2026-08-31当前整改边界：按[工程规范§3.4](../governance/engineering-standards.md#34-单路径整改交付2026-08-31)执行正式路径完整接管与旧路径同批删除，不等待发布周期保留旧执行入口/legacy import。进程采用[RFC-0071 §1.1](rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)已批准的分级保证：native如实有限，强要求不降级。以下旧候选的Frozen/Complete记录是历史证据；本次业务实现与新资格化尚在整改，不以该记录代替验收。
+
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
@@ -13,9 +15,9 @@
 > RFC-0070 current package snapshot (2026-08-28): R70.4 application ports, R70.5 public framework packages,
 > R70.6 host ownership and R70.7 preview package qualification are implemented. R70.8 has retired the public
 > compatibility paths and moved the lossless resource-recovery projection from runtime into `sigil-application`.
-> The internal host still owns the product renderer/worker implementation until a published preview has completed
-> one real release cycle and user validation; that evidence is a separate release gate and is not implied by local
-> package tests.
+> The internal host still owns the product renderer/worker implementation in this historical snapshot. Its
+> replacement must preserve the complete product contract and retire the replaced paths in the same delivery;
+> publication, release-cycle and user-validation evidence remain separate gates, not permission to retain dual paths.
 
 R70.8 compatibility note：上文的 `sigil-tui` package tree 已拆成 public framework 与内部
 `sigil-tui-host`；后者的 runner、AppState、legacy LayoutSnapshot 和 platform effects 不是 public

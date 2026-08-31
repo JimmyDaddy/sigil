@@ -71,10 +71,4 @@ Automatic Task routing is the default: ordinary input is first routed through a 
 
 ## Project
 
-The terminal UI framework is also split into a small publishable, application-neutral family:
-`sigil-tui-core` provides bounded primitives, `sigil-tui-ratatui` provides the Ratatui adapter, and
-`sigil-tui` provides the framework facade. Sigil's product wiring remains in the non-publishable
-`sigil-tui-host` and `sigil-tui-app` packages; the public packages do not expose session state,
-worker protocols, filesystem access, or process ownership.
-
 [Project status](https://sigil.corerobin.com/docs/status/) · [Contributing](CONTRIBUTING.md) · [Developer docs](dev/docs/index.md) · [Security](SECURITY.md) · [MIT License](LICENSE)

@@ -2,6 +2,8 @@
 
 状态：R70.4 Complete / R70.5 Complete / R70.6 Complete / R70.7 Complete / R70.8 Engineering Complete / Release-cycle Deferred（R71.8 已在 exact candidate `ec5459d8` 完成 local/five-platform qualification；R70.4 application contract、production ports、five-surface conformance 与 cold-cache gate 已闭合，R70.5 framework/package boundary、R70.6 host ownership、R70.7 preview package qualification、R70.8 compatibility retirement 与 hosted engineering qualification 已闭合；真实 crates.io publish、release cycle 与 user validation 仍按 release operator 条件 deferred）
 
+> 2026-08-31当前整改状态：单路径实施中。上面的Complete和后文exact-SHA结果描述各自历史候选，不证明当前command settlement、真实五表面及presentation缺口已解决。§22已取消兼容入口/旧数据导入和等待release-cycle才删除的条件；正式路径能力与删除同批验收，发布证据仍独立保留。
+
 创建日期：2026-08-23
 
 修订日期：2026-08-23
@@ -2110,7 +2112,7 @@ Fake application、in-process runtime、HTTP adapter与Desktop typed client使�
 - reserve前/后、dispatch marker前/后、effect调用前/中/后、receipt fsync前/后crash；store append/fsync/capacity、
   retention expiry、same-key same/different fingerprint、concurrent duplicate与uncertain reconciliation；
 - writer/application restart后相同command id、response-lost reconnect后的同durable client epoch、旧epoch全局拒绝；
-- legacy HTTP store import中途crash、restart repair与cutover期间single writable reservation authority；
+- current-schema HTTP store的reserve/dispatch/domain commit/settlement各crash点和restart repair；旧schema明确拒绝且不存在legacy import或第二writable reservation authority（§22修订）；
 - forged/replayed/wrong sink/wrong digest/wrong route/clipped/hidden/zero-area/overdrawn/partial-I/O presentation
   completion全部拒绝；
 - ordinary client即使复制/构造renderer-neutral observation也不能生成session-authorized attestation；
@@ -2289,9 +2291,9 @@ canonical hash、authority owner或recovery transition，必须先单独修订RF
 | `commands.rs` | generic key binding + product action catalog | label不能成为 command authority |
 | UI/app/runner tests | public headless、adapter contract、runtime contract三层 | 不再依赖一体化 fixture |
 
-## 22. 分阶段迁移计划
+## 22. 单路径实施计划（2026-08-31修订）
 
-迁移禁止 big-bang。每阶段都要保留现有功能，先建立可比较 contract，再删除旧路径。
+以下切片继续用于控制实现和验证范围，不再表示允许阶段性双轨交付。用户已批准正式路径完整接管与旧路径同包退出：不保留legacy import、双读/双写、transitional facade或延期删除开关；必要功能、当前schema恢复与分层安全检查必须完整承接。受影响当前数据先盘点，不自动删除/改写。参见[工程规范§3.4](../../governance/engineering-standards.md#34-单路径整改交付2026-08-31)。这是新的实施约束，不是当前代码已经全部整改的完成声明。
 
 **Cross-RFC serial invariant**：本计划只有在RFC-0071 R71.8完成、同一release candidate资格化并产出post-R71 handoff manifest后才启动。R70.0以前不得预建`sigil-application`、拆public TUI package或把R71 transitional facade当成R70进度；R70实施中也不得修改R71 durable schema/authority来“顺便适配”。
 
@@ -2379,7 +2381,7 @@ render invariant与Unicode/UAX #9 contract gate通过。此阶段不把预载完
 - durable reserve-before-effect、payload conflict、settlement class、uncertain/restart repair；
 - approval/cancel/session/config/provider/MCP/task/agent/user-input/maintenance projection；
 - 独立trusted presenter capability，不进入ordinary command port；
-- 现有 `application_run` capability迁入/实现该 contract；R71 runtime transitional facade在迁移期只作为同一service的薄兼容入口，不拥有第二份projection/recovery truth；
+- 现有`application_run` capability完整接入该contract；对应R71 runtime transitional facade随正式消费者接管同批删除，不再交付薄兼容入口或第二份projection/recovery truth；
 - fake application实现；
 - 在exclusive lease下幂等导入legacy HTTP command store的identity、unfinished reservation、terminal receipt与
   tombstone；cutover任何时刻只有一个writable reservation authority，并可在中途crash后继续/回滚；
@@ -2437,7 +2439,7 @@ RA/Sandbox concrete/physical type，runtime transitional consumer edge为零，R
 
 ### R70.8：删除兼容层
 
-只有在至少一个release cycle与真实用户验证后：
+以下删除与正式产品能力接管、功能保留验证在同一交付包完成，不再等待release cycle。真实package发布、release cycle与用户验证仍是独立release evidence，未运行不得声称完成：
 
 - 删除旧 `AppState -> renderer`；
 - 删除旧 WorkerProtocol TUI facade；
@@ -2590,7 +2592,7 @@ dry-run临时registry/目录与前置package可解析后再继续。达到19.2 e
 
 风险：旧/新renderer、theme、action长期漂移。
 
-缓解：每阶段有删除条件、兼容层有owner/expiry、同fixture双render对比；R70.8作为明确终点。
+缓解：每包同时验收正式路径能力与旧路径零残留；对照fixture只比较真实结果，不维持两条生产render/authority链。R70.8保留发布证据责任，不再成为延期删除的理由。
 
 ### 25.12 Presenter capability 被普通 client 伪造
 

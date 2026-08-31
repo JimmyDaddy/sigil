@@ -70,6 +70,17 @@
 - 新增直接依赖时同步维护 [`dependency-supply-chain.md`](dependency-supply-chain.md)，记录 owner、版本/feature、许可、安全理由和发布前剩余 gate
 - desktop 变更同时运行 `pnpm --dir apps/desktop check`；涉及 native shell 时至少编译 `sigil-desktop-app`，涉及 runtime route 时补真实 `sigil serve` contract test
 
+### 3.4 单路径整改交付（2026-08-31）
+
+本次已批准的整改采用“正式路径完整接管、被替代旧路径同批删除”。它替代旧迁移期间的双轨、legacy import和等待release cycle再删代码的条件；不取消真实发布/平台/用户验证本身。
+
+- 每个交付包必须同时保留合法能力和删除其旧入口、重复owner、兼容decoder、fallback及无用依赖；只增加新facade、把旧实现移到test-only完整链或永久返回Unavailable不算完成。
+- 每个完成验收的交付包应及时形成独立的 Conventional Commit，将对应实现、测试和文档放在一起；不要累积多个无关批次后混成一次提交。共享文件按变更内容拆分暂存，跨crate的完整修复不为凑提交数拆断；未完成工作和无关修改不得混入。commit不代表已获push或发布授权。
+- 查询、草稿/焦点等本地UI状态、必要分层鉴权和当前schema恢复继续保留；不得把“去重复”理解为去掉approval、资源验证或真实receipt。
+- 旧格式明确拒绝，不自动upcast、双读/双写、重写或删除用户历史。若切换使当前可用数据无法继续，必须先给出具体受影响记录/范围并获得决定；不因开发时间顺序把仍有效的实现一概删除。
+- 进程清理按[RFC-0071分级保证](../docs/rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)执行：native有限能力不伪装全树保证，强要求不静默降级，普通执行不因内部证明机制永久挂起。
+- 当前验收结论必须绑定本次真实代码和非零测试；历史Frozen/Complete、fake多client标签或纯静态通过不得代替生产链、真实表面与平台资格化。规则修订不自动把未整改代码标成符合。
+
 ## 4. 文档同步规范
 
 以下变更默认要同步文档：
@@ -213,7 +224,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
   physical managed `records.jsonl` layout to surface contracts.
 - session JSONL、writer lease、lifecycle journal 及其 lease 必须创建为 owner-only 文件；writer 打开既有文件时必须修复宽松 mode，Doctor 必须报告最近 stream 的权限漂移
 - managed writer 在 admission 后必须写入 authority-owned owner-only admission marker；append 与 finalize 必须在同一 namespace lock 下完成 file `sync_all`/首次 materialization parent sync；finalize 前必须把真实 `records.jsonl` byte length、record count 与 content hash 提交给 Resource Authority，由 authority 在同一 lock 下重新读取 exact bytes、以 grant/handle/namespace/generation/journal-instance 生成一次性 frontier proof，并把 observation record hash 绑定到 settlement/receipt 后才能 settlement。proof、observation 与 settlement 必须由 authority one-shot 持锁完成；writer/replace 在该 lock 内先验证 handle 仍 admitted，settled lease 的后续 mutation 必须 fail closed。相同 proof 重试必须幂等，physical drift 或缺失 proof 必须 fail closed。Windows physical boundary 必须按 `MetadataExt::file_attributes()` 拒绝 reparse ancestor/leaf，并使用 `FILE_FLAG_OPEN_REPARSE_POINT` no-follow；records/journal parent durability 不得静默 no-op，无法证明时必须报错。current boot 遇到无 settlement 的 admission 时，必须通过 authority-owned physical verifier 按 `Observed -> StartedShadow -> RecoveryOperationPrepared -> ResolutionPrepared -> RecoveryOperationSettled -> ResolutionSettled -> DomainBlockerProjected` 顺序恢复；marker 缺失、frontier 不完整或 prefix 不一致必须 fail closed，不得从 surface error 或目录扫描猜造 no-effect
-- tool result 正文使用 session sibling immutable artifact store；JSONL 只保存 V2 descriptor、facts 和 bounded view
+- current tool result正文使用authority-managed immutable artifact store；JSONL只保存V3 descriptor、facts和bounded view，不保存正文
 - artifact ref 必须 opaque、session-scoped；fork 重新签发 ref，export 明确 completeness，delete/GC 复用 tombstone + grace lifecycle
 - current-schema ArtifactStaging 与 ArtifactStore 必须通过同一 authority-admitted 双 namespace lease 接线：capture 临时文件只落 staging root，发布 refs/blobs/usage 只落 ArtifactStore root；TUI/HTTP display、typed retrieval、export 与 GC 必须复用同一 authority-resolved roots，禁止从 managed SessionLog 路径推导 sibling artifact writer/read path
 - current-schema kernel artifact API 必须是 opaque backend/handle/receipt seam；kernel production route 不得持有 ArtifactStore/ArtifactStaging `PathBuf` root、`OpenOptions`、`File::open`、`hard_link` 或 direct publish/delete writer。runtime/authority private adapter 必须持有 paired leases，并在 capture/publish/read mutation 前验证 handle；finalize 后旧 facade/handle 必须 fail closed。未接入 authority retire frontier 的 managed GC/prune 必须显式拒绝，不能回退到 kernel filesystem GC。R71.7 negative dependency gate 必须把仍可达的 kernel legacy artifact filesystem backend 报为 blocker，不得因 current route 已切换就把 legacy constructor/IO 误列为完成。

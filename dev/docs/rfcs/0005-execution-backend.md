@@ -4,6 +4,8 @@
 
 > RFC-0071 implementation note (2026-08-25): current managed execution is admitted by Resource Authority and enforced through the `sigil-sandbox` seam. Local execution reports truthful `None` enforcement; Seatbelt, Bubblewrap, Docker and Windows restricted qualification are not inferred from cwd/env and are covered by the R71.8 fixed-job release candidate.
 
+> 2026-08-31规范修订：进程保证按[RFC-0071 §1.1](0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)分为真实有限native清理与contained tree静止。强要求在launch前冻结，缺能力不得降级；Local/Seatbelt不凭PGID清理宣称所有历史后代已停。Unix唯一reaper/延迟reap、各surface能力与资源cleanup minimum须同步实施；下面历史conformance不代表新协议已通过。
+
 创建日期：2026-06-28
 
 基线：

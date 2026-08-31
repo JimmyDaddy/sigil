@@ -1,12 +1,12 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：Implemented / Frozen（2026-08-28；R71.9q exact-SHA local full 与 fixed-candidate five-platform hosted qualification 已通过）
+状态：单路径整改实施中（2026-08-31）。2026-08-28的Implemented/Frozen与R71.9q exact-SHA local full/five-platform qualification保留为历史证据；不代表本次修订或后续代码已资格化。
 
 > 当前审查覆盖、逐项回应与历史 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十三轮曾在 `441243dfdffaaba27ea5a59225d64c6f4405387c` 冻结；第三十四轮真实用户 journal 又暴露 pending source-bound grant rollover、sequence-only broker proof 重用、legacy marker alias 与多 composer snapshot 覆盖缺陷。第三十五轮 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 进一步证明：shipping composition 创建空 borrowed-subject registry，却没有 production workspace registration/onboarding；plan-review child/finalizer 也没有 authority-managed ArtifactStaging/ArtifactStore resource bundle。现有 full gate 使用忽略真实 `ToolContext` 的 inspection fixture，无法证明实际 `ls/grep/read_file` 产品链。第三十四轮 qualification candidate 判定和更早 freeze 均被本段 supersede；完成 R71.9 implementation、真实 current-schema E2E 与新 clean exact-SHA full/five-platform qualification 前不得恢复 Candidate/Frozen，也不得启动或继续 RFC-0070 implementation。
 
 创建日期：2026-08-23
 
-修订日期：2026-08-28
+修订日期：2026-08-31
 
 依赖：
 
@@ -58,6 +58,47 @@ Tool Call
 ```
 
 本 RFC 不是一次 `chmod` 修补，也不是只移动 `scratch_namespace.rs`。它解决的是 permission、resource、sandbox、mutation、lifecycle 与 recovery 之间没有单一事实来源，导致每次局部修复后在另一入口重新失效的问题。
+
+### 1.1 进程覆盖与资源结算的分级保证（2026-08-31修订）
+
+用户已接受“保留原生执行、按实际能力分级保证；要求完整树保证的操作只能使用真正满足要求的backend，不静默降级”。本节是本次实施的规范边界，优先于本文旧的无条件process-tree完成措辞；不是声称当前Local/Seatbelt或所有平台已具备以下实现。
+
+只有一套managed execution/authority协议，增加封闭的coverage与资源最低清理要求，不能据此再建第二执行器、审批器或资源registry：
+
+| 覆盖 | 可签发的事实 | 不可推导的事实 |
+| --- | --- | --- |
+| `BoundedNative` | exact direct child终态/reap、原group及全部已登记对象的有界清理、host forward关闭和独立capture结算；`BoundedCleanupCompleted` | 未观察到的逃逸后代、外部broker或远程效果已经全部停止 |
+| `ContainedTree` | 无逃逸窗口的实际绑定范围在关闭成员接纳后全体静止、direct child回收；`ContainedTreeQuiescent` | 已发生的文件/网络效果被撤销，或范围外任务已停止 |
+
+领域owner在原typed请求中声明所需coverage；RA按资源类别/操作确定`cleanup_requirement`（`BoundedNativeAllowed`或`ContainedTreeRequired`）；sandbox报告实际backend能力。取所有依赖的最强要求，在审批/grant/Prepared前绑定进原requirement/effective receipt及hash。不得运行后改弱、给缺字段旧记录默认补弱等级，或通过工具名/用户文案猜要求。现有`require_process_tree_ownership` bool须随消费链替换，不再同时表示killpg与不可逃逸全树保证。
+
+普通native沿已有获准profile声明有限能力，不新增内部审批弹窗；强要求不满足时在用户代码运行前typed拒绝，给出缺失能力与已配置的可选backend，不自动安装、拉镜像、扩权或偷偷换Local。文件/网络约束独立保留。backend名字不是资格证明，必须逐one-shot/PTY/MCP/extension surface验证；Docker普通命令可用不等于其PTY/MCP可用。
+
+**身份、正常清理与未知：**
+
+- `sigil-process`提供真实OS birth/object事实，observer做自登记和purpose-bound验证，sandbox唯一产生physical settlement，RA验证完整inventory/holder/CAS；runtime/UI不铸造证明。owner已死仅允许claim接管，不能说明child已死或业务未发生。
+- Unix direct child由唯一reaper持有；用`waitid(P_PID, WEXITED | WNOHANG | WNOWAIT)`或平台等价机制观察退出而不提前回收，保留清理窗口的PID身份连续性。禁止其他wait/try_wait、SIGCHLD自动reap抢收；TERM/grace/KILL均在该连续性内完成，最终exact reap/ECHILD/host crash后永久废止旧数字PGID的信号权。bounded group观察区分保留的terminal/zombie leader，不把它当持续活跃工作。非交互使用attempt私有session，PTY遵守真实controlling-terminal/job-control机制；session本身不防后代逃逸。
+- 已登记或真实观察到的attempt成员不能因setsid/换PGID/查不清身份被忘掉；live/unknown都保留对应process/effect义务。原生固有的“不能排除未观察后代”则只是已声明限制，不让每条正常命令都变成OutcomeUncertain。
+- 同一个owner并发drain stdout/stderr，deadline从launch起算；leader退出后pipe仍开只等待bounded窗口。capture缺失、artifact失败、执行结果、cleanup结果分别如实表达，不无限等EOF，不为补产物重跑命令。有限枚举/快照只证明有限清理，不升级为全历史成员穷尽证明。
+- Windows强Job范围需要CREATE_SUSPENDED→attach/捕获birth/持久化Spawned→resume；attach失败在零用户代码前终止回收，未知则保留Prepared。普通spawn后attach的旧窗口不能声称强保证；Job范围外broker仍不覆盖。Linux cgroup/Bubblewrap/Docker也必须实证入组、不可逃逸、exact对象连续性和停止，不靠路径/名字相同发证。
+
+**资源最低要求与Task完成：**
+
+- fresh、单attempt、明确native暴露且可丢弃的ExecutionTemp generation可事前声明BoundedNativeAllowed。有限成功receipt与其余真实holder归零后，允许descriptor-relative/no-follow/exact identity/generation CAS删除；同generation永不重分配。实际删除失败才保留CleanupIncomplete/Quarantined，不因缺强后代证明自动永久quarantine。
+- 持久SessionScratch/cache仍由原语义owner决定保留和删除时点；关闭execution holder不清零semantic/source/reader hold。曾弱暴露的generation不得直接升级为强排他/隔离资源；borrowed workspace采用BorrowedNoCleanup，不删除用户文件，也不宣称未知后代的OS写句柄已被撤销。
+- 依赖全部写者停止的强ACL恢复、排他workspace复用、强撤权及对应GC必须ContainedTreeRequired，或原资源契约允许的真实精确撤权证据。要求在grant前确定，不能先让普通native借用再永久等不存在的强证明。
+- 不可变artifact/evidence不能通过给弱暴露源原地改状态获得；在source仍有合法read/retention资格时形成新host-owned验证副本/固定前缀并保留语义依赖。它不扩大为对同UID恶意不受限child的保密承诺。
+- 业务effect与执行按冻结coverage结束后，纯删除/retire失败可由RA在原journal同frontier原子转交ResourceMaintenance/StartupReconciler；新holder未durable不撤旧holder，不出现GC零holder窗口。Task可完成，generation/quota继续保留；活跃/未知进程或业务effect不能伪装成纯GC欠账。
+- 正式后台服务须由已有typed admission或受权durable handoff确定successor、scope、权限、资源与取消/恢复责任；新owner实际接手后才撤parent permit。root cancel已获胜不能新handoff逃过取消，UI detach/Agent.Background/setsid不算授权；不能交出仍会被parent kill的不可分割process scope。
+
+**配额与恢复：**
+
+- execution slot、reservation、namespace bytes和OS物理空间分别计账；unlink成功不说明open-unlinked空间已归还。native不宣称硬磁盘/全后代运行时配额；required-hard profile缺真实backend在spawn前拒绝。真实retained generation与cleanup债务继续占分层quota，上限局部阻塞相关arena分配，不TTL清零或产生无限后台队列。
+- 正常同realm/epoch重启恢复原有限terminal，不每次强制fresh epoch；owner或scope连续性未知时只阻塞直接依赖的mutation并沿真实provider/权限/精确对象恢复，不自动重放命令或按旧PGID杀进程。
+- journal/trust-anchor损坏的fresh epoch仍要求完整旧inventory的强静止证明。有限terminal不能因执行holder释放/资源删除就从epoch安全记录消失；保留原记录或可认证coverage/boot摘要，丢失即完整性失败。弱receipt、active holders空集或换roots都不能代替强证据；同boot缺证据时保持既有execution fence，诊断和operator的真实OS重启/provider停止恢复继续可用。
+- OS boot变化只证明旧本机process对象不继续运行，不证明远程/broker效果撤销，也不授权重试未知effect。平台birth/API、PID复用、唯一reaper/PTY、known escape、pipe/backpressure、cleanup debt、handoff/cancel竞争及fresh epoch必须有真实平台正反例；设计批准不替代资格化。
+
+本节对应正文§10.5、§10.8、§10.9的分级资源结算及§12.4强fresh-epoch门槛；旧PID-only/伪proof、bool混合强弱、先reap后raw group kill和仅leader退出就全量release的生产路径须随正式接管同批删除。当前有效数据缺新identity/coverage字段时先列影响，不自动upcast、清空、改写或保留双读。
 
 ---
 
@@ -8434,8 +8475,8 @@ struct LeaseRecord {
 ```
 
 - in-process refcount 只是缓存；durable journal + OS lock/handle 才是 cross-process truth；
-- GC/session delete 必须同时证明 holder_count=0、无 active process tree、generation CAS 一致；
-- terminal cancel 先终止并确认 process tree，再 release lease；
+- GC/session delete必须同时满足holder_count=0、启动前冻结的cleanup minimum及generation CAS；§1.1明确native-disposable的有限清理政策，强资源仍须完整树静止，source/semantic hold不能整体清零；
+- terminal cancel先按冻结coverage确认owned work结束，再结算相应execution holder；资源是否可release独立按其cleanup minimum与其他holder验证；
 - resource lease owner 不通过 `Drop` 执行 async delete。
 
 ### 10.6 Allocation 原子性
@@ -8482,7 +8523,7 @@ FIFO/socket/device的no-follow cleanup安全性不代表可以暴露给child。p
 
 GC 只能对 authority-owned generation 操作：
 
-- `ExecutionTemp`：terminalize 后立即尝试 cleanup；失败则在同一 arena 原子 rename 到 quarantine，再创建新 generation；
+- `ExecutionTemp`：按§1.1和§10.5满足自身cleanup minimum后立即尝试exact cleanup；有限native成功不因缺全树证明自动quarantine，真实失败在同arena按identity处理quarantine并保留quota，后续使用新generation；
 - `SessionScratch`：按 session delete/TTL 策略回收；异常 descendant 不阻止 quarantine；
 - invalid generation 不得永久 `skip`；必须产出 `Quarantined` 或 `CleanupIncomplete`；
 - GC 不跨 root、不 follow link、不删除 active holder；
@@ -8529,7 +8570,7 @@ pub struct QuotaReservationV1 {
 
 1. 每个managed requirement必须有bounded`ResourceQuotaProfileV1`。acquire在publish generation前，用冻结的resource-journal scope lock对workspace资源的`generation -> session(if any) -> workspace arena`或application资源的`generation -> application arena` bytes/entries一次性原子reserve；任一层会越过hard admission cap时整笔失败，不允许部分debit、跨journal transaction或overcommit。
 2. active/persistent generation 按 `max(reserved, last_reconciled_usage)` 计入 aggregate；finalize/reconcile 以 identity-bound receipt settle实际 usage并释放未使用 reservation。crash 留下的 reservation必须由 startup reconciliation结算，不能悄悄归零。
-3. `ReservedAdmission` 只证明启动时 aggregate 未超预算，不证明 child 运行中绝不会越界。若 filesystem/container/backend 提供强 quota，receipt 可写 `BackendHard`；否则 runner 必须 bounded monitor，超限时终止 process tree、结算 effect并 quarantine，receipt 写 `ObservedAndTerminated`。required-hard-quota profile 在缺少 hard backend 时必须 spawn 前 fail closed。
+3. `ReservedAdmission`只证明启动时aggregate未超预算，不证明运行中绝不会越界。真实强quota才写`BackendHard`；否则runner bounded monitor，超限按冻结coverage停止并结算effect/资源。`ObservedAndTerminated`必须绑定实际覆盖，不暗示native全部逃逸后代已停止；无法确认已知成员终止时仍cleanup-incomplete。namespace删除/reservation释放不证明open-unlinked物理空间已回收。required-hard-quota profile缺真实hard backend必须spawn前fail closed。
 4. generation或session cap超限只建立该stable requirement/session blocker；workspace/application arena cap是共享容量事实，blocker scope必须匹配`WorkspaceArena/ApplicationArena`，因此可以暂停同arena的新allocation，但不能取消/删除sibling active lease。
 5. quarantine使用与journal scope一致的独立`QuarantineArena` cap和预留emergency budget。active generation rename进入quarantine前先reserve；reserve失败产生对应workspace/application-scoped`CleanupIncomplete/AwaitResource`，保留原identity并停止新allocation，绝不为腾空间静默删除未知或未到retention的内容。
 6. borrowed resource 不计入 managed byte quota；它只受 permission和sandbox access policy。ArtifactStaging/ToolCache/RuntimeCache 的 semantic retention owner仍按 §9.5 决定删除候选，authority只验证 quota、identity与执行删除。

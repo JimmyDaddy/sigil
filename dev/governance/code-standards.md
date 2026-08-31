@@ -66,7 +66,7 @@
 - 必须桥接阻塞逻辑时，短时阻塞工作使用 `tokio::task::spawn_blocking`
 - `spawn_blocking` 只用于会自行结束的阻塞工作；长期常驻的阻塞 loop / worker 优先使用专用线程，并提供明确的退出路径
 - 后台任务不能“放飞不管”；需要有明确 owner、`JoinHandle`、取消信号或收尾路径
-- run/task/agent 取消必须使用唯一 root owner 与可复制 child handle；所有 forward effect 在最后责任边界取得 RAII permit，取消后不得再取得新 permit。cleanup/rollback/reap 使用独立 cleanup permit；只有 owned task 与 permit 全部归零才能记录 `Cancelled`，deadline 超时只能记录 `Interrupted`/cleanup-incomplete
+- run/task/agent取消必须使用唯一root owner与可复制child handle；所有forward effect在最后责任边界取得RAII permit，取消后不得再取得新permit。cleanup/rollback/reap使用独立cleanup permit；只有启动前冻结的scope/coverage下owned task与permit全部归零才能记录`Cancelled`，deadline超时只能记录`Interrupted`/cleanup-incomplete。有限native停止不能表述为全树静止；具体资源结算与强要求见[RFC-0071 §1.1](../docs/rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)
 
 ### 2.6 用户自然语言与语义决策边界
 
@@ -118,7 +118,7 @@
 - prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
-- 所有 current-schema 工具结果必须通过 `ToolResultRecordedV3` 拆成 immutable policy-safe artifact、bounded model view 和 bounded display view；artifact body 不得进入 JSONL、control entry、run event 或 Desktop IPC。V2 只保留为明确的 legacy decoder/fixture，不得作为新 execution writer 或治理规范目标
+- 所有current-schema工具结果必须通过`ToolResultRecordedV3`拆成immutable policy-safe artifact、bounded model view和bounded display view；artifact body不得进入JSONL、control entry、run event或Desktop IPC。V2只保留历史契约说明和旧格式拒绝fixture，被替代的生产legacy decoder随对应整改包删除，不再作为新writer或治理目标；数据影响遵守工程规范§3.4
 - 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
 - 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context

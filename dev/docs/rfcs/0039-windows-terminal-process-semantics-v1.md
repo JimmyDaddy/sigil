@@ -111,6 +111,8 @@ result metadata 必须说明 Windows 上实际使用 PowerShell，模型不得�
 
 ## 7. Windows process ownership contract
 
+2026-08-31规范修订：完整树保证采用[RFC-0071 §1.1](0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)，必须CREATE_SUSPENDED后完成Job assignment、birth与durable Spawned再resume；assignment失败在零用户代码前回收。下述普通spawn后assignment是原V1实现记录，不能据此声明新的ContainedTree资格。one-shot/non-PTY/PTY须分别验证，不静默缩减既有native能力或以Job ownership冒充文件/网络隔离。
+
 每个 Windows one-shot/terminal child 创建独立 Job Object，并设置
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。child spawn 后必须立即 assignment；assignment 失败时终止并
 回收 direct child，且本次工具调用失败，不允许静默退回仅 direct-child kill。V1 的 one-shot、

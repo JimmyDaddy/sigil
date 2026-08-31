@@ -27,6 +27,12 @@ below explain how Sigil is engineered and why its internal boundaries exist.
   and the evidence gates that govern later work.
 - [TUI mouse interaction design](sigil-tui-mouse-interaction-design.md): mouse
   input, hit testing, terminal behavior, and interaction constraints.
+- [TUI framework and product boundaries](rfcs/0070-independent-publishable-tui-framework-and-application-adapter-v1.md):
+  the publishable, application-neutral family consists of bounded primitives in
+  `sigil-tui-core`, the Ratatui adapter in `sigil-tui-ratatui`, and the framework
+  facade in `sigil-tui`. Product wiring stays in the non-publishable
+  `sigil-tui-host` and `sigil-tui-app`; public packages do not expose session state,
+  worker protocols, filesystem access, or process ownership.
 
 ## RFCs and Execution Status
 
