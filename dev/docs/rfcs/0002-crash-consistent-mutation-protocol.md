@@ -165,6 +165,15 @@ Rules:
 - Batch finished status is derived from per-file outcomes.
 - Verification sees the resulting parent workspace snapshot, not the intended batch.
 
+2026-08-31 补充：批次文件结果与事后的 diff 产物可用性是两个事实。全部文件成功时，
+即使 diff store 构造、目录创建或 preview/reverse 写入失败，`Applied` 和已持久化的
+`MutationBatchFinished` 仍保持不变；工具通过既有 `metadata.details.artifacts` 返回
+`availability=unavailable` 与有界原因，不把物理路径或原始 I/O 错误暴露给模型。
+真实文件部分失败仍返回 `PartiallyApplied` 并保留原错误种类与逐文件结果，产物错误不能
+覆盖它。成功的成对产物标为 `available`，不发布只写了一半的产物引用。
+这里的 diff 可用性不是整个 tool-output capture 的可用性；不新增一套公共结果协议，
+也不因产物缺失重放已经提交的 mutation。恢复仍仅依据既有 durable mutation 事实。
+
 ### 7.1 Approval-bound prepared mutations
 
 External planners such as an LSP may propose a multi-file edit before the local tool owns the

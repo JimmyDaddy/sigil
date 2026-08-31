@@ -15,11 +15,11 @@ use sigil_kernel::{
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, FileType,
     MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject, Tool, ToolAccess,
-    ToolAnalysisStatus, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation,
-    ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolReplayContractV1, ToolResult, ToolResultMeta,
-    ToolSemanticScope, ToolSpec, delete_file_with_mutation_expected_in_batch,
-    write_file_with_mutation_expected_in_batch,
+    ToolAnalysisStatus, ToolArtifactAvailability, ToolCategory, ToolContext, ToolDiffStats,
+    ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolReplayContractV1, ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec,
+    delete_file_with_mutation_expected_in_batch, write_file_with_mutation_expected_in_batch,
 };
 
 use crate::{
@@ -972,15 +972,15 @@ pub(crate) fn apply_changeset_plan(
             &failed_operations,
         )?;
     }
-    let mut apply_result = ChangeSetResult {
+    let apply_result = ChangeSetResult {
         id: plan.change_set.id.clone(),
         status,
         file_results,
-        message: None,
+        message: failed.then(|| "partial apply failure".to_owned()),
     };
 
-    let artifact_record = if changed_files.is_empty() {
-        None
+    let artifact_result = if changed_files.is_empty() {
+        Ok(None)
     } else {
         let preview_diff = if status == ChangeSetResultStatus::Applied {
             plan.preview_diff.clone()
@@ -992,61 +992,24 @@ pub(crate) fn apply_changeset_plan(
         } else {
             applied_reverse_diffs.join("\n")
         };
-        match ChangeSetArtifactStore::new_with_artifact_root(
+        ChangeSetArtifactStore::new_with_artifact_root(
             workspace_root,
             artifact_root,
             artifact_label_root,
-        )?
-        .write_diff_artifacts(plan.change_set.id.clone(), &preview_diff, &reverse_diff)
-        {
-            Ok(record) => Some(record),
-            Err(error) => {
-                apply_result.status = ChangeSetResultStatus::PartiallyApplied;
-                apply_result.message = Some(format!("artifact_write_failed: {error}"));
-                return Ok(apply_changeset_error_result(
-                    call_id,
-                    plan,
-                    apply_result,
-                    None,
-                    changed_files,
-                    ToolErrorKind::Io,
-                    "change set applied but artifact write failed",
-                ));
-            }
-        }
+        )
+        .and_then(|store| {
+            store.write_diff_artifacts(plan.change_set.id.clone(), &preview_diff, &reverse_diff)
+        })
+        .map(Some)
     };
 
-    if failed {
-        apply_result.message = Some("partial apply failure".to_owned());
-        return Ok(apply_changeset_error_result(
-            call_id,
-            plan,
-            apply_result,
-            artifact_record,
-            changed_files,
-            failure_kind,
-            "change set partially applied",
-        ));
-    }
-
-    let details = apply_changeset_details(
-        Some(&plan.change_set),
-        &apply_result,
-        artifact_record.as_ref(),
-    );
-    Ok(ToolResult::ok(
+    Ok(finish_apply_changeset_result(
         call_id,
-        "apply_changeset",
-        format!(
-            "applied change set {} ({} files)",
-            plan.change_set.id.as_str(),
-            changed_files.len()
-        ),
-        ToolResultMeta {
-            changed_files,
-            details,
-            ..ToolResultMeta::default()
-        },
+        plan.change_set,
+        apply_result,
+        artifact_result,
+        changed_files,
+        failure_kind,
     ))
 }
 
@@ -1087,22 +1050,53 @@ pub(crate) fn apply_planned_changeset_file(
     }
 }
 
-pub(crate) fn apply_changeset_error_result(
+fn finish_apply_changeset_result(
     call_id: String,
-    plan: ApplyChangeSetPlan,
+    change_set: ChangeSet,
     apply_result: ChangeSetResult,
-    artifact_record: Option<ChangeSetArtifactRecord>,
+    artifact_result: Result<Option<ChangeSetArtifactRecord>>,
     changed_files: Vec<String>,
-    kind: ToolErrorKind,
-    message: &str,
+    failure_kind: ToolErrorKind,
 ) -> ToolResult {
-    let details = apply_changeset_details(
-        Some(&plan.change_set),
-        &apply_result,
-        artifact_record.as_ref(),
-    );
-    let mut result = ToolResult::error(call_id, "apply_changeset", kind, message)
-        .with_error_details(false, details.clone());
+    // MutationBatchFinished already owns the file outcome. Diff storage only changes availability.
+    let artifact_unavailable = artifact_result.is_err();
+    let artifact_record = artifact_result.ok().flatten();
+    let mut details =
+        apply_changeset_details(Some(&change_set), &apply_result, artifact_record.as_ref());
+    if artifact_unavailable {
+        details["artifacts"] = json!({
+            "availability": ToolArtifactAvailability::Unavailable,
+            "reason": "diff_artifact_persistence_failed"
+        });
+    }
+
+    let mut result = match apply_result.status {
+        ChangeSetResultStatus::Applied => {
+            let mut message = format!(
+                "applied change set {} ({} files)",
+                change_set.id.as_str(),
+                changed_files.len()
+            );
+            if artifact_unavailable {
+                message.push_str("; diff artifacts unavailable");
+            }
+            ToolResult::ok(
+                call_id,
+                "apply_changeset",
+                message,
+                ToolResultMeta::default(),
+            )
+        }
+        ChangeSetResultStatus::PartiallyApplied
+        | ChangeSetResultStatus::Failed
+        | ChangeSetResultStatus::Cancelled => ToolResult::error(
+            call_id,
+            "apply_changeset",
+            failure_kind,
+            "change set partially applied",
+        )
+        .with_error_details(false, details.clone()),
+    };
     result.metadata = ToolResultMeta {
         changed_files,
         details,
@@ -1125,6 +1119,7 @@ pub(crate) fn apply_changeset_details(
         details.insert(
             "artifacts".to_owned(),
             json!({
+                "availability": ToolArtifactAvailability::Available,
                 "artifact_dir": record.artifact_dir,
                 "preview": record.preview,
                 "reverse": record.reverse,
@@ -1382,3 +1377,7 @@ pub(crate) fn metadata_mtime_ms(metadata: &fs::Metadata) -> Option<u64> {
     let duration = modified.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_millis()).ok()
 }
+
+#[cfg(test)]
+#[path = "tests/changeset_tool_tests.rs"]
+mod tests;
