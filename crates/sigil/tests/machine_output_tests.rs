@@ -12,10 +12,21 @@ use std::{
 #[cfg(unix)]
 use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
+mod common;
+
 fn test_workspace(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("sigil-process-{name}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&path).expect("test workspace should create");
     path
+}
+
+fn sigil_command(workspace: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    common::isolated_child_environment(workspace)
+        .expect("machine-output child environment should create")
+        .apply_to_command(&mut command);
+    command.current_dir(workspace);
+    command
 }
 
 fn write_config(path: &Path, base_url: &str) {
@@ -220,8 +231,7 @@ fn json_process_stdout_is_one_parseable_result_and_exit_zero() {
     let (base_url, server) = spawn_sse_server("process answer");
     write_config(&config_path, &base_url);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .current_dir(&workspace)
+    let output = sigil_command(&workspace)
         .args([
             "--config",
             config_path.to_str().expect("UTF-8 config path"),
@@ -251,8 +261,7 @@ fn json_process_configuration_error_is_structured_and_exits_two() {
     let workspace = test_workspace("json-config-error");
     let config_path = workspace.join("missing.toml");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .current_dir(&workspace)
+    let output = sigil_command(&workspace)
         .args([
             "--config",
             config_path.to_str().expect("UTF-8 config path"),
@@ -283,8 +292,7 @@ fn jsonl_process_sigint_persists_cancelled_terminal_and_exits_130() {
     let config_path = workspace.join("sigil.toml");
     let (base_url, request_started, server) = spawn_hanging_server();
     write_config(&config_path, &base_url);
-    let child = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .current_dir(&workspace)
+    let child = sigil_command(&workspace)
         .args([
             "--config",
             config_path.to_str().expect("UTF-8 config path"),
@@ -349,8 +357,7 @@ fn json_process_rejects_non_regular_config_before_run() {
     // SAFETY: `fifo` is a valid NUL-terminated path inside the owned test workspace.
     let created = unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) };
     assert_eq!(created, 0, "test config FIFO should create");
-    let child = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .current_dir(&workspace)
+    let child = sigil_command(&workspace)
         .args([
             "--config",
             config_path.to_str().expect("UTF-8 config path"),

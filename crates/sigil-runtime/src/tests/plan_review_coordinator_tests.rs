@@ -31,6 +31,13 @@ use crate::{
     ConversationCoordinator, PlanDecisionCommand, PlanReviewCoordinator, PlanReviewRunRequest,
 };
 
+fn isolated_storage_toml(path: &std::path::Path) -> String {
+    let root = path.parent().expect("test config should have a parent");
+    let state_root = toml::Value::String(root.join("state").to_string_lossy().into_owned());
+    let cache_root = toml::Value::String(root.join("cache").to_string_lossy().into_owned());
+    format!("[storage]\nstate_root = {state_root}\ncache_root = {cache_root}\n")
+}
+
 #[test]
 fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
@@ -2179,6 +2186,7 @@ async fn execute_plan_review_revision_runs_the_new_attempt_and_commits_the_draft
 
     let (fixture, base_url) = spawn_revision_draft_fixture().await?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
         format!(
@@ -2186,6 +2194,8 @@ async fn execute_plan_review_revision_runs_the_new_attempt_and_commits_the_draft
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -2302,9 +2312,13 @@ async fn revision_provider_construction_failure_commits_confirmed_interrupted_te
     std::fs::create_dir_all(&workspace)?;
     let session_path = temp.path().join("session.jsonl");
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -2325,8 +2339,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let root_config: sigil_kernel::RootConfig =
         toml::from_str(&std::fs::read_to_string(&config_path)?)?;
@@ -2383,9 +2398,13 @@ async fn cancelling_suspended_revision_commits_the_original_terminal_outbox() ->
     std::fs::create_dir_all(&workspace)?;
     let session_path = temp.path().join("session.jsonl");
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -2403,8 +2422,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:9"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let root_config: sigil_kernel::RootConfig =
         toml::from_str(&std::fs::read_to_string(&config_path)?)?;
@@ -2517,6 +2537,7 @@ async fn revision_draft_conflict_is_rejected_before_start_without_a_fake_termina
 
     let (fixture, base_url) = spawn_revision_draft_fixture().await?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
         format!(
@@ -2524,6 +2545,8 @@ async fn revision_draft_conflict_is_rejected_before_start_without_a_fake_termina
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "local-test"
@@ -3374,10 +3397,14 @@ fn plan_review_binding_identities_are_stable_across_rebinding() -> Result<()> {
 
 fn write_admission_test_config(root: &std::path::Path) -> std::path::PathBuf {
     let path = root.join("sigil.toml");
+    let storage = isolated_storage_toml(&path);
     std::fs::create_dir_all(root).expect("test root");
     std::fs::write(
         &path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3391,12 +3418,13 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:1"
-credential = { source = "none" }
+credential = {{ source = "none" }}
 
 [task]
 enabled = true
 max_plan_steps = 64
-"#,
+"#
+        ),
     )
     .expect("test config");
     path
@@ -4425,6 +4453,8 @@ fn adopt_rejects_commands_bound_to_another_session() -> Result<()> {
 
 #[test]
 fn admission_probes_distinguish_route_shape_from_credential_availability() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
+    let _missing_key = crate::test_env::EnvScope::remove("SIGIL_OPENAI_COMPATIBLE_API_KEY");
     let temp = tempfile::tempdir()?;
     // Connection with an environment credential that is NOT set: route resolves, credential
     // must not be reported available.

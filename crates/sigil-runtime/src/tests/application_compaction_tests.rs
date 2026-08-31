@@ -7,7 +7,15 @@ use sigil_kernel::{
 
 use super::*;
 
+fn isolated_storage_toml(path: &Path) -> String {
+    let root = path.parent().expect("test config should have a parent");
+    let state_root = toml::Value::String(root.join("state").to_string_lossy().into_owned());
+    let cache_root = toml::Value::String(root.join("cache").to_string_lossy().into_owned());
+    format!("[storage]\nstate_root = {state_root}\ncache_root = {cache_root}\n")
+}
+
 fn write_config(path: &Path, compaction_enabled: bool) -> Result<()> {
+    let storage = isolated_storage_toml(path);
     std::fs::write(
         path,
         format!(
@@ -15,6 +23,8 @@ fn write_config(path: &Path, compaction_enabled: bool) -> Result<()> {
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "deepseek-default"

@@ -24,6 +24,8 @@ use sigil_kernel::{
 };
 use sigil_runtime::{SessionExportV1, resolve_sigil_paths};
 
+mod common;
+
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct TestWorkspace(PathBuf);
@@ -441,19 +443,7 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
 }
 
 fn configure_isolated_process_home(command: &mut CommandBuilder, workspace: &Path) -> Result<()> {
-    let home = workspace.join(".process-home");
-    let config_home = home.join(".config");
-    let cache_home = home.join(".cache");
-    let state_home = home.join(".local").join("state");
-    let runtime_home = home.join(".runtime");
-    for path in [&home, &config_home, &cache_home, &state_home, &runtime_home] {
-        fs::create_dir_all(path)?;
-    }
-    command.env("HOME", home.as_os_str());
-    command.env("XDG_CONFIG_HOME", config_home.as_os_str());
-    command.env("XDG_CACHE_HOME", cache_home.as_os_str());
-    command.env("XDG_STATE_HOME", state_home.as_os_str());
-    command.env("XDG_RUNTIME_DIR", runtime_home.as_os_str());
+    common::isolated_child_environment(workspace)?.apply_to_command_builder(command);
     Ok(())
 }
 

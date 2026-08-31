@@ -8,6 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod common;
+
 fn test_workspace(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "sigil-serve-process-{name}-{}",
@@ -201,7 +203,11 @@ fn spawn_serve(workspace: &Path, config_path: &Path, token: &str) -> ServeProces
     let stderr_path = workspace.join("serve.stderr");
     let stdout = File::create(&stdout_path).expect("serve stdout should create");
     let stderr = File::create(&stderr_path).expect("serve stderr should create");
-    let child = Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    common::isolated_child_environment(workspace)
+        .expect("serve child environment should create")
+        .apply_to_command(&mut command);
+    let child = command
         .current_dir(workspace)
         .env("SIGIL_HTTP_TOKEN", token)
         .args([
@@ -265,9 +271,12 @@ fn spawn_desktop_serve_with_home(
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
-    if let Some(user_home) = user_home {
-        command.env("HOME", user_home);
+    let child_environment = match user_home {
+        Some(home) => common::isolated_child_environment_for_home(home),
+        None => common::isolated_child_environment(workspace),
     }
+    .expect("desktop serve child environment should create");
+    child_environment.apply_to_command(&mut command);
     let mut child = command.spawn().expect("desktop sigil serve should spawn");
     let owner_stdin = child
         .stdin
@@ -1480,6 +1489,9 @@ fn serve_process_rejects_unsafe_startup_before_creating_listener_state() {
     ];
     for (name, serve_args, token) in cases {
         let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+        common::isolated_child_environment(&workspace)
+            .expect("serve child environment should create")
+            .apply_to_command(&mut command);
         command.current_dir(&workspace).args([
             "--config",
             config_path.to_str().expect("UTF-8 config path"),

@@ -467,12 +467,19 @@ fn application_owned_queue_fixture(
     application_owned_queue_fixture_with_auto_routing(root, exact_prompt, false)
 }
 
+fn isolated_storage_toml(root: &Path) -> String {
+    let state_root = toml::Value::String(root.join("state").to_string_lossy().into_owned());
+    let cache_root = toml::Value::String(root.join("cache").to_string_lossy().into_owned());
+    format!("[storage]\nstate_root = {state_root}\ncache_root = {cache_root}\n")
+}
+
 fn application_owned_queue_fixture_with_auto_routing(
     root: &Path,
     exact_prompt: &str,
     automatic_routing: bool,
 ) -> Result<ApplicationOwnedQueueFixture> {
     let config_path = root.join("sigil.toml");
+    let storage = isolated_storage_toml(root);
     let task_config = if automatic_routing {
         r#"
 [task]
@@ -489,6 +496,8 @@ routing_policy = "auto"
 
 [workspace]
 root = "."
+
+{storage}
 
 [agent]
 connection = "deepseek-default"

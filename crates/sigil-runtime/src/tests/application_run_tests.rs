@@ -153,10 +153,21 @@ fn append_running_application_task(
     session.append_controls(controls)
 }
 
+fn isolated_storage_toml(path: &Path) -> String {
+    let root = path.parent().expect("test config should have a parent");
+    let state_root = toml::Value::String(root.join("state").to_string_lossy().into_owned());
+    let cache_root = toml::Value::String(root.join("cache").to_string_lossy().into_owned());
+    format!("[storage]\nstate_root = {state_root}\ncache_root = {cache_root}\n")
+}
+
 fn write_application_test_config(path: &Path) -> Result<()> {
+    let storage = isolated_storage_toml(path);
     std::fs::write(
         path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -170,16 +181,21 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     Ok(())
 }
 
 fn write_unauthenticated_application_test_config(path: &Path) -> Result<()> {
+    let storage = isolated_storage_toml(path);
     std::fs::write(
         path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -193,8 +209,9 @@ label = "Local test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     Ok(())
 }
@@ -949,9 +966,13 @@ fn session_lease_rejects_overlapping_foreground_runs_and_releases_on_drop() -> R
 fn preparation_recovers_an_orphan_run_after_exclusive_lease_before_next_admission() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -965,8 +986,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let session_path = temp.path().join("state/sessions/orphan.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
@@ -1203,9 +1225,13 @@ async fn application_request_context_uses_runtime_resolver() -> Result<()> {
 fn adapter_session_binding_creates_and_reopens_the_same_durable_v2_scope() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1219,8 +1245,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let requested_path = temp.path().join("state/sessions/http.jsonl");
 
@@ -1314,9 +1341,13 @@ fn adapter_session_binding_accepts_connection_models_and_rejects_unknown_connect
 fn run_context_catalog_keeps_same_model_ids_distinct_across_connections() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1330,15 +1361,16 @@ label = "DeepSeek personal"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 
 [connections.deepseek-team]
 label = "DeepSeek team"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let binding = bind_application_session(&config_path, temp.path(), None)?;
 
@@ -1406,11 +1438,14 @@ fn session_reopen_binding_rejects_a_route_less_current_session() -> Result<()> {
 fn run_context_exposes_exact_bound_confirmation_and_application_applies_it() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     let write_config = |port: u16| -> Result<()> {
         std::fs::write(
             &config_path,
             format!(
                 r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1538,11 +1573,14 @@ credential = {{ source = "none" }}
 fn attached_bind_rejects_external_owner_before_route_recovery_writes() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     let write_config = |port: u16| -> Result<()> {
         std::fs::write(
             &config_path,
             format!(
                 r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1597,11 +1635,14 @@ credential = {{ source = "none" }}
 fn same_origin_endpoint_correction_rebinds_without_blocking_run_context() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     let write_config = |path: &str| -> Result<()> {
         std::fs::write(
             &config_path,
             format!(
                 r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1930,9 +1971,13 @@ fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilit
 fn run_model_selection_switches_provider_connections_without_replacing_the_session() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -1946,15 +1991,16 @@ label = "Local default"
 provider = "custom"
 protocol = "responses"
 base_url = "http://127.0.0.1:11434/v1"
-credential = { source = "none" }
+credential = {{ source = "none" }}
 
 [connections.deepseek-team]
 label = "DeepSeek team"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let session_path = temp.path().join("state/sessions/cross-provider.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
@@ -2007,9 +2053,13 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 fn recovery_model_selection_requires_exact_route_and_catalog_bindings() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -2023,14 +2073,18 @@ label = "Original"
 provider = "custom"
 protocol = "responses"
 base_url = "http://127.0.0.1:1/v1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let session_path = temp.path().join("state/sessions/replacement-binding.jsonl");
     let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -2044,8 +2098,9 @@ label = "Replacement"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:2/v1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let context = application_run_context_view(
         &config_path,
@@ -2137,6 +2192,7 @@ credential = { source = "none" }
 fn run_context_uses_only_the_exact_connection_fresh_catalog_cache() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let state_root = temp.path().join("state");
     let cache_root = temp.path().join("cache");
     std::fs::write(
         &config_path,
@@ -2144,6 +2200,7 @@ fn run_context_uses_only_the_exact_connection_fresh_catalog_cache() -> Result<()
             r#"config_version = 2
 
 [storage]
+state_root = {}
 cache_root = {}
 
 [workspace]
@@ -2160,6 +2217,7 @@ protocol = "responses"
 base_url = "http://127.0.0.1:11434/v1"
 credential = {{ source = "none" }}
 "#,
+            toml::Value::String(state_root.to_string_lossy().into_owned()),
             toml::Value::String(cache_root.to_string_lossy().into_owned())
         ),
     )?;
@@ -3356,9 +3414,13 @@ async fn application_auto_routing_stays_manual_without_attached_task_executor() 
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3375,8 +3437,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let request = ApplicationRunRequest::non_interactive(
         &config_path,
@@ -3419,9 +3482,13 @@ async fn application_preparation_enables_model_owned_auto_handoff_without_host_c
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3438,8 +3505,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let request = ApplicationRunRequest::non_interactive(
         &config_path,
@@ -3484,9 +3552,13 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 async fn application_task_handoff_runs_shared_executor_and_returns_synthesis() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3500,8 +3572,9 @@ label = "Application task test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let mut root_config = RootConfig::load(&config_path)?;
     root_config.task.enabled = true;
@@ -3625,9 +3698,13 @@ async fn application_task_planner_question_resumes_through_the_public_decision_p
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3641,8 +3718,9 @@ label = "Application task test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let mut root_config = RootConfig::load(&config_path)?;
     root_config.task.enabled = true;
@@ -3881,9 +3959,13 @@ credential = { source = "none" }
 async fn application_typed_task_continuation_executes_exact_selected_task() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -3897,8 +3979,9 @@ label = "Application task test"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "http://127.0.0.1:11434/v1"
-credential = { source = "none" }
-"#,
+credential = {{ source = "none" }}
+"#
+        ),
     )?;
     let mut root_config = RootConfig::load(&config_path)?;
     root_config.task.enabled = true;
@@ -5376,9 +5459,13 @@ async fn typed_continuation_cannot_fork_unfinished_materialized_guidance() -> Re
 async fn application_task_continuation_rejects_stale_scope_without_mutation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -5395,8 +5482,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let session_path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&session_path)?;
@@ -6151,9 +6239,13 @@ async fn application_plan_review_continuation_commits_typed_draft_and_waits_for_
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-api-key");
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
     std::fs::write(
         &config_path,
-        r#"config_version = 2
+        format!(
+            r#"config_version = 2
+
+{storage}
 
 [workspace]
 root = "."
@@ -6170,8 +6262,9 @@ label = "DeepSeek"
 provider = "deepseek"
 protocol = "deepseek"
 base_url = "https://api.deepseek.com"
-credential = { source = "environment", name = "SIGIL_API_KEY" }
-"#,
+credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
+"#
+        ),
     )?;
     let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     let _rollout_guard =

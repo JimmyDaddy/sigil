@@ -2,6 +2,8 @@ use std::{fs, process::Command};
 
 use sigil_runtime::support::{DOCTOR_SUPPORT_SCHEMA_VERSION, DoctorSupportReportV1};
 
+mod common;
+
 fn test_root(name: &str) -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!("sigil-doctor-{name}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).expect("doctor process root should create");
@@ -18,7 +20,11 @@ fn doctor_json_process_emits_one_parseable_redacted_document() {
         "VERSION-CANARY-process-private",
         "PROFILE-CANARY-process-private",
     ];
-    let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    common::isolated_child_environment(&root)
+        .expect("doctor child environment should create")
+        .apply_to_command(&mut command);
+    let output = command
         .args([
             "--config",
             config.to_str().expect("test config is UTF-8"),
@@ -57,7 +63,11 @@ fn doctor_json_process_emits_one_parseable_redacted_document() {
 fn doctor_text_process_remains_the_default() {
     let root = test_root("text");
     let config = root.join("missing-sigil.toml");
-    let output = Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    common::isolated_child_environment(&root)
+        .expect("doctor child environment should create")
+        .apply_to_command(&mut command);
+    let output = command
         .args([
             "--config",
             config.to_str().expect("test config is UTF-8"),

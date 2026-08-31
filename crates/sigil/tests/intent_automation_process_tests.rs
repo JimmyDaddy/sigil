@@ -7,6 +7,8 @@ use std::{
 use sigil_kernel::{JsonlSessionStore, ModelMessage, RootConfig, Session};
 use sigil_runtime::{provider_connections::resolve_default_model_route, resolve_sigil_paths};
 
+mod common;
+
 fn test_workspace(name: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(&format!("sigil-intent-automation-{name}-"))
@@ -69,7 +71,11 @@ fn durable_session(config_path: &Path, workspace: &Path) -> String {
 }
 
 fn run_intent(config_path: &Path, workspace: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_sigil"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    common::isolated_child_environment(workspace)
+        .expect("intent child environment should create")
+        .apply_to_command(&mut command);
+    command
         .current_dir(workspace)
         .arg("--config")
         .arg(config_path)
@@ -77,6 +83,39 @@ fn run_intent(config_path: &Path, workspace: &Path, arguments: &[&str]) -> Outpu
         .args(arguments)
         .output()
         .expect("sigil intent should execute")
+}
+
+fn run_intent_with_conflicting_child_storage_roots(
+    config_path: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> Output {
+    let ignored_state = workspace.join("ignored-sigil-state");
+    let ignored_cache = workspace.join("ignored-sigil-cache");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+    command
+        .env("SIGIL_STATE_HOME", &ignored_state)
+        .env("SIGIL_CACHE_HOME", &ignored_cache);
+    common::isolated_child_environment(workspace)
+        .expect("intent child environment should create")
+        .apply_to_command(&mut command);
+    let output = command
+        .current_dir(workspace)
+        .arg("--config")
+        .arg(config_path)
+        .arg("intent")
+        .args(["--session", session_id, "inspect"])
+        .output()
+        .expect("sigil intent should execute");
+    assert!(
+        !ignored_state.exists(),
+        "child fixture must not create state under the removed SIGIL_STATE_HOME"
+    );
+    assert!(
+        !ignored_cache.exists(),
+        "child fixture must not create cache under the removed SIGIL_CACHE_HOME"
+    );
+    output
 }
 
 #[test]
@@ -118,6 +157,32 @@ fn inspect_emits_one_typed_path_free_record_for_the_exact_durable_session() {
     ] {
         assert!(!encoded.contains(forbidden), "{forbidden}");
     }
+}
+
+#[test]
+fn inspect_child_keeps_explicit_fixture_storage_when_sigil_roots_are_preconfigured() {
+    let workspace = test_workspace("inspect-explicit-storage");
+    let config_path = write_config(workspace.path());
+    let session_id = durable_session(&config_path, workspace.path());
+
+    let output = run_intent_with_conflicting_child_storage_roots(
+        &config_path,
+        workspace.path(),
+        &session_id,
+    );
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .expect("stdout should remain a JSON record")["record_type"],
+        "result"
+    );
 }
 
 #[test]
