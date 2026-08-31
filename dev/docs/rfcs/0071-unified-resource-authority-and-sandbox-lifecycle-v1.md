@@ -8577,6 +8577,28 @@ pub struct QuotaReservationV1 {
 
 quota receipt 必须同时输出 requested profile、各 scope reservation/settlement与 `QuotaEnforcementV1`。因此产品不能把 reservation accounting 误报为 filesystem hard quota。
 
+#### 10.9.1 Scratch byte quota 的跨层错误契约
+
+Scratch 的进程内容量错误统一使用
+`sigil_kernel::resource::{ScratchQuotaScope, ScratchQuotaExceededError}`：
+只包含 `Session/Workspace`、`usage_bytes`、`quota_bytes`，不携带物理路径、reset
+授权或自动重试决定。它是现有 scratch byte-capacity 事实的收窄表达，不替代上面的
+`QuotaScopeV1`、reservation receipt 或 durable resource recovery，也不声称具备运行中硬配额。
+
+- Resource Authority 负责测量、记账和构造错误；runtime 原样传递 typed payload，
+  不转成字符串，也不根据消息反推类型。RA 和 tools 不另建 scope/error 定义或兼容 alias。
+- workspace admission 的失败数值包括本次 incoming bytes；entry 数量超限沿用
+  entry-limit 错误，不能把 entries 填入 byte 字段。整数转换不能截断计数。
+  runtime 将 RA 的 entry-limit 事实结构化适配为现有 tools `ScratchMeasurementError`
+  诊断，落到既有 `ResourceLimit/scratch_measurement_limit_exceeded`，不丢成普通 I/O；
+  该诊断只是 provider seam 的错误呈现，不另建 quota owner 或权限决定。
+- tools 负责将该事实投影为既有 `ScratchQuotaExceeded` tool error，保留
+  `scope/usage_bytes/quota_bytes` 与非自动、需用户确认的 recovery 提示；提示不是批准，
+  不在错误转换过程中 reset、删除文件或回退系统临时目录。普通 I/O 错误不冒充 quota。
+- 产品消费已有的安全摘要与 tool-error projection；不为传递这三个数值增加持久化 schema、
+  新审批流程或第二套恢复状态机。真实 RA provider 接入正式 Bash/terminal entry 的测试
+  必须覆盖 session/workspace 超限，以及用户明确清理后同一路径可以继续使用。
+
 ---
 
 ## 11. Sandbox 与 environment binding

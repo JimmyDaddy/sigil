@@ -34,6 +34,7 @@ use anyhow::anyhow;
 #[cfg(test)]
 use anyhow::{Context, bail};
 use serde_json::json;
+use sigil_kernel::resource::ScratchQuotaExceededError;
 #[cfg(test)]
 use sigil_kernel::secure_private_path_permissions;
 use sigil_kernel::{ToolErrorKind, ToolResult};
@@ -84,47 +85,12 @@ impl Default for ScratchQuota {
     }
 }
 
-/// Which quota bound was exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScratchQuotaScope {
-    Session,
-    Workspace,
-}
-
-impl ScratchQuotaScope {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Session => "session",
-            Self::Workspace => "workspace",
-        }
-    }
-}
-
-impl std::fmt::Display for ScratchQuotaScope {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Structured, diagnosable quota failure. The tool layer maps this to a recoverable tool error;
-/// it never falls back to the system temp directory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "scratch quota exceeded ({scope}): {usage_bytes} bytes used of {quota_bytes} bytes allowed; \
-     ask the user to reset scratch storage or remove unneeded scratch files"
-)]
-pub struct ScratchQuotaExceededError {
-    pub scope: ScratchQuotaScope,
-    pub usage_bytes: u64,
-    pub quota_bytes: u64,
-}
-
 /// Stable failures produced while measuring a scratch namespace.
 ///
 /// Paths are relative to the session namespace so these errors can be projected to a tool result
 /// without disclosing the host cache layout.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Runtime adapters may translate a provider's structured measurement failure into this existing
+/// tool-facing diagnostic; the diagnostic itself does not authorize any filesystem operation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ScratchMeasurementError {
     #[error(
@@ -665,9 +631,9 @@ pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<S
 ///
 /// # Errors
 ///
-/// Returns [`ScratchQuotaExceededError`] when the session or workspace quota is already reached,
-/// and a contextual error for symlink attacks or permission hardening failures. Never falls back
-/// to the system temp directory.
+/// Returns [`ScratchQuotaExceededError`] when the session or workspace byte quota is already
+/// reached, and a contextual error for symlink attacks or permission hardening failures. Never
+/// falls back to the system temp directory.
 #[cfg(test)]
 pub fn ensure_session_scratch(
     scratch_root: &Path,
@@ -713,7 +679,7 @@ pub fn ensure_session_scratch(
     let usage = measure_scratch_usage(scratch_root, &session_key)?;
     if usage.session_bytes > quota.per_session_bytes {
         return Err(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Session,
+            scope: sigil_kernel::resource::ScratchQuotaScope::Session,
             usage_bytes: usage.session_bytes,
             quota_bytes: quota.per_session_bytes,
         }
@@ -721,7 +687,7 @@ pub fn ensure_session_scratch(
     }
     if usage.workspace_bytes > quota.workspace_hard_bytes {
         return Err(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
+            scope: sigil_kernel::resource::ScratchQuotaScope::Workspace,
             usage_bytes: usage.workspace_bytes,
             quota_bytes: quota.workspace_hard_bytes,
         }
@@ -746,7 +712,9 @@ pub(crate) fn scratch_provision_error_result(
             call_id,
             tool_name,
             ToolErrorKind::ScratchQuotaExceeded,
-            quota_error.to_string(),
+            format!(
+                "{quota_error}; ask the user to reset scratch storage or remove unneeded scratch files"
+            ),
         )
         .with_error_details(
             false,

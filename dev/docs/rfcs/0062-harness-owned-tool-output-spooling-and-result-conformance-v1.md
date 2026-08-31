@@ -1061,6 +1061,12 @@ pub struct McpCallToolResultV1 {
 - shell tool description 说明适用场景、生命周期和不保证长期保存；
 - 文件路径可能进入 command/result，因此必须继续经过 path trust 与 disclosure policy。
 
+Scratch byte quota 超限从 Resource Authority 经 runtime 到工具必须保留同一份
+kernel-owned typed error，具体边界见 [RFC-0071 §10.9.1](0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#1091-scratch-byte-quota-的跨层错误契约)。
+工具继续使用既有 `ScratchQuotaExceeded` kind 和结构化 `scope/usage_bytes/quota_bytes`
+details；安全摘要说明容量范围与数值，清理/reset 提示不等于获得操作授权。
+不得因为适配层丢失类型而降级为普通 I/O，也不得把条目数上限报告成 byte quota。
+
 ### 14.2 Harness-private call spool
 
 artifact staging namespace：

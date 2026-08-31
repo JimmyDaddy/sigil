@@ -1,4 +1,5 @@
 use super::*;
+use sigil_kernel::resource::{ScratchQuotaExceededError, ScratchQuotaScope};
 
 #[test]
 fn authority_owns_session_namespace_and_quota() {
@@ -11,13 +12,96 @@ fn authority_owns_session_namespace_and_quota() {
     let error = authority
         .ensure(Some("session-a"), 10, 20)
         .expect_err("quota");
-    assert!(matches!(
+    assert_eq!(
         error,
-        SessionScratchErrorV1::QuotaExceeded {
-            scope: SessionScratchQuotaScopeV1::Session,
-            ..
+        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Session,
+            usage_bytes: 11,
+            quota_bytes: 10,
+        })
+    );
+}
+
+#[test]
+fn quota_adapter_preserves_byte_totals_and_keeps_entry_counts_out_of_byte_payloads() {
+    assert_eq!(
+        quota_error(QuotaErrorV1::ReservationExceeded {
+            class: "session_scratch",
+            reserved: 17,
+            max: 16,
+        }),
+        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Workspace,
+            usage_bytes: 17,
+            quota_bytes: 16,
+        })
+    );
+    assert_eq!(
+        quota_error(QuotaErrorV1::WorkspaceOvercommit {
+            used: 11,
+            incoming: 7,
+            cap: 16,
+        }),
+        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Workspace,
+            usage_bytes: 18,
+            quota_bytes: 16,
+        })
+    );
+    assert_eq!(
+        quota_error(QuotaErrorV1::WorkspaceOvercommit {
+            used: u64::MAX - 1,
+            incoming: 2,
+            cap: u64::MAX,
+        }),
+        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Workspace,
+            usage_bytes: u64::MAX,
+            quota_bytes: u64::MAX,
+        })
+    );
+    assert_eq!(
+        quota_error(QuotaErrorV1::EntryExceeded {
+            class: "session_scratch",
+            reserved: 7,
+            max: 6,
+        }),
+        SessionScratchErrorV1::EntryLimitExceeded {
+            limit: 6,
+            observed: 7,
         }
-    ));
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn quota_adapter_does_not_truncate_platform_sized_entry_counts() {
+    assert_eq!(
+        quota_error(QuotaErrorV1::EntryExceeded {
+            class: "session_scratch",
+            reserved: u64::MAX,
+            max: u64::MAX - 1,
+        }),
+        SessionScratchErrorV1::EntryLimitExceeded {
+            limit: usize::MAX - 1,
+            observed: usize::MAX,
+        }
+    );
+}
+
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn quota_adapter_does_not_truncate_entry_counts_that_exceed_platform_range() {
+    let error = quota_error(QuotaErrorV1::EntryExceeded {
+        class: "session_scratch",
+        reserved: u64::MAX,
+        max: u64::MAX - 1,
+    });
+    let SessionScratchErrorV1::Filesystem(message) = error else {
+        panic!("out-of-range entry counts must not be truncated into a byte quota");
+    };
+    assert!(message.contains(&u64::MAX.to_string()));
+    assert!(message.contains(&(u64::MAX - 1).to_string()));
 }
 
 #[test]

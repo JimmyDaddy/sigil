@@ -16,7 +16,10 @@ use std::{
 use std::time::SystemTime;
 
 use fs2::FileExt;
-use sigil_kernel::secure_private_path_permissions;
+use sigil_kernel::{
+    resource::{ScratchQuotaExceededError, ScratchQuotaScope},
+    secure_private_path_permissions,
+};
 
 use crate::quota::{QuotaBookV1, QuotaErrorV1};
 
@@ -38,12 +41,8 @@ pub enum SessionScratchErrorV1 {
     UnsupportedEntry { path: String },
     #[error("session scratch measurement exceeded {limit} entries after {observed} entries")]
     EntryLimitExceeded { limit: usize, observed: usize },
-    #[error("session scratch {scope} quota exceeded: {used} bytes used of {limit} allowed")]
-    QuotaExceeded {
-        scope: SessionScratchQuotaScopeV1,
-        used: u64,
-        limit: u64,
-    },
+    #[error(transparent)]
+    QuotaExceeded(#[from] ScratchQuotaExceededError),
     #[error("session scratch filesystem operation failed: {0}")]
     Filesystem(String),
     #[error("session scratch lease registry is unavailable")]
@@ -52,21 +51,6 @@ pub enum SessionScratchErrorV1 {
     LeaseUnavailable(String),
     #[error("invalid session scratch namespace could not be quarantined: {path}: {reason}")]
     QuarantineFailed { path: String, reason: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionScratchQuotaScopeV1 {
-    Session,
-    Workspace,
-}
-
-impl std::fmt::Display for SessionScratchQuotaScopeV1 {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Session => "session",
-            Self::Workspace => "workspace",
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -212,18 +196,20 @@ impl SessionScratchAuthorityV1 {
         ensure_directory(&directory)?;
         let usage = self.measure(&key)?;
         if usage.session_bytes > per_session_bytes {
-            return Err(SessionScratchErrorV1::QuotaExceeded {
-                scope: SessionScratchQuotaScopeV1::Session,
-                used: usage.session_bytes,
-                limit: per_session_bytes,
-            });
+            return Err(ScratchQuotaExceededError {
+                scope: ScratchQuotaScope::Session,
+                usage_bytes: usage.session_bytes,
+                quota_bytes: per_session_bytes,
+            }
+            .into());
         }
         if usage.workspace_bytes > workspace_hard_bytes {
-            return Err(SessionScratchErrorV1::QuotaExceeded {
-                scope: SessionScratchQuotaScopeV1::Workspace,
-                used: usage.workspace_bytes,
-                limit: workspace_hard_bytes,
-            });
+            return Err(ScratchQuotaExceededError {
+                scope: ScratchQuotaScope::Workspace,
+                usage_bytes: usage.workspace_bytes,
+                quota_bytes: workspace_hard_bytes,
+            }
+            .into());
         }
         let profile = scratch_quota_profile(workspace_hard_bytes);
         self.with_quota(Some(workspace_hard_bytes), |quota| {
@@ -604,21 +590,34 @@ fn scratch_quota_profile(
 
 fn quota_error(error: QuotaErrorV1) -> SessionScratchErrorV1 {
     match error {
-        QuotaErrorV1::ReservationExceeded { reserved, max, .. }
-        | QuotaErrorV1::WorkspaceOvercommit {
-            used: reserved,
-            cap: max,
-            ..
-        } => SessionScratchErrorV1::QuotaExceeded {
-            scope: SessionScratchQuotaScopeV1::Workspace,
-            used: reserved,
-            limit: max,
-        },
-        QuotaErrorV1::EntryExceeded { reserved, max, .. } => SessionScratchErrorV1::QuotaExceeded {
-            scope: SessionScratchQuotaScopeV1::Session,
-            used: reserved,
-            limit: max,
-        },
+        QuotaErrorV1::ReservationExceeded { reserved, max, .. } => ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Workspace,
+            usage_bytes: reserved,
+            quota_bytes: max,
+        }
+        .into(),
+        QuotaErrorV1::WorkspaceOvercommit {
+            used,
+            incoming,
+            cap,
+        } => ScratchQuotaExceededError {
+            scope: ScratchQuotaScope::Workspace,
+            usage_bytes: used.saturating_add(incoming),
+            quota_bytes: cap,
+        }
+        .into(),
+        QuotaErrorV1::EntryExceeded { reserved, max, .. } => {
+            let observed = usize::try_from(reserved);
+            let limit = usize::try_from(max);
+            match (observed, limit) {
+                (Ok(observed), Ok(limit)) => {
+                    SessionScratchErrorV1::EntryLimitExceeded { limit, observed }
+                }
+                _ => SessionScratchErrorV1::Filesystem(format!(
+                    "session scratch entry counts exceed platform range: observed={reserved} limit={max}"
+                )),
+            }
+        }
         other => SessionScratchErrorV1::Filesystem(other.to_string()),
     }
 }

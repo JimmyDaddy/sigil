@@ -4,12 +4,13 @@ use std::{fs, sync::Arc, time::SystemTime};
 use std::{path::Path, time::Duration};
 
 use anyhow::Result;
-use sigil_kernel::private_path_permissions_are_restricted;
+use sigil_kernel::resource::{ScratchQuotaExceededError, ScratchQuotaScope};
+use sigil_kernel::{ToolErrorKind, ToolResultStatus, private_path_permissions_are_restricted};
 
 use crate::scratch_namespace::{
-    ScratchGcConfig, ScratchNamespaceControl, ScratchQuota, ScratchQuotaExceededError,
-    ScratchQuotaScope, ScratchTaskLeaseRegistry, ScratchUsage, delete_session_scratch_namespace,
-    ensure_session_scratch, gc_scratch_namespaces, measure_scratch_usage, session_scratch_dir,
+    ScratchGcConfig, ScratchNamespaceControl, ScratchQuota, ScratchTaskLeaseRegistry, ScratchUsage,
+    delete_session_scratch_namespace, ensure_session_scratch, gc_scratch_namespaces,
+    measure_scratch_usage, scratch_provision_error_result, session_scratch_dir,
     session_scratch_key,
 };
 
@@ -203,7 +204,10 @@ fn quota_exceeded_is_structured_and_releases_deterministically() -> Result<()> {
     assert_eq!(quota_error.scope, ScratchQuotaScope::Session);
     assert_eq!(quota_error.usage_bytes, 32);
     assert_eq!(quota_error.quota_bytes, 16);
-    assert!(quota_error.to_string().contains("reset scratch storage"));
+    assert_eq!(
+        quota_error.to_string(),
+        "scratch quota exceeded (session): 32 bytes used of 16 bytes allowed"
+    );
 
     // Releasing space makes the next provision succeed deterministically.
     fs::remove_file(namespace.join("blob"))?;
@@ -237,6 +241,69 @@ fn workspace_hard_cap_spans_all_session_namespaces() -> Result<()> {
     assert_eq!(quota_error.usage_bytes, 24);
     assert_eq!(quota_error.quota_bytes, 16);
     Ok(())
+}
+
+#[test]
+fn quota_projection_adds_recovery_guidance_without_polluting_the_shared_error() {
+    let payload = ScratchQuotaExceededError {
+        scope: ScratchQuotaScope::Workspace,
+        usage_bytes: 24,
+        quota_bytes: 16,
+    };
+    assert_eq!(
+        payload.to_string(),
+        "scratch quota exceeded (workspace): 24 bytes used of 16 bytes allowed"
+    );
+
+    let result = scratch_provision_error_result(
+        "call-quota".to_owned(),
+        "bash".to_owned(),
+        "cache/tmp",
+        payload.into(),
+    );
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("quota projection must return a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::ScratchQuotaExceeded);
+    assert_eq!(
+        error.message,
+        "scratch quota exceeded (workspace): 24 bytes used of 16 bytes allowed; ask the user to reset scratch storage or remove unneeded scratch files"
+    );
+    assert_eq!(error.details["scope"], "workspace");
+    assert_eq!(error.details["usage_bytes"], 24);
+    assert_eq!(error.details["quota_bytes"], 16);
+    assert_eq!(error.details["recovery"]["automatic"], false);
+    assert_eq!(error.details["recovery"]["requires_confirmation"], true);
+}
+
+#[test]
+fn entry_limit_projection_preserves_counts_without_byte_quota_details() {
+    let result = scratch_provision_error_result(
+        "call-entry-limit".to_owned(),
+        "bash".to_owned(),
+        "cache/tmp",
+        crate::ScratchMeasurementError::EntryLimitExceeded {
+            limit: 250_000,
+            observed_entries: 250_001,
+        }
+        .into(),
+    );
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("entry limit must be a structured tool error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::ResourceLimit);
+    assert_eq!(
+        error.details["reason_code"],
+        "scratch_measurement_limit_exceeded"
+    );
+    assert_eq!(error.details["measurement"]["limit_kind"], "entries");
+    assert_eq!(error.details["measurement"]["limit"], 250_000);
+    assert_eq!(error.details["measurement"]["observed_entries"], 250_001);
+    assert!(error.details.get("usage_bytes").is_none());
+    assert!(error.details.get("quota_bytes").is_none());
+    assert!(!error.retryable);
+    assert_eq!(error.details["recovery"]["automatic"], false);
+    assert_eq!(error.details["recovery"]["requires_confirmation"], true);
 }
 
 #[test]

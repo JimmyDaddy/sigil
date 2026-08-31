@@ -11,7 +11,6 @@ use anyhow::{Result, anyhow};
 
 use sigil_resource_authority::session_scratch::{
     SessionScratchAuthorityV1, SessionScratchDeleteOutcomeV1, SessionScratchGcConfigV1,
-    SessionScratchQuotaScopeV1,
 };
 
 #[derive(Debug, Clone)]
@@ -140,19 +139,19 @@ impl sigil_tools_builtin::ScratchNamespaceProvider for AuthorityScratchNamespace
 fn authority_error(
     error: sigil_resource_authority::session_scratch::SessionScratchErrorV1,
 ) -> anyhow::Error {
-    if let sigil_resource_authority::session_scratch::SessionScratchErrorV1::QuotaExceeded {
-        scope,
-        used,
-        limit,
-    } = error
-    {
-        let scope = match scope {
-            SessionScratchQuotaScopeV1::Session => "session",
-            SessionScratchQuotaScopeV1::Workspace => "workspace",
-        };
-        anyhow!("scratch quota exceeded ({scope}): {used} bytes used of {limit} bytes allowed")
-    } else {
-        anyhow!(error)
+    match error {
+        sigil_resource_authority::session_scratch::SessionScratchErrorV1::QuotaExceeded(
+            payload,
+        ) => payload.into(),
+        sigil_resource_authority::session_scratch::SessionScratchErrorV1::EntryLimitExceeded {
+            limit,
+            observed,
+        } => sigil_tools_builtin::ScratchMeasurementError::EntryLimitExceeded {
+            limit,
+            observed_entries: observed,
+        }
+        .into(),
+        error => anyhow!(error),
     }
 }
 

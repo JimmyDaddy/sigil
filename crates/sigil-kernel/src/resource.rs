@@ -504,6 +504,50 @@ pub enum ResourceQuotaClassV1 {
     Quarantine,
 }
 
+/// Scope of a measured scratch byte-capacity failure, not a permission or retry decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScratchQuotaScope {
+    /// The current session namespace exceeded its byte cap.
+    Session,
+    /// The workspace scratch namespaces exceeded their aggregate byte cap.
+    Workspace,
+}
+
+impl ScratchQuotaScope {
+    /// Stable label used by the existing structured tool-error details.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+impl fmt::Display for ScratchQuotaScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Pathless byte-capacity failure shared by Resource Authority, runtime and tools.
+///
+/// This process-local error preserves measured numbers across adapters. It neither grants
+/// permission to reset storage nor defines a durable recovery record; the tool layer owns
+/// user guidance and the existing recovery protocol remains authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "scratch quota exceeded ({scope}): {usage_bytes} bytes used of {quota_bytes} bytes allowed"
+)]
+pub struct ScratchQuotaExceededError {
+    /// The narrowest measured byte cap that was exceeded.
+    pub scope: ScratchQuotaScope,
+    /// Observed or accounted scratch bytes in that scope.
+    pub usage_bytes: u64,
+    /// Allowed scratch bytes in the same scope.
+    pub quota_bytes: u64,
+}
+
 /// Closed quota profile. Units are bytes / entries / holders / milliseconds.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -1022,3 +1066,7 @@ pub enum IssuedExecutionAdmissionBundleV1 {
         resource_capability: OpaqueResourceId,
     },
 }
+
+#[cfg(test)]
+#[path = "tests/scratch_quota_tests.rs"]
+mod scratch_quota_tests;

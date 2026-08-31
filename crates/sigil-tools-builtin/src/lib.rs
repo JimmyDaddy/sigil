@@ -47,9 +47,9 @@ pub use registry::{
     register_builtin_tools_with_paths_execution_backend_execution_config_and_terminal_lifecycle_factory,
 };
 pub use scratch_namespace::{
-    ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport, ScratchNamespaceControl,
-    ScratchNamespaceLease, ScratchNamespaceLeaseRegistry, ScratchNamespaceProvider,
-    ScratchNamespaceProviderLease, ScratchQuota, ScratchQuotaExceededError, ScratchQuotaScope,
+    ScratchDeleteOutcome, ScratchGcConfig, ScratchGcReport, ScratchMeasurementError,
+    ScratchNamespaceControl, ScratchNamespaceLease, ScratchNamespaceLeaseRegistry,
+    ScratchNamespaceProvider, ScratchNamespaceProviderLease, ScratchQuota,
     ScratchTaskLeaseRegistry, ScratchUsage, SessionScratchProvision, session_scratch_key,
 };
 pub use terminal_process::{

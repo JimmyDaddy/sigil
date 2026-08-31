@@ -1450,6 +1450,83 @@ fn unavailable_artifact_display_never_advertises_has_more() -> Result<()> {
 }
 
 #[test]
+fn scratch_quota_error_details_survive_v3_facts_model_and_safe_display_projection() -> Result<()> {
+    let (temp, store) = store_fixture()?;
+    let host_path = temp.path().to_string_lossy().into_owned();
+
+    for (scope, usage_bytes, quota_bytes) in [
+        (crate::resource::ScratchQuotaScope::Session, 32, 16),
+        (crate::resource::ScratchQuotaScope::Workspace, 24, 16),
+    ] {
+        let quota = crate::resource::ScratchQuotaExceededError {
+            scope,
+            usage_bytes,
+            quota_bytes,
+        };
+        let message = format!(
+            "{quota}; ask the user to reset scratch storage or remove unneeded scratch files"
+        );
+        let details = serde_json::json!({
+            "scope": scope.as_str(),
+            "usage_bytes": usage_bytes,
+            "quota_bytes": quota_bytes,
+            "scratch_label": "cache/tmp",
+            "recovery": {
+                "user_action": "reset_scratch_storage",
+                "automatic": false,
+                "requires_confirmation": true,
+            },
+        });
+        let result = ToolResult::error(
+            format!("call-quota-{}", scope.as_str()),
+            "bash",
+            ToolErrorKind::ScratchQuotaExceeded,
+            &message,
+        )
+        .with_error_details(false, details.clone());
+
+        let (recorded, display) = ToolResultRecordedV3::capture(
+            &result,
+            Some(&store),
+            ToolArtifactSensitivity::Ordinary,
+        )?;
+        let facts_error = recorded
+            .facts
+            .error
+            .as_ref()
+            .expect("quota error must survive in V3 facts");
+        assert_eq!(facts_error.kind, ToolErrorKind::ScratchQuotaExceeded);
+        assert_eq!(facts_error.message, message);
+        assert_eq!(facts_error.details, details);
+        assert_eq!(recorded.facts.status, "error");
+        assert_eq!(
+            recorded.wire_semantics.outcome,
+            ToolResultOutcomeV1::ToolError
+        );
+        assert_eq!(
+            recorded.wire_semantics.error_kind,
+            Some(ToolErrorKind::ScratchQuotaExceeded)
+        );
+
+        let model: serde_json::Value = serde_json::from_str(&recorded.model_content()?)?;
+        assert_eq!(model["facts"]["status"], "error");
+        assert_eq!(model["facts"]["error"]["kind"], "scratch_quota_exceeded");
+        assert_eq!(model["facts"]["error"]["message"], message);
+        assert_eq!(model["facts"]["error"]["details"], details);
+
+        assert_eq!(display.status_label, "error");
+        assert_eq!(recorded.display_view(), display);
+        assert!(display.preview.contains("scratch quota exceeded"));
+        assert!(display.preview.contains("reset scratch storage"));
+        assert!(display.summary.starts_with("bash error ("));
+
+        let encoded = serde_json::to_string(&recorded)?;
+        assert!(!encoded.contains(&host_path));
+    }
+    Ok(())
+}
+
+#[test]
 fn oversized_error_message_is_bounded_in_facts_without_failing_capture() -> Result<()> {
     // RFC-0062 5.2/9.5: a large tool error body must never overflow facts or abort the run;
     // the error summary is capped at 1 KiB with UTF-8-safe truncation while the full body
