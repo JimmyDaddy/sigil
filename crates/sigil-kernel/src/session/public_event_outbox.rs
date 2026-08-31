@@ -53,6 +53,7 @@ impl PublicEventOutboxProjectionV1 {
             projection.apply_record(record)?;
         }
         projection.validate_terminal_pairs(records)?;
+        super::control_publication::validate_control_publication_pairs(records, &projection)?;
         super::plan_review_terminal::validate_revision_pairs(records, &projection)?;
         Ok(projection)
     }
@@ -208,6 +209,8 @@ pub(super) struct PublicEventOutboxAdmissionIndexV1 {
     entries: BTreeMap<String, PublicEventOutboxIdentityV1>,
     run_watermarks: BTreeMap<String, u64>,
     deliveries: BTreeSet<(String, String)>,
+    active_run_ids: BTreeSet<String>,
+    active_run_admission_degraded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +248,20 @@ impl PublicEventOutboxAdmissionIndexV1 {
 
     pub(super) fn durable_sequence(&self, run_id: &str) -> u64 {
         self.run_watermarks.get(run_id).copied().unwrap_or(0)
+    }
+
+    /// Requires a run whose durable lifecycle has started and has not yet finalized.
+    ///
+    /// This is intentionally an admission cache rather than a second run authority: it is
+    /// rebuilt from the append-only lifecycle records under the same writer lock.
+    pub(super) fn require_active_run(&self, run_id: &str) -> Result<()> {
+        if self.active_run_admission_degraded {
+            bail!("public control publication cannot verify its active durable run");
+        }
+        if run_id.trim().is_empty() || !self.active_run_ids.contains(run_id) {
+            bail!("public control publication requires an active durable run");
+        }
+        Ok(())
     }
 
     pub(super) fn admit_outbox(
@@ -333,6 +350,12 @@ impl PublicEventOutboxAdmissionIndexV1 {
         {
             return Ok(());
         }
+        if apply_public_run_admission_record(&mut self.active_run_ids, record).is_err() {
+            // Generic session appends intentionally accept raw records and leave strict schema
+            // rejection to their owning replay projection. This cache must not change that
+            // boundary, but it also cannot prove an active run after a malformed lifecycle.
+            self.active_run_admission_degraded = true;
+        }
         match event.event_kind() {
             Some(DurableEventType::PublicEventOutbox) => {
                 let entry = decode(event)?;
@@ -373,6 +396,49 @@ impl PublicEventOutboxAdmissionIndexV1 {
         }
         Ok(())
     }
+}
+
+/// Advances the payload-free active-run admission state from one durable record.
+///
+/// Root runs use their explicit lifecycle envelopes. Revision runs have no root lifecycle
+/// record, so their actual review-attempt transition is the durable lifecycle authority. A
+/// waiting revision deliberately remains active because it may be answered and resumed.
+pub(super) fn apply_public_run_admission_record(
+    active_run_ids: &mut BTreeSet<String>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    if let Some(DurableEventType::RunStatusChanged | DurableEventType::RunFinalized) =
+        record.stored_event().event_kind()
+        && let Some(lifecycle) = crate::conversation_run_lifecycle_record_from_stream(record)?
+    {
+        match lifecycle {
+            crate::ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started) => {
+                active_run_ids.insert(started.run_id().to_owned());
+            }
+            crate::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized) => {
+                active_run_ids.remove(finalized.run_id());
+            }
+        }
+    }
+
+    if record.stored_event().event_kind() != Some(DurableEventType::PlanReviewAttempt) {
+        return Ok(());
+    }
+    let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) =
+        record.session_log_entry()?
+    else {
+        return Ok(());
+    };
+    if attempt.revision_request_id.is_none() {
+        return Ok(());
+    }
+    let run_id = super::plan_review_terminal::plan_review_revision_run_id(&attempt);
+    if attempt.status == crate::PlanReviewAttemptStatus::Started {
+        active_run_ids.insert(run_id);
+    } else if super::plan_review_terminal::is_revision_terminal(&attempt) {
+        active_run_ids.remove(&run_id);
+    }
+    Ok(())
 }
 
 impl From<&PublicEventOutboxEntryV1> for PublicEventOutboxIdentityV1 {
@@ -455,9 +521,6 @@ pub(crate) fn validate_outbox_entry(entry: &PublicEventOutboxEntryV1) -> Result<
         serde_json::to_vec(&entry.event).context("failed to encode public outbox payload")?;
     if entry.payload_digest != crate::stable_event_hash(&encoded) {
         bail!("public event outbox payload digest does not match its event");
-    }
-    if !is_terminal_event(&entry.event.event) && entry.domain_event_id != entry.public_event_id {
-        bail!("nonterminal public event must self-reference its durable publication");
     }
     Ok(())
 }

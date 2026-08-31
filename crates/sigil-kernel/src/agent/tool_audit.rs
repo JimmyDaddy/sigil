@@ -260,8 +260,7 @@ pub(super) fn append_tool_approval_policy_audit<H: EventHandler>(
         grant_id: session_grant_source.map(|grant| grant.grant_id.clone()),
         prepared_digest,
     }));
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 pub(super) fn append_tool_permission_plan_audit<H: EventHandler>(
@@ -273,8 +272,7 @@ pub(super) fn append_tool_permission_plan_audit<H: EventHandler>(
     let control = ControlEntry::ToolPermissionPlannedV2(Box::new(
         crate::ToolPermissionPlannedV2Entry::from_plan(&call.id, plan)?,
     ));
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 fn append_tool_approval_audit_entry(
@@ -407,8 +405,7 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         expires: ToolApprovalSessionGrantExpiry::Session,
         granted_at_ms: super::unix_time_ms(),
     });
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 pub(super) fn append_tool_execution_audit(
@@ -770,8 +767,7 @@ pub(super) fn append_tool_execution_started_audit(
         error: None,
         model_content_hash: None,
     }));
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 pub(super) fn append_terminal_task_control_from_result(
@@ -783,8 +779,7 @@ pub(super) fn append_terminal_task_control_from_result(
         return Ok(None);
     };
     let control = ControlEntry::TerminalTask(entry.clone());
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))?;
+    handler.commit_controls(session, vec![control])?;
     Ok(Some(entry))
 }
 

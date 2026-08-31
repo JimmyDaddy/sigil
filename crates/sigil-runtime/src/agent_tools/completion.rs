@@ -471,8 +471,7 @@ fn append_joined_child_interrupted(
             updated_at_ms: Some(unix_time_ms()),
         }),
     ] {
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+        handler.commit_controls(session, vec![control])?;
     }
     Ok(())
 }
@@ -490,7 +489,6 @@ pub(super) fn append_agent_result_continuation(
         reason,
         updated_at_ms: Some(unix_time_ms()),
     });
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))?;
+    handler.commit_controls(session, vec![control])?;
     Ok(())
 }

@@ -99,10 +99,7 @@ impl AgentToolRuntime {
                 reason: Some(reason),
                 updated_at_ms: Some(unix_time_ms()),
             });
-            if let Err(error) = session
-                .append_control(status.clone())
-                .and_then(|()| handler.handle(RunEvent::Control(status)))
-            {
+            if let Err(error) = handler.commit_controls(session, vec![status]) {
                 return ToolResult::error(
                     call.id.clone(),
                     call.name.clone(),
@@ -328,10 +325,7 @@ impl AgentToolRuntime {
             truncated: result_page.truncated,
             delivered_at_ms: None,
         });
-        if let Err(error) = session
-            .append_control(delivery.clone())
-            .and_then(|()| handler.handle(RunEvent::Control(delivery)))
-        {
+        if let Err(error) = handler.commit_controls(session, vec![delivery]) {
             return ToolResult::error(
                 call.id.clone(),
                 call.name.clone(),
@@ -569,10 +563,7 @@ impl AgentToolRuntime {
             updated_at_ms: Some(unix_time_ms()),
         });
         for control in [terminal, interrupted] {
-            if let Err(error) = session
-                .append_control(control.clone())
-                .and_then(|()| handler.handle(RunEvent::Control(control)))
-            {
+            if let Err(error) = handler.commit_controls(session, vec![control]) {
                 return ToolResult::error(
                     call.id.clone(),
                     call.name.clone(),

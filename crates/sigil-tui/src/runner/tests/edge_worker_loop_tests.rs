@@ -35,6 +35,7 @@ use super::{
         LocalOperationKind, LocalOperationStatus, McpActivationStatus, WorkerCommand,
         WorkerCommandSender, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
+        event_bridge::ChannelEventHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
         worker_event::WorkerMcpRuntimeEventSender,
@@ -77,6 +78,8 @@ fn commit_explicit_plan_review_draft(
         workspace_snapshot_id.clone(),
         1,
     )?;
+    let mut handler = sigil_kernel::NoopEventHandler;
+    PlanReviewCoordinator::ensure_attempt_started(session, &request, &mut handler, 2)?;
     let draft = plan_draft_created_entry_with_plan_id(
         request.plan_id.clone(),
         plan_text,
@@ -115,6 +118,7 @@ fn commit_explicit_plan_review_draft(
             )),
             session_scope_id: Some(session.session_scope_id().to_owned()),
         },
+        &mut handler,
         3,
     )?;
     Ok(draft)
@@ -908,6 +912,8 @@ fn resolve_continue_task_rejects_an_exact_cancelled_task() -> Result<()> {
 #[test]
 fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
+    let (event_tx, _event_rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(event_tx);
     let task_id = TaskId::new("task_1")?;
     let step_ids = [TaskStepId::new("step_1")?, TaskStepId::new("step_2")?];
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
@@ -968,6 +974,7 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
 
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         &mut session,
+        &mut handler,
         None,
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Cancelled,
         "user explicitly cancelled the task",
@@ -1014,6 +1021,8 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
 #[test]
 fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
+    let (event_tx, _event_rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(event_tx);
     let task_id = TaskId::new("task_1")?;
     let step_id = TaskStepId::new("step_1")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
@@ -1073,7 +1082,8 @@ fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
         reason: None,
     }))?;
 
-    append_paused_task_state(&mut session, task_id.as_str()).map_err(anyhow::Error::msg)?;
+    append_paused_task_state(&mut session, &mut handler, task_id.as_str())
+        .map_err(anyhow::Error::msg)?;
 
     let projection = session.task_state_projection();
     let task = projection.tasks.get(&task_id).expect("paused task");
@@ -1109,6 +1119,8 @@ fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
 #[test]
 fn stopped_task_run_is_interrupted_and_remains_continuable() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
+    let (event_tx, _event_rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(event_tx);
     let task_id = TaskId::new("task_stopped")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -1121,6 +1133,7 @@ fn stopped_task_run_is_interrupted_and_remains_continuable() -> Result<()> {
 
     append_interrupted_task_state(
         &mut session,
+        &mut handler,
         Some(task_id.as_str()),
         "task run stopped from TUI; task remains available to continue",
     )

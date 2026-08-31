@@ -67,8 +67,8 @@ use crate::{
 use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
-    PendingConversationInputProvider, TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT,
-    build_task_step_checkpoint, emit_tool_result,
+    PendingConversationInputProvider, RoutingMicroturnEventFilter,
+    TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, build_task_step_checkpoint, emit_tool_result,
 };
 
 /// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
@@ -2544,6 +2544,60 @@ impl EventHandler for RecordingEventHandler {
         self.events.push(event);
         Ok(())
     }
+}
+
+#[derive(Default)]
+struct CommitControlsRecordingEventHandler {
+    events: Vec<RunEvent>,
+    committed_batches: Vec<Vec<ControlEntry>>,
+}
+
+impl EventHandler for CommitControlsRecordingEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn commit_controls(
+        &mut self,
+        session: &mut Session,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<crate::StoredEvent>> {
+        self.committed_batches.push(controls.clone());
+        let events = session.append_controls_with_events(controls.clone())?;
+        for control in controls {
+            self.handle(RunEvent::Control(control))?;
+        }
+        Ok(events)
+    }
+}
+
+#[test]
+fn routing_microturn_filter_forwards_control_commits_to_its_inner_handler() -> Result<()> {
+    let mut session = Session::new("mock-routing-filter", "mock-model");
+    let mut inner = CommitControlsRecordingEventHandler::default();
+    {
+        let mut filter = RoutingMicroturnEventFilter::new(&mut inner, true);
+        filter.commit_controls(
+            &mut session,
+            vec![ControlEntry::Note {
+                kind: "routing_control".to_owned(),
+                data: json!({"source": "test"}),
+            }],
+        )?;
+    }
+
+    assert_eq!(inner.committed_batches.len(), 1);
+    assert!(matches!(
+        inner.committed_batches[0].as_slice(),
+        [ControlEntry::Note { kind, data }]
+            if kind == "routing_control" && data["source"] == "test"
+    ));
+    assert!(matches!(
+        session.entries(),
+        [SessionLogEntry::Control(ControlEntry::Note { kind, .. })] if kind == "routing_control"
+    ));
+    Ok(())
 }
 
 struct SessionReadLockingEventHandler {
@@ -5998,7 +6052,7 @@ async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()>
         ToolRegistry::new(),
     );
     let mut session = Session::new("mock-guidance", "mock-model");
-    let mut handler = crate::event::NoopEventHandler;
+    let mut handler = CommitControlsRecordingEventHandler::default();
     let exact_guidance = "请把验证顺序放到实现之前，而不是扩大任务范围";
 
     let output = agent
@@ -6060,6 +6114,13 @@ async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()>
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                if plan.plan_version == 2 && plan.status == TaskPlanStatus::Accepted
+        )
+    }));
+    assert!(handler.committed_batches.iter().any(|controls| {
+        matches!(
+            controls.as_slice(),
+            [ControlEntry::TaskGuidanceApplied(_), ControlEntry::TaskPlan(plan)]
                 if plan.plan_version == 2 && plan.status == TaskPlanStatus::Accepted
         )
     }));
@@ -8741,7 +8802,7 @@ async fn chat_decision_records_route_decision_without_effect_authority() -> Resu
             },
         )))
         .with_cancellation(cancellation_owner.handle());
-    let mut handler = RecordingEventHandler::default();
+    let mut handler = CommitControlsRecordingEventHandler::default();
 
     let output = agent
         .run_with_input(
@@ -8781,6 +8842,13 @@ async fn chat_decision_records_route_decision_without_effect_authority() -> Resu
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].route, ConversationRoute::Chat);
     assert!(decisions[0].reason_codes.is_empty());
+    assert!(handler.committed_batches.iter().any(|controls| {
+        matches!(
+            controls.as_slice(),
+            [ControlEntry::ConversationRouteDecisionRecorded(decision)]
+                if decision.route == ConversationRoute::Chat
+        )
+    }));
     assert!(session.entries().iter().all(|entry| !matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))

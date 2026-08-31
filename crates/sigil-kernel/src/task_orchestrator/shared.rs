@@ -8,8 +8,7 @@ pub(super) fn append_task_control<H>(
 where
     H: EventHandler + Send,
 {
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 pub(super) fn append_task_controls<H>(
@@ -20,14 +19,9 @@ pub(super) fn append_task_controls<H>(
 where
     H: EventHandler + Send,
 {
-    // A multi-control task transition is one recovery contract. `append_controls` uses the
-    // writer's crash-safe bundle intent, whereas the mixed direct-event API intentionally does
-    // not. Never weaken an all-control transition by routing it through the mixed API.
-    session.append_controls(controls.clone())?;
-    for control in controls {
-        handler.handle(RunEvent::Control(control))?;
-    }
-    Ok(())
+    // A multi-control task transition is one recovery contract. The event-handler commit
+    // boundary coordinates the session writer's crash-safe bundle intent with matching delivery.
+    handler.commit_controls(session, controls).map(|_| ())
 }
 
 pub(super) fn append_task_control_with_event<H>(
@@ -38,9 +32,8 @@ pub(super) fn append_task_control_with_event<H>(
 where
     H: EventHandler + Send,
 {
-    let event = session.append_control_with_event(control.clone())?;
-    handler.handle(RunEvent::Control(control))?;
-    Ok(event)
+    let mut events = handler.commit_controls(session, vec![control])?;
+    Ok(events.pop())
 }
 
 pub(super) fn append_task_run<H>(

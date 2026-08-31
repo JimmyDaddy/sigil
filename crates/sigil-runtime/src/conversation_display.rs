@@ -416,17 +416,18 @@ struct ConversationTaskControlProjection {
 }
 
 impl ConversationTaskControlProjection {
-    fn apply_entry(&mut self, entry: &SessionLogEntry) {
+    fn apply_entry(&mut self, entry: &SessionLogEntry) -> Result<()> {
         match entry {
             SessionLogEntry::User(_) => self.clear_current(),
-            SessionLogEntry::Control(control) => self.apply_control(control),
+            SessionLogEntry::Control(control) => self.apply_control(control)?,
             SessionLogEntry::Assistant(_)
             | SessionLogEntry::ToolResultV3(_)
             | SessionLogEntry::RuntimeContextSnapshotV2(_) => {}
         }
+        Ok(())
     }
 
-    fn apply_control(&mut self, control: &ControlEntry) {
+    fn apply_control(&mut self, control: &ControlEntry) -> Result<()> {
         match control {
             ControlEntry::ConversationInputPromoted(_) => self.clear_current(),
             ControlEntry::PlanDraftCreated(_) => self.clear_current(),
@@ -509,9 +510,10 @@ impl ConversationTaskControlProjection {
             }
             _ => {}
         }
-        for event in self.events.project_control(control) {
+        for event in self.events.project_control(control)? {
             self.apply_event(event);
         }
+        Ok(())
     }
 
     fn current(&self) -> Option<ConversationTaskControlV1> {
@@ -1186,7 +1188,7 @@ fn project_record(
     }
 
     if let Some(entry) = record.session_log_entry()? {
-        task_control.apply_entry(&entry);
+        task_control.apply_entry(&entry)?;
         return project_session_entry(
             record,
             expected_scope,

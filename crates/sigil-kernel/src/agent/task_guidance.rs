@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    ControlEntry, EventHandler, RunEvent, Session, TASK_GUIDANCE_APPLY_TOOL_NAME,
+    ControlEntry, EventHandler, Session, TASK_GUIDANCE_APPLY_TOOL_NAME,
     TaskGuidanceAssessmentContext, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult,
     ToolResultMeta, task_guidance_applied_entry, task_guidance_apply_result_content,
 };
@@ -36,11 +36,8 @@ where
         Ok(entry) => {
             accepted = true;
             let decision = ControlEntry::TaskGuidanceApplied(entry.clone());
-            session.append_control(decision.clone())?;
-            handler.handle(RunEvent::Control(decision))?;
             let plan = ControlEntry::TaskPlan(context.accepted_plan.clone());
-            session.append_control(plan.clone())?;
-            handler.handle(RunEvent::Control(plan))?;
+            handler.commit_controls(session, vec![decision, plan])?;
             let result = ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),

@@ -273,34 +273,34 @@ pub struct PublicTaskEventProjector {
 
 impl PublicTaskEventProjector {
     /// Projects one control entry into zero or more public task events.
-    #[must_use]
-    pub fn project_control(&mut self, control: &ControlEntry) -> Vec<PublicRunEventKind> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a lifecycle cannot be applied to the previously observed prefix.
+    pub fn project_control(
+        &mut self,
+        control: &ControlEntry,
+    ) -> anyhow::Result<Vec<PublicRunEventKind>> {
         if let Some(entry) = crate::UserInputLifecycleEntryV1::from_control(control) {
             let identity = entry.identity().clone();
             let request_hash = entry.request_hash().to_owned();
-            if let Err(error) = self.user_inputs.apply(entry) {
-                return vec![PublicRunEventKind::RunFailed {
-                    error: format!("invalid durable user input lifecycle: {error}"),
-                }];
-            }
+            self.user_inputs.apply(entry)?;
             let Some(request) = self
                 .user_inputs
                 .request(&identity)
                 .map(crate::UserInputRequestStateV1::public_view)
             else {
-                return vec![PublicRunEventKind::RunFailed {
-                    error: "durable user input lifecycle lost its projected request".to_owned(),
-                }];
+                anyhow::bail!("durable user input lifecycle lost its projected request");
             };
-            return vec![PublicRunEventKind::UserInputChanged {
+            return Ok(vec![PublicRunEventKind::UserInputChanged {
                 request_id: identity.request_id.as_str().to_owned(),
                 generation: identity.generation,
                 request_hash,
                 status: request.status,
                 request: Box::new(request),
-            }];
+            }]);
         }
-        match control {
+        Ok(match control {
             ControlEntry::ConversationRouteDecisionRecorded(entry) => {
                 vec![PublicRunEventKind::ConversationRouteChanged {
                     decision_id: entry.decision_id.as_str().to_owned(),
@@ -424,7 +424,7 @@ impl PublicTaskEventProjector {
             }
             ControlEntry::IntegrationLaneChanged(entry) => {
                 let Some(plan) = self.integration_plans.get(entry.plan_id.as_str()) else {
-                    return Vec::new();
+                    return Ok(Vec::new());
                 };
                 vec![PublicRunEventKind::IntegrationLaneChanged {
                     task_id: plan.task_id.clone(),
@@ -440,7 +440,7 @@ impl PublicTaskEventProjector {
                 }]
             }
             _ => Vec::new(),
-        }
+        })
     }
 
     fn project_participant(

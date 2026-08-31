@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     ControlEntry, EventHandler, EvidenceScope, IntegrationPlanId, IntegrationPromotionAttemptId,
-    ReadinessInput, ReceiptStatus, RunEvent, RunStatus, Session, TaskParentVerificationRecorded,
+    ReadinessInput, ReceiptStatus, RunStatus, Session, TaskParentVerificationRecorded,
     TrustedCheckSpec, VerificationCheckRunRequest, VerificationPolicy, VerificationRecordedEntry,
     VerificationVerdict, WorkspaceTrust, build_workspace_snapshot, evaluate_readiness,
     run_verification_check, stable_workspace_id,
@@ -209,10 +209,10 @@ where
         recorded_at_unix_ms: unix_time_ms(),
     };
     record.validate()?;
-    session.append_control(ControlEntry::TaskParentVerificationRecorded(record.clone()))?;
-    handler.handle(RunEvent::Control(
-        ControlEntry::TaskParentVerificationRecorded(record.clone()),
-    ))?;
+    handler.commit_controls(
+        session,
+        vec![ControlEntry::TaskParentVerificationRecorded(record.clone())],
+    )?;
     Ok(ParentVerificationRunOutput {
         record,
         cleanup_error,
@@ -292,8 +292,8 @@ where
     H: EventHandler + Send,
 {
     let control = ControlEntry::VerificationRecorded(verification.clone());
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control])?;
+    Ok(())
 }
 
 fn parent_verification_reason(

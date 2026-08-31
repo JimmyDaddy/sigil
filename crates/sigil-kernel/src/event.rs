@@ -1836,7 +1836,7 @@ impl From<RunEvent> for PublicRunEventKind {
     }
 }
 
-fn control_entry_kind(entry: &ControlEntry) -> &'static str {
+pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionIdentity { .. } => "session_identity",
         ControlEntry::SessionModelSelected { .. } => "session_model_selected",
@@ -1996,6 +1996,25 @@ pub trait EventHandler {
     ///
     /// Returns an error when the downstream event consumer fails and the current run should stop.
     fn handle(&mut self, event: RunEvent) -> Result<()>;
+
+    /// Commits an explicitly observable control transition before delivering it. Public
+    /// application bridges override this boundary to append the source and outbox together;
+    /// private child handlers retain their own filtering and never inherit a parent's stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, durable append, or a private consumer fails.
+    fn commit_controls(
+        &mut self,
+        session: &mut crate::Session,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<StoredEvent>> {
+        let events = session.append_controls_with_events(controls.clone())?;
+        for control in controls {
+            self.handle(RunEvent::Control(control))?;
+        }
+        Ok(events)
+    }
 }
 
 /// Event handler that ignores every incoming event.

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    EventHandler, RunEvent, TaskChecklistUpdateContextV1, ToolCall, ToolErrorKind, ToolResult,
+    EventHandler, TaskChecklistUpdateContextV1, ToolCall, ToolErrorKind, ToolResult,
     ToolResultMeta,
     session::{ControlEntry, Session, ToolExecutionStatus},
     task_checklist_update_entry,
@@ -28,10 +28,10 @@ where
     let result = match task_checklist_update_entry(context, call) {
         Ok(entry) => {
             context.current_revision = entry.revision;
-            session.append_control(ControlEntry::TaskChecklistUpdatedV1(entry.clone()))?;
-            handler.handle(RunEvent::Control(ControlEntry::TaskChecklistUpdatedV1(
-                entry.clone(),
-            )))?;
+            handler.commit_controls(
+                session,
+                vec![ControlEntry::TaskChecklistUpdatedV1(entry.clone())],
+            )?;
             let result = ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),

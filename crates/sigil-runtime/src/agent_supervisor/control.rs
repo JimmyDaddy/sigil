@@ -1,7 +1,6 @@
 use anyhow::Result;
 use sigil_kernel::{
-    AgentThreadTerminalStatus, ControlEntry, EventHandler, RunEvent, Session,
-    TaskChildSessionStatus,
+    AgentThreadTerminalStatus, ControlEntry, EventHandler, Session, TaskChildSessionStatus,
 };
 
 pub(super) fn append_control<H>(
@@ -12,8 +11,8 @@ pub(super) fn append_control<H>(
 where
     H: EventHandler + Send + ?Sized,
 {
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control])?;
+    Ok(())
 }
 
 pub(super) fn agent_terminal_status_from_task_child(

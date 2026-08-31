@@ -33,7 +33,7 @@ fn projector_emits_typed_plan_batch_and_step_events_without_raw_detail() -> Resu
             isolation: Some(TaskIsolationMode::SharedReadOnly),
         }],
         reason: Some("raw planner transcript".to_owned()),
-    }));
+    }))?;
 
     assert!(matches!(
         &plan_events[..],
@@ -78,7 +78,7 @@ fn projector_emits_typed_plan_batch_and_step_events_without_raw_detail() -> Resu
             status: TaskParticipantAttemptStatus::Started,
             reason: None,
         },
-    ));
+    ))?;
 
     assert!(attempt_events.iter().any(|event| matches!(
         event,
@@ -129,7 +129,7 @@ fn projector_joins_integration_lane_to_task_without_exposing_private_target() ->
     };
     let phase_events = projector.project_control(&ControlEntry::IntegrationPlanRecorded(
         IntegrationPlanRecorded { plan },
-    ));
+    ))?;
     assert!(matches!(
         &phase_events[..],
         [PublicRunEventKind::TaskPhaseChanged {
@@ -154,7 +154,7 @@ fn projector_joins_integration_lane_to_task_without_exposing_private_target() ->
             verification_check_ids: vec!["check_public".to_owned()],
             reason: None,
         },
-    ));
+    ))?;
 
     assert!(matches!(
         &lane_events[..],

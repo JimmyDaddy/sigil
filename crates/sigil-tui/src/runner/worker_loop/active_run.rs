@@ -305,7 +305,7 @@ pub(in crate::runner) fn cancel_active_run(
                     RunCancellationTerminalOutcome::Cancelled,
                     ActiveRunStopDisposition::PauseTask,
                     RunCancellationTarget::Task { task_id },
-                ) => append_paused_task_state(&mut session, task_id),
+                ) => append_paused_task_state(&mut session, &mut cancel_handler, task_id),
                 (
                     RunCancellationTerminalOutcome::Cancelled,
                     ActiveRunStopDisposition::PauseTask,
@@ -317,6 +317,7 @@ pub(in crate::runner) fn cancel_active_run(
                     RunCancellationTarget::Task { task_id },
                 ) => append_interrupted_task_state(
                     &mut session,
+                    &mut cancel_handler,
                     Some(task_id),
                     "task run stopped from TUI; task remains available to continue",
                 ),
@@ -329,7 +330,12 @@ pub(in crate::runner) fn cancel_active_run(
                     RunCancellationTerminalOutcome::Interrupted,
                     _,
                     RunCancellationTarget::Task { task_id },
-                ) => append_interrupted_task_state(&mut session, Some(task_id), &terminal_reason),
+                ) => append_interrupted_task_state(
+                    &mut session,
+                    &mut cancel_handler,
+                    Some(task_id),
+                    &terminal_reason,
+                ),
                 (
                     RunCancellationTerminalOutcome::Interrupted,
                     _,

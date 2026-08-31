@@ -479,6 +479,13 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         Some(base_snapshot.clone()),
         1,
     )?;
+    let mut handler = sigil_kernel::NoopEventHandler;
+    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(
+        &mut review_session,
+        &review_request,
+        &mut handler,
+        2,
+    )?;
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         review_request.plan_id.clone(),
         &structured_plan_text(
@@ -515,6 +522,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             workspace_id: None,
             session_scope_id: Some("test-session".to_owned()),
         },
+        &mut handler,
         3,
     )?;
 

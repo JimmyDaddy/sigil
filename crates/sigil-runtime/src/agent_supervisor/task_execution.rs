@@ -7,12 +7,12 @@ use sigil_kernel::{
     CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
     DiscoveredCheck, EventHandler, EvidenceScope, RecoverableTaskGuidanceReviewAuthority,
     RootConfig, RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
-    RunCancellationTarget, RunEvent, RunTaskGuard, SandboxProfileRequirement,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus,
-    TaskContinuationSelectedEntry, TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId,
-    TaskParticipantAttemptStatus, TaskPauseRequest, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus,
-    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
+    RunCancellationTarget, RunTaskGuard, SandboxProfileRequirement, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskContinuationSelectedEntry,
+    TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptStatus,
+    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
+    VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
     discover_candidate_checks_with_user_config, recoverable_task_guidance,
     recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
     safe_persistence_text, stable_workspace_id,
@@ -352,12 +352,16 @@ pub(crate) fn task_id_for_cancellation_scope(
 ///
 /// Returns a stable error when the exact Task is absent or no longer running, or when the complete
 /// append-only transition cannot be persisted.
-pub fn append_task_stop_state(
+pub fn append_task_stop_state<H>(
     session: &mut Session,
+    handler: &mut H,
     exact_task_id: Option<&TaskId>,
     disposition: TaskStopDisposition,
     reason: &str,
-) -> std::result::Result<Option<AppendedTaskStopState>, TaskStopStateError> {
+) -> std::result::Result<Option<AppendedTaskStopState>, TaskStopStateError>
+where
+    H: EventHandler + ?Sized,
+{
     let projection = session.task_state_projection();
     let task =
         match exact_task_id {
@@ -448,8 +452,8 @@ pub fn append_task_stop_state(
         status,
         reason: Some(safe_reason),
     }));
-    session
-        .append_controls(controls.clone())
+    handler
+        .commit_controls(session, controls.clone())
         .map_err(TaskStopStateError::Persistence)?;
     Ok(Some(AppendedTaskStopState {
         task_id,
@@ -721,10 +725,7 @@ where
     if let Some(recovered) = recoverable_review.as_ref() {
         let retry_controls = recoverable_task_guidance_review_retry_controls(session, recovered)?;
         if !retry_controls.is_empty() {
-            session.append_controls(retry_controls.clone())?;
-            for control in retry_controls {
-                handler.handle(RunEvent::Control(control))?;
-            }
+            handler.commit_controls(session, retry_controls)?;
         }
     }
     if explicit_focus_required {
@@ -1028,10 +1029,8 @@ where
         }
         return Ok(());
     }
-    session.append_control(ControlEntry::TaskRunTargetSelected(selected.clone()))?;
-    handler.handle(RunEvent::Control(ControlEntry::TaskRunTargetSelected(
-        selected,
-    )))
+    handler.commit_controls(session, vec![ControlEntry::TaskRunTargetSelected(selected)])?;
+    Ok(())
 }
 
 /// Runs an admitted handoff task and atomically claims the shared root terminal.
@@ -1312,9 +1311,8 @@ where
         controls.push(ControlEntry::VerificationPolicyChanged(policy_entry));
     }
 
-    for control in controls {
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+    if !controls.is_empty() {
+        handler.commit_controls(session, controls)?;
     }
     Ok(())
 }

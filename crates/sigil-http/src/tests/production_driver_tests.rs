@@ -5901,6 +5901,14 @@ fn seed_revision_session(
         100,
     )
     .expect("automatic plan review should prepare");
+    let mut handler = sigil_kernel::NoopEventHandler;
+    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(
+        &mut session_log,
+        &request,
+        &mut handler,
+        105,
+    )
+    .expect("seed executor should mark its plan review attempt started");
     let draft = PlanDraftCreatedEntry {
         plan_id: request.plan_id.clone(),
         schema_version: 2,
@@ -5958,6 +5966,7 @@ fn seed_revision_session(
             workspace_id: None,
             session_scope_id: Some("test-session".to_owned()),
         },
+        &mut handler,
         120,
     )
     .expect("seed draft should commit");

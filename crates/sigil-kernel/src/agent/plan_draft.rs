@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, EventHandler, PlanReviewDraftContext, RunEvent, SUBMIT_PLAN_DRAFT_TOOL_NAME,
-    Session, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
+    ControlEntry, EventHandler, PlanReviewDraftContext, SUBMIT_PLAN_DRAFT_TOOL_NAME, Session,
+    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
     submit_plan_draft_entry,
 };
 
@@ -60,8 +60,7 @@ where
             accepted = true;
             let plan_id = entry.plan_id.as_str().to_owned();
             let control = ControlEntry::PlanDraftCreated(entry);
-            session.append_control(control.clone())?;
-            handler.handle(RunEvent::Control(control))?;
+            handler.commit_controls(session, vec![control])?;
             let result = ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),

@@ -18,6 +18,7 @@ pub struct Session {
     pub(super) runtime_attachments: SessionRuntimeAttachments,
     durable_session_entry_count: Option<u64>,
     reconstruction_records: Option<Arc<[SessionStreamRecord]>>,
+    pub(super) control_public_projection: super::control_publication::ControlPublicProjection,
 }
 
 #[derive(Clone, Default)]
@@ -112,6 +113,7 @@ impl StableCompactionSnapshot {
             runtime_attachments: self.runtime_attachments.clone(),
             durable_session_entry_count: Some(self.durable_session_entry_count),
             reconstruction_records: None,
+            control_public_projection: Default::default(),
         }))
     }
 
@@ -179,6 +181,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            control_public_projection: Default::default(),
         }
     }
 
@@ -196,6 +199,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            control_public_projection: Default::default(),
         }
     }
 
@@ -345,6 +349,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            control_public_projection: Default::default(),
         }
     }
 
@@ -396,6 +401,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: Some(records.into()),
+            control_public_projection: Default::default(),
         })
     }
 
@@ -458,6 +464,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count,
             reconstruction_records: None,
+            control_public_projection: Default::default(),
         };
         if audit_needed {
             session.append_control(unsafe_external_recovery_audit_control())?;
@@ -501,7 +508,7 @@ impl Session {
         Ok(())
     }
 
-    fn advance_durable_session_entry_count(&mut self, events: &[StoredEvent]) {
+    pub(super) fn advance_durable_session_entry_count(&mut self, events: &[StoredEvent]) {
         let Some(previous) = self.durable_session_entry_count else {
             return;
         };
@@ -1063,6 +1070,18 @@ impl Session {
     }
 
     pub fn append_controls(&mut self, controls: Vec<ControlEntry>) -> Result<()> {
+        self.append_controls_with_events(controls).map(|_| ())
+    }
+
+    /// Appends one control transition and returns only its durable domain envelopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty/invalid transition or a failed durable append.
+    pub fn append_controls_with_events(
+        &mut self,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<StoredEvent>> {
         if controls.is_empty() {
             bail!("control append batch must not be empty");
         }
@@ -1081,34 +1100,12 @@ impl Session {
             .map(|store| store.append_session_entry_events(&entries))
             .transpose()?;
         self.entries.extend(entries);
-        if let Some(events) = events {
-            self.advance_durable_session_entry_count(&events);
-        }
-        Ok(())
+        let events = events.unwrap_or_default();
+        self.advance_durable_session_entry_count(&events);
+        Ok(events)
     }
 
-    /// Appends a control entry and returns its durable envelope when this session is store-backed.
-    pub(crate) fn append_control_with_event(
-        &mut self,
-        control: ControlEntry,
-    ) -> Result<Option<StoredEvent>> {
-        control.validate_durable_contract()?;
-        self.validate_user_input_controls(std::iter::once(&control))?;
-        self.validate_plan_controls(std::iter::once(&control))?;
-        let entry = SessionLogEntry::Control(control);
-        let event = self
-            .store
-            .as_ref()
-            .map(|store| store.append_session_entry_event(&entry))
-            .transpose()?;
-        self.entries.push(entry);
-        if let Some(event) = event.as_ref() {
-            self.advance_durable_session_entry_count(std::slice::from_ref(event));
-        }
-        Ok(event)
-    }
-
-    fn validate_user_input_controls<'a>(
+    pub(super) fn validate_user_input_controls<'a>(
         &self,
         controls: impl IntoIterator<Item = &'a ControlEntry>,
     ) -> Result<()> {
@@ -1132,7 +1129,7 @@ impl Session {
         Ok(())
     }
 
-    fn validate_plan_controls<'a>(
+    pub(super) fn validate_plan_controls<'a>(
         &self,
         controls: impl IntoIterator<Item = &'a ControlEntry>,
     ) -> Result<()> {
@@ -1448,6 +1445,7 @@ impl Session {
         }
         self.stats = session_stats_from_entries(&live_entries);
         self.entries = live_entries;
+        self.control_public_projection = Default::default();
         self.durable_session_entry_count = Some(active.durable_session_entry_count());
         true
     }
@@ -1500,6 +1498,7 @@ impl Session {
             }
             self.stats = session_stats_from_entries(&entries);
             self.entries = entries;
+            self.control_public_projection = Default::default();
             self.durable_session_entry_count = Some(snapshot.durable_session_entry_count());
             self.reconstruction_records = None;
             Ok(())

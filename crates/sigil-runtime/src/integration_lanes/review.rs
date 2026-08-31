@@ -379,8 +379,7 @@ where
             continue;
         }
         let control = ControlEntry::ChangeSetApplied(result);
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+        handler.commit_controls(session, vec![control])?;
     }
     Ok(())
 }
@@ -526,8 +525,8 @@ where
             ControlEntry::IntegrationPromotionRecorded(entry)
         }
     };
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control])?;
+    Ok(())
 }
 
 fn integration_review_policy(

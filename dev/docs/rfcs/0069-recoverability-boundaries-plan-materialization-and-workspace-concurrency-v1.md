@@ -946,10 +946,45 @@ PlanReview revision 的独立终态协议（2026-08-31）：
 
 本节冻结 A2 的实施契约，不代表整个 E08 或平台资格化已完成。当前切片覆盖已物化
 public event 的持久化、交付与补发，以及 revision Waiting 原子 bundle；普通 Control
-领域事件提交与 public DTO 物化仍存在先后窗口，TUI 常规 `RunEvent -> WorkerMessage`
+已按下述纯 Control transition 收敛，混合 ToolResult/assistant/provider 写入后的公开
+DTO 物化仍存在先后窗口，TUI 常规 `RunEvent -> WorkerMessage`
 生产链也尚未整体迁入 outbox。approval/tool/route 的 adapter registry 与 broker 恢复也
 尚未完成同源收敛：补发通知不代表审批入口、输入路由或工具状态已经恢复，不得仅因重放
 而重新授予权限。这三项仍属后续整改，不由 consumer replay 冒充完成。
+
+纯 Control transition 的同源提交协议：
+
+- 原本显式 `append_control(s) -> RunEvent::Control` 的生产路径通过
+  `EventHandler::commit_controls` 协调提交；Session/writer 仍是领域写入 owner。
+  public application bridge 使用同一 live sequence 锁，Session 将每个 source Control
+  与它对应的一个或多个 DTO 放入同一个现有 append intent；领域 ID 指向真实 source
+  envelope，多个 DTO 保持投影顺序和连续序号。纯 Control 旧 split producer 退出。
+- Session 公开投影是可重建、增量推进的内存缓存：首次从已有 entries 恢复，再只消费
+  新 entries；它不持有另一个日志/序号 authority。投影候选在写前完成，成功提交后再
+  更新缓存；恢复接管若替换 canonical prefix，则丢弃旧游标并从该已验证前缀重建。
+  无效 user-input lifecycle 返回错误，不能制造 `RunFailed`。
+- 此入口只用于原本显式通知的 controls，不把所有 durable/private Control 自动公开。
+  UserInputChanged 使用无答案的 public view；task/integration 使用既有 typed DTO；
+  ToolExecution 保留现有 HTTP/Desktop 生命周期消费；agent 通知仅保留触发 activity
+  reload 的 kind，不转发 child refs、mailbox 或权限原文。其他未映射 controls 只写领域
+  记录，不再通过通用 serde fallback 公开；整批无 DTO 时不消耗 public sequence。
+  私有 child handler 保持自己的过滤，不能借新接口绑定 parent 的公开 run。
+- 普通 plan review 的 prepare 阶段只校验并构造请求，不提前写 `Started`；实际 executor
+  建立 handler 后提交开始、等待、完成等 parent attempt 状态。draft 与 attempt 的既有
+  Control batch 保持完整，不再先写状态再另行 emit。research/finalizer 的内部 Control
+  只归各自 child session；非 Control 进度沿用既有转发，不能跨 store 声称原子提交。
+  revision Waiting/terminal 仍由既有专用 bundle owner 提交，不套普通 attempt 关闭接口。
+  没有 active run 的普通 research-input 取消仍归 input command owner，返回原 command
+  receipt/entries；它原本不经 `RunEvent::Control` 发布，不能虚构 run handler 或序号来
+  套用此入口。该 command 与运行中显式 Control producer 的职责不得混同。
+- outbox 与 source 共享 correlation chain，故障只恢复原 intent 的完整字节。
+  replay 校验 source 的真实类型、相邻 envelope、同源 DTO 数量/顺序/内容；既有无
+  outbox 的记录不反推或补造通知。正常追加不新增全日志扫描，uncertain append 才
+  校验完整固定-ID batch；stale sequence 不得重复推进 live Session。ID 在首次物理追加
+  前固定；跨进程由 append intent 恢复原字节并重放原 outbox，不重新执行领域 command。
+- ToolResult/assistant/provider 的混合 bundle 不拆散来套这个接口，仍在普通 Control
+  总体缺口清单内。task stop 的 Control 状态同源，不等于所有其他 TaskRunFinished
+  等通知都已与领域写入原子化；approval/tool/route broker、常规 TUI 接管仍未关闭。
 
 - 同一个 session/run 的 public outbox 是公开事件序列的唯一 durable 来源。runtime 的单一
   live producer 只提出下一序号，session writer 在锁内校验；重启从该 durable frontier

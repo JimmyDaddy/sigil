@@ -6,8 +6,8 @@ use crate::{
     ContinueDurableTaskAction, ControlEntry, ConversationTurnRef, EventHandler,
     KEEP_PENDING_PLAN_TOOL_NAME, PendingPlanDecisionRequiredAction, PlanReviewAttemptStatus,
     PlanReviewHandoffBinding, REQUEST_TASK_PLANNING_TOOL_NAME, RUN_PENDING_PLAN_TOOL_NAME,
-    RecoverableTaskGuidanceReviewAuthority, RunEvent, RunPendingPlanAction, Session,
-    SessionLogEntry, StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
+    RecoverableTaskGuidanceReviewAuthority, RunPendingPlanAction, Session, SessionLogEntry,
+    StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
     TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
     TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry,
     TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, ToolCall, ToolErrorKind,
@@ -983,8 +983,7 @@ fn append_control<H>(session: &mut Session, handler: &mut H, control: ControlEnt
 where
     H: EventHandler + Send,
 {
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }
 
 fn append_control_batch<H>(
@@ -995,9 +994,5 @@ fn append_control_batch<H>(
 where
     H: EventHandler + Send,
 {
-    session.append_controls(controls.clone())?;
-    for control in controls {
-        handler.handle(RunEvent::Control(control))?;
-    }
-    Ok(())
+    handler.commit_controls(session, controls).map(|_| ())
 }

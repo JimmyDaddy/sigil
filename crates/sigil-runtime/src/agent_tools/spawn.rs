@@ -1276,8 +1276,8 @@ fn append_control_to_parent(
     handler: &mut (dyn EventHandler + Send),
     control: ControlEntry,
 ) -> Result<()> {
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control])?;
+    Ok(())
 }
 
 fn chat_changeset_only_merge_review_id(

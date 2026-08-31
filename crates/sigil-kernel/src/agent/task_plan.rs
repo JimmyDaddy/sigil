@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    event::{EventHandler, RunEvent},
+    event::EventHandler,
     provider::ToolCall,
     session::{ControlEntry, Session, ToolExecutionStatus},
     task::{
@@ -59,10 +59,7 @@ where
             controls.push(ControlEntry::TaskPlanContractSetCommittedV2(
                 contract_set_commit,
             ));
-            session.append_controls(controls.clone())?;
-            for control in controls {
-                handler.handle(RunEvent::Control(control))?;
-            }
+            handler.commit_controls(session, controls)?;
             let result = ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),

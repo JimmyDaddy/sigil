@@ -125,6 +125,7 @@ mod compaction_v2;
 mod context;
 mod context_projection;
 mod continuity_v2;
+mod control_publication;
 mod conversation_promotion_projection;
 mod conversation_queue_mutation;
 mod conversation_queue_promotion;

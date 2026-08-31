@@ -548,6 +548,15 @@ impl JsonlSessionStore {
     }
 
     /// Appends a provider-visible or control session entry as a v2 stored event.
+    pub(super) fn append_control_publication(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        run_id: &str,
+    ) -> Result<Vec<StoredEvent>> {
+        self.writer.append_control_publication(pending, run_id)
+    }
+
+    /// Appends a provider-visible or control session entry as a v2 stored event.
     pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
         validate_session_entry_durable_contract(entry)?;
         if matches!(

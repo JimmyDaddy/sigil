@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    AgentRole, ControlEntry, ConversationTurnRef, PlanId,
+    AgentRole, ControlEntry, ConversationTurnRef, NoopEventHandler, PlanId,
     ProviderTurnRecoveryTerminalDispositionV1, ProviderTurnRecoveryTerminalError,
     RunCancellationOwner, RunCancellationTarget, Session, SessionLogEntry, SessionRef,
     TaskContinuationControlKind, TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1,
@@ -282,8 +282,10 @@ fn direct_task_pause_and_continuation_bind_the_admission_without_a_plan() -> Res
         scope_id,
         session.entries(),
     )?;
+    let mut handler = NoopEventHandler;
     let stopped = append_task_stop_state(
         &mut session,
+        &mut handler,
         Some(&task_id),
         TaskStopDisposition::Paused,
         "paused from test",
@@ -335,8 +337,10 @@ fn shared_task_stop_transition_closes_steps_before_task_in_one_writer_batch() ->
         }),
     ])?;
 
+    let mut handler = NoopEventHandler;
     let appended = append_task_stop_state(
         &mut session,
+        &mut handler,
         Some(&task_id),
         TaskStopDisposition::Paused,
         "pause after quiescence",

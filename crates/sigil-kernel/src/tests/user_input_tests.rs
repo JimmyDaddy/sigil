@@ -756,7 +756,7 @@ fn public_projector_emits_full_request_without_answer_values() -> Result<()> {
     let decision = submitted_decision(&request)?;
     let mut projector = PublicTaskEventProjector::default();
     let requested =
-        projector.project_control(&ControlEntry::UserInputRequested(Box::new(request.clone())));
+        projector.project_control(&ControlEntry::UserInputRequested(Box::new(request.clone())))?;
     assert!(matches!(
         &requested[..],
         [PublicRunEventKind::UserInputChanged {
@@ -769,13 +769,63 @@ fn public_projector_emits_full_request_without_answer_values() -> Result<()> {
     ));
 
     let accepted =
-        projector.project_control(&ControlEntry::UserInputDecisionAccepted(Box::new(decision)));
+        projector.project_control(&ControlEntry::UserInputDecisionAccepted(Box::new(decision)))?;
     let serialized = serde_json::to_string(&accepted)?;
     assert!(serialized.contains("decision_accepted"));
     assert!(!serialized.contains("kernel and runtime"));
     assert_eq!(
         PublicConversationPhase::AwaitingUserInput.as_str(),
         "awaiting_user_input"
+    );
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_rehydrates_user_input_without_publishing_answer_values() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&crate::ConversationRunStartedEntryV1::new("root_run", 1)?)?;
+    let request = text_request_for_session(&session, "request_1", 1)?;
+    let decision = submitted_decision(&request)?;
+    session.append_controls_with_public_outbox(
+        vec![ControlEntry::UserInputRequested(Box::new(request))],
+        "root_run",
+        1,
+    )?;
+    drop(session);
+    let mut resumed = Session::load_from_store("test", "model", store.clone())?;
+    let (_, public) = resumed.append_controls_with_public_outbox(
+        vec![ControlEntry::UserInputDecisionAccepted(Box::new(decision))],
+        "root_run",
+        2,
+    )?;
+    assert!(matches!(
+        &public[0].event.event,
+        PublicRunEventKind::UserInputChanged {
+            status: UserInputStatusV1::DecisionAccepted,
+            ..
+        }
+    ));
+    let projection =
+        crate::PublicEventOutboxProjectionV1::from_records(&store.read_event_records_writer()?)?;
+    let encoded = serde_json::to_string(&projection.events_in_order())?;
+    assert!(!encoded.contains("kernel and runtime"));
+    assert_eq!(projection.events_in_order().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn invalid_public_control_projection_is_error_not_a_fabricated_run_failure() -> Result<()> {
+    let request = text_request("request_1", 1)?;
+    let decision = submitted_decision(&request)?;
+    assert!(
+        PublicTaskEventProjector::default()
+            .project_control(&ControlEntry::UserInputDecisionAccepted(Box::new(decision)),)
+            .is_err()
     );
     Ok(())
 }

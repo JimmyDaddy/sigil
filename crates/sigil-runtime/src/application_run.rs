@@ -1411,12 +1411,10 @@ impl ApplicationRunControl {
                 .wait_for_quiescence(ticket.remaining_timeout())
                 .await;
             let task_stop = self.append_related_task_stop_state(
+                handler,
                 crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
                 "application Task cancellation request could not be durably audited",
             );
-            if let Ok(Some(task_stop)) = task_stop.as_ref() {
-                self.emit_task_stop_state(handler, task_stop)?;
-            }
             let terminal_event = PublicRunEventKind::RunInterrupted {
                 reason: "run interrupted because its cancellation request could not be audited"
                     .to_owned(),
@@ -1444,7 +1442,8 @@ impl ApplicationRunControl {
         let outcome = self
             .finalize_recorded_cancellation(ticket, execution_joined, conversation_start)
             .await?;
-        let task_stop = self.append_related_task_stop_state(
+        self.append_related_task_stop_state(
+            handler,
             match outcome {
                 RunCancellationTerminalOutcome::Cancelled => {
                     crate::agent_supervisor::task_execution::TaskStopDisposition::Cancelled
@@ -1477,9 +1476,6 @@ impl ApplicationRunControl {
                 },
             ),
         };
-        if let Some(task_stop) = task_stop.as_ref() {
-            self.emit_task_stop_state(handler, task_stop)?;
-        }
         emit_application_conversation_terminal(
             &self.conversation_lifecycle,
             &self.events,
@@ -1530,17 +1526,14 @@ impl ApplicationRunControl {
                 .wait_for_quiescence(cancellation.remaining_timeout())
                 .await;
             let task_stop = self.load_control_session().and_then(|mut session| {
-                crate::agent_supervisor::task_execution::append_task_stop_state(
+                self.append_task_stop_state_and_emit(
                     &mut session,
+                    handler,
                     Some(&request.task_id),
                     crate::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
                     "application Task pause request could not be durably audited",
                 )
-                .map_err(Into::into)
             });
-            if let Ok(Some(task_stop)) = task_stop.as_ref() {
-                self.emit_task_stop_state(handler, task_stop)?;
-            }
             let terminal_event = PublicRunEventKind::RunInterrupted {
                 reason: "Task interrupted because its pause request could not be audited"
                     .to_owned(),
@@ -1595,13 +1588,15 @@ impl ApplicationRunControl {
                 "application Task pause cleanup could not be confirmed".to_owned(),
             ),
         };
-        let task_stop = crate::agent_supervisor::task_execution::append_task_stop_state(
-            &mut session,
-            Some(&request.task_id),
-            disposition,
-            &reason,
-        )?
-        .context("exact application Task was not available during pause finalization")?;
+        let task_stop = self
+            .append_task_stop_state_and_emit(
+                &mut session,
+                handler,
+                Some(&request.task_id),
+                disposition,
+                &reason,
+            )?
+            .context("exact application Task was not available during pause finalization")?;
         let task_status = task_stop.status();
         let (terminal_status, terminal_summary, terminal) = match task_status {
             TaskRunStatus::Paused => (
@@ -1620,7 +1615,6 @@ impl ApplicationRunControl {
             ),
             _ => bail!("application Task pause wrote an invalid terminal status"),
         };
-        self.emit_task_stop_state(handler, &task_stop)?;
         emit_application_conversation_terminal(
             &self.conversation_lifecycle,
             &self.events,
@@ -1695,11 +1689,15 @@ impl ApplicationRunControl {
         Ok(outcome)
     }
 
-    fn append_related_task_stop_state(
+    fn append_related_task_stop_state<H>(
         &self,
+        handler: &mut H,
         disposition: crate::agent_supervisor::task_execution::TaskStopDisposition,
         reason: &str,
-    ) -> Result<Option<crate::agent_supervisor::task_execution::AppendedTaskStopState>> {
+    ) -> Result<Option<crate::agent_supervisor::task_execution::AppendedTaskStopState>>
+    where
+        H: ApplicationRunEventHandler,
+    {
         if matches!(
             self.cancellation_target,
             RunCancellationTarget::AgentThread { .. }
@@ -1715,13 +1713,41 @@ impl ApplicationRunControl {
         let Some(task_id) = task_id else {
             return Ok(None);
         };
-        crate::agent_supervisor::task_execution::append_task_stop_state(
+        self.append_task_stop_state_and_emit(
             &mut session,
+            handler,
             Some(&task_id),
             disposition,
             reason,
         )
-        .map_err(Into::into)
+    }
+
+    fn append_task_stop_state_and_emit<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        exact_task_id: Option<&TaskId>,
+        disposition: crate::agent_supervisor::task_execution::TaskStopDisposition,
+        reason: &str,
+    ) -> Result<Option<crate::agent_supervisor::task_execution::AppendedTaskStopState>>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler)?;
+        let task_stop = crate::agent_supervisor::task_execution::append_task_stop_state(
+            session,
+            &mut bridge,
+            exact_task_id,
+            disposition,
+            reason,
+        )?;
+        if let Some(task_stop) = task_stop.as_ref() {
+            bridge.emit(PublicRunEventKind::TaskRunFinished {
+                task_id: task_stop.task_id().as_str().to_owned(),
+                status: application_task_run_status_label(task_stop.status()).to_owned(),
+            })?;
+        }
+        Ok(task_stop)
     }
 
     fn load_control_session(&self) -> Result<Session> {
@@ -1738,29 +1764,6 @@ impl ApplicationRunControl {
             bail!("application control session identity changed");
         }
         Ok(session)
-    }
-
-    fn emit_task_stop_state<H>(
-        &self,
-        handler: &mut H,
-        task_stop: &crate::agent_supervisor::task_execution::AppendedTaskStopState,
-    ) -> Result<()>
-    where
-        H: ApplicationRunEventHandler,
-    {
-        let mut projector = PublicTaskEventProjector::default();
-        for control in task_stop.controls() {
-            for event in projector.project_control(control) {
-                self.events.emit(handler, event)?;
-            }
-        }
-        self.events.emit(
-            handler,
-            PublicRunEventKind::TaskRunFinished {
-                task_id: task_stop.task_id().as_str().to_owned(),
-                status: application_task_run_status_label(task_stop.status()).to_owned(),
-            },
-        )
     }
 }
 
@@ -3040,7 +3043,14 @@ where
         ..
     } = runtime;
     let plan_review_workspace_root = options.workspace_root.clone();
-    emit_current_plan_review_attempt(session, &request, handler)?;
+    // Commit Started before entering the outcome mapper so an outbox append failure is returned
+    // as the authority failure it is, rather than being rewritten as a plan-review failure.
+    crate::PlanReviewCoordinator::ensure_attempt_started(
+        session,
+        &request,
+        handler,
+        current_unix_time_ms(),
+    )?;
     let outcome = match child_resource_provisioner {
         Some(provisioner) => {
             crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
@@ -3082,20 +3092,23 @@ where
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
+            if is_application_public_outbox_append_error(&error) {
+                return Err(error).context("plan review public control append was not confirmed");
+            }
             let close = crate::PlanReviewCoordinator::close_plan_review_run_if_open(
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Failed(
                     "plan review run failed before an outcome".to_owned(),
                 ),
+                handler,
                 current_unix_time_ms(),
             );
             if let Err(close_error) = close {
-                bail!(
-                    "plan review run failed ({error:#}) and its terminal closure also failed ({close_error:#})"
-                );
+                return Err(close_error).context(format!(
+                    "plan review run failed ({error:#}) and its terminal closure failed"
+                ));
             }
-            emit_current_plan_review_attempt(session, &request, handler)?;
             return Err(error);
         }
     };
@@ -3107,9 +3120,9 @@ where
                 &crate::PlanReviewRunOutcome::AwaitingUserInput {
                     request: pending.clone(),
                 },
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
                     final_text: String::new(),
@@ -3137,9 +3150,9 @@ where
                 &draft,
                 &request,
                 &compile_input,
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             let final_text = format!("Plan ready: {}", draft.summary);
             let final_message_id =
                 append_application_final_answer(session, handler, final_text.clone())?;
@@ -3157,9 +3170,9 @@ where
             crate::PlanReviewCoordinator::complete_without_draft(
                 session,
                 &request,
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             let final_text =
                 "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
                     .to_owned();
@@ -3180,9 +3193,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Cancelled,
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3203,9 +3216,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Interrupted(reason.clone()),
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3226,9 +3239,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Blocked(reason),
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3249,9 +3262,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Paused(reason),
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3275,9 +3288,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::Failed(error.clone()),
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3299,9 +3312,9 @@ where
                 session,
                 &request,
                 &crate::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone()),
+                handler,
                 current_unix_time_ms(),
             )?;
-            emit_current_plan_review_attempt(session, &request, handler)?;
             if !cancellation_handle.is_naturally_finalized()
                 && !cancellation_handle.try_finalize_naturally()
             {
@@ -3321,28 +3334,6 @@ where
             ))
         }
     }
-}
-
-fn emit_current_plan_review_attempt(
-    session: &Session,
-    request: &crate::PlanReviewRunRequest,
-    handler: &mut (impl EventHandler + ?Sized),
-) -> Result<()> {
-    let attempt = session
-        .entries()
-        .iter()
-        .rev()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
-                if attempt.plan_review_id == request.plan_review_id
-                    && attempt.attempt_id == request.attempt_id =>
-            {
-                Some(attempt.clone())
-            }
-            _ => None,
-        })
-        .ok_or_else(|| anyhow!("plan review transition has no durable attempt"))?;
-    handler.handle(RunEvent::Control(ControlEntry::PlanReviewAttempt(attempt)))
 }
 
 fn append_application_final_answer(
@@ -6417,11 +6408,13 @@ struct ApplicationRunEventState {
     live_delivery_prepared: bool,
 }
 
-/// A public outbox append is a durability/authority failure, not an adapter-delivery failure.
-/// The execution owner must leave its durable recovery path intact rather than manufacture a
-/// `RunFailed` terminal from this wrapper.
+/// Public publication preparation or durable outbox append failed.
+///
+/// This is a durability/authority failure, not an adapter-delivery failure. The execution owner
+/// must leave its durable recovery path intact rather than manufacture a `RunFailed` terminal
+/// from this wrapper.
 #[derive(Debug, thiserror::Error)]
-#[error("failed to durably append application public outbox event")]
+#[error("failed to prepare or durably append application public publication")]
 struct ApplicationPublicOutboxAppendError {
     #[source]
     source: anyhow::Error,
@@ -7067,7 +7060,7 @@ where
         .resolved_model_route()
         .map(|route| route.model_ref.clone())
         .unwrap_or_else(|| fallback_route.model_ref.clone());
-    crate::PlanReviewCoordinator::ensure_attempt_started(
+    crate::PlanReviewCoordinator::ensure_revision_attempt_started(
         &mut session,
         request,
         current_unix_time_ms(),
@@ -7354,9 +7347,15 @@ where
 {
     fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Result<Self> {
         events.replay_pending_before_live(handler)?;
+        let mut task_events = PublicTaskEventProjector::default();
+        for record in events.outbox_store.read_event_records_writer()? {
+            if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()? {
+                task_events.project_control(&control)?;
+            }
+        }
         Ok(Self {
             events,
-            task_events: PublicTaskEventProjector::default(),
+            task_events,
             handler,
         })
     }
@@ -7429,7 +7428,10 @@ where
         let RunEvent::Control(control) = event else {
             return self.emit(event.into());
         };
-        let task_events = self.task_events.project_control(&control);
+        let task_events = self
+            .task_events
+            .project_control(&control)
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
         if task_events.is_empty() {
             return self.emit(PublicRunEventKind::Control {
                 control: control.into(),
@@ -7439,6 +7441,54 @@ where
             self.emit(event)?;
         }
         Ok(())
+    }
+
+    fn commit_controls(
+        &mut self,
+        session: &mut Session,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<sigil_kernel::StoredEvent>> {
+        self.events
+            .ensure_pending_replayed_before_live(self.handler)?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application public control belongs to another durable session");
+        }
+        if session.store_path() != Some(self.events.outbox_store.path()) {
+            bail!("application public control uses a different durable session store");
+        }
+        let mut state = self
+            .events
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let next_sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        let mut staged_task_events = self.task_events.clone();
+        controls
+            .iter()
+            .try_for_each(|control| staged_task_events.project_control(control).map(|_| ()))
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
+        let (events, outbox) = session
+            .append_controls_with_public_outbox(controls, &self.events.run_id, next_sequence)
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
+        self.task_events = staged_task_events;
+        if let Some(last) = outbox.last() {
+            state.sequence = last.sequence;
+        }
+        for entry in outbox {
+            self.events.deliver_committed(
+                &mut state,
+                self.handler,
+                entry.event,
+                &entry.public_event_id,
+            );
+        }
+        Ok(events)
     }
 }
 

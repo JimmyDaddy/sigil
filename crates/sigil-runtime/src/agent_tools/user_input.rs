@@ -63,8 +63,7 @@ impl AgentToolRuntime {
                 reason: Some("background child user-input request was not submitted".to_owned()),
                 updated_at_ms: Some(unix_time_ms()),
             });
-            parent.append_control(status.clone())?;
-            handler.handle(RunEvent::Control(status))?;
+            handler.commit_controls(parent, vec![status])?;
             self.supervisor
                 .release_runtime_thread(&route.source_thread_id);
             return Ok(BackgroundAgentUserInputDecisionResult {

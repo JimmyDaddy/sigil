@@ -210,6 +210,14 @@ where
         }
         self.inner.handle(event)
     }
+
+    fn commit_controls(
+        &mut self,
+        session: &mut Session,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<crate::StoredEvent>> {
+        self.inner.commit_controls(session, controls)
+    }
 }
 
 /// Runtime knobs for one agent run.
@@ -1408,8 +1416,7 @@ where
     match projection.decision(&entry.decision_id) {
         None => {
             let control = ControlEntry::ConversationRouteDecisionRecorded(entry);
-            session.append_control(control.clone())?;
-            handler.handle(RunEvent::Control(control))?;
+            handler.commit_controls(session, vec![control])?;
         }
         Some(previous) if previous == &entry => {}
         Some(_) => {
@@ -5972,8 +5979,7 @@ where
         };
         if let Some(egress_audit) = egress_audit {
             let control = tool_egress_control_entry(&call, &decision.subjects, egress_audit);
-            session.append_control(control.clone())?;
-            handler.handle(RunEvent::Control(control))?;
+            handler.commit_controls(session, vec![control])?;
         }
     }
 

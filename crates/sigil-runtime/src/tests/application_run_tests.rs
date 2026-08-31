@@ -12,29 +12,33 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
     AgentRole, AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunPurpose,
-    AgentRunResult, AgentRunTerminalReason, ApprovalHandler, AssistantMessageKind,
-    AutoApproveHandler, CompletionRequest, ContextBodyRef, ContextInclusionReason, ContextItem,
-    ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry,
-    ConversationRunLifecycleRecordV1, ConversationRunStartedEntryV1,
-    ConversationRunTerminalStatusV1, DisclosurePresentationError, DisclosurePresentationReceipt,
-    EgressDisclosurePresenter, EventHandler, IntegrationPlanId, InteractionMode, JsonlSessionStore,
-    MemoryConfig, ModelMessage, MutationEventRecorder, NoopEventHandler, PreEgressDisclosure,
-    Provider, ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind,
-    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
-    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
-    RuntimeContextCandidates, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
-    StartPlanReviewAction, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
-    TERMINAL_TASK_SCHEMA_VERSION, TaskHandoffId, TaskId, TaskIntegrationReviewRequest,
-    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TaskVerificationRerunRequest, TerminalLifecycleEvent,
-    TerminalLifecycleUpdateV2, TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
-    UserInputActionV1, UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId,
-    UserInputContinuationBindingV1, UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1,
+    AgentRunResult, AgentRunTerminalReason, AgentThreadId, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, ApprovalHandler, AssistantMessageKind, AutoApproveHandler,
+    CompletionRequest, ContextBodyRef, ContextInclusionReason, ContextItem, ContextSensitivity,
+    ContextSource, ContextTrustLevel, ControlEntry, ConversationRunLifecycleRecordV1,
+    ConversationRunStartedEntryV1, ConversationRunTerminalStatusV1, DisclosurePresentationError,
+    DisclosurePresentationReceipt, EgressDisclosurePresenter, EventHandler,
+    IntegrationBaseRepresentation, IntegrationLaneCandidate, IntegrationLaneChanged,
+    IntegrationLaneId, IntegrationLaneSpec, IntegrationLaneStatus, IntegrationPlan,
+    IntegrationPlanId, IntegrationPlanRecorded, InteractionMode, JsonlSessionStore, MemoryConfig,
+    ModelMessage, MutationEventRecorder, NoopEventHandler, PreEgressDisclosure, Provider,
+    ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
+    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
+    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RuntimeContextCandidates,
+    Session, SessionLogEntry, SessionRef, StartDurableTaskAction, StartPlanReviewAction,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskHandoffId, TaskId,
+    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest,
+    TerminalLifecycleEvent, TerminalLifecycleUpdateV2, TerminalReadinessKind,
+    TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolArtifactSensitivity, ToolArtifactStore,
+    ToolCall, ToolCategory, ToolContext, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
+    ToolResultRecordedV3, ToolSpec, UsageStats, UserInputActionV1, UserInputAnswerV1,
+    UserInputAnswerValueV1, UserInputCommandId, UserInputContinuationBindingV1,
+    UserInputDecisionAcceptedV1, UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1,
     UserInputLifecycleEntryV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
     UserInputRequestV1, UserInputRequestedV1, UserInputResolutionV1, UserInputSourceV1,
     UserInputStatusV1, conversation_run_lifecycle_record_from_stream,
@@ -86,6 +90,13 @@ fn durable_application_event_sequence(
         run_id.to_owned(),
         JsonlSessionStore::new(path)?,
     )
+}
+
+fn start_application_public_control_run(session: &Session, run_id: &str) -> Result<()> {
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&ConversationRunStartedEntryV1::new(run_id, 1)?)?;
+    Ok(())
 }
 
 fn application_internal_context_fixture() -> RuntimeContextCandidates {
@@ -856,16 +867,6 @@ struct RecordingApplicationRunEvents(Vec<PublicRunEvent>);
 
 impl ApplicationRunEventHandler for RecordingApplicationRunEvents {
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-        self.0.push(event);
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-struct RecordingRunEvents(Vec<RunEvent>);
-
-impl EventHandler for RecordingRunEvents {
-    fn handle(&mut self, event: RunEvent) -> Result<()> {
         self.0.push(event);
         Ok(())
     }
@@ -2414,7 +2415,7 @@ credential = { source = "environment", name = "SIGIL_API_KEY" }
 }
 
 #[tokio::test]
-async fn builtin_plan_agent_binding_prepares_a_durable_explicit_review() -> Result<()> {
+async fn builtin_plan_agent_binding_prepares_an_unstarted_explicit_review() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
@@ -2442,18 +2443,9 @@ async fn builtin_plan_agent_binding_prepares_a_durable_explicit_review() -> Resu
     ));
     let projection =
         sigil_kernel::PlanReviewProjection::from_entries(prepared.execution.session.entries());
-    let attempt = projection
-        .reviews()
-        .next()
-        .and_then(sigil_kernel::PlanReviewProjectionEntry::latest_attempt)
-        .expect("explicit plan preparation should append one attempt");
-    assert_eq!(
-        attempt.source,
-        sigil_kernel::PlanReviewSource::ExplicitPlanCommand
-    );
-    assert_eq!(
-        attempt.status,
-        sigil_kernel::PlanReviewAttemptStatus::Started
+    assert!(
+        projection.reviews().next().is_none(),
+        "prepare must only bind the explicit review; its executor owns the first Started append"
     );
     Ok(())
 }
@@ -2997,6 +2989,521 @@ fn public_event_bridge_projects_task_controls_and_preserves_unknown_controls() -
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
+    Ok(())
+}
+
+#[test]
+fn public_event_bridge_marks_invalid_raw_user_input_projection_without_terminalizing() -> Result<()>
+{
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let source_path = temp.path().join("state/sessions/source-user-input.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&source_path))?;
+    let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
+    let accepted = UserInputDecisionAcceptedV1::new(
+        &requested,
+        UserInputCommandId::new("invalid-raw-public-answer")?,
+        UserInputDecisionV1::Submitted {
+            answers: vec![UserInputAnswerV1 {
+                question_id: "mode".to_owned(),
+                value: UserInputAnswerValueV1::Text {
+                    value: "private answer value".to_owned(),
+                },
+            }],
+        },
+        20,
+    )?;
+
+    let target_path = temp.path().join("target-session.jsonl");
+    let target =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&target_path)?)?;
+    let mut recorder = Recorder::default();
+    let events = durable_application_event_sequence(
+        target.session_scope_id(),
+        "run-raw-invalid",
+        &target_path,
+    )?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let error = EventHandler::handle(
+        &mut bridge,
+        RunEvent::Control(
+            UserInputLifecycleEntryV1::DecisionAccepted(Box::new(accepted)).into_control(),
+        ),
+    )
+    .expect_err("a raw answer without its durable request prefix must not be projected");
+    assert!(is_application_public_outbox_append_error(&error));
+    drop(bridge);
+
+    assert!(recorder.0.is_empty());
+    let records = JsonlSessionStore::read_event_records(&target_path)?;
+    assert!(records.iter().all(|record| {
+        record.stored_event().event_kind() != Some(sigil_kernel::DurableEventType::RunFinalized)
+    }));
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert!(
+        projection
+            .events_in_order()
+            .iter()
+            .all(|entry| { !matches!(entry.event.event, PublicRunEventKind::RunFailed { .. }) })
+    );
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_bundles_typed_controls_with_their_exact_domain_ids() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut session =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-control")?;
+    let mut recorder = Recorder::default();
+    let events =
+        durable_application_event_sequence(session.session_scope_id(), "run-control", &path)?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let domain = EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![
+            ControlEntry::TaskRun(TaskRunEntry {
+                task_id: TaskId::new("task-control")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "private task objective".to_owned(),
+                title: None,
+                status: TaskRunStatus::Running,
+                reason: None,
+            }),
+            ControlEntry::TaskPlan(TaskPlanEntry {
+                task_id: TaskId::new("task-control")?,
+                plan_version: 1,
+                status: TaskPlanStatus::Accepted,
+                steps: Vec::new(),
+                reason: None,
+            }),
+        ],
+    )?;
+    drop(bridge);
+
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    let public = projection.events_in_order();
+    assert_eq!(domain.len(), 2);
+    assert_eq!(public.len(), 3, "accepted TaskPlan emits two typed DTOs");
+    assert_eq!(public[0].domain_event_id, domain[0].event_id);
+    assert_eq!(public[1].domain_event_id, domain[1].event_id);
+    assert_eq!(public[2].domain_event_id, domain[1].event_id);
+    assert_eq!(
+        public
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(matches!(
+        &public[0].event.event,
+        PublicRunEventKind::TaskPhaseChanged {
+            task_id: Some(task_id),
+            status,
+            ..
+        } if task_id == "task-control" && status == "running"
+    ));
+    assert!(matches!(
+        &public[1].event.event,
+        PublicRunEventKind::TaskExecutionAdmitted { task_id, .. }
+            if task_id == "task-control"
+    ));
+    assert!(matches!(
+        &public[2].event.event,
+        PublicRunEventKind::TaskPlanUpdated { task_id, .. }
+            if task_id == "task-control"
+    ));
+    assert_eq!(recorder.0.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_keeps_private_controls_private_but_retains_tool_and_agent_activity()
+-> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut session =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-private-control")?;
+    let mut recorder = Recorder::default();
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "run-private-control",
+        &path,
+    )?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let domain = EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![
+            ControlEntry::Note {
+                kind: "private_audit".to_owned(),
+                data: serde_json::json!({"secret": "do not publish"}),
+            },
+            ControlEntry::TaskChildSession(TaskChildSessionEntry {
+                task_id: TaskId::new("task-private")?,
+                plan_version: 1,
+                step_id: TaskStepId::new("step-private")?,
+                child_task_id: TaskId::new("child-private")?,
+                child_session_ref: SessionRef::new_relative("children/private-child.jsonl")?,
+                role: AgentRole::SubagentRead,
+                status: TaskChildSessionStatus::Started,
+                summary_hash: None,
+            }),
+            ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+                call_id: "call-public-tool".to_owned(),
+                tool_name: "read_file".to_owned(),
+                status: ToolExecutionStatus::Started,
+                duration_ms: None,
+                subjects: Vec::new(),
+                changed_files: Vec::new(),
+                metadata: ToolResultMeta::default(),
+                error: None,
+                model_content_hash: None,
+            })),
+            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: AgentThreadId::new("agent-private")?,
+                status: AgentThreadStatus::Running,
+                reason: Some("private execution detail".to_owned()),
+                updated_at_ms: Some(1),
+            }),
+        ],
+    )?;
+    drop(bridge);
+
+    assert_eq!(
+        domain.len(),
+        4,
+        "private controls are still durable domain facts"
+    );
+    assert_eq!(recorder.0.len(), 2);
+    assert!(matches!(
+        &recorder.0[0].event,
+        PublicRunEventKind::Control { control }
+            if control.kind == "tool_execution" && control.payload.is_some()
+    ));
+    assert!(matches!(
+        &recorder.0[1].event,
+        PublicRunEventKind::Control { control }
+            if control.kind == "agent_thread_status_changed" && control.payload.is_none()
+    ));
+    let public_json = serde_json::to_string(&recorder.0)?;
+    assert!(!public_json.contains("do not publish"));
+    assert!(!public_json.contains("private-child.jsonl"));
+    assert!(!public_json.contains("private execution detail"));
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_replays_a_failed_delivery_before_a_later_control() -> Result<()> {
+    struct FailFirstAdapter {
+        failed: bool,
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for FailFirstAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            if !self.failed {
+                self.failed = true;
+                anyhow::bail!("adapter is temporarily unavailable");
+            }
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAdapter(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for RecordingAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut session =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-control-replay")?;
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "run-control-replay",
+        &path,
+    )?;
+    let mut failing = FailFirstAdapter {
+        failed: false,
+        events: Vec::new(),
+    };
+    let mut bridge = PublicApplicationEventBridge::new(events.clone(), &mut failing)?;
+    EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![ControlEntry::TaskRun(TaskRunEntry {
+            task_id: TaskId::new("task-control-replay")?,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "durable control".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })],
+    )?;
+    drop(bridge);
+    assert!(events.delivery_is_degraded()?);
+    assert!(failing.events.is_empty());
+
+    let mut replay = RecordingAdapter::default();
+    let mut bridge = PublicApplicationEventBridge::new(
+        durable_application_event_sequence(
+            session.session_scope_id(),
+            "run-control-replay",
+            &path,
+        )?,
+        &mut replay,
+    )?;
+    EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: TaskId::new("task-control-replay")?,
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        })],
+    )?;
+    drop(bridge);
+
+    assert_eq!(
+        replay
+            .0
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "the failed control is replayed before the later accepted TaskPlan batch"
+    );
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    assert!(projection.pending_for_adapter("application").is_empty());
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_reopens_user_input_projection_without_answer_values() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let session_path = temp
+        .path()
+        .join("state/sessions/user-input-public-control.jsonl");
+    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let store = JsonlSessionStore::new(&binding.session_log_path)?;
+    let started = Session::load_from_store("custom", "gpt-test", store.clone())?;
+    start_application_public_control_run(&started, "runtime-user-input-root")?;
+    drop(started);
+    let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
+    let mut session = Session::load_from_store("custom", "gpt-test", store)?;
+    let mut recorder = RecordingApplicationRunEvents::default();
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "runtime-user-input-root",
+        &binding.session_log_path,
+    )?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let accepted = UserInputDecisionAcceptedV1::new(
+        &requested,
+        UserInputCommandId::new("public-control-answer")?,
+        UserInputDecisionV1::Submitted {
+            answers: vec![UserInputAnswerV1 {
+                question_id: "mode".to_owned(),
+                value: UserInputAnswerValueV1::Text {
+                    value: "private answer value".to_owned(),
+                },
+            }],
+        },
+        20,
+    )?;
+    EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![UserInputLifecycleEntryV1::DecisionAccepted(Box::new(accepted)).into_control()],
+    )?;
+    drop(bridge);
+
+    assert!(matches!(
+        recorder.0.as_slice(),
+        [PublicRunEvent {
+            event: PublicRunEventKind::UserInputChanged {
+                status: UserInputStatusV1::DecisionAccepted,
+                ..
+            },
+            ..
+        }]
+    ));
+    assert!(!serde_json::to_string(&recorder.0)?.contains("private answer value"));
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_reopens_integration_context_before_projecting_a_lane() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut session =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-integration-context")?;
+    let plan_id = IntegrationPlanId::new("integration-public-plan")?;
+    let lane_id = IntegrationLaneId::new("integration-public-lane")?;
+    session.append_control(ControlEntry::IntegrationPlanRecorded(
+        IntegrationPlanRecorded {
+            plan: IntegrationPlan {
+                plan_id: plan_id.clone(),
+                task_id: TaskId::new("task-integration-context")?,
+                plan_version: 3,
+                base_snapshot_id: "snapshot-public".to_owned(),
+                base_representation: IntegrationBaseRepresentation::Unknown,
+                proposals: Vec::new(),
+                conflicts: Vec::new(),
+                lanes: vec![IntegrationLaneSpec {
+                    lane_id: lane_id.clone(),
+                    proposals: Vec::new(),
+                    verification_scope_hashes: Vec::new(),
+                }],
+            },
+        },
+    ))?;
+    let mut recorder = Recorder::default();
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "run-integration-context",
+        &path,
+    )?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    EventHandler::commit_controls(
+        &mut bridge,
+        &mut session,
+        vec![ControlEntry::IntegrationLaneChanged(
+            IntegrationLaneChanged {
+                plan_id,
+                lane_id,
+                status: IntegrationLaneStatus::Ready,
+                candidate: Some(IntegrationLaneCandidate::ManagedRef {
+                    private_ref: "refs/private/integration-lane".to_owned(),
+                    base_commit: "b".repeat(40),
+                    candidate_commit: "a".repeat(40),
+                    workspace_snapshot_id: "snapshot-private".to_owned(),
+                }),
+                verification_check_ids: vec!["check-public".to_owned()],
+                reason: None,
+            },
+        )],
+    )?;
+    drop(bridge);
+
+    assert!(matches!(
+        recorder.0.as_slice(),
+        [PublicRunEvent {
+            event: PublicRunEventKind::IntegrationLaneChanged {
+                task_id,
+                status,
+                ..
+            },
+            ..
+        }] if task_id == "task-integration-context" && status == "ready"
+    ));
+    assert!(!serde_json::to_string(&recorder.0)?.contains("refs/private/integration-lane"));
+    Ok(())
+}
+
+#[test]
+fn public_control_commit_rejects_a_foreign_durable_session_before_appending() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let foreign_path = temp.path().join("foreign-session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-foreign")?;
+    let mut foreign =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&foreign_path)?)?;
+    let foreign_entry_count = foreign.entries().len();
+    let foreign_bytes = std::fs::read(&foreign_path)?;
+    let parent_bytes = std::fs::read(&path)?;
+    let mut recorder = Recorder::default();
+    let events =
+        durable_application_event_sequence(session.session_scope_id(), "run-foreign", &path)?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let error = EventHandler::commit_controls(
+        &mut bridge,
+        &mut foreign,
+        vec![ControlEntry::Note {
+            kind: "private_audit".to_owned(),
+            data: serde_json::json!({"secret": "must stay foreign"}),
+        }],
+    )
+    .expect_err("a bridge must not write another session");
+    drop(bridge);
+
+    assert!(error.to_string().contains("another durable session"));
+    assert_eq!(foreign.entries().len(), foreign_entry_count);
+    assert_eq!(std::fs::read(&foreign_path)?, foreign_bytes);
+    assert_eq!(std::fs::read(&path)?, parent_bytes);
+    assert!(recorder.0.is_empty());
     Ok(())
 }
 
@@ -6935,6 +7442,34 @@ impl Provider for PlanReviewDraftProvider {
     }
 }
 
+struct PlanReviewFinalizingDraftProvider(AtomicUsize);
+
+#[async_trait]
+impl Provider for PlanReviewFinalizingDraftProvider {
+    fn name(&self) -> &str {
+        "plan-review-finalizing-draft"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        application_task_provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(
+                    "research completed without a draft".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        PlanReviewDraftProvider.stream(request).await
+    }
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn application_plan_review_continuation_commits_typed_draft_and_waits_for_decision()
@@ -6992,6 +7527,13 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     };
     let plan_review_binding = context.plan_review.clone().expect("plan review binding");
     let source_turn = context.source_turn.clone();
+    assert!(
+        sigil_kernel::PlanReviewProjection::from_entries(prepared.execution.session.entries())
+            .reviews()
+            .next()
+            .is_none(),
+        "automatic preparation must leave its first attempt for the executor's public-control bundle"
+    );
     drop(prepared);
 
     // Simulate the routing microturn outcome: the model requests a plan review.
@@ -7009,7 +7551,13 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
             source_turn: source_turn.clone(),
         }),
     };
-    let mut session = Session::new("application-plan-review", "planned-model");
+    let session_path = temp.path().join("plan-review-parent.jsonl");
+    let mut session = Session::load_from_store(
+        "application-plan-review",
+        "planned-model",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    start_application_public_control_run(&session, "run-application-plan-review")?;
     let mut message = ModelMessage::user("design the coordinator migration");
     message.id = source_turn.message_id.clone();
     session.append_user_message(message)?;
@@ -7044,7 +7592,13 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         child_resource_provisioner: None,
     };
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
-    let mut handler = RecordingRunEvents::default();
+    let mut recorder = RecordingApplicationRunEvents::default();
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "run-application-plan-review",
+        &session_path,
+    )?;
+    let mut handler = PublicApplicationEventBridge::new(events, &mut recorder)?;
     let mut approval_handler = sigil_kernel::AutoApproveHandler;
     let output = super::continue_application_plan_review(
         &mut session,
@@ -7063,18 +7617,12 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     let final_message_id = output
         .result
         .final_message_id
-        .as_deref()
         .expect("plan-ready success must bind a durable final assistant");
-    assert!(handler.0.iter().any(|event| matches!(
-        event,
-        RunEvent::Control(ControlEntry::PlanReviewAttempt(attempt))
-            if attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
-    )));
-    assert!(handler.0.iter().any(|event| matches!(
-        event,
-        RunEvent::AssistantMessage(message)
-            if message.id == final_message_id
-                && message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+    drop(handler);
+    assert!(recorder.0.iter().any(|event| matches!(
+        &event.event,
+        PublicRunEventKind::PlanReviewChanged { status, .. }
+            if *status == sigil_kernel::PublicPlanReviewStatus::DraftReady
     )));
     let plan_projection = session.plan_artifact_projection();
     let draft = plan_projection
@@ -7082,6 +7630,12 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         .get(&plan_review_binding.plan_id)
         .expect("draft committed to parent");
     assert_eq!(draft.summary, "Migrate the coordinator");
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Assistant(message)
+            if message.id == final_message_id
+                && message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+    )));
     let review_projection = sigil_kernel::PlanReviewProjection::from_entries(session.entries());
     let attempt = review_projection
         .latest_attempt(&plan_review_binding.plan_review_id)
@@ -7090,6 +7644,455 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         attempt.status,
         sigil_kernel::PlanReviewAttemptStatus::DraftReady
     );
+
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let plan_changes = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.event.event,
+                PublicRunEventKind::PlanReviewChanged { plan_review_id, .. }
+                    if plan_review_id == plan_review_binding.plan_review_id.as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plan_changes.len(), 2);
+    assert!(matches!(
+        &plan_changes[0].event.event,
+        PublicRunEventKind::PlanReviewChanged { status, .. }
+            if *status == sigil_kernel::PublicPlanReviewStatus::Started
+    ));
+    assert!(matches!(
+        &plan_changes[1].event.event,
+        PublicRunEventKind::PlanReviewChanged { status, .. }
+            if *status == sigil_kernel::PublicPlanReviewStatus::DraftReady
+    ));
+    assert!(plan_changes[0].sequence < plan_changes[1].sequence);
+    let all_sequences = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == "run-application-plan-review")
+        .map(|entry| entry.sequence)
+        .collect::<Vec<_>>();
+    assert!(
+        all_sequences
+            .windows(2)
+            .all(|window| window[1] == window[0] + 1),
+        "the complete run outbox, not merely its PlanReviewChanged subset, stays contiguous"
+    );
+
+    let mut attempt_sources = Vec::new();
+    let mut draft_index = None;
+    for (index, record) in records.iter().enumerate() {
+        match record.session_log_entry()? {
+            Some(SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)))
+                if draft.plan_id == plan_review_binding.plan_id =>
+            {
+                draft_index = Some(index);
+            }
+            Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)))
+                if attempt.plan_review_id == plan_review_binding.plan_review_id =>
+            {
+                attempt_sources.push((
+                    index,
+                    attempt.status,
+                    record.stored_event().event_id.to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        attempt_sources
+            .iter()
+            .map(|(_, status, _)| *status)
+            .collect::<Vec<_>>(),
+        vec![
+            sigil_kernel::PlanReviewAttemptStatus::Started,
+            sigil_kernel::PlanReviewAttemptStatus::DraftReady,
+        ],
+        "the executor must append Started exactly once, then the completed attempt"
+    );
+    let draft_ready_source = attempt_sources
+        .iter()
+        .find(|(_, status, _)| *status == sigil_kernel::PlanReviewAttemptStatus::DraftReady)
+        .expect("draft-ready attempt source");
+    assert_eq!(
+        draft_index.expect("draft source") + 1,
+        draft_ready_source.0,
+        "the original draft plus attempt batch must remain intact"
+    );
+    for (source_index, _, domain_event_id) in &attempt_sources {
+        let paired = plan_changes
+            .iter()
+            .find(|entry| entry.domain_event_id == *domain_event_id)
+            .expect("each ordinary Attempt source has its exact PlanReviewChanged outbox entry");
+        let public_record = records
+            .get(source_index + 1)
+            .expect("outbox entry follows its source in the same append bundle")
+            .stored_event();
+        assert_eq!(
+            public_record.event_id.to_string(),
+            paired.public_event_id,
+            "public outbox identity must be committed beside its domain source"
+        );
+        assert_eq!(
+            public_record
+                .causation_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(domain_event_id.as_str())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_application_plan_review_starts_once_and_projects_its_parent_controls()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let plan = crate::application_extension_catalog_view(&root_config, temp.path(), &[])?
+        .agents
+        .into_iter()
+        .find(|agent| agent.id == "plan" && agent.available)
+        .expect("the built-in plan agent should be available");
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "prepare a typed application plan",
+        "run-explicit-plan-public-controls",
+    );
+    request.agent_binding = plan.binding;
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let mut prepared = prepare_application_run(request, &services).await?;
+    let plan_review_request = match &prepared.execution.kind {
+        ApplicationRunExecutionKind::ExplicitPlanReview { request } => (**request).clone(),
+        _ => panic!("built-in plan agent must prepare an explicit review"),
+    };
+    assert!(
+        sigil_kernel::PlanReviewProjection::from_entries(prepared.execution.session.entries())
+            .reviews()
+            .next()
+            .is_none(),
+        "prepare must not create an executor-owned Started attempt"
+    );
+    let runtime = prepared
+        .execution
+        .plan_review_runtime
+        .as_mut()
+        .expect("explicit execution retains its plan-review runtime");
+    *runtime.agent =
+        sigil_kernel::Agent::new(Box::new(PlanReviewDraftProvider), ToolRegistry::new());
+    runtime.tool_registry = ToolRegistry::new();
+    let session_path = prepared.execution.session_log_path.clone();
+    let mut recorder = RecordingApplicationRunEvents::default();
+    let output = prepared
+        .execution
+        .execute(&mut recorder, &mut AutoApproveHandler)
+        .await?;
+    assert_eq!(
+        output.terminal_status,
+        ApplicationRunTerminalStatus::Succeeded
+    );
+
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let plan_changes = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.event.event,
+                PublicRunEventKind::PlanReviewChanged { plan_review_id, .. }
+                    if plan_review_id == plan_review_request.plan_review_id.as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plan_changes.len(), 2);
+    assert!(plan_changes[0].sequence < plan_changes[1].sequence);
+    let all_sequences = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == output.run_id)
+        .map(|entry| entry.sequence)
+        .collect::<Vec<_>>();
+    assert!(
+        all_sequences
+            .windows(2)
+            .all(|window| window[1] == window[0] + 1),
+        "the complete run outbox, not merely its PlanReviewChanged subset, stays contiguous"
+    );
+
+    let mut attempt_sources = Vec::new();
+    let mut draft_index = None;
+    for (index, record) in records.iter().enumerate() {
+        match record.session_log_entry()? {
+            Some(SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)))
+                if draft.plan_id == plan_review_request.plan_id =>
+            {
+                draft_index = Some(index);
+            }
+            Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)))
+                if attempt.plan_review_id == plan_review_request.plan_review_id =>
+            {
+                attempt_sources.push((
+                    index,
+                    attempt.status,
+                    record.stored_event().event_id.to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        attempt_sources
+            .iter()
+            .map(|(_, status, _)| *status)
+            .collect::<Vec<_>>(),
+        vec![
+            sigil_kernel::PlanReviewAttemptStatus::Started,
+            sigil_kernel::PlanReviewAttemptStatus::DraftReady,
+        ]
+    );
+    assert_eq!(
+        draft_index.expect("draft source") + 1,
+        attempt_sources[1].0,
+        "the draft plus DraftReady attempt are one unbroken control batch"
+    );
+    for (source_index, _, domain_event_id) in &attempt_sources {
+        let paired = plan_changes
+            .iter()
+            .find(|entry| entry.domain_event_id == *domain_event_id)
+            .expect("the ordinary Attempt source must have a same-bundle outbox DTO");
+        let public_record = records
+            .get(source_index + 1)
+            .expect("outbox entry follows the source in the same writer bundle")
+            .stored_event();
+        assert_eq!(public_record.event_id.to_string(), paired.public_event_id);
+        assert_eq!(
+            public_record
+                .causation_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some(domain_event_id.as_str())
+        );
+    }
+    assert_eq!(
+        recorder
+            .0
+            .iter()
+            .filter(|event| matches!(event.event, PublicRunEventKind::PlanReviewChanged { .. }))
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_plan_review_finalizing_publication_failure_preserves_its_started_marker()
+-> Result<()> {
+    struct FinalizingPublicationConflict<'a> {
+        inner: PublicApplicationEventBridge<'a, RecordingApplicationRunEvents>,
+        store: JsonlSessionStore,
+        session_id: String,
+        run_id: String,
+        inserted: bool,
+        reached_finalizing: bool,
+    }
+
+    impl EventHandler for FinalizingPublicationConflict<'_> {
+        fn handle(&mut self, event: RunEvent) -> Result<()> {
+            EventHandler::handle(&mut self.inner, event)
+        }
+
+        fn commit_controls(
+            &mut self,
+            session: &mut Session,
+            controls: Vec<ControlEntry>,
+        ) -> Result<Vec<sigil_kernel::StoredEvent>> {
+            let finalizing = controls.iter().any(|control| {
+                matches!(
+                    control,
+                    ControlEntry::PlanReviewAttempt(attempt)
+                        if attempt.status == sigil_kernel::PlanReviewAttemptStatus::Finalizing
+                )
+            });
+            if finalizing {
+                self.reached_finalizing = true;
+                let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+                    &JsonlSessionStore::read_event_records(self.store.path())?,
+                )?;
+                let sequence = projection
+                    .events_in_order()
+                    .into_iter()
+                    .filter(|entry| entry.run_id == self.run_id)
+                    .map(|entry| entry.sequence)
+                    .max()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .expect("test public sequence must remain representable");
+                let public_event_id = format!("plan-review-conflicting-public:{sequence}");
+                let foreign = PublicRunEvent::new(
+                    &self.session_id,
+                    &self.run_id,
+                    sequence,
+                    PublicRunEventKind::Notice {
+                        message: "competing public sequence before Finalizing".to_owned(),
+                    },
+                );
+                sigil_kernel::PublicEventOutboxRecorder::new(self.store.clone()).append_outbox(
+                    &sigil_kernel::PublicEventOutboxEntryV1 {
+                        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                        public_event_id: public_event_id.clone(),
+                        domain_event_id: public_event_id,
+                        run_id: self.run_id.clone(),
+                        sequence,
+                        payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(
+                            &foreign,
+                        )?),
+                        event: foreign,
+                    },
+                )?;
+                self.inserted = true;
+            }
+            EventHandler::commit_controls(&mut self.inner, session, controls)
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let session_path = temp.path().join("plan-review-finalizing.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session = Session::load_from_store("deepseek", "test-model", store.clone())?;
+    let run_id = "run-explicit-plan-finalizing-publication-failure";
+    start_application_public_control_run(&session, run_id)?;
+    let request = crate::PlanReviewCoordinator::prepare_explicit_plan_review(
+        &mut session,
+        "prove finalizing publication does not manufacture a terminal",
+        run_id,
+        None,
+        1,
+    )?;
+    let plan_review_id = request.plan_review_id.clone();
+    let options = crate::build_run_options(
+        &root_config,
+        temp.path().to_path_buf(),
+        InteractionMode::Headless,
+        None,
+    );
+    let runtime = super::ApplicationPlanReviewRuntime {
+        options,
+        root_config: root_config.clone(),
+        agent: Box::new(sigil_kernel::Agent::new(
+            Box::new(PlanReviewFinalizingDraftProvider(AtomicUsize::new(0))),
+            ToolRegistry::new(),
+        )),
+        tool_registry: ToolRegistry::new(),
+        workspace_snapshot_id: None,
+        child_resource_provisioner: None,
+    };
+    let parent_output = AgentRunOutput {
+        disposition: AgentRunDisposition::FinalAnswer,
+        result: AgentRunResult {
+            final_text: String::new(),
+            tool_calls: 0,
+            final_message_id: None,
+        },
+        outcome: AgentRunOutcome::default(),
+    };
+    let mut recorder = RecordingApplicationRunEvents::default();
+    let bridge = PublicApplicationEventBridge::new(
+        durable_application_event_sequence(session.session_scope_id(), run_id, &session_path)?,
+        &mut recorder,
+    )?;
+    let mut handler = FinalizingPublicationConflict {
+        inner: bridge,
+        store,
+        session_id: session.session_scope_id().to_owned(),
+        run_id: run_id.to_owned(),
+        inserted: false,
+        reached_finalizing: false,
+    };
+    let cancellation_owner = RunCancellationOwner::new();
+    let error = super::run_application_plan_review_request(
+        &mut session,
+        parent_output,
+        runtime,
+        request,
+        &mut handler,
+        &mut AutoApproveHandler,
+        &cancellation_owner.handle(),
+    )
+    .await
+    .expect_err("a stale Finalizing outbox sequence must stop the original execution");
+    assert!(
+        handler.reached_finalizing,
+        "the real child reached Finalizing"
+    );
+    assert!(
+        handler.inserted,
+        "inject only at the Finalizing control commit"
+    );
+    assert!(
+        is_application_public_outbox_append_error(&error),
+        "{error:#}"
+    );
+    drop(handler);
+    assert!(
+        recorder
+            .0
+            .iter()
+            .all(|event| !matches!(event.event, PublicRunEventKind::RunFailed { .. }))
+    );
+
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let entries = records
+        .iter()
+        .filter_map(|record| record.session_log_entry().transpose())
+        .collect::<Result<Vec<_>>>()?;
+    let attempts = entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+                if attempt.plan_review_id == plan_review_id =>
+            {
+                Some(attempt.status)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attempts,
+        vec![sigil_kernel::PlanReviewAttemptStatus::Started],
+        "the durable Started marker remains, but publication failure is not a domain Failed attempt"
+    );
+    assert!(records.iter().all(|record| {
+        record.stored_event().event_kind() != Some(sigil_kernel::DurableEventType::RunFinalized)
+    }));
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert!(
+        outbox
+            .events_in_order()
+            .iter()
+            .all(|entry| { !matches!(entry.event.event, PublicRunEventKind::RunFailed { .. }) })
+    );
+    assert!(outbox.events_in_order().iter().any(|entry| {
+        matches!(
+            &entry.event.event,
+            PublicRunEventKind::PlanReviewChanged { plan_review_id: observed, status, .. }
+                if observed == plan_review_id.as_str()
+                    && *status == sigil_kernel::PublicPlanReviewStatus::Started
+        )
+    }));
     Ok(())
 }
 
@@ -7132,7 +8135,13 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         workspace_snapshot_id: base_snapshot.clone(),
     };
     let session_scope_id = session.session_scope_id().to_owned();
-    crate::PlanReviewCoordinator::ensure_attempt_started(&mut session, &request, 1)?;
+    let mut plan_review_handler = NoopEventHandler;
+    crate::PlanReviewCoordinator::ensure_attempt_started(
+        &mut session,
+        &request,
+        &mut plan_review_handler,
+        1,
+    )?;
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         request.plan_id.clone(),
         r#"```sigil-plan-v2
@@ -7167,6 +8176,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
             workspace_id: None,
             session_scope_id: Some(session_scope_id.clone()),
         },
+        &mut plan_review_handler,
         2,
     )?;
     let plan_id = request.plan_id.clone();
@@ -7317,7 +8327,13 @@ max_plan_steps = 64
         workspace_snapshot_id: base_snapshot.clone(),
     };
     let session_scope_id = session.session_scope_id().to_owned();
-    crate::PlanReviewCoordinator::ensure_attempt_started(&mut session, &request, 1)?;
+    let mut plan_review_handler = NoopEventHandler;
+    crate::PlanReviewCoordinator::ensure_attempt_started(
+        &mut session,
+        &request,
+        &mut plan_review_handler,
+        1,
+    )?;
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         request.plan_id.clone(),
         r#"```sigil-plan-v2
@@ -7352,6 +8368,7 @@ max_plan_steps = 64
             workspace_id: None,
             session_scope_id: Some(session_scope_id.clone()),
         },
+        &mut plan_review_handler,
         2,
     )?;
     let plan_id = request.plan_id.clone();

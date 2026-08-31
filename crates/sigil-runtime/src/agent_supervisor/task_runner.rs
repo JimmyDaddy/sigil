@@ -3788,6 +3788,17 @@ where
             .map_err(|_| anyhow::anyhow!("task event handler lock poisoned"))?
             .handle(event)
     }
+
+    fn commit_controls(
+        &mut self,
+        session: &mut Session,
+        controls: Vec<ControlEntry>,
+    ) -> Result<Vec<sigil_kernel::StoredEvent>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("task event handler lock poisoned"))?
+            .commit_controls(session, controls)
+    }
 }
 
 struct SharedTaskApprovalHandler<'a, A> {

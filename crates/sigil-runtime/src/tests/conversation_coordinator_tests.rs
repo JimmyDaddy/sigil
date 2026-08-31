@@ -189,6 +189,8 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
         None,
         1,
     )?;
+    let mut handler = sigil_kernel::NoopEventHandler;
+    crate::PlanReviewCoordinator::ensure_attempt_started(&mut session, &review, &mut handler, 2)?;
     let draft = sigil_kernel::plan_draft_created_entry_with_plan_id(
         review.plan_id.clone(),
         r#"```sigil-plan-v2
@@ -223,6 +225,7 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
             workspace_id: None,
             session_scope_id: Some("test-session".to_owned()),
         },
+        &mut handler,
         3,
     )?;
 

@@ -3,11 +3,11 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AgentThreadId, ControlEntry, EventHandler, LogicalRunId, RunEvent, Session, SessionLogEntry,
-    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, USER_INPUT_SCHEMA_VERSION,
-    UserInputActionV1, UserInputContinuationBindingV1, UserInputIdentityV1, UserInputPurposeV1,
-    UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1, UserInputRequestV1,
-    UserInputRequestedV1, UserInputSourceV1,
+    AgentThreadId, ControlEntry, EventHandler, LogicalRunId, Session, SessionLogEntry, ToolCall,
+    ToolErrorKind, ToolExecutionStatus, ToolResult, USER_INPUT_SCHEMA_VERSION, UserInputActionV1,
+    UserInputContinuationBindingV1, UserInputIdentityV1, UserInputPurposeV1, UserInputQuestionV1,
+    UserInputRequestId, UserInputRequestRefV1, UserInputRequestV1, UserInputRequestedV1,
+    UserInputSourceV1,
 };
 
 use super::{
@@ -131,9 +131,7 @@ where
         None,
     )?));
     let request_control = ControlEntry::UserInputRequested(Box::new(requested.clone()));
-    session.append_controls(vec![started.clone(), request_control.clone()])?;
-    handler.handle(RunEvent::Control(started))?;
-    handler.handle(RunEvent::Control(request_control))?;
+    handler.commit_controls(session, vec![started, request_control])?;
     Ok((&requested).into())
 }
 

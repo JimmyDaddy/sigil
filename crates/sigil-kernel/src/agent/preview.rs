@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::{
     ApprovalRequestIdentityV2, ToolPermissionPlanV2,
-    event::{EventHandler, RunEvent},
+    event::EventHandler,
     permission::{ApprovalMode, PermissionDecision},
     provider::ToolCall,
     session::{
@@ -202,8 +202,7 @@ where
             ToolDiffBudget::default(),
             preview_hash.clone(),
         ));
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+        handler.commit_controls(session, vec![control])?;
     }
 
     Ok(ToolPreviewCapture {

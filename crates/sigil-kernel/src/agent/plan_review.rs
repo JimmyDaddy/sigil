@@ -4,8 +4,8 @@ use serde_json::json;
 use crate::{
     AutomaticRouteCapability, ControlEntry, ConversationRoute, ConversationRouteDecisionProjection,
     ConversationRouteDecisionRecordedEntry, ConversationTurnRef, EventHandler,
-    PlanReviewHandoffBinding, RunEvent, Session, SessionLogEntry, StartPlanReviewAction,
-    TaskRoutingPolicy, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
+    PlanReviewHandoffBinding, Session, SessionLogEntry, StartPlanReviewAction, TaskRoutingPolicy,
+    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
     plan_review_reason_codes,
 };
 
@@ -200,6 +200,5 @@ fn append_control<H>(session: &mut Session, handler: &mut H, control: ControlEnt
 where
     H: EventHandler + Send,
 {
-    session.append_control(control.clone())?;
-    handler.handle(RunEvent::Control(control))
+    handler.commit_controls(session, vec![control]).map(|_| ())
 }

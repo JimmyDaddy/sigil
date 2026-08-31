@@ -63,6 +63,38 @@ fn session_id(store: &JsonlSessionStore) -> Result<String> {
 }
 
 #[test]
+fn malformed_lifecycle_degrades_admission_without_rejecting_the_raw_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = crate::Session::new("test", "model").with_store(store.clone());
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&crate::ConversationRunStartedEntryV1::new("run-1", 1)?)?;
+
+    // A generic raw append keeps its existing delayed strict-validation boundary. The
+    // admission cache must fail closed for later public-control work instead of turning this
+    // unrelated append into an eager lifecycle parser error.
+    store.append_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({"not": "a_conversation_run_lifecycle"}),
+    )?;
+    assert!(
+        session
+            .append_controls_with_public_outbox(
+                vec![crate::ControlEntry::Note {
+                    kind: "private_audit".to_owned(),
+                    data: serde_json::Value::Null,
+                }],
+                "run-1",
+                1,
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn outbox_projection_keeps_failed_delivery_pending_without_changing_domain_event() -> Result<()> {
     let entry = entry(1);
     let mut projection = PublicEventOutboxProjectionV1::default();

@@ -885,11 +885,20 @@ where
     H: sigil_kernel::EventHandler + Send,
     A: sigil_kernel::ApprovalHandler + Send,
 {
-    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(
-        run_session,
-        request,
-        current_unix_time_ms(),
-    )
+    if request.revision_request_id.is_some() {
+        sigil_runtime::PlanReviewCoordinator::ensure_revision_attempt_started(
+            run_session,
+            request,
+            current_unix_time_ms(),
+        )
+    } else {
+        sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(
+            run_session,
+            request,
+            handler,
+            current_unix_time_ms(),
+        )
+    }
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
     let plan_review_workspace_root = options.workspace_root.clone();
     let child_resource_provisioner = managed_plan_review_child_resources;
@@ -970,6 +979,7 @@ where
                 &sigil_runtime::PlanReviewRunOutcome::Failed(
                     "plan review run failed before an outcome".to_owned(),
                 ),
+                handler,
                 current_unix_time_ms(),
             );
             return Err(match close {
@@ -988,6 +998,7 @@ where
                 &sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput {
                     request: pending.clone(),
                 },
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to suspend plan review: {error:#}"))?;
@@ -1011,6 +1022,7 @@ where
                 &draft,
                 request,
                 &compile_input,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to commit plan review draft: {error:#}"))?;
@@ -1026,6 +1038,7 @@ where
             sigil_runtime::PlanReviewCoordinator::complete_without_draft(
                 run_session,
                 request,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|error| format!("failed to close plan review: {error:#}"))?;
@@ -1044,6 +1057,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -1059,6 +1073,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -1072,6 +1087,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| format!(
@@ -1088,6 +1104,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| format!(
@@ -1104,6 +1121,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {
@@ -1118,6 +1136,7 @@ where
                 run_session,
                 request,
                 &terminal,
+                handler,
                 current_unix_time_ms(),
             )
             .map_err(|close_error| {

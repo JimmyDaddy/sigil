@@ -64,6 +64,28 @@ pub enum PlanReviewRunOutcome {
     SubmitOnlyProtocolViolation(String),
 }
 
+/// Keeps child-owned controls in the child session while retaining the parent's existing
+/// forwarding policy for non-control run events.
+///
+/// A plan-review child has a distinct writer and session scope. Forwarding `commit_controls` to
+/// the parent application's bridge would claim an atomic source/outbox bundle across those two
+/// durable stores, which is not an authority this coordinator has.
+struct PlanReviewChildEventHandler<'a, H> {
+    inner: &'a mut H,
+}
+
+impl<H> EventHandler for PlanReviewChildEventHandler<'_, H>
+where
+    H: EventHandler,
+{
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        match event {
+            RunEvent::Control(_) => Ok(()),
+            event => self.inner.handle(event),
+        }
+    }
+}
+
 /// Host-bound request describing one read-only plan review run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanReviewRunRequest {
@@ -1028,8 +1050,10 @@ impl PlanReviewCoordinator {
 
     /// Prepares the plan review run for an accepted automatic `PlanReview` route decision.
     ///
-    /// Validates the durable route decision, appends the idempotent `Started` attempt, and returns
-    /// the host-bound run request. The model never supplies identity, timestamps, or authority.
+    /// Validates the durable route decision and returns the host-bound run request. The run
+    /// executor owns the `Started` append so an application bridge can commit it with its public
+    /// outbox in one parent-session bundle. The model never supplies identity, timestamps, or
+    /// authority.
     ///
     /// # Errors
     ///
@@ -1039,7 +1063,7 @@ impl PlanReviewCoordinator {
         session: &mut Session,
         action: &StartPlanReviewAction,
         workspace_snapshot_id: Option<String>,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<PlanReviewRunRequest> {
         let decision_projection =
             ConversationRouteDecisionProjection::from_entries(session.entries());
@@ -1100,7 +1124,6 @@ impl PlanReviewCoordinator {
             explicit_objective: None,
             objective,
         };
-        Self::ensure_attempt_started(session, &request, now_ms)?;
         Ok(request)
     }
 
@@ -1117,7 +1140,7 @@ impl PlanReviewCoordinator {
         prompt: &str,
         root_logical_run_id: &str,
         workspace_snapshot_id: Option<String>,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> Result<PlanReviewRunRequest> {
         let explicit_objective = safe_persistence_text(prompt);
         if explicit_objective.trim().is_empty() {
@@ -1163,7 +1186,6 @@ impl PlanReviewCoordinator {
             objective: explicit_objective,
             workspace_snapshot_id,
         };
-        Self::ensure_attempt_started(session, &request, now_ms)?;
         Ok(request)
     }
 
@@ -1252,10 +1274,14 @@ impl PlanReviewCoordinator {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        // Keep the coordinator API safe for every caller, including recovery and tests. Product
-        // drivers also call this before registering their supervised run; the append is
-        // idempotent for the exact same attempt binding.
-        Self::ensure_attempt_started(parent_session, request, now_ms())?;
+        // A revision's `Started` record remains owned by its revision execution protocol. An
+        // ordinary parent attempt instead crosses the supplied handler commit boundary so an
+        // application bridge can atomically append its source and public outbox entry.
+        if request.revision_request_id.is_some() {
+            Self::ensure_revision_attempt_started(parent_session, request, now_ms())?;
+        } else {
+            Self::ensure_attempt_started(parent_session, request, handler, now_ms())?;
+        }
         // The host owns plan acceptance authority: the plan review run is always read-only,
         // regardless of the enclosing run's permission mode.
         let mut options = options;
@@ -1397,6 +1423,7 @@ impl PlanReviewCoordinator {
             } else {
                 plan_review_run_input(request, &draft_context, &cancellation, None, 0)
             };
+            let mut child_handler = PlanReviewChildEventHandler { inner: handler };
             Some(
                 agent
                     .run_with_approval_input_and_tool_registry(
@@ -1404,7 +1431,7 @@ impl PlanReviewCoordinator {
                         research_input,
                         research_options,
                         tool_registry,
-                        handler,
+                        &mut child_handler,
                         approval_handler,
                     )
                     .await,
@@ -1549,13 +1576,24 @@ impl PlanReviewCoordinator {
         if cancellation.is_cancel_requested() {
             return Ok(PlanReviewRunOutcome::Cancelled);
         }
-        append_attempt_status(
-            parent_session,
-            request,
-            PlanReviewAttemptStatus::Finalizing,
-            None,
-            now_ms(),
-        )?;
+        if request.revision_request_id.is_some() {
+            append_revision_attempt_status(
+                parent_session,
+                request,
+                PlanReviewAttemptStatus::Finalizing,
+                None,
+                now_ms(),
+            )?;
+        } else {
+            append_attempt_status(
+                parent_session,
+                request,
+                handler,
+                PlanReviewAttemptStatus::Finalizing,
+                None,
+                now_ms(),
+            )?;
+        }
         let evidence = plan_review_finalizer_evidence_bundle(request, &child_session);
         let mut last_violation = None;
         for corrective_ordinal in 1..=2 {
@@ -1605,13 +1643,14 @@ impl PlanReviewCoordinator {
                 Some(&evidence),
                 corrective_ordinal,
             );
+            let mut child_handler = PlanReviewChildEventHandler { inner: handler };
             let finalization = agent
                 .run_with_approval_input_and_tool_registry(
                     &mut finalizer_session,
                     finalization_input,
                     finalization_options,
                     sigil_kernel::ToolRegistry::new(),
-                    handler,
+                    &mut child_handler,
                     approval_handler,
                 )
                 .await;
@@ -1744,13 +1783,17 @@ impl PlanReviewCoordinator {
     ///
     /// Returns an error when the draft conflicts with durable facts or the attempt transition is
     /// invalid.
-    pub fn commit_draft_from_child(
+    pub fn commit_draft_from_child<H>(
         parent: &mut Session,
         draft: &PlanDraftCreatedEntry,
         request: &PlanReviewRunRequest,
         _compile_input: &PlanCompileInputV1,
+        handler: &mut H,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        H: EventHandler + ?Sized,
+    {
         validate_plan_review_request_lineage(request)?;
         validate_plan_review_request_objective(parent, request)?;
         if request.revision_request_id.is_some() {
@@ -1786,7 +1829,8 @@ impl PlanReviewCoordinator {
         if controls.is_empty() {
             Ok(())
         } else {
-            parent.append_controls(controls)
+            handler.commit_controls(parent, controls)?;
+            Ok(())
         }
     }
 
@@ -1901,12 +1945,16 @@ impl PlanReviewCoordinator {
     /// # Errors
     ///
     /// Returns an error when the attempt transition is invalid or conflicts with durable facts.
-    pub fn close_plan_review_run(
+    pub fn close_plan_review_run<H>(
         session: &mut Session,
         request: &PlanReviewRunRequest,
         outcome: &PlanReviewRunOutcome,
+        handler: &mut H,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        H: EventHandler + ?Sized,
+    {
         validate_plan_review_request_lineage(request)?;
         validate_plan_review_request_objective(session, request)?;
         if request.revision_request_id.is_some() {
@@ -1919,6 +1967,7 @@ impl PlanReviewCoordinator {
                 append_attempt_status_with_pending_input(
                     session,
                     request,
+                    handler,
                     PlanReviewAttemptStatus::WaitingForInput,
                     Some((**pending).clone()),
                     now_ms,
@@ -1927,6 +1976,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Cancelled => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Cancelled,
                 Some(PlanReviewTerminalReason::UserCancelled),
                 now_ms,
@@ -1934,6 +1984,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Interrupted(_) => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Interrupted,
                 Some(PlanReviewTerminalReason::RunInterrupted),
                 now_ms,
@@ -1941,6 +1992,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Blocked(_) => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Blocked,
                 Some(PlanReviewTerminalReason::RunBlocked),
                 now_ms,
@@ -1948,6 +2000,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Paused(_) => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Paused,
                 Some(PlanReviewTerminalReason::RunPaused),
                 now_ms,
@@ -1955,6 +2008,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::Failed(_) => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Failed,
                 Some(PlanReviewTerminalReason::RunFailed),
                 now_ms,
@@ -1962,6 +2016,7 @@ impl PlanReviewCoordinator {
             PlanReviewRunOutcome::SubmitOnlyProtocolViolation(_) => append_attempt_status(
                 session,
                 request,
+                handler,
                 PlanReviewAttemptStatus::Failed,
                 Some(PlanReviewTerminalReason::SubmitOnlyProtocolViolation),
                 now_ms,
@@ -1980,12 +2035,16 @@ impl PlanReviewCoordinator {
     /// # Errors
     ///
     /// Returns an error when the attempt is open and its terminal transition fails.
-    pub fn close_plan_review_run_if_open(
+    pub fn close_plan_review_run_if_open<H>(
         session: &mut Session,
         request: &PlanReviewRunRequest,
         outcome: &PlanReviewRunOutcome,
+        handler: &mut H,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        H: EventHandler + ?Sized,
+    {
         validate_plan_review_request_lineage(request)?;
         validate_plan_review_request_objective(session, request)?;
         if request.revision_request_id.is_some() {
@@ -2000,7 +2059,7 @@ impl PlanReviewCoordinator {
         if existing.attempt_id == request.attempt_id && existing.status.is_terminal() {
             return Ok(());
         }
-        Self::close_plan_review_run(session, request, outcome, now_ms)
+        Self::close_plan_review_run(session, request, outcome, handler, now_ms)
     }
 
     /// Closes an automatic plan review that produced no draft.
@@ -2008,11 +2067,15 @@ impl PlanReviewCoordinator {
     /// # Errors
     ///
     /// Returns an error when the attempt transition is invalid.
-    pub fn complete_without_draft(
+    pub fn complete_without_draft<H>(
         session: &mut Session,
         request: &PlanReviewRunRequest,
+        handler: &mut H,
         now_ms: u64,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        H: EventHandler + ?Sized,
+    {
         validate_plan_review_request_lineage(request)?;
         validate_plan_review_request_objective(session, request)?;
         if request.revision_request_id.is_some() {
@@ -2021,6 +2084,7 @@ impl PlanReviewCoordinator {
         append_attempt_status(
             session,
             request,
+            handler,
             PlanReviewAttemptStatus::CompletedWithoutDraft,
             Some(PlanReviewTerminalReason::NoDraftAfterRetry),
             now_ms,
@@ -2789,12 +2853,7 @@ impl PlanReviewCoordinator {
                 )?;
                 return Ok((receipt, None, Some(outbox)));
             }
-            Self::close_plan_review_run(
-                parent,
-                &request,
-                &PlanReviewRunOutcome::Cancelled,
-                now_ms,
-            )?;
+            append_command_owned_plan_review_cancellation(parent, &request, now_ms)?;
             return Ok((receipt, None, None));
         }
         Ok((receipt, Some(request), None))
@@ -3506,7 +3565,7 @@ pub struct RejectPlanRequest {
 }
 
 impl PlanReviewCoordinator {
-    /// Ensures the attempt `Started` record exists in the parent session.
+    /// Commits an ordinary attempt `Started` record through the parent event handler.
     ///
     /// The record is owned by the run executor, not by the prepare step: a persisted `Started`
     /// without an in-process run would be misread as a crashed run by recovery (which closes it
@@ -3516,72 +3575,131 @@ impl PlanReviewCoordinator {
     ///
     /// Returns an error when the attempt already carries a different status or the transition is
     /// invalid.
-    pub fn ensure_attempt_started(
+    pub fn ensure_attempt_started<H>(
+        session: &mut Session,
+        request: &PlanReviewRunRequest,
+        handler: &mut H,
+        now_ms: u64,
+    ) -> Result<()>
+    where
+        H: EventHandler + ?Sized,
+    {
+        if request.revision_request_id.is_some() {
+            bail!("revision started requires its dedicated execution owner");
+        }
+        if let Some(entry) = plan_review_started_attempt_entry(session, request, now_ms)? {
+            handler.commit_controls(session, vec![ControlEntry::PlanReviewAttempt(entry)])?;
+        }
+        Ok(())
+    }
+
+    /// Ensures a revision attempt has its executor-owned `Started` record.
+    ///
+    /// Revision Waiting and terminal publication remain governed by their dedicated kernel
+    /// bundles, so this path must not use the ordinary application public-control hook.
+    pub fn ensure_revision_attempt_started(
         session: &mut Session,
         request: &PlanReviewRunRequest,
         now_ms: u64,
     ) -> Result<()> {
-        validate_plan_review_request_lineage(request)?;
-        validate_plan_review_request_objective(session, request)?;
-        let projection = PlanReviewProjection::from_entries(session.entries());
-        if let Some(existing) = projection.latest_attempt(&request.plan_review_id) {
-            if existing.attempt_id == request.attempt_id
-                && existing.status == PlanReviewAttemptStatus::Started
-            {
-                if existing.source != request.source
-                    || existing.source_turn != request.source_turn
-                    || existing.explicit_objective != request.explicit_objective
-                {
-                    bail!(
-                        "plan review attempt {} conflicts with its durable source binding",
-                        request.attempt_id.as_str()
-                    );
-                }
-                return Ok(());
-            }
-            if existing.attempt_id == request.attempt_id
-                && existing.status != PlanReviewAttemptStatus::WaitingForInput
-            {
-                bail!(
-                    "plan review attempt {} already has status {}",
-                    request.attempt_id.as_str(),
-                    existing.status.as_str()
-                );
-            }
+        if request.revision_request_id.is_none() {
+            bail!("non-revision started must use the application control commit hook");
         }
-        let entry = PlanReviewAttemptEntry {
-            plan_review_id: request.plan_review_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            plan_id: request.plan_id.clone(),
-            source: request.source,
-            source_turn: request.source_turn.clone(),
-            route_decision_id: request.route_decision_id.clone(),
-            child_session_ref: request.child_session_ref.clone(),
-            finalizer_session_ref: Some(request.finalizer_session_ref.clone()),
-            revision_request_id: request.revision_request_id.clone(),
-            attempt_ordinal: request.attempt_ordinal,
-            base_plan_id: request.base_plan_id.clone(),
-            base_plan_hash: request.base_plan_hash.clone(),
-            explicit_objective: request.explicit_objective.clone(),
-            workspace_snapshot_id: request.workspace_snapshot_id.clone(),
-            pending_user_input: None,
-            status: PlanReviewAttemptStatus::Started,
-            terminal_reason: None,
-            recorded_at_ms: now_ms,
-        };
-        projection.validate_append(&entry)?;
-        session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
+        if let Some(entry) = plan_review_started_attempt_entry(session, request, now_ms)? {
+            session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
+        }
         Ok(())
     }
 }
 
-fn append_attempt_status(
+fn plan_review_started_attempt_entry(
+    session: &Session,
+    request: &PlanReviewRunRequest,
+    now_ms: u64,
+) -> Result<Option<PlanReviewAttemptEntry>> {
+    validate_plan_review_request_lineage(request)?;
+    validate_plan_review_request_objective(session, request)?;
+    let projection = PlanReviewProjection::from_entries(session.entries());
+    if let Some(existing) = projection.latest_attempt(&request.plan_review_id) {
+        if existing.attempt_id == request.attempt_id
+            && existing.status == PlanReviewAttemptStatus::Started
+        {
+            if existing.source != request.source
+                || existing.source_turn != request.source_turn
+                || existing.explicit_objective != request.explicit_objective
+            {
+                bail!(
+                    "plan review attempt {} conflicts with its durable source binding",
+                    request.attempt_id.as_str()
+                );
+            }
+            return Ok(None);
+        }
+        if existing.attempt_id == request.attempt_id
+            && existing.status != PlanReviewAttemptStatus::WaitingForInput
+        {
+            bail!(
+                "plan review attempt {} already has status {}",
+                request.attempt_id.as_str(),
+                existing.status.as_str()
+            );
+        }
+    }
+    let entry = PlanReviewAttemptEntry {
+        plan_review_id: request.plan_review_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        plan_id: request.plan_id.clone(),
+        source: request.source,
+        source_turn: request.source_turn.clone(),
+        route_decision_id: request.route_decision_id.clone(),
+        child_session_ref: request.child_session_ref.clone(),
+        finalizer_session_ref: Some(request.finalizer_session_ref.clone()),
+        revision_request_id: request.revision_request_id.clone(),
+        attempt_ordinal: request.attempt_ordinal,
+        base_plan_id: request.base_plan_id.clone(),
+        base_plan_hash: request.base_plan_hash.clone(),
+        explicit_objective: request.explicit_objective.clone(),
+        workspace_snapshot_id: request.workspace_snapshot_id.clone(),
+        pending_user_input: None,
+        status: PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: now_ms,
+    };
+    projection.validate_append(&entry)?;
+    Ok(Some(entry))
+}
+
+fn append_attempt_status<H>(
+    session: &mut Session,
+    request: &PlanReviewRunRequest,
+    handler: &mut H,
+    status: PlanReviewAttemptStatus,
+    terminal_reason: Option<PlanReviewTerminalReason>,
+    now_ms: u64,
+) -> Result<()>
+where
+    H: EventHandler + ?Sized,
+{
+    if let Some(entry) =
+        plan_review_attempt_status_entry(session, request, status, terminal_reason, now_ms)?
+    {
+        let projection = PlanReviewProjection::from_entries(session.entries());
+        projection.validate_append(&entry)?;
+        handler.commit_controls(session, vec![ControlEntry::PlanReviewAttempt(entry)])?;
+    }
+    Ok(())
+}
+
+fn append_revision_attempt_status(
     session: &mut Session,
     request: &PlanReviewRunRequest,
     status: PlanReviewAttemptStatus,
     terminal_reason: Option<PlanReviewTerminalReason>,
     now_ms: u64,
 ) -> Result<()> {
+    if request.revision_request_id.is_none() {
+        bail!("ordinary plan-review status must use the application control commit hook");
+    }
     if let Some(entry) =
         plan_review_attempt_status_entry(session, request, status, terminal_reason, now_ms)?
     {
@@ -3592,19 +3710,49 @@ fn append_attempt_status(
     Ok(())
 }
 
-fn append_attempt_status_with_pending_input(
+/// Records the parent cancellation fact owned by a user-input command, which resumes without an
+/// active application run or public bridge. This is deliberately not an executor transition.
+fn append_command_owned_plan_review_cancellation(
     session: &mut Session,
     request: &PlanReviewRunRequest,
+    now_ms: u64,
+) -> Result<()> {
+    if request.revision_request_id.is_some() {
+        bail!("revision cancellation requires the atomic revision terminal bundle");
+    }
+    if let Some(entry) = plan_review_attempt_status_entry(
+        session,
+        request,
+        PlanReviewAttemptStatus::Cancelled,
+        Some(PlanReviewTerminalReason::UserCancelled),
+        now_ms,
+    )? {
+        let projection = PlanReviewProjection::from_entries(session.entries());
+        projection.validate_append(&entry)?;
+        session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
+    }
+    Ok(())
+}
+
+fn append_attempt_status_with_pending_input<H>(
+    session: &mut Session,
+    request: &PlanReviewRunRequest,
+    handler: &mut H,
     status: PlanReviewAttemptStatus,
     pending_user_input: Option<sigil_kernel::PublicUserInputRequestV1>,
     now_ms: u64,
-) -> Result<()> {
+) -> Result<()>
+where
+    H: EventHandler + ?Sized,
+{
     let mut entry = plan_review_attempt_status_entry(session, request, status, None, now_ms)?
         .context("plan review pending-input transition was already recorded")?;
     entry.pending_user_input = pending_user_input.map(Box::new);
     let projection = PlanReviewProjection::from_entries(session.entries());
     projection.validate_append(&entry)?;
-    session.append_control(ControlEntry::PlanReviewAttempt(entry))
+    handler
+        .commit_controls(session, vec![ControlEntry::PlanReviewAttempt(entry)])
+        .map(|_| ())
 }
 
 /// A revision is identified by its accepted guidance request and exact base-plan binding.

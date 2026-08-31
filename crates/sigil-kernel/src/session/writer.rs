@@ -166,6 +166,11 @@ impl SharedSessionCoordinator {
         &self,
         entry: &PublicEventOutboxEntryV1,
     ) -> Result<bool> {
+        if !super::public_event_outbox::is_terminal_event(&entry.event.event)
+            && entry.domain_event_id != entry.public_event_id
+        {
+            bail!("source-linked control publication requires its atomic control bundle");
+        }
         let (appended, notice) = {
             let mut writer = self.lock_writer()?;
             writer.ensure_public_event_outbox_index()?;
@@ -193,6 +198,74 @@ impl SharedSessionCoordinator {
         };
         self.notify(notice);
         Ok(appended)
+    }
+
+    /// Appends the exact source controls and their publications using the existing append intent.
+    /// An uncertain write is reconciled against every immutable member, not just a watermark.
+    pub(super) fn append_control_publication(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        run_id: &str,
+    ) -> Result<Vec<StoredEvent>> {
+        let (events, notice) = {
+            let mut writer = self.lock_writer()?;
+            writer.ensure_public_event_outbox_index()?;
+            writer
+                .public_event_outbox_index()
+                .context("public outbox index is unavailable")?
+                .require_active_run(run_id)?;
+            // Reject a stale caller before attempting I/O. Only an error from this very append
+            // may be reconciled as an uncertain commit; an already-applied batch is not a new
+            // Session delta and must never be appended to its in-memory entries twice.
+            let publications = pending
+                .iter()
+                .filter(|event| event.event_type == DurableEventType::PublicEventOutbox)
+                .map(|event| {
+                    serde_json::from_value::<PublicEventOutboxEntryV1>(event.payload.clone())
+                        .map_err(Into::into)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            writer
+                .public_event_outbox_index()
+                .context("public outbox index is unavailable")?
+                .validate_durable_appends(&publications, &[])?;
+            let result = writer.append_crash_safe_bundle(pending.clone());
+            let events = match result {
+                Ok((events, _)) => events,
+                Err(source) => {
+                    let records = writer
+                        .read_records_writer()
+                        .context("failed to reconcile control publication append")?;
+                    let mut recovered = Vec::with_capacity(pending.len());
+                    for candidate in &pending {
+                        let Some(record) = records.iter().find(|record| {
+                            Some(&record.stored_event().event_id) == candidate.event_id.as_ref()
+                        }) else {
+                            return Err(source);
+                        };
+                        let event = record.stored_event();
+                        if event.event_kind() != Some(candidate.event_type)
+                            || event.payload != candidate.payload
+                            || event.correlation_id != candidate.correlation_id
+                            || event.causation_id != candidate.causation_id
+                        {
+                            bail!("control publication retry conflicts with its durable source");
+                        }
+                        if recovered.last().is_some_and(|previous: &StoredEvent| {
+                            previous.stream_sequence.checked_add(1) != Some(event.stream_sequence)
+                        }) {
+                            bail!("control publication retry is not one contiguous durable bundle");
+                        }
+                        recovered.push(event.clone());
+                    }
+                    recovered
+                }
+            };
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (events, notice)
+        };
+        self.notify(notice);
+        Ok(events)
     }
 
     pub(super) fn append_public_event_delivery(
@@ -1603,7 +1676,7 @@ pub(crate) enum SessionWriterFault {
     DiskSpaceExhaustedBeforeWrite,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct PendingStoredEvent {
     pub(super) event_type: DurableEventType,
     pub(super) event_class: EventClass,
@@ -1917,6 +1990,38 @@ impl LinearSessionWriter {
                     bail!("public outbox envelope must use its exact public event id");
                 }
                 self.validate_public_event_outbox_session_identity(&entry)?;
+                if !super::public_event_outbox::is_terminal_event(&entry.event.event)
+                    && entry.domain_event_id != entry.public_event_id
+                {
+                    let source_index = pending
+                        .iter()
+                        .position(|source| {
+                            source.event_id.as_deref() == Some(entry.domain_event_id.as_str())
+                        })
+                        .context(
+                            "source-linked public event is missing its atomic source control",
+                        )?;
+                    let public_index = pending
+                        .iter()
+                        .position(|source| source.event_id == event.event_id)
+                        .context("public control envelope is unavailable")?;
+                    let source = &pending[source_index];
+                    let control: SessionLogEntry = serde_json::from_value(
+                        source
+                            .payload
+                            .get("session_log_entry")
+                            .cloned()
+                            .context("public source is not a control entry")?,
+                    )?;
+                    if source_index >= public_index
+                        || !matches!(&control, SessionLogEntry::Control(_))
+                        || source.event_type != super::store::session_entry_event_type(&control)
+                        || event.causation_id.as_deref() != Some(entry.domain_event_id.as_str())
+                    {
+                        bail!("public event is not linked to its preceding source control");
+                    }
+                    index.require_active_run(&entry.run_id)?;
+                }
                 Ok(entry)
             })
             .collect::<Result<Vec<_>>>()?;

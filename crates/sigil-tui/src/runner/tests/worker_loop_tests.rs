@@ -122,7 +122,11 @@ fn worker_revision_waiting_commits_the_exact_public_outbox_before_tui_wakeup() -
         13,
     )?;
     let revision = revision.expect("accepted guidance must prepare a revision worker run");
-    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(&mut session, &revision, 14)?;
+    sigil_runtime::PlanReviewCoordinator::ensure_revision_attempt_started(
+        &mut session,
+        &revision,
+        14,
+    )?;
     let pending = sigil_kernel::PublicUserInputRequestV1 {
         identity: sigil_kernel::UserInputIdentityV1 {
             session_scope_id: sigil_kernel::SessionScopeId::new(&session_id)?,

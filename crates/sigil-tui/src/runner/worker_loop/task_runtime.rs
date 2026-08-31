@@ -1542,12 +1542,14 @@ pub(in crate::runner) fn revise_plan(
 
 pub(in crate::runner) fn append_paused_task_state(
     session: &mut Session,
+    handler: &mut ChannelEventHandler,
     task_id: &str,
 ) -> std::result::Result<(), String> {
     let task_id = TaskId::new(task_id.to_owned())
         .map_err(|error| format!("invalid active task id: {error}"))?;
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         session,
+        handler,
         Some(&task_id),
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Paused,
         "task paused from TUI",
@@ -1558,6 +1560,7 @@ pub(in crate::runner) fn append_paused_task_state(
 
 pub(in crate::runner) fn append_interrupted_task_state(
     session: &mut Session,
+    handler: &mut ChannelEventHandler,
     task_id: Option<&str>,
     reason: &str,
 ) -> std::result::Result<(), String> {
@@ -1569,6 +1572,7 @@ pub(in crate::runner) fn append_interrupted_task_state(
         .transpose()?;
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         session,
+        handler,
         task_id.as_ref(),
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
         reason,
