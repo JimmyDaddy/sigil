@@ -143,9 +143,19 @@ impl Session {
                 }
                 return Ok(false);
             }
-            if records
+            let next_sequence = projection
+                .events_in_order()
                 .iter()
-                .any(|record| record.session_id() != expected.event.session_id)
+                .filter(|entry| entry.run_id == expected.run_id)
+                .map(|entry| entry.sequence)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .context("revision public sequence exhausted")?;
+            if expected.sequence != next_sequence
+                || records
+                    .iter()
+                    .any(|record| record.session_id() != expected.event.session_id)
                 || projection.events_in_order().iter().any(|entry| {
                     entry.run_id == expected.run_id && entry.sequence >= expected.sequence
                 })
@@ -179,6 +189,10 @@ impl Session {
             .into_iter()
             .find(|entry| {
                 entry.run_id == run_id
+                    && !matches!(
+                        entry.event.event,
+                        PublicRunEventKind::RunAwaitingUserInput { .. }
+                    )
                     && records.iter().any(|record| {
                         record.stored_event().event_id == entry.domain_event_id
                             && record.stored_event().event_kind()
@@ -209,7 +223,7 @@ impl Session {
     }
 }
 
-fn validate_predecessor(
+pub(super) fn validate_predecessor(
     entries: &[SessionLogEntry],
     attempt: &PlanReviewAttemptEntry,
 ) -> Result<()> {
@@ -231,7 +245,7 @@ fn validate_predecessor(
         .clone();
     expected.status = attempt.status;
     expected.terminal_reason = attempt.terminal_reason;
-    expected.pending_user_input = None;
+    expected.pending_user_input = attempt.pending_user_input.clone();
     expected.recorded_at_ms = attempt.recorded_at_ms;
     if &expected != attempt {
         bail!("revision terminal changes its immutable attempt binding");
@@ -331,6 +345,7 @@ pub(super) fn validate_revision_pairs(
     records: &[SessionStreamRecord],
     projection: &PublicEventOutboxProjectionV1,
 ) -> Result<()> {
+    super::plan_review_waiting::validate_waiting_pairs(records, projection)?;
     let mut finalized = BTreeMap::new();
     let mut paired = std::collections::BTreeSet::new();
     for (index, record) in records.iter().enumerate() {
@@ -402,6 +417,10 @@ pub(super) fn validate_revision_pairs(
             record.stored_event().event_id == entry.domain_event_id
                 && record.stored_event().event_kind() == Some(DurableEventType::PlanReviewAttempt)
         }) && super::public_event_outbox::is_terminal_event(&entry.event.event)
+            && !matches!(
+                entry.event.event,
+                PublicRunEventKind::RunAwaitingUserInput { .. }
+            )
             && !paired.contains(entry.public_event_id.as_str())
         {
             bail!("public revision terminal has no exact finalized attempt");

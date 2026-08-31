@@ -19,12 +19,13 @@ use sigil_kernel::{
     ExecutionNetworkReceipt, ExecutionSandboxFallback, ExecutionSandboxProfile,
     ExecutionSandboxStrategyConfig, InteractionMode, JsonlSessionStore, LanguageServerConfig,
     McpServerConfig, McpServerStartup, McpServerTrustPolicy, ModelRef, MutationEventRecorder,
-    NetworkEffect, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig,
-    RootConfig, Session, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, TERMINAL_TASK_SCHEMA_VERSION, TerminalLifecycleEvent, TerminalLifecycleSink,
-    TerminalLifecycleUpdateV2, TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus, Tool,
-    ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolExecutionStatus,
+    NetworkEffect, ProviderCapabilities, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
+    ReasoningStreamSupport, RoleModelConfig, RootConfig, Session, SessionLogEntry, SkillDescriptor,
+    SkillRunMode, SkillSource, SkillTrustState, TERMINAL_TASK_SCHEMA_VERSION,
+    TerminalLifecycleEvent, TerminalLifecycleSink, TerminalLifecycleUpdateV2,
+    TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus, Tool, ToolAccess,
+    ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolExecutionStatus,
     ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, ToolSubjectKind, WorkspaceTrust, durable_tool_execution_entry,
 };
@@ -322,12 +323,10 @@ struct DurableFirstTerminalHandler {
 }
 
 impl ApplicationTerminalLifecycleHandler for DurableFirstTerminalHandler {
-    fn handle_terminal_lifecycle(
-        &self,
-        _session_id: &str,
-        _run_id: &str,
-        event: &TerminalLifecycleEvent,
-    ) -> Result<()> {
+    fn handle_public_event(&self, event: PublicRunEvent) -> Result<()> {
+        let PublicRunEventKind::TerminalLifecycle { event } = event.event else {
+            anyhow::bail!("terminal lifecycle route received a non-lifecycle public event");
+        };
         let entries = JsonlSessionStore::read_entries(&self.path)?;
         let projection = TerminalTaskProjection::from_entries(&entries);
         let task = projection
@@ -338,6 +337,10 @@ impl ApplicationTerminalLifecycleHandler for DurableFirstTerminalHandler {
         self.handled.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        "terminal_lifecycle_test"
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -345,16 +348,22 @@ async fn terminal_lifecycle_router_appends_exact_snapshot_before_live_publicatio
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("terminal-route.jsonl");
     let store = JsonlSessionStore::new(path.clone())?;
+    let mut session = Session::new("deepseek", "deepseek-v4-pro").with_store(store.clone());
+    session.ensure_identity_entry()?;
     let handled = Arc::new(AtomicUsize::new(0));
-    let router = ApplicationTerminalLifecycleRouter::new(
-        MutationEventRecorder::new(store),
-        "session-route",
-        "run-route",
-        Some(Arc::new(DurableFirstTerminalHandler {
-            path: path.clone(),
-            handled: Arc::clone(&handled),
-        })),
-    );
+    let events = crate::application_run::ApplicationRunEventSequence::with_outbox(
+        session.session_scope_id().to_owned(),
+        "run-route".to_owned(),
+        JsonlSessionStore::new(path.clone())?,
+    )?;
+    let router = ApplicationTerminalLifecycleRouter::new(MutationEventRecorder::new(store))
+        .with_application_public_events(
+            Arc::new(DurableFirstTerminalHandler {
+                path: path.clone(),
+                handled: Arc::clone(&handled),
+            }),
+            events,
+        );
     let task = runtime_terminal_entry(
         temp.path(),
         1,

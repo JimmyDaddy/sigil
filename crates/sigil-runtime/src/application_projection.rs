@@ -1,6 +1,6 @@
 //! Durable-session adapter for the transport-neutral application projection.
 
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use futures::future::BoxFuture;
 use sigil_application::{
@@ -17,9 +17,10 @@ use sigil_application::{
     UserInputSurfaceProjection,
 };
 use sigil_kernel::{
-    ControlEntry, ConversationQueueDurableProjection, JsonlSessionStore, PublicEventOutboxEntryV1,
-    PublicEventOutboxProjectionV1, PublicRunEventKind, SessionLogEntry, TerminalReadinessStatus,
-    TerminalTaskProjection,
+    ControlEntry, ConversationQueueDurableProjection, DurableEventType, JsonlSessionStore,
+    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder, PublicRunEventKind, SessionLogEntry,
+    TerminalReadinessStatus, TerminalTaskProjection,
 };
 
 use crate::application_run::{
@@ -183,8 +184,11 @@ impl RuntimeSessionProjectionBinding {
             .iter()
             .map(|(_, entry)| entry)
             .collect::<Vec<_>>();
+        let revision_waiting_public_event_ids =
+            revision_waiting_public_event_ids(&records, &public_events)?;
         let route_recovery = context.route_recovery.as_ref();
-        let event_state = ProjectionEventState::from_events(&events);
+        let event_state =
+            ProjectionEventState::from_events(&events, &revision_waiting_public_event_ids);
         let status = route_recovery
             .map(|_| "recovery-required")
             .unwrap_or(event_state.run_status);
@@ -326,13 +330,20 @@ impl RuntimeSessionProjectionBinding {
             .iter()
             .map(|(_, entry)| entry)
             .collect::<Vec<_>>();
+        let public_outbox =
+            PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
+                ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
+            })?;
+        let revision_waiting_public_event_ids =
+            revision_waiting_public_event_ids(&records, &public_outbox)?;
         let prefix_public = public_events
             .iter()
             .filter(|(sequence, _)| *sequence <= resume_from.through_sequence)
             .map(|(_, entry)| entry)
             .collect::<Vec<_>>();
         let mut base_projection = current.projection.clone();
-        let base_state = ProjectionEventState::from_events(&prefix_public);
+        let base_state =
+            ProjectionEventState::from_events(&prefix_public, &revision_waiting_public_event_ids);
         apply_projection_event_state(&mut base_projection, &base_state)?;
         let prefix_records = records
             .iter()
@@ -382,7 +393,10 @@ impl RuntimeSessionProjectionBinding {
             {
                 public_index += 1;
             }
-            let state = ProjectionEventState::from_events(&all_public[..public_index]);
+            let state = ProjectionEventState::from_events(
+                &all_public[..public_index],
+                &revision_waiting_public_event_ids,
+            );
             let mut next_projection = base.projection.clone();
             apply_projection_event_state(&mut next_projection, &state)?;
             let through_records = records
@@ -489,6 +503,127 @@ impl RuntimeSessionProjectionBinding {
             items,
         })
     }
+
+    fn acknowledge_tui_public_outbox_through_sync(
+        &self,
+        frontier: &ApplicationFrontier,
+    ) -> Result<usize, ApplicationError> {
+        if frontier.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION
+            || frontier.scope != self.scope
+            || frontier.writer_generation != self.writer_generation
+            || frontier.stream_generation != self.stream_generation
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        if frontier.durable_cursor != format!("session-stream:{}", frontier.through_sequence) {
+            return Err(ApplicationError::ResetRequired);
+        }
+
+        let store = JsonlSessionStore::new(&self.session_path)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let records = store
+            .read_event_records_writer()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let first = records.first().ok_or(ApplicationError::Unavailable)?;
+        let last = records.last().ok_or(ApplicationError::Unavailable)?;
+        if first.session_id() != self.expected_session_scope_id
+            || records
+                .iter()
+                .any(|record| record.session_id() != self.expected_session_scope_id)
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        if frontier.through_sequence < first.stream_sequence()
+            || frontier.through_sequence > last.stream_sequence()
+        {
+            return Err(ApplicationError::ResetRequired);
+        }
+
+        let outbox = PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
+            ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
+        })?;
+        let pending_ids = outbox
+            .pending_for_adapter("tui")
+            .into_iter()
+            .map(|entry| entry.public_event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let eligible_ids = records
+            .iter()
+            .filter(|record| record.stream_sequence() <= frontier.through_sequence)
+            .filter(|record| {
+                record.stored_event().event_kind() == Some(DurableEventType::PublicEventOutbox)
+            })
+            .map(|record| {
+                let entry = serde_json::from_value::<PublicEventOutboxEntryV1>(
+                    record.stored_event().payload.clone(),
+                )
+                .map_err(|_| {
+                    ApplicationError::CorruptProjection(
+                        "invalid public event outbox payload".to_owned(),
+                    )
+                })?;
+                let Some(projected) = outbox.entry(&entry.public_event_id) else {
+                    return Err(ApplicationError::CorruptProjection(
+                        "public event outbox projection lost its entry".to_owned(),
+                    ));
+                };
+                let projected_payload = serde_json::to_vec(projected).map_err(|_| {
+                    ApplicationError::CorruptProjection(
+                        "public event outbox projection could not validate its payload".to_owned(),
+                    )
+                })?;
+                let durable_payload = serde_json::to_vec(&entry).map_err(|_| {
+                    ApplicationError::CorruptProjection(
+                        "public event outbox payload could not be validated".to_owned(),
+                    )
+                })?;
+                if projected_payload != durable_payload {
+                    return Err(ApplicationError::CorruptProjection(
+                        "public event outbox projection entry differs from durable payload"
+                            .to_owned(),
+                    ));
+                }
+                Ok(entry.public_event_id)
+            })
+            .collect::<Result<BTreeSet<_>, ApplicationError>>()?;
+        let recorder = PublicEventOutboxRecorder::new(store);
+        let delivered_at_unix_ms = crate::current_unix_time_ms();
+        let mut acknowledged = 0usize;
+        for entry in outbox.events_in_order().into_iter().filter(|entry| {
+            pending_ids.contains(entry.public_event_id.as_str())
+                && eligible_ids.contains(entry.public_event_id.as_str())
+        }) {
+            if entry.event.session_id != self.expected_session_scope_id {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            recorder
+                .append_delivery(&PublicEventDeliveryReceiptV1 {
+                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    public_event_id: entry.public_event_id.clone(),
+                    adapter: "tui".to_owned(),
+                    delivered_at_unix_ms,
+                })
+                .map_err(|_| ApplicationError::Unavailable)?;
+            acknowledged += 1;
+        }
+        Ok(acknowledged)
+    }
+
+    /// Acknowledges only the TUI-visible public outbox entries represented by one exact,
+    /// already-applied application projection cut. This is intentionally not a generic adapter
+    /// writer: it fixes the adapter identity and keeps durable writer policy in runtime.
+    pub async fn acknowledge_tui_public_outbox_through(
+        &self,
+        frontier: &ApplicationFrontier,
+    ) -> Result<usize, ApplicationError> {
+        let binding = self.clone();
+        let frontier = frontier.clone();
+        tokio::task::spawn_blocking(move || {
+            binding.acknowledge_tui_public_outbox_through_sync(&frontier)
+        })
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?
+    }
 }
 
 fn terminal_surface_projection(
@@ -554,6 +689,41 @@ fn terminal_readiness_label(readiness: &TerminalReadinessStatus) -> &'static str
     }
 }
 
+/// Returns only the public events whose `RunAwaitingUserInput` payload is proven by the paired
+/// revision Waiting attempt. A public event kind is intentionally insufficient: root awaiting
+/// input remains a terminal conversation outcome.
+fn revision_waiting_public_event_ids(
+    records: &[sigil_kernel::SessionStreamRecord],
+    outbox: &PublicEventOutboxProjectionV1,
+) -> Result<BTreeSet<String>, ApplicationError> {
+    let mut waiting_domain_ids = BTreeSet::new();
+    for record in records {
+        let entry = record.session_log_entry().map_err(|_| {
+            ApplicationError::CorruptProjection("invalid plan-review waiting record".to_owned())
+        })?;
+        let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) = entry else {
+            continue;
+        };
+        if attempt.revision_request_id.is_some()
+            && attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
+        {
+            waiting_domain_ids.insert(record.event_id().to_owned());
+        }
+    }
+    Ok(outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| {
+            waiting_domain_ids.contains(&entry.domain_event_id)
+                && matches!(
+                    entry.event.event,
+                    PublicRunEventKind::RunAwaitingUserInput { .. }
+                )
+        })
+        .map(|entry| entry.public_event_id.clone())
+        .collect())
+}
+
 #[derive(Clone)]
 struct ProjectionEventState {
     run_status: &'static str,
@@ -569,6 +739,7 @@ struct ProjectionEventState {
     user_input_pending: bool,
     user_input_binding: Option<String>,
     user_input_prompt: Option<SafeText>,
+    revision_waiting_run_id: Option<String>,
     last_notice: Option<SafeText>,
 }
 
@@ -601,7 +772,10 @@ fn apply_projection_event_state(
 }
 
 impl ProjectionEventState {
-    fn from_events(events: &[&sigil_kernel::PublicEventOutboxEntryV1]) -> Self {
+    fn from_events(
+        events: &[&sigil_kernel::PublicEventOutboxEntryV1],
+        revision_waiting_public_event_ids: &BTreeSet<String>,
+    ) -> Self {
         let mut state = Self {
             run_status: "idle",
             run_active: false,
@@ -616,6 +790,7 @@ impl ProjectionEventState {
             user_input_pending: false,
             user_input_binding: None,
             user_input_prompt: None,
+            revision_waiting_run_id: None,
             last_notice: None,
         };
         for entry in events {
@@ -627,6 +802,13 @@ impl ProjectionEventState {
                     state.run_status = "running";
                     state.run_active = true;
                     state.run_binding = Some(entry.run_id.clone());
+                    if state.revision_waiting_run_id.as_deref() == Some(&entry.run_id) {
+                        state.user_input_pending = false;
+                        state.user_input_binding = None;
+                        state.user_input_prompt = None;
+                        state.plan_status = "started";
+                        state.revision_waiting_run_id = None;
+                    }
                 }
                 PublicRunEventKind::RunFinished { .. }
                 | PublicRunEventKind::TaskRunFinished { .. }
@@ -672,15 +854,19 @@ impl ProjectionEventState {
                     generation,
                     request_hash,
                 } => {
-                    // Awaiting user input is a durable terminal outcome for this run. The
-                    // request stays pending, but the preceding execution is no longer active
-                    // or cancellable when a projection is rebuilt after a refresh/restart.
+                    // A root AwaitingUserInput is terminal, while a revision Waiting pair is a
+                    // resumable attempt suspension. The exact PlanReviewAttempt/outbox pairing
+                    // selects the latter; the public event kind alone never decides it.
                     state.run_status = "awaiting-user-input";
                     state.run_active = false;
                     state.run_binding = None;
                     state.user_input_pending = true;
                     state.user_input_binding =
                         Some(format!("{request_id}:{generation}:{request_hash}"));
+                    if revision_waiting_public_event_ids.contains(&entry.public_event_id) {
+                        state.plan_status = "waiting-for-input";
+                        state.revision_waiting_run_id = Some(entry.run_id.clone());
+                    }
                 }
                 PublicRunEventKind::UserInputChanged {
                     request_id,

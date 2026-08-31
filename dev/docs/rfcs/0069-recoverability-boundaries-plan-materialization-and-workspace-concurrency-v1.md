@@ -879,14 +879,15 @@ PlanReview revision 的独立终态协议（2026-08-31）：
   真正 unfinished revision 没有原 bundle 时只结算 Interrupted，不能从 child draft 推造成功。
 - HTTP、TUI 只交付同一原终态，不能再按 `Result::Err` 造 RunFailed；delivery receipt 与
   adapter registry 分别恢复，ACK 不等于 registry 已收敛。非终态 live sequence 的重启连续性
-  与完整 public outbox 属于独立 E08/A2，不在此协议冒充已完成。
+  与完整 public outbox 按下文 E08/A2 协议实施；A1 本身不构成该能力的完成证据。
   TUI 后置审计仍须尝试，失败单独 Notice，不覆盖实际 Finished/Cancelled/Interrupted。
   HTTP receipt 或发布失败也必须尝试从原 terminal 收敛 registry/stream；独立返回 delivery
   错误并保留原 pending outbox，由既有 attach replay 补交，不能让 Paused 残留成为新真相。
 - worker 活动期间 public sequence 由该 run 的单一 runtime live bridge 预留，session writer
-  只验证同 run 的 durable 序列不倒退并固定该值；它不是 session stream sequence。等待输入
-  时没有活动 worker，HTTP 取消沿原 journal publication lock 取得下一值、提交原子终态后
-  发布该 exact event；不另建 reservation registry，也不重编号已提交事件。无 live bridge
+  在原子追加边界验证同 run 的 durable 下一序号并固定该值；它不是 session stream sequence。
+  等待输入时没有活动 worker，HTTP 取消从 session outbox frontier 取得下一值，在原
+  publication lock 下提交原子终态后发布 exact event；HTTP journal 不分配领域 public
+  sequence。不另建 reservation registry，也不重编号已提交事件。无 live bridge
   的离线恢复从已有 durable public frontier 取下一值，不要求终态固定为 1。
 - writer-read 补齐 intent 后须在同 writer 临界区更新共享投影，锁外发布变化；便宜的
   snapshot 仍不做文件 I/O。live Session 只采纳已验证的同一恢复 prefix，重验 frontier，
@@ -940,6 +941,62 @@ PlanReview revision 的独立终态协议（2026-08-31）：
   `Uncertain` receipt；该 command 不携带答案，worker 必须重读同一 managed child receipt 后才复用既有
   input dispatcher。恢复查询仍由 worker/runtime 持有 authority，HTTP 复用绕过 adapter receipt cache 的既有
   session-attention resume 入口。
+
+#### E08/A2：public event 交付与重放（2026-08-31）
+
+本节冻结 A2 的实施契约，不代表整个 E08 或平台资格化已完成。当前切片覆盖已物化
+public event 的持久化、交付与补发，以及 revision Waiting 原子 bundle；普通 Control
+领域事件提交与 public DTO 物化仍存在先后窗口，TUI 常规 `RunEvent -> WorkerMessage`
+生产链也尚未整体迁入 outbox。approval/tool/route 的 adapter registry 与 broker 恢复也
+尚未完成同源收敛：补发通知不代表审批入口、输入路由或工具状态已经恢复，不得仅因重放
+而重新授予权限。这三项仍属后续整改，不由 consumer replay 冒充完成。
+
+- 同一个 session/run 的 public outbox 是公开事件序列的唯一 durable 来源。runtime 的单一
+  live producer 只提出下一序号，session writer 在锁内校验；重启从该 durable frontier
+  继续，不再接受 HTTP journal、UI 缓存或调用方传入的起始序号。
+- 后台 terminal task 的 lifecycle 回调复用该 run 的同一 runtime 序列与 outbox，不由 HTTP
+  另行分配序号。只有这一已存在 owner 的 lifecycle 可在 foreground terminal 后继续追加；
+  普通 run 事件仍关闭，原 foreground 结局不能改写。尚未启动 runtime 的 preparation
+  失败/取消仍是独立 adapter outcome，不冒充已经提交的领域 run terminal。
+  HTTP 补交该类 lifecycle 时仍须同步既有 registry 的 generation/status 投影；最后一个
+  lifecycle 的 durable publication 与 stream close 原子完成，重放不重启进程或创建新 owner。
+- 所有已物化的 public event 在发送之前固定 identity、sequence、完整有界 payload 与
+  digest，并经现有 crash-safe append intent 持久化。普通进度以 outbox 本身作为 publication
+  fact（domain ID 自引用），不制造不存在的领域记录；root/revision 终态继续引用原领域
+  envelope，不能以普通 append 绕过其原子提交。已发布事件不能重新编号或改写 payload。
+- 持久化失败时不发送、不推进 live frontier；恢复原 intent 后交付原字节。handler 失败、
+  subscriber 断线、receipt 丢失是交付问题，不改写任务结果，也不重跑 provider/tool/effect。
+  同一 adapter 按 durable 顺序补交，不能越过未接收事件发布后续事件。
+- ACK 按既有事件类别解释：HTTP 的 Durable 类（状态、等待、终态等）必须完成其
+  durable replay publication，TUI/application 的状态 ACK 必须完成其 reducer commit，
+  不能仅凭成功入内存 channel 就确认。
+  ACK 丢失允许至少一次重放；相同 identity/digest 幂等，identity 冲突明确失败。
+  ACK 不等于人类已读、画面已呈现、command 成功或领域终态，也不删除状态历史。
+- HTTP 的 `TextDelta / ReasoningDelta / ToolCallArgsDelta / ToolProgress` 保持原协议的
+  Transient 分类与可丢弃 provisional UI 语义，不新增 token-history replay。它们同样先
+  outbox、再按序尝试 live fanout；其 receipt 只表示该次 adapter 受理，不证明进入 HTTP
+  durable journal、订阅者收到或重连可恢复。缺 receipt 时只允许原事件至少一次尝试，
+  不因 receipt 有无改变领域状态；状态恢复仍依赖 Durable 事件与 application snapshot。
+- revision `WaitingForInput` 与对应 `RunAwaitingUserInput` 在同一个既有 writer bundle
+  提交，精确绑定 attempt、child、pending request identity/generation/hash。它是可恢复
+  suspension，不占用最终 terminal pair；输入后沿原 run/attempt 继续递增。root run 的
+  `RunAwaitingUserInput` 仍保持其原领域终态语义，不能仅按 event kind 混淆两者。
+  接受回答不提前将 parent 标成 Started；worker 先核对既有 managed child 的 exact
+  Submitted/Declined receipt，再接管原 Started 路径。接管前崩溃仍由 Waiting 与原 child
+  receipt 恢复；取消沿既有 parent terminal settlement，不凭 adapter 标记授予继续权限。
+- startup/attach/reconnect 的 outbox 消费者接入完整 ordered replay；只重放 terminal、
+  revision live-only 通知、optional outbox 与 adapter-owned sequence 旧路径同批删除。
+  source index 可由日志增量派生，但不拥有第二份事实，也不在每个 delta 上全量重读日志。
+- HTTP 有界 replay window 被其他流淘汰时，按已验证的 session outbox 重建目标 run 的
+  adapter projection，不能凭旧 watermark 猜测 receipt。重建在既有 journal 内先校验完整
+  candidate，按原全局容量裁剪并一次提交；成功后才按原 pending 顺序（含 Transient）交付与
+  ACK。旧 cursor 仍遵守 expired/reset 语义，不新增第二份事实或无界 retention registry。
+  source 读取前捕获 journal 的进程内 cache revision，提交时在同一 journal 锁内检查；期间
+  有并发写入则拒绝旧快照，即使该 run 的旧 watermark 已被容量裁剪移除也不能覆盖新事实。
+  该 revision 不持久化、不替代 public sequence，也不构成新的权限或领域状态。
+- 验收覆盖 persistence 后发送前崩溃、partial append、发送失败、ACK 丢失、相同序号冲突、
+  重开与断线重连、等待输入后恢复、最终 terminal 原样保留，以及真实 HTTP/TUI 消费者。
+  自动化全部使用隔离测试入口；不迁移、重签或清理用户旧数据，不执行实际存储 cutover。
 
 ### 13.3 ProjectionDegraded
 

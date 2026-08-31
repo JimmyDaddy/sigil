@@ -4031,13 +4031,13 @@ fn terminal_outbox_replay_keeps_the_original_gapped_http_sequence() -> anyhow::R
         },
     );
 
-    publish_exact_http_terminal_outbox_event(
+    publish_exact_http_outbox_event(
         &event_bus,
         "session-terminal-replay",
         "run-terminal-replay",
         terminal.clone(),
     )?;
-    publish_exact_http_terminal_outbox_event(
+    publish_exact_http_outbox_event(
         &event_bus,
         "session-terminal-replay",
         "run-terminal-replay",
@@ -4053,6 +4053,852 @@ fn terminal_outbox_replay_keeps_the_original_gapped_http_sequence() -> anyhow::R
             .collect::<Vec<_>>(),
         vec![3, 9]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn full_public_outbox_replay_recovers_nonterminal_http_publication_before_receipt()
+-> anyhow::Result<()> {
+    fn entry(
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+        message: &str,
+    ) -> anyhow::Result<sigil_kernel::PublicEventOutboxEntryV1> {
+        let event = PublicRunEvent::new(
+            session_id,
+            run_id,
+            sequence,
+            PublicRunEventKind::Notice {
+                message: message.to_owned(),
+            },
+        );
+        let public_event_id = format!("http-public:{session_id}:{run_id}:{sequence}");
+        Ok(sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: public_event_id.clone(),
+            domain_event_id: public_event_id,
+            run_id: run_id.to_owned(),
+            sequence,
+            payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+            event,
+        })
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    drop(session);
+    let recorder = sigil_kernel::PublicEventOutboxRecorder::new(store.clone());
+    let first = entry(&session_id, "run-first", 1, "first durable notice")?;
+    let second = entry(&session_id, "run-second", 1, "second durable notice")?;
+    recorder.append_outbox(&first)?;
+    recorder.append_outbox(&second)?;
+
+    let protocol_journal = Arc::new(HttpDurableProtocolJournal::open(
+        temp.path().join("protocol.json"),
+        8,
+    )?);
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(8, protocol_journal));
+    let mut subscriber = event_bus.subscribe();
+
+    // Simulate process death after the canonical HTTP journal append but before the outbox
+    // receipt. Equal bytes are accepted during recovery; the event must not be sent twice.
+    publish_exact_http_outbox_event(event_bus.as_ref(), &session_id, "run-first", first.event)?;
+    let first_live = match subscriber.recv_run_stream().await? {
+        crate::sse::HttpRunStreamReceive::Event(event) => event,
+        crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {
+            panic!("nonterminal public event must reach the live HTTP consumer")
+        }
+    };
+    assert_eq!(first_live.run_event.run_id, "run-first");
+
+    assert_eq!(
+        replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
+        2,
+        "the first matching journal event and the second new event both receive ordered receipts"
+    );
+    let second_live = match subscriber.recv_run_stream().await? {
+        crate::sse::HttpRunStreamReceive::Event(event) => event,
+        crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {
+            panic!("the later pending public event must not be overtaken or dropped")
+        }
+    };
+    assert_eq!(second_live.run_event.run_id, "run-second");
+    assert_eq!(second_live.run_event.sequence, 1);
+
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &store.read_event_records_writer()?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
+    assert_eq!(
+        event_bus
+            .replay_run_after(&session_id, "run-first", None)?
+            .len(),
+        1,
+        "recovery must not duplicate the journal event already committed before its receipt"
+    );
+    assert_eq!(
+        replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
+        0,
+        "a restart after receipts are durable is idempotent"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn evicted_http_projection_rebuilds_from_full_outbox_before_ordered_receipts()
+-> anyhow::Result<()> {
+    fn entry(
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+        event: PublicRunEventKind,
+    ) -> anyhow::Result<sigil_kernel::PublicEventOutboxEntryV1> {
+        let event = PublicRunEvent::new(session_id, run_id, sequence, event);
+        let public_event_id = format!("http-evicted:{session_id}:{run_id}:{sequence}");
+        Ok(sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: public_event_id.clone(),
+            domain_event_id: public_event_id,
+            run_id: run_id.to_owned(),
+            sequence,
+            payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+            event,
+        })
+    }
+
+    let temp = tempfile::tempdir()?;
+    let run_id = "run-evicted-projection";
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    drop(session);
+    let recorder = sigil_kernel::PublicEventOutboxRecorder::new(store.clone());
+    let source = vec![
+        entry(
+            &session_id,
+            run_id,
+            1,
+            PublicRunEventKind::Notice {
+                message: "durable one".to_owned(),
+            },
+        )?,
+        entry(
+            &session_id,
+            run_id,
+            2,
+            PublicRunEventKind::TextDelta {
+                text: "transient two".to_owned(),
+            },
+        )?,
+        entry(
+            &session_id,
+            run_id,
+            3,
+            PublicRunEventKind::Notice {
+                message: "durable three".to_owned(),
+            },
+        )?,
+        entry(
+            &session_id,
+            run_id,
+            4,
+            PublicRunEventKind::Notice {
+                message: "durable four".to_owned(),
+            },
+        )?,
+        entry(
+            &session_id,
+            run_id,
+            5,
+            PublicRunEventKind::Notice {
+                message: "durable five".to_owned(),
+            },
+        )?,
+    ];
+    for entry in &source {
+        recorder.append_outbox(entry)?;
+    }
+
+    let journal = Arc::new(HttpDurableProtocolJournal::open(
+        temp.path().join("protocol.json"),
+        2,
+    )?);
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, journal));
+    // Simulate live publication before receipts followed by unrelated bounded-journal trimming.
+    // This direct source delivery is intentionally not the recovery helper under test.
+    for entry in &source {
+        event_bus.publish_run_event(entry.event.clone())?;
+    }
+    assert!(matches!(
+        event_bus.replay_run_after(&session_id, run_id, None),
+        Err(crate::HttpProtocolReplayError::CursorExpired)
+    ));
+
+    let mut subscriber = event_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
+        source.len(),
+        "all source items, including the transient gap, must be re-attempted in order"
+    );
+    for expected_sequence in 1..=5 {
+        let crate::sse::HttpRunStreamReceive::Event(event) = subscriber.recv_run_stream().await?
+        else {
+            panic!("rebuild must fan out every pending source item before its receipt");
+        };
+        assert_eq!(event.run_event.sequence, expected_sequence);
+        if expected_sequence == 2 {
+            assert!(!event.is_durable());
+            assert!(event.replay_id.is_none());
+        }
+    }
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &store.read_event_records_writer()?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
+    assert!(
+        matches!(
+            event_bus.replay_run_after(&session_id, run_id, None),
+            Err(crate::HttpProtocolReplayError::CursorExpired),
+        ),
+        "the rebuilt bounded durable window must retain normal expired-cursor semantics"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fully_evicted_closed_http_stream_rebuilds_pending_durable_outbox_events()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let run_id = "run-closed-and-evicted";
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    drop(session);
+    let source = (1..=2)
+        .map(|sequence| {
+            let event = PublicRunEvent::new(
+                &session_id,
+                run_id,
+                sequence,
+                PublicRunEventKind::Notice {
+                    message: format!("durable notice {sequence}"),
+                },
+            );
+            let public_event_id = format!("http-closed-evicted:{sequence}");
+            Ok(sigil_kernel::PublicEventOutboxEntryV1 {
+                schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: public_event_id.clone(),
+                domain_event_id: public_event_id,
+                run_id: run_id.to_owned(),
+                sequence,
+                payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+                event,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let recorder = sigil_kernel::PublicEventOutboxRecorder::new(store.clone());
+    for entry in &source {
+        recorder.append_outbox(entry)?;
+    }
+
+    let journal = Arc::new(HttpDurableProtocolJournal::open(
+        temp.path().join("protocol.json"),
+        1,
+    )?);
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, journal));
+    for entry in &source {
+        event_bus.publish_run_event(entry.event.clone())?;
+    }
+    event_bus.close_run_stream(&session_id, run_id)?;
+    event_bus.publish_run_event(PublicRunEvent::new(
+        &session_id,
+        "another-run",
+        1,
+        PublicRunEventKind::Notice {
+            message: "displace the closed stream's final retained event".to_owned(),
+        },
+    ))?;
+    event_bus.close_run_stream(&session_id, "another-run")?;
+    assert!(
+        event_bus
+            .replay_run_after(&session_id, run_id, None)?
+            .is_empty(),
+        "a fully trimmed closed stream has no watermark, so replay(None) alone cannot prove delivery"
+    );
+
+    let mut subscriber = event_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
+        source.len(),
+        "missing exact retained durable entries must rebuild even without CursorExpired"
+    );
+    for expected_sequence in 1..=2 {
+        let crate::sse::HttpRunStreamReceive::Event(event) = subscriber.recv_run_stream().await?
+        else {
+            panic!("rebuilt durable outbox events must fan out before their receipts");
+        };
+        assert_eq!(event.run_event.sequence, expected_sequence);
+    }
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &store.read_event_records_writer()?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_terminal_lifecycle_replay_projects_registry_and_closes_before_receipt()
+-> anyhow::Result<()> {
+    struct RegistryOnlyDriver {
+        binding: HttpSessionBinding,
+    }
+
+    impl HttpRunDriver for RegistryOnlyDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            Ok(self.binding.clone())
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+    }
+
+    fn outbox_entry(
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+        event: PublicRunEventKind,
+    ) -> anyhow::Result<sigil_kernel::PublicEventOutboxEntryV1> {
+        let event = PublicRunEvent::new(session_id, run_id, sequence, event);
+        let public_event_id = format!("http-lifecycle:{run_id}:{sequence}");
+        Ok(sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: public_event_id.clone(),
+            domain_event_id: public_event_id,
+            run_id: run_id.to_owned(),
+            sequence,
+            payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+            event,
+        })
+    }
+
+    fn lifecycle_entry(
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+        task_id: &str,
+    ) -> anyhow::Result<sigil_kernel::PublicEventOutboxEntryV1> {
+        outbox_entry(
+            session_id,
+            run_id,
+            sequence,
+            PublicRunEventKind::TerminalLifecycle {
+                event: sigil_kernel::TerminalLifecycleEvent {
+                    task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+                    execution_backend: None,
+                    sandbox_profile: None,
+                    generation: 1,
+                    status: sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+                    readiness: sigil_kernel::TerminalReadinessStatus::None,
+                    total_output_bytes: 0,
+                    emitted_at_ms: sequence,
+                },
+            },
+        )
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    drop(session);
+    let run_id = "run-pending-terminal-lifecycle";
+    let registry = Arc::new(HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: session_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    })));
+    let adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let mutation = registry.reserve_durable_session_mutation(&session_id)?;
+    registry.register_or_resume_supervised_revision_run(
+        &adapter_session.id,
+        run_id,
+        HttpPermissionMode::ReadOnly,
+        "pending lifecycle recovery",
+        false,
+    )?;
+    drop(mutation);
+    registry.record_run_terminal(run_id, HttpRunTerminalOutcome::Finished)?;
+
+    let recorder = sigil_kernel::PublicEventOutboxRecorder::new(store.clone());
+    let started = outbox_entry(
+        &session_id,
+        run_id,
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "pending lifecycle recovery".to_owned(),
+        },
+    )?;
+    lifecycle.append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+        run_id, 1,
+    )?)?;
+    let foreground_terminal_entry = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        run_id,
+        sigil_kernel::ConversationRunTerminalStatusV1::Succeeded,
+        Some("pending-lifecycle-final-message".to_owned()),
+        Some("foreground complete"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    let foreground_terminal_event = PublicRunEvent::new(
+        &session_id,
+        run_id,
+        2,
+        PublicRunEventKind::RunFinished {
+            final_text: "foreground complete".to_owned(),
+        },
+    );
+    let foreground_terminal = sigil_kernel::PublicEventOutboxEntryV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: format!("http-lifecycle:{run_id}:2"),
+        domain_event_id: format!("http-lifecycle-domain:{run_id}:2"),
+        run_id: run_id.to_owned(),
+        sequence: 2,
+        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(
+            &foreground_terminal_event,
+        )?),
+        event: foreground_terminal_event,
+    };
+    recorder.append_outbox(&started)?;
+    recorder.append_delivery(&sigil_kernel::PublicEventDeliveryReceiptV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: started.public_event_id.clone(),
+        adapter: "http".to_owned(),
+        delivered_at_unix_ms: 1,
+    })?;
+    lifecycle.append_finalized_with_outbox(&foreground_terminal_entry, &foreground_terminal)?;
+    recorder.append_delivery(&sigil_kernel::PublicEventDeliveryReceiptV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: foreground_terminal.public_event_id.clone(),
+        adapter: "http".to_owned(),
+        delivered_at_unix_ms: 1,
+    })?;
+    let already_published = lifecycle_entry(&session_id, run_id, 3, "terminal-one")?;
+    recorder.append_outbox(&already_published)?;
+    let first_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol-existing.json"),
+            8,
+        )?),
+    ));
+    // Model a process death after journal append but before registry reduction, stream close, and
+    // receipt. Replay must not publish a second lifecycle event, but it must finish the registry
+    // transition and close this retained stream before writing the receipt.
+    first_bus.publish_run_event(started.event.clone())?;
+    first_bus.publish_run_event_with_stream_continuation(foreground_terminal.event.clone())?;
+    first_bus.publish_run_event(already_published.event.clone())?;
+    let mut first_subscriber = first_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outboxes(
+            &session_path,
+            &session_id,
+            &first_bus,
+            Some(&registry),
+        )?,
+        1
+    );
+    assert!(matches!(
+        first_subscriber.recv_run_stream().await?,
+        crate::sse::HttpRunStreamReceive::StreamClosed { run_id: ref closed, .. }
+            if closed == run_id
+    ));
+    assert!(
+        !first_bus.run_stream_accepts_events(&session_id, run_id)?,
+        "an exact retained lifecycle retry must seal the previously-open stream"
+    );
+    assert_eq!(registry.get_run(run_id)?.terminal_tasks.len(), 1);
+
+    let missing_from_journal = lifecycle_entry(&session_id, run_id, 4, "terminal-two")?;
+    recorder.append_outbox(&missing_from_journal)?;
+    let second_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol-missing.json"),
+            8,
+        )?),
+    ));
+    let mut second_subscriber = second_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outboxes(
+            &session_path,
+            &session_id,
+            &second_bus,
+            Some(&registry),
+        )?,
+        1
+    );
+    let crate::sse::HttpRunStreamReceive::Event(event) =
+        second_subscriber.recv_run_stream().await?
+    else {
+        panic!("a missing final lifecycle must be delivered before stream close");
+    };
+    assert_eq!(event.run_event.sequence, 4);
+    assert!(matches!(
+        second_subscriber.recv_run_stream().await?,
+        crate::sse::HttpRunStreamReceive::StreamClosed { run_id: ref closed, .. }
+            if closed == run_id
+    ));
+    assert!(
+        !second_bus.run_stream_accepts_events(&session_id, run_id)?,
+        "a missing final lifecycle must append and close atomically before its receipt"
+    );
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &store.read_event_records_writer()?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
+    assert_eq!(registry.get_run(run_id)?.terminal_tasks.len(), 2);
+    let source = projection
+        .events_in_order()
+        .into_iter()
+        .map(|entry| entry.event.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registry.restore_terminal_lifecycle_projection_from_source(
+            &source,
+            &BTreeSet::from([(session_id.clone(), run_id.to_owned())]),
+        )?,
+        BTreeSet::from([(session_id.clone(), run_id.to_owned(), 4)]),
+        "an already-applied source batch must still reconstruct the last lifecycle close rather than skipping every current generation"
+    );
+    let recovered_registry = Arc::new(HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: session_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    })));
+    let recovered_session =
+        recovered_registry.create_session(HttpSessionCreateRequest::default())?;
+    let recovered_mutation = recovered_registry.reserve_durable_session_mutation(&session_id)?;
+    recovered_registry.register_or_resume_supervised_revision_run(
+        &recovered_session.id,
+        run_id,
+        HttpPermissionMode::ReadOnly,
+        "pending lifecycle recovery",
+        false,
+    )?;
+    drop(recovered_mutation);
+    recovered_registry.record_run_terminal(run_id, HttpRunTerminalOutcome::Finished)?;
+    let recovered_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol-registry-only.json"),
+            8,
+        )?),
+    ));
+    assert_eq!(
+        replay_pending_http_public_outboxes(
+            &session_path,
+            &session_id,
+            &recovered_bus,
+            Some(&recovered_registry),
+        )?,
+        0,
+        "receipt-complete lifecycle history should only rehydrate the registry"
+    );
+    assert_eq!(recovered_registry.get_run(run_id)?.terminal_tasks.len(), 2);
+    assert!(
+        recovered_bus
+            .replay_run_after(&session_id, run_id, None)?
+            .is_empty(),
+        "registry-only lifecycle recovery must not republish historical lifecycle events"
+    );
+    let PublicRunEventKind::TerminalLifecycle {
+        event: latest_lifecycle,
+    } = &missing_from_journal.event.event
+    else {
+        unreachable!("test fixture must retain a terminal lifecycle")
+    };
+    let newer_running = sigil_kernel::TerminalLifecycleEvent {
+        generation: latest_lifecycle.generation + 1,
+        status: sigil_kernel::TerminalTaskStatus::Running,
+        ..latest_lifecycle.clone()
+    };
+    registry.record_terminal_lifecycle(run_id, &newer_running)?;
+    assert!(matches!(
+        registry.restore_terminal_lifecycle_projection_from_source(
+            &source,
+            &BTreeSet::from([(session_id.clone(), run_id.to_owned())]),
+        ),
+        Err(HttpRegistryError::DriverRejected {
+            operation: "plan terminal lifecycle replay",
+            ..
+        })
+    ));
+
+    // Rebuild from one complete durable source where the foreground terminal follows the task
+    // lifecycle. The close belongs to RunFinished sequence four, not the earlier Exited event.
+    let ordered_run_id = "run-source-ordered-terminal";
+    let ordered_registry = Arc::new(HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: session_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    })));
+    let ordered_session = ordered_registry.create_session(HttpSessionCreateRequest::default())?;
+    let ordered_mutation = ordered_registry.reserve_durable_session_mutation(&session_id)?;
+    ordered_registry.register_or_resume_supervised_revision_run(
+        &ordered_session.id,
+        ordered_run_id,
+        HttpPermissionMode::ReadOnly,
+        "source ordered lifecycle recovery",
+        false,
+    )?;
+    drop(ordered_mutation);
+    lifecycle.append_started(&sigil_kernel::ConversationRunStartedEntryV1::new(
+        ordered_run_id,
+        3,
+    )?)?;
+    let ordered_started = outbox_entry(
+        &session_id,
+        ordered_run_id,
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "source ordered lifecycle recovery".to_owned(),
+        },
+    )?;
+    let ordered_running = outbox_entry(
+        &session_id,
+        ordered_run_id,
+        2,
+        PublicRunEventKind::TerminalLifecycle {
+            event: sigil_kernel::TerminalLifecycleEvent {
+                task_id: sigil_kernel::TerminalTaskId::new("ordered-terminal")?,
+                execution_backend: None,
+                sandbox_profile: None,
+                generation: 1,
+                status: sigil_kernel::TerminalTaskStatus::Running,
+                readiness: sigil_kernel::TerminalReadinessStatus::None,
+                total_output_bytes: 0,
+                emitted_at_ms: 2,
+            },
+        },
+    )?;
+    let ordered_exited = outbox_entry(
+        &session_id,
+        ordered_run_id,
+        3,
+        PublicRunEventKind::TerminalLifecycle {
+            event: sigil_kernel::TerminalLifecycleEvent {
+                task_id: sigil_kernel::TerminalTaskId::new("ordered-terminal")?,
+                execution_backend: None,
+                sandbox_profile: None,
+                generation: 2,
+                status: sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+                readiness: sigil_kernel::TerminalReadinessStatus::None,
+                total_output_bytes: 0,
+                emitted_at_ms: 3,
+            },
+        },
+    )?;
+    let ordered_terminal_entry = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        ordered_run_id,
+        sigil_kernel::ConversationRunTerminalStatusV1::Succeeded,
+        Some("ordered-lifecycle-final-message".to_owned()),
+        Some("foreground completed after terminal exit"),
+        4,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    let ordered_finished_event = PublicRunEvent::new(
+        &session_id,
+        ordered_run_id,
+        4,
+        PublicRunEventKind::RunFinished {
+            final_text: "foreground completed after terminal exit".to_owned(),
+        },
+    );
+    let ordered_finished = sigil_kernel::PublicEventOutboxEntryV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: format!("http-lifecycle:{ordered_run_id}:4"),
+        domain_event_id: format!("http-lifecycle-domain:{ordered_run_id}:4"),
+        run_id: ordered_run_id.to_owned(),
+        sequence: 4,
+        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(
+            &ordered_finished_event,
+        )?),
+        event: ordered_finished_event,
+    };
+    for entry in [&ordered_started, &ordered_running, &ordered_exited] {
+        recorder.append_outbox(entry)?;
+        recorder.append_delivery(&sigil_kernel::PublicEventDeliveryReceiptV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: entry.public_event_id.clone(),
+            adapter: "http".to_owned(),
+            delivered_at_unix_ms: 2,
+        })?;
+    }
+    lifecycle.append_finalized_with_outbox(&ordered_terminal_entry, &ordered_finished)?;
+    let ordered_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol-source-ordered.json"),
+            8,
+        )?),
+    ));
+    let mut ordered_subscriber = ordered_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outbox(
+            &session_path,
+            &session_id,
+            ordered_run_id,
+            &ordered_bus,
+            &ordered_registry,
+        )?,
+        1
+    );
+    let crate::sse::HttpRunStreamReceive::Event(ordered_terminal) =
+        ordered_subscriber.recv_run_stream().await?
+    else {
+        panic!("the pending foreground terminal must follow the rebuilt lifecycle source");
+    };
+    assert_eq!(ordered_terminal.run_event.sequence, 4);
+    assert!(matches!(
+        ordered_subscriber.recv_run_stream().await?,
+        crate::sse::HttpRunStreamReceive::StreamClosed { run_id: ref closed, .. }
+            if closed == ordered_run_id
+    ));
+    assert!(
+        !ordered_bus.run_stream_accepts_events(&session_id, ordered_run_id)?,
+        "the rebuilt candidate must atomically seal at RunFinished rather than Exited"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn transient_public_outbox_receipt_retries_live_without_claiming_durable_replay()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let run_id = "run-transient-retry";
+    let session_path = temp.path().join("session.jsonl");
+    let journal_path = temp.path().join("protocol.json");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    drop(session);
+    let event = PublicRunEvent::new(
+        &session_id,
+        run_id,
+        1,
+        PublicRunEventKind::TextDelta {
+            text: "partial live output".to_owned(),
+        },
+    );
+    let outbox = sigil_kernel::PublicEventOutboxEntryV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: "http-transient-retry:1".to_owned(),
+        domain_event_id: "http-transient-retry:1".to_owned(),
+        run_id: run_id.to_owned(),
+        sequence: 1,
+        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+        event: event.clone(),
+    };
+    sigil_kernel::PublicEventOutboxRecorder::new(store.clone()).append_outbox(&outbox)?;
+
+    {
+        let journal = Arc::new(HttpDurableProtocolJournal::open(&journal_path, 8)?);
+        let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, journal));
+        let mut subscriber = event_bus.subscribe();
+        let live = publish_exact_http_outbox_event(&event_bus, &session_id, run_id, event.clone())?;
+        assert!(!live.is_durable());
+        assert!(live.replay_id.is_none());
+        let crate::sse::HttpRunStreamReceive::Event(received) =
+            subscriber.recv_run_stream().await?
+        else {
+            panic!("the initial transient attempt must be delivered live");
+        };
+        assert!(received.replay_id.is_none());
+        assert!(
+            event_bus
+                .replay_run_after(&session_id, run_id, None)?
+                .is_empty()
+        );
+        // Intentionally omit the receipt to model a process death after live delivery.
+    }
+
+    let reopened_journal = Arc::new(HttpDurableProtocolJournal::open(&journal_path, 8)?);
+    let reopened_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, reopened_journal));
+    let mut subscriber = reopened_bus.subscribe();
+    assert_eq!(
+        replay_pending_http_public_outboxes(&session_path, &session_id, &reopened_bus, None)?,
+        1
+    );
+    let crate::sse::HttpRunStreamReceive::Event(retried) = subscriber.recv_run_stream().await?
+    else {
+        panic!("a receipt-lost transient outbox must receive one best-effort live retry");
+    };
+    assert!(!retried.is_durable());
+    assert!(retried.replay_id.is_none());
+    assert!(
+        reopened_bus
+            .replay_run_after(&session_id, run_id, None)?
+            .is_empty()
+    );
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &store.read_event_records_writer()?,
+    )?;
+    assert!(projection.pending_for_adapter("http").is_empty());
     Ok(())
 }
 
@@ -4164,6 +5010,7 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
         ControlEntry::PlanReviewAttempt(started_attempt.clone()),
     ])?;
     let run_id = sigil_kernel::plan_review_revision_run_id(&started_attempt);
+    let terminal_sequence = session.next_plan_review_public_sequence(&run_id)?;
     let terminal_attempt = sigil_kernel::PlanReviewAttemptEntry {
         status: sigil_kernel::PlanReviewAttemptStatus::Cancelled,
         terminal_reason: Some(sigil_kernel::PlanReviewTerminalReason::UserCancelled),
@@ -4185,7 +5032,7 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
         PublicRunEvent::new(
             &durable_session_scope_id,
             &run_id,
-            7,
+            terminal_sequence,
             PublicRunEventKind::RunCancelled,
         ),
     )?;
@@ -4210,8 +5057,12 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
     )?;
     drop(mutation);
 
-    let event_bus = HttpLiveEventBus::new(8);
-    publish_exact_http_terminal_outbox_event(
+    let protocol_journal_path = temp.path().join("revision-receipt-failure.protocol.json");
+    let event_bus = HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(&protocol_journal_path, 8)?),
+    );
+    publish_exact_http_outbox_event(
         &event_bus,
         &durable_session_scope_id,
         &run_id,
@@ -4251,12 +5102,17 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
         HttpRunStatus::Cancelled,
         "the exact durable terminal must still replace the registered revision state"
     );
-    let recovery_event_bus = Arc::new(HttpLiveEventBus::new(8));
+    drop(event_bus);
+    let recovery_event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(
+        8,
+        Arc::new(HttpDurableProtocolJournal::open(&protocol_journal_path, 8)?),
+    ));
     assert_eq!(
-        replay_pending_http_terminal_outboxes(
+        replay_pending_http_public_outboxes(
             &session_path,
             &durable_session_scope_id,
             &recovery_event_bus,
+            None,
         )?,
         1,
         "attachment recovery must replay the existing exact terminal once"
@@ -4296,9 +5152,208 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
             .iter()
             .map(|event| event.run_event.sequence)
             .collect::<Vec<_>>(),
-        vec![7],
+        vec![durable_outbox.event.sequence],
         "recovery must preserve rather than renumber or duplicate the exact terminal event"
     );
+    Ok(())
+}
+
+#[test]
+fn attachment_reconcile_keeps_a_durable_revision_waiting_checkpoint_resumable() -> anyhow::Result<()>
+{
+    struct RegistryOnlyDriver {
+        binding: HttpSessionBinding,
+    }
+
+    impl HttpRunDriver for RegistryOnlyDriver {
+        fn bind_session(
+            &self,
+            _session_id: &str,
+            _model_ref: Option<&crate::HttpProviderModelRef>,
+        ) -> Result<HttpSessionBinding, crate::HttpRunDriverError> {
+            Ok(self.binding.clone())
+        }
+
+        fn start_run(
+            &self,
+            _start: crate::HttpRunDriverStart,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn cancel_run(
+            &self,
+            _cancel: crate::HttpRunDriverCancel,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+
+        fn submit_approval(
+            &self,
+            _approval: crate::HttpRunDriverApproval,
+        ) -> Result<(), crate::HttpRunDriverError> {
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("revision-waiting-attachment.jsonl");
+    let mut session = sigil_kernel::Session::load_from_store(
+        "test",
+        "model",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    let durable_session_scope_id = session.session_scope_id().to_owned();
+    let review_id = sigil_kernel::PlanReviewId::new("waiting-attachment-review")?;
+    let attempt_id = sigil_kernel::PlanReviewAttemptId::new("waiting-attachment-revision")?;
+    let base = sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
+        sigil_kernel::PlanId::new("waiting-attachment-base")?,
+        "Original plan",
+        sigil_kernel::PlanSourceRef::default(),
+        1,
+        None,
+    )?
+    .expect("nonempty base plan");
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        &durable_session_scope_id,
+        "waiting-attachment-source",
+        "waiting-attachment-origin",
+    )?;
+    let started_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: review_id.clone(),
+        attempt_id: attempt_id.clone(),
+        plan_id: sigil_kernel::PlanId::new("waiting-attachment-candidate")?,
+        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+        source_turn,
+        explicit_objective: Some("Original objective".to_owned()),
+        route_decision_id: None,
+        child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
+        finalizer_session_ref: None,
+        revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
+            "waiting-attachment-guidance",
+        )?),
+        attempt_ordinal: 1,
+        base_plan_id: Some(base.plan_id.clone()),
+        base_plan_hash: Some(base.plan_hash.clone()),
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: sigil_kernel::PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 2,
+    };
+    session.append_controls(vec![
+        ControlEntry::PlanDraftCreated(base.clone()),
+        ControlEntry::PlanDecisionRecorded(sigil_kernel::PlanDecisionRecordedEntry {
+            plan_id: base.plan_id.clone(),
+            plan_hash: base.plan_hash.clone(),
+            decision: sigil_kernel::PlanDecision::RevisionRequested,
+            decided_by: sigil_kernel::PlanDecisionActor::User,
+            decided_at_ms: 2,
+            reason: None,
+        }),
+        ControlEntry::PlanReviewAttempt(started_attempt.clone()),
+    ])?;
+    let run_id = sigil_kernel::plan_review_revision_run_id(&started_attempt);
+    let request_hash = sigil_kernel::stable_event_hash(b"waiting attachment request");
+    let waiting_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        status: sigil_kernel::PlanReviewAttemptStatus::WaitingForInput,
+        pending_user_input: Some(Box::new(sigil_kernel::PublicUserInputRequestV1 {
+            identity: sigil_kernel::UserInputIdentityV1 {
+                session_scope_id: sigil_kernel::SessionScopeId::new("child-session")?,
+                root_logical_run_id: sigil_kernel::LogicalRunId::new(&run_id)?,
+                source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+                request_id: sigil_kernel::UserInputRequestId::new("waiting-attachment-question")?,
+                generation: 1,
+                source_binding_hash: sigil_kernel::stable_event_hash(b"waiting child binding"),
+            },
+            request_hash: request_hash.clone(),
+            source: sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                plan_review_id: review_id,
+                attempt_id,
+            },
+            purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+            prompt: "Which scope?".to_owned(),
+            questions: vec![sigil_kernel::UserInputQuestionV1 {
+                id: "scope".to_owned(),
+                header: "Scope".to_owned(),
+                question: "Which scope?".to_owned(),
+                description: None,
+                required: true,
+                field: sigil_kernel::UserInputFieldKindV1::Text {
+                    multiline: false,
+                    max_chars: 256,
+                },
+            }],
+            allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+            requested_at_unix_ms: 3,
+            status: sigil_kernel::UserInputStatusV1::Requested,
+            answer_receipt: None,
+            resolution: None,
+        })),
+        terminal_reason: None,
+        recorded_at_ms: 3,
+        ..started_attempt
+    };
+    session.append_plan_review_revision_waiting(
+        waiting_attempt,
+        PublicRunEvent::new(
+            &durable_session_scope_id,
+            &run_id,
+            1,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id: "waiting-attachment-question".to_owned(),
+                generation: 1,
+                request_hash,
+            },
+        ),
+    )?;
+
+    let registry = HttpSessionRunRegistry::new(Arc::new(RegistryOnlyDriver {
+        binding: HttpSessionBinding {
+            session_scope_id: durable_session_scope_id.clone(),
+            session_log_path: canonical_http_session_path(&session_path)?
+                .display()
+                .to_string(),
+            route_transition: None,
+            route_recovery: None,
+        },
+    }));
+    let adapter_session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let mutation = registry.reserve_durable_session_mutation(&durable_session_scope_id)?;
+    registry.register_or_resume_supervised_revision_run(
+        &adapter_session.id,
+        &run_id,
+        HttpPermissionMode::ReadOnly,
+        "revision waiting attachment fixture",
+        false,
+    )?;
+    drop(mutation);
+    registry.record_supervised_revision_waiting(&run_id)?;
+    assert_eq!(registry.get_run(&run_id)?.status, HttpRunStatus::Paused);
+
+    // This is the terminal-reconciliation operation invoked by session attachment. A Waiting
+    // pair must neither close the run stream nor consume the registry's resumable checkpoint.
+    assert_eq!(
+        reconcile_registered_http_terminal_outboxes(
+            &session_path,
+            &durable_session_scope_id,
+            &registry,
+            &HttpLiveEventBus::new(8),
+        )?,
+        0
+    );
+    assert_eq!(registry.get_run(&run_id)?.status, HttpRunStatus::Paused);
+
+    let mutation = registry.reserve_durable_session_mutation(&durable_session_scope_id)?;
+    let resumed = registry.register_or_resume_supervised_revision_run(
+        &adapter_session.id,
+        &run_id,
+        HttpPermissionMode::ReadOnly,
+        "revision waiting attachment fixture",
+        true,
+    )?;
+    drop(mutation);
+    assert_eq!(resumed.status, HttpRunStatus::Running);
     Ok(())
 }
 
@@ -5569,7 +6624,11 @@ credential = {{ source = "none" }}
     let outbox = outbox_projection
         .events_in_order()
         .into_iter()
-        .find(|entry| entry.run_id == revision_run_id)
+        .find(|entry| {
+            entry.run_id == revision_run_id
+                && entry.sequence == terminal.run_event.sequence
+                && matches!(&entry.event.event, PublicRunEventKind::RunFinished { .. })
+        })
         .expect("revision must persist exactly one terminal outbox");
     assert_eq!(
         serde_json::to_value(&outbox.event).expect("terminal outbox should serialize"),
@@ -5902,7 +6961,18 @@ credential = {{ source = "none" }}
     let terminals = outbox
         .events_in_order()
         .into_iter()
-        .filter(|entry| entry.run_id == revision_run_id)
+        .filter(|entry| {
+            entry.run_id == revision_run_id
+                && matches!(
+                    &entry.event.event,
+                    PublicRunEventKind::RunFinished { .. }
+                        | PublicRunEventKind::RunFailed { .. }
+                        | PublicRunEventKind::RunCancelled
+                        | PublicRunEventKind::RunInterrupted { .. }
+                        | PublicRunEventKind::RunPaused { .. }
+                        | PublicRunEventKind::RunBlocked { .. }
+                )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         terminals.len(),
@@ -6333,12 +7403,33 @@ credential = {{ source = "none" }}
     );
     let outbox_before_resume = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
         .expect("waiting records should not contain a terminal outbox tear");
+    let revision_outboxes_before_resume = outbox_before_resume
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == revision_run_id)
+        .collect::<Vec<_>>();
     assert!(
-        outbox_before_resume
-            .events_in_order()
-            .into_iter()
-            .all(|entry| entry.run_id != revision_run_id),
-        "WaitingForInput must not create an A1 revision terminal outbox"
+        revision_outboxes_before_resume.iter().any(|entry| {
+            matches!(
+                &entry.event.event,
+                PublicRunEventKind::RunAwaitingUserInput { .. }
+            )
+        }),
+        "WaitingForInput must persist its durable public checkpoint outbox"
+    );
+    assert!(
+        revision_outboxes_before_resume.iter().all(|entry| {
+            !matches!(
+                &entry.event.event,
+                PublicRunEventKind::RunFinished { .. }
+                    | PublicRunEventKind::RunFailed { .. }
+                    | PublicRunEventKind::RunCancelled
+                    | PublicRunEventKind::RunInterrupted { .. }
+                    | PublicRunEventKind::RunPaused { .. }
+                    | PublicRunEventKind::RunBlocked { .. }
+            )
+        }),
+        "WaitingForInput must not create a final revision terminal outbox"
     );
 
     let resumed = registry
@@ -6433,7 +7524,11 @@ credential = {{ source = "none" }}
     let terminal_outboxes = outbox_projection
         .events_in_order()
         .into_iter()
-        .filter(|entry| entry.run_id == revision_run_id)
+        .filter(|entry| {
+            entry.run_id == revision_run_id
+                && entry.sequence == terminal_event.sequence
+                && matches!(&entry.event.event, PublicRunEventKind::RunFinished { .. })
+        })
         .collect::<Vec<_>>();
     assert_eq!(terminal_outboxes.len(), 1);
     assert_eq!(
@@ -6459,7 +7554,7 @@ credential = {{ source = "none" }}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn production_plan_review_waiting_cancel_uses_the_next_exact_journal_sequence() {
+async fn production_plan_review_waiting_cancel_uses_the_next_exact_outbox_sequence() {
     production_plan_review_waiting_cancel_scenario(false).await;
 }
 
@@ -6865,7 +7960,11 @@ credential = {{ source = "none" }}
     let terminal_outbox = outbox_projection
         .events_in_order()
         .into_iter()
-        .find(|entry| entry.run_id == revision_run_id)
+        .find(|entry| {
+            entry.run_id == revision_run_id
+                && entry.sequence == terminal_event.sequence
+                && matches!(&entry.event.event, PublicRunEventKind::RunCancelled)
+        })
         .expect("cancelled revision should have exactly one terminal outbox");
     assert_eq!(terminal_outbox.event.sequence, terminal_event.sequence);
     assert_eq!(

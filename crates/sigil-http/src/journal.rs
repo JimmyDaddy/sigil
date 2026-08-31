@@ -179,22 +179,12 @@ impl HttpDurableProtocolJournal {
         writer: std::sync::Arc<ManagedStorageWriterAdapterV1>,
         key: &str,
     ) -> Result<(), HttpProtocolJournalError> {
-        let managed = ManagedProtocolReplayWriter::new(writer, key)?;
-        let managed_bytes = managed.read_snapshot()?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| HttpProtocolJournalError::Unavailable)?;
-        let mut candidate = if managed_bytes.is_empty() {
-            state.clone()
-        } else {
-            decode_state(&managed_bytes)?
-        };
-        candidate.seal_recovered_streams();
-        candidate.trim(self.max_events)?;
-        let bytes = encode_state(&candidate)?;
-        managed.replace_snapshot(&bytes)?;
-        *state = candidate;
+        // Keep the existing state -> writer lock order used by ordinary persistence. Reject a
+        // second owner before acquiring another lease or replacing either snapshot.
         let mut attached = self
             .managed_writer
             .lock()
@@ -202,6 +192,19 @@ impl HttpDurableProtocolJournal {
         if attached.is_some() {
             return Err(HttpProtocolJournalError::Unavailable);
         }
+        let managed = ManagedProtocolReplayWriter::new(writer, key)?;
+        let managed_bytes = managed.read_snapshot()?;
+        let mut candidate = if managed_bytes.is_empty() {
+            state.clone()
+        } else {
+            decode_state(&managed_bytes)?
+        };
+        candidate.seal_recovered_streams();
+        candidate.trim(self.max_events)?;
+        candidate.revision = state.next_revision()?;
+        let bytes = encode_state(&candidate)?;
+        managed.replace_snapshot(&bytes)?;
+        *state = candidate;
         *attached = Some(managed);
         Ok(())
     }
@@ -262,6 +265,7 @@ impl HttpDurableProtocolJournal {
             candidate.close_stream(&key)?;
         }
         candidate.trim(self.max_events)?;
+        candidate.revision = state.next_revision()?;
         self.persist_state(&candidate)?;
         *state = candidate;
         Ok(())
@@ -280,9 +284,211 @@ impl HttpDurableProtocolJournal {
         let mut candidate = state.clone();
         let key = HttpProtocolStreamKey::new(session_id, run_id);
         candidate.close_stream(&key)?;
+        candidate.revision = state.next_revision()?;
         self.persist_state(&candidate)?;
         *state = candidate;
         Ok(())
+    }
+
+    /// Returns an in-process cache revision to capture before reading a rebuild source.
+    ///
+    /// This is not a public-event sequence or persisted authority. It fences concurrent cache
+    /// changes even when retention has removed a run's last event and watermark.
+    pub(crate) fn replay_projection_revision(&self) -> Result<u64, HttpProtocolJournalError> {
+        self.state
+            .lock()
+            .map(|state| state.revision)
+            .map_err(|_| HttpProtocolJournalError::Unavailable)
+    }
+
+    /// Atomically replaces selected derived run windows with verified durable public events.
+    ///
+    /// The candidate removes only the selected runs directly, then applies the complete source
+    /// and the normal global retention trim before one persist-and-swap. Retention can still
+    /// evict another run's oldest suffix; it never clears another run as part of this reset.
+    pub(crate) fn replace_run_replay_projections(
+        &self,
+        runs: &BTreeSet<(String, String)>,
+        source: &[(HttpProtocolEvent, bool, bool)],
+        expected_revision: u64,
+    ) -> Result<(), HttpProtocolJournalError> {
+        let canonical_source = source
+            .iter()
+            .map(|(event, keep_stream_open, close_stream_after_event)| {
+                let key = (
+                    event.run_event.session_id.clone(),
+                    event.run_event.run_id.clone(),
+                );
+                if !runs.contains(&key) {
+                    return Err(HttpProtocolJournalError::Corrupt {
+                        message:
+                            "rebuild source event belongs to a run outside the replacement set"
+                                .to_owned(),
+                    });
+                }
+                Ok((
+                    canonical_durable_event(event.clone())?,
+                    *keep_stream_open,
+                    *close_stream_after_event,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let source_frontiers = canonical_source.iter().fold(
+            BTreeMap::<HttpProtocolStreamKey, u64>::new(),
+            |mut frontiers, (event, _, _)| {
+                let key = HttpProtocolStreamKey::new(
+                    event.run_event.session_id.clone(),
+                    event.run_event.run_id.clone(),
+                );
+                frontiers
+                    .entry(key)
+                    .and_modify(|sequence| *sequence = (*sequence).max(event.run_event.sequence))
+                    .or_insert(event.run_event.sequence);
+                frontiers
+            },
+        );
+        if source_frontiers.len() != runs.len() {
+            return Err(HttpProtocolJournalError::Corrupt {
+                message: "rebuild source is missing a requested run".to_owned(),
+            });
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolJournalError::Unavailable)?;
+        if state.revision != expected_revision {
+            return Err(HttpProtocolJournalError::StaleReplayProjection);
+        }
+        let source_by_identity = canonical_source
+            .iter()
+            .map(|(event, _, _)| {
+                (
+                    (
+                        event.run_event.session_id.as_str(),
+                        event.run_event.run_id.as_str(),
+                        event.run_event.sequence,
+                    ),
+                    &event.run_event,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut preserve_closed = Vec::new();
+        for (session_id, run_id) in runs {
+            let key = HttpProtocolStreamKey::new(session_id.clone(), run_id.clone());
+            let source_frontier = source_frontiers.get(&key).copied().ok_or_else(|| {
+                HttpProtocolJournalError::Corrupt {
+                    message: "rebuild source is missing a requested run frontier".to_owned(),
+                }
+            })?;
+            if let Some(current) = state.high_watermarks.get(&key)
+                && current.latest_sequence > source_frontier
+            {
+                // A concurrent publisher can advance this derived window after the source was
+                // read. Reject the stale snapshot without classifying valid state as corruption.
+                return Err(HttpProtocolJournalError::NonMonotonicSequence {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    latest: current.latest_sequence,
+                    received: source_frontier,
+                });
+            }
+            if let Some(current) = state.high_watermarks.get(&key)
+                && !current.accepts_events
+                && current.latest_sequence == source_frontier
+            {
+                preserve_closed.push((key, current.terminal));
+            }
+        }
+        // The source remains authoritative, but an already published identity cannot silently
+        // acquire different bytes through the rebuild path. Match the exact-publication guard.
+        for current in &state.events {
+            if !runs.contains(&(
+                current.run_event.session_id.clone(),
+                current.run_event.run_id.clone(),
+            )) {
+                continue;
+            }
+            let source = source_by_identity
+                .get(&(
+                    current.run_event.session_id.as_str(),
+                    current.run_event.run_id.as_str(),
+                    current.run_event.sequence,
+                ))
+                .ok_or_else(|| HttpProtocolJournalError::Corrupt {
+                    message: "rebuild source omits a retained durable event identity".to_owned(),
+                })?;
+            let encode = |event: &sigil_kernel::PublicRunEvent| {
+                serde_json::to_value(event).map_err(|error| HttpProtocolJournalError::Corrupt {
+                    message: error.to_string(),
+                })
+            };
+            if encode(&current.run_event)? != encode(source)? {
+                return Err(HttpProtocolJournalError::Corrupt {
+                    message: "rebuild source conflicts with a retained public event identity"
+                        .to_owned(),
+                });
+            }
+        }
+        let mut candidate = state.clone();
+        candidate.events.retain(|event| {
+            !runs.contains(&(
+                event.run_event.session_id.clone(),
+                event.run_event.run_id.clone(),
+            ))
+        });
+        candidate
+            .high_watermarks
+            .retain(|key, _| !runs.contains(&(key.session_id.clone(), key.run_id.clone())));
+        for (event, keep_stream_open, close_stream_after_event) in canonical_source {
+            let key = HttpProtocolStreamKey::new(
+                event.run_event.session_id.clone(),
+                event.run_event.run_id.clone(),
+            );
+            candidate.append(event, keep_stream_open)?;
+            if close_stream_after_event {
+                candidate.close_stream(&key)?;
+            }
+        }
+        for (key, was_terminal) in preserve_closed {
+            if let Some(watermark) = candidate.high_watermarks.get_mut(&key) {
+                // An equal source frontier supplies no new fact that could reopen this stream.
+                // Preserve recovery sealing without inventing a foreground domain terminal.
+                watermark.accepts_events = false;
+                watermark.terminal |= was_terminal;
+            }
+        }
+        candidate.trim(self.max_events)?;
+        candidate.revision = state.next_revision()?;
+        self.persist_state(&candidate)?;
+        *state = candidate;
+        Ok(())
+    }
+
+    /// Returns one retained durable protocol event without cloning this run's replay suffix.
+    ///
+    /// An absent event is deliberately distinct from cursor expiry: exact delivery can only use
+    /// this to recognize bytes already retained. Recovery of an evicted pending predecessor is
+    /// owned by the verified-public-outbox rebuild path.
+    pub(crate) fn retained_run_event_at(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> Result<Option<HttpProtocolEvent>, HttpProtocolReplayError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| HttpProtocolReplayError::JournalUnavailable)?;
+        Ok(state
+            .events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.run_event.session_id == session_id
+                    && event.run_event.run_id == run_id
+                    && event.run_event.sequence == sequence
+            })
+            .cloned())
     }
 
     /// Replays a retained durable suffix for one run.
@@ -423,6 +629,11 @@ impl Drop for HttpDurableProtocolJournal {
 /// Durable journal failures.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpProtocolJournalError {
+    /// A rebuild source was read across a concurrent change to this derived cache.
+    #[error(
+        "http replay projection changed while its source was read; retry with a fresh snapshot"
+    )]
+    StaleReplayProjection,
     /// The configured journal is malformed or violates the replay contract.
     #[error("http protocol journal is corrupt: {message}")]
     Corrupt { message: String },
@@ -490,9 +701,17 @@ impl HttpProtocolJournalError {
 struct HttpProtocolJournalState {
     events: Vec<HttpProtocolEvent>,
     high_watermarks: BTreeMap<HttpProtocolStreamKey, HttpProtocolStreamWatermark>,
+    // Process-local only: HttpProtocolJournalFile deliberately does not encode this fence.
+    revision: u64,
 }
 
 impl HttpProtocolJournalState {
+    fn next_revision(&self) -> Result<u64, HttpProtocolJournalError> {
+        self.revision
+            .checked_add(1)
+            .ok_or(HttpProtocolJournalError::Unavailable)
+    }
+
     fn append(
         &mut self,
         event: HttpProtocolEvent,
@@ -754,6 +973,7 @@ impl HttpProtocolJournalFile {
         Ok(HttpProtocolJournalState {
             events: self.events,
             high_watermarks,
+            revision: 0,
         })
     }
 }

@@ -68,7 +68,7 @@ use sigil_runtime::application_run::{
     prepare_application_run, prepare_application_task_continuation,
     prepare_application_user_input_decision,
     record_application_preparation_cancellation_with_attachment,
-    replay_pending_application_terminal_outbox, rerun_application_verification_with_attachment,
+    rerun_application_verification_with_attachment,
 };
 use sigil_runtime::conversation_display::{
     ConversationDisplayProjectionError, conversation_display_page_with_artifact_store,
@@ -366,18 +366,15 @@ impl sigil_runtime::application_run::ApplicationRunEventHandler
         }
         // The runtime bridge is the only sequence owner for this revision. Re-numbering here
         // would make its later durable terminal outbox disagree with the already emitted stream.
-        let awaiting_input = matches!(
-            &event.event,
-            sigil_kernel::PublicRunEventKind::RunAwaitingUserInput { .. }
-        );
-        self.event_bus.publish_run_event(event)?;
-        if awaiting_input {
-            // End this SSE response without sealing the protocol journal: the exact same child
-            // logical run resumes after the accepted research answer.
-            self.event_bus
-                .close_live_run_delivery(&self.durable_session_scope_id, &self.run_id)?;
-        }
-        Ok(())
+        // The shared exact helper also accepts journal bytes committed by a prior process before
+        // its outbox delivery receipt was persisted.
+        publish_exact_http_outbox_event(
+            &self.event_bus,
+            &self.durable_session_scope_id,
+            &self.run_id,
+            event,
+        )
+        .map(|_| ())
     }
 
     fn public_event_adapter_id(&self) -> &'static str {
@@ -419,39 +416,6 @@ fn revision_attempt_is_exact_waiting_input(
         anyhow::bail!("plan review attempt binding does not match the supervised revision request");
     }
     Ok(attempt.status == PlanReviewAttemptStatus::WaitingForInput)
-}
-
-/// Whether this exact public research request still belongs to the current suspended attempt.
-/// Historical requests remain readable for command idempotency, but they must not reserve a new
-/// terminal sequence or reopen a finalized revision.
-fn plan_review_research_input_is_current_waiting(
-    session_log_path: &Path,
-    durable_session_scope_id: &str,
-    identity: &sigil_kernel::UserInputIdentityV1,
-    request_hash: &str,
-) -> Result<bool> {
-    let session = sigil_kernel::Session::load_from_store(
-        "http-plan-review-input-admission",
-        "unknown",
-        JsonlSessionStore::new(session_log_path)?,
-    )?;
-    if session.session_scope_id() != durable_session_scope_id {
-        anyhow::bail!("plan-review research input belongs to another durable session");
-    }
-    let projection = PlanReviewProjection::from_entries(session.entries());
-    if projection.has_conflicts() {
-        anyhow::bail!("plan-review projection is conflicted before input admission");
-    }
-    let Some(historical) = projection.attempt_for_pending_user_input(identity, request_hash) else {
-        return Ok(false);
-    };
-    Ok(projection
-        .latest_attempt(&historical.plan_review_id)
-        .is_some_and(|latest| {
-            latest.attempt_id == historical.attempt_id
-                && latest.status == PlanReviewAttemptStatus::WaitingForInput
-                && latest.revision_request_id.is_some()
-        }))
 }
 
 enum PendingHttpCompaction {
@@ -590,15 +554,6 @@ impl HttpProductionRunDriver {
         let durable_session_scope_id = session.durable_session_scope_id.clone();
         let session_id = session.id.clone();
         let run_id = request.child_logical_run_id();
-        let initial_public_sequence = self
-            .event_bus
-            .latest_run_sequence(&durable_session_scope_id, &run_id)
-            .map_err(|error| {
-                HttpRunDriverError::new(format!(
-                    "plan review revision public sequence recovery failed: {error}"
-                ))
-            })?
-            .unwrap_or(0);
         let attachment = self.acquire_session_attachment(session).map_err(|error| {
             HttpRunDriverError::new(format!("plan review revision attachment failed: {error}"))
         })?;
@@ -686,7 +641,6 @@ impl HttpProductionRunDriver {
                     &workspace_root,
                     &session_log_path,
                     &request,
-                    initial_public_sequence,
                     &mut handler,
                     Some(cancellation_handle),
                     managed_command_execution,
@@ -842,7 +796,7 @@ fn publish_exact_plan_review_revision_terminal_outbox(
             "plan-review revision terminal outbox belongs to another HTTP run"
         ));
     }
-    publish_exact_http_terminal_outbox_event(
+    publish_exact_http_outbox_event(
         event_bus,
         durable_session_scope_id,
         run_id,
@@ -1882,13 +1836,15 @@ impl HttpProductionRunDriver {
         }
         self.reconcile_terminal_session_once(durable_session_scope_id, &canonical_session_path)
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        replay_pending_http_terminal_outboxes(
+        let registry = self.registry.get().and_then(Weak::upgrade);
+        replay_pending_http_public_outboxes(
             &canonical_session_path,
             durable_session_scope_id,
             &self.event_bus,
+            registry.as_deref(),
         )
         .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        if let Some(registry) = self.registry.get().and_then(Weak::upgrade) {
+        if let Some(registry) = registry {
             reconcile_registered_http_terminal_outboxes(
                 &canonical_session_path,
                 durable_session_scope_id,
@@ -3864,7 +3820,6 @@ impl HttpRunDriver for HttpProductionRunDriver {
             session_attachment: Some(Arc::clone(&attachment)),
             expected_session_scope_id: session.durable_session_scope_id.clone(),
             run_id: run_id.clone(),
-            revision_terminal_public_sequence: None,
             identity: exact.identity.clone(),
             request_hash: exact.request_hash.clone(),
             command_id: sigil_kernel::UserInputCommandId::new(command.command_id.clone()).map_err(
@@ -3874,66 +3829,16 @@ impl HttpRunDriver for HttpProductionRunDriver {
             interaction: ApplicationRunInteraction::ExternallyInteractive,
             permission_mode: command.request.permission_mode.map(Into::into),
         };
-        let cancelled_plan_review_research = matches!(
-            &exact.source,
-            sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
-        ) && matches!(
-            &command.request.decision,
-            sigil_kernel::UserInputDecisionV1::RunCancelled
-        ) && plan_review_research_input_is_current_waiting(
-            Path::new(&session.session_log_path),
-            &session.durable_session_scope_id,
-            &exact.identity,
-            &exact.request_hash,
-        )
-        .map_err(|error| {
-            HttpRunDriverError::new(format!(
-                "plan-review cancellation input admission failed: {error:#}"
-            ))
-        })?;
-        let (prepared, revision_terminal_was_published) = if cancelled_plan_review_research {
-            let revision_run_id = exact.identity.root_logical_run_id.as_str().to_owned();
-            let prepared = self
-                .event_bus
-                .commit_and_publish_next_run_event(
-                    &session.durable_session_scope_id,
-                    &revision_run_id,
-                    |sequence| {
-                        let mut request = request;
-                        request.revision_terminal_public_sequence = Some(sequence);
-                        let prepared = self
-                            .runtime
-                            .block_on(self.preparer.prepare_user_input(request, services.clone()))
-                            .map_err(|error| crate::HttpEventPublishError::Journal {
-                                message: format!(
-                                    "plan-review cancellation decision failed before terminal publication: {error:#}"
-                                ),
-                            })?;
-                        let event = prepared
-                            .revision_terminal_outbox()
-                            .map(|outbox| outbox.event.clone())
-                            .ok_or_else(|| crate::HttpEventPublishError::Journal {
-                                message: "plan-review cancellation did not commit its durable terminal outbox"
-                                    .to_owned(),
-                            })?;
-                        Ok((prepared, event))
-                    },
-                )
-                .map_err(|error| {
-                    HttpRunDriverError::new(format!(
-                        "plan-review cancellation terminal publication failed: {error}"
-                    ))
-                })?;
-            (prepared, true)
-        } else {
-            let prepared = self
-                .runtime
-                .block_on(self.preparer.prepare_user_input(request, services))
-                .map_err(|error| {
-                    HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
-                })?;
-            (prepared, false)
-        };
+        // The runtime allocates the next sequence from the durable public outbox as it commits
+        // the cancellation terminal. The HTTP journal is only the adapter replay projection: it
+        // cannot reserve this sequence because a previously durable Waiting event may not yet
+        // have reached the journal.
+        let prepared = self
+            .runtime
+            .block_on(self.preparer.prepare_user_input(request, services))
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("user input decision failed: {error:#}"))
+            })?;
         let revision_terminal_outbox = prepared.revision_terminal_outbox().cloned();
         let (receipt, continuation, revision_request) = prepared.into_parts();
         let continuation_run_id = continuation.as_ref().map(|_| run_id.clone()).or_else(|| {
@@ -4005,7 +3910,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 Path::new(&session.session_log_path),
                 &session.durable_session_scope_id,
                 &outbox,
-                revision_terminal_was_published,
+                false,
             )?;
         }
         Ok(HttpUserInputDecisionCommandReceipt {
@@ -5124,11 +5029,12 @@ impl HttpRunSupervisor {
                     durable_application_execution_terminal(&control, &result)?,
                     "application execution ended",
                 )?;
-                replay_pending_http_terminal_outbox(
+                replay_pending_http_public_outbox(
                     Path::new(&self.start.session.session_log_path),
                     &self.start.session.durable_session_scope_id,
                     &self.start.run.id,
                     &self.event_bus,
+                    &registry,
                 )?;
                 record_run_terminal_and_reconcile_stream(
                     &registry,
@@ -5312,11 +5218,12 @@ impl HttpRunSupervisor {
                                     return Err(error);
                                 }
                             };
-                            if let Err(error) = replay_pending_http_terminal_outbox(
+                            if let Err(error) = replay_pending_http_public_outbox(
                                 Path::new(&self.start.session.session_log_path),
                                 &self.start.session.durable_session_scope_id,
                                 &self.start.run.id,
                                 &self.event_bus,
+                                &registry,
                             ) {
                                 let error = if acknowledgement_sent {
                                     error
@@ -5491,11 +5398,12 @@ impl HttpRunSupervisor {
                         return Err(error);
                     }
                 };
-                if let Err(error) = replay_pending_http_terminal_outbox(
+                if let Err(error) = replay_pending_http_public_outbox(
                     Path::new(&self.start.session.session_log_path),
                     &self.start.session.durable_session_scope_id,
                     &self.start.run.id,
                     &self.event_bus,
+                    &registry,
                 ) {
                     let error = if acknowledgement_sent {
                         error
@@ -5756,11 +5664,12 @@ impl HttpRunSupervisor {
                 });
             }
         };
-        if let Err(error) = replay_pending_http_terminal_outbox(
+        if let Err(error) = replay_pending_http_public_outbox(
             Path::new(&self.start.session.session_log_path),
             &self.start.session.durable_session_scope_id,
             &self.start.run.id,
             &self.event_bus,
+            registry,
         ) {
             return Err(if acknowledgement_sent {
                 error
@@ -5946,11 +5855,12 @@ impl HttpRunSupervisor {
                         "pre-execution cancellation outcome conflicts with its durable application terminal",
                     ));
                 }
-                replay_pending_http_terminal_outbox(
+                replay_pending_http_public_outbox(
                     Path::new(&self.start.session.session_log_path),
                     &self.start.session.durable_session_scope_id,
                     &self.start.run.id,
                     &self.event_bus,
+                    registry,
                 )?;
                 record_run_terminal_and_reconcile_stream(
                     registry,
@@ -6130,12 +6040,6 @@ struct HttpProductionEventHandler {
     event_bus: Arc<HttpLiveEventBus>,
 }
 
-struct HttpPendingTerminalOutboxHandler {
-    durable_session_scope_id: String,
-    run_id: String,
-    event_bus: Arc<HttpLiveEventBus>,
-}
-
 struct HttpProductionTerminalLifecycleHandler {
     durable_session_scope_id: String,
     run_id: String,
@@ -6155,53 +6059,37 @@ impl std::fmt::Debug for HttpProductionTerminalLifecycleHandler {
 }
 
 impl sigil_runtime::ApplicationTerminalLifecycleHandler for HttpProductionTerminalLifecycleHandler {
-    fn handle_terminal_lifecycle(
-        &self,
-        session_id: &str,
-        run_id: &str,
-        event: &sigil_kernel::TerminalLifecycleEvent,
-    ) -> Result<()> {
-        if session_id != self.durable_session_scope_id || run_id != self.run_id {
+    fn handle_public_event(&self, public_event: PublicRunEvent) -> Result<()> {
+        if public_event.session_id != self.durable_session_scope_id
+            || public_event.run_id != self.run_id
+        {
             return Err(anyhow!("terminal lifecycle route identity changed"));
         }
+        let PublicRunEventKind::TerminalLifecycle { .. } = &public_event.event else {
+            // The lifecycle wrapper first replays every older pending public outbox item through
+            // this same adapter. Those events need exact delivery only: replay must not recreate
+            // approval/tool/route side effects owned by the normal application handler.
+            return publish_exact_http_outbox_event(
+                &self.event_bus,
+                &self.durable_session_scope_id,
+                &self.run_id,
+                public_event,
+            )
+            .map(|_| ());
+        };
         let registry = self
             .registry
             .upgrade()
             .ok_or_else(|| anyhow!("terminal lifecycle registry is closed"))?;
-        let Some(_sequence) = registry
-            .record_terminal_lifecycle_with_publication(
-                &self.run_id,
-                event,
-                |_registry_sequence, close_stream_after_publication| {
-                    let public_event = PublicRunEvent::new(
-                        &self.durable_session_scope_id,
-                        &self.run_id,
-                        1,
-                        PublicRunEventKind::TerminalLifecycle {
-                            event: event.clone(),
-                        },
-                    );
-                    if close_stream_after_publication {
-                        self.event_bus
-                            .publish_next_run_event_and_close_stream(public_event)
-                    } else {
-                        self.event_bus.publish_next_run_event(public_event)
-                    }
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-                },
-            )
-            .map_err(|error| anyhow!(error))?
-        else {
-            return Ok(());
-        };
-        if registry.get_run(&self.run_id).ok().is_some_and(|run| {
-            !run.terminal_tasks.is_empty()
-                && run
-                    .terminal_tasks
-                    .iter()
-                    .all(|task| task.status.is_terminal())
-        }) {
+        let all_terminal_tasks_settled = deliver_exact_http_terminal_lifecycle_public_event(
+            &registry,
+            &self.event_bus,
+            &self.durable_session_scope_id,
+            &self.run_id,
+            public_event,
+            None,
+        )?;
+        if all_terminal_tasks_settled {
             self.terminal_owners
                 .lock()
                 .map_err(|_| anyhow!("production terminal-owner state unavailable"))?
@@ -6209,6 +6097,64 @@ impl sigil_runtime::ApplicationTerminalLifecycleHandler for HttpProductionTermin
         }
         Ok(())
     }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        "http"
+    }
+}
+
+/// Projects one exact lifecycle outbox event through the registry before its HTTP receipt.
+///
+/// A new final lifecycle appends and seals the durable protocol stream in the same journal
+/// transaction. A retry whose bytes are already retained only seals the still-open stream; it
+/// never allocates a replacement sequence or replays the physical owner effect.
+fn deliver_exact_http_terminal_lifecycle_public_event(
+    registry: &HttpSessionRunRegistry,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    public_event: PublicRunEvent,
+    planned_stream_close: Option<bool>,
+) -> Result<bool> {
+    if public_event.session_id != durable_session_scope_id || public_event.run_id != run_id {
+        return Err(anyhow!("terminal lifecycle route identity changed"));
+    }
+    let PublicRunEventKind::TerminalLifecycle { event } = &public_event.event else {
+        return Err(anyhow!("public event is not a terminal lifecycle"));
+    };
+    let applied = registry
+        .record_terminal_lifecycle_with_publication(run_id, event, |_, should_close_stream| {
+            publish_exact_http_outbox_event_with_stream_close(
+                event_bus,
+                durable_session_scope_id,
+                run_id,
+                public_event.clone(),
+                planned_stream_close.unwrap_or(should_close_stream),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        })
+        .map_err(|error| anyhow!(error))?;
+    let all_terminal_tasks_settled = registry.get_run(run_id).ok().is_some_and(|run| {
+        run.status.is_terminal()
+            && !run.terminal_tasks.is_empty()
+            && run
+                .terminal_tasks
+                .iter()
+                .all(|task| task.status.is_terminal())
+    });
+    if applied.is_none() {
+        // Registry state may already have committed before its outbox receipt. Re-check the
+        // exact bytes and idempotently seal an otherwise-open final stream before ACKing.
+        publish_exact_http_outbox_event_with_stream_close(
+            event_bus,
+            durable_session_scope_id,
+            run_id,
+            public_event,
+            planned_stream_close.unwrap_or(all_terminal_tasks_settled),
+        )?;
+    }
+    Ok(all_terminal_tasks_settled)
 }
 
 fn is_application_terminal_public_event(event: &PublicRunEventKind) -> bool {
@@ -6224,55 +6170,88 @@ fn is_application_terminal_public_event(event: &PublicRunEventKind) -> bool {
     )
 }
 
-fn publish_exact_http_terminal_outbox_event(
+/// Delivers one already durable public event to the HTTP adapter.
+///
+/// The public outbox is the durable authority for identity/sequence/payload. Durable HTTP event
+/// classes are projected into the bounded replay journal exactly once; equal bytes at one
+/// sequence establish a prior accepted projection. Transient HTTP classes retain their existing
+/// best-effort live semantics and are deliberately not inferred from the durable journal.
+fn publish_exact_http_outbox_event(
     event_bus: &HttpLiveEventBus,
     durable_session_scope_id: &str,
     run_id: &str,
     event: PublicRunEvent,
-) -> Result<()> {
+) -> Result<crate::HttpProtocolEvent> {
+    publish_exact_http_outbox_event_with_stream_close(
+        event_bus,
+        durable_session_scope_id,
+        run_id,
+        event,
+        false,
+    )
+}
+
+fn publish_exact_http_outbox_event_with_stream_close(
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    run_id: &str,
+    event: PublicRunEvent,
+    close_stream_after_event: bool,
+) -> Result<crate::HttpProtocolEvent> {
     if event.session_id != durable_session_scope_id || event.run_id != run_id {
         return Err(anyhow!(
             "pending public outbox event belongs to another production run"
         ));
     }
-    if !is_application_terminal_public_event(&event.event) {
-        return Err(anyhow!(
-            "pending public outbox replay requires a terminal event"
-        ));
-    }
     let canonical = crate::HttpProtocolEvent::from_run_event(event.clone())?;
+    if !canonical.is_durable() {
+        let protocol = event_bus
+            .publish_run_event(event)
+            .map_err(anyhow::Error::new)?;
+        if close_stream_after_event {
+            event_bus
+                .close_run_stream(durable_session_scope_id, run_id)
+                .map_err(anyhow::Error::new)?;
+        }
+        return Ok(protocol);
+    }
     let existing = event_bus
-        .replay_run_after(durable_session_scope_id, run_id, None)
-        .map_err(|error| anyhow!("HTTP terminal replay state is unavailable: {error}"))?
-        .into_iter()
-        .find(|existing| existing.run_event.sequence == event.sequence);
+        .retained_run_event_at(durable_session_scope_id, run_id, event.sequence)
+        .map_err(|error| anyhow!("HTTP public replay state is unavailable: {error}"))?;
     if let Some(existing) = existing {
-        if serde_json::to_value(existing.run_event)? == serde_json::to_value(canonical.run_event)? {
-            return Ok(());
+        if serde_json::to_value(&existing.run_event)? == serde_json::to_value(&canonical.run_event)?
+        {
+            if close_stream_after_event {
+                event_bus
+                    .close_run_stream(durable_session_scope_id, run_id)
+                    .map_err(anyhow::Error::new)?;
+            }
+            return Ok(existing);
         }
         return Err(anyhow!(
-            "HTTP terminal replay sequence conflicts with the durable public outbox payload"
+            "HTTP replay sequence conflicts with the durable public outbox payload"
         ));
     }
-    event_bus
-        .publish_run_event_with_stream_continuation(event)
-        .map(|_| ())
-        .map_err(anyhow::Error::new)
-}
-
-impl ApplicationRunEventHandler for HttpPendingTerminalOutboxHandler {
-    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-        publish_exact_http_terminal_outbox_event(
-            &self.event_bus,
-            &self.durable_session_scope_id,
-            &self.run_id,
-            event,
-        )
+    let awaiting_input = matches!(
+        &event.event,
+        PublicRunEventKind::RunAwaitingUserInput { .. }
+    );
+    let protocol = if close_stream_after_event {
+        event_bus.publish_run_event_and_close_stream(event)
+    } else if is_application_terminal_public_event(&event.event) {
+        // Root/revision terminal handling remains owned by A1.  Do not let this adapter replay
+        // close the stream before its registry/lifecycle owner makes that decision.
+        event_bus.publish_run_event_with_stream_continuation(event)
+    } else {
+        event_bus.publish_run_event(event)
     }
-
-    fn public_event_adapter_id(&self) -> &'static str {
-        "http"
+    .map_err(anyhow::Error::new)?;
+    if awaiting_input {
+        // A revision question ends the current live SSE response but keeps the durable protocol
+        // stream open: an exact answer resumes this same run with the next public sequence.
+        event_bus.close_live_run_delivery(durable_session_scope_id, run_id)?;
     }
+    Ok(protocol)
 }
 
 impl ApplicationRunEventHandler for HttpProductionEventHandler {
@@ -6402,17 +6381,20 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                 }
                 published.map(|_| ()).map_err(anyhow::Error::new)
             }
-            _ if application_terminal => publish_exact_http_terminal_outbox_event(
+            _ if application_terminal => publish_exact_http_outbox_event(
                 &self.event_bus,
                 &self.durable_session_scope_id,
                 &self.run_id,
                 event,
-            ),
-            _ => self
-                .event_bus
-                .publish_run_event(event)
-                .map(|_| ())
-                .map_err(anyhow::Error::new),
+            )
+            .map(|_| ()),
+            _ => publish_exact_http_outbox_event(
+                &self.event_bus,
+                &self.durable_session_scope_id,
+                &self.run_id,
+                event,
+            )
+            .map(|_| ()),
         };
         if let Err(error) = publication {
             if let Some(approval) = approval_request {
@@ -6880,11 +6862,12 @@ fn record_natural_terminal_if_committed(
     let Some(terminal) = durable_application_execution_terminal(control, result)? else {
         return Ok(false);
     };
-    replay_pending_http_terminal_outbox(
+    replay_pending_http_public_outbox(
         session_log_path,
         durable_session_scope_id,
         run_id,
         event_bus,
+        registry,
     )?;
     record_run_terminal_and_reconcile_stream(
         registry,
@@ -6896,29 +6879,105 @@ fn record_natural_terminal_if_committed(
     Ok(true)
 }
 
-fn replay_pending_http_terminal_outbox(
+fn replay_pending_http_public_outbox(
     session_log_path: &Path,
     durable_session_scope_id: &str,
     run_id: &str,
     event_bus: &Arc<HttpLiveEventBus>,
+    registry: &HttpSessionRunRegistry,
 ) -> Result<usize, HttpRunDriverError> {
-    let mut handler = HttpPendingTerminalOutboxHandler {
-        durable_session_scope_id: durable_session_scope_id.to_owned(),
-        run_id: run_id.to_owned(),
-        event_bus: Arc::clone(event_bus),
-    };
-    replay_pending_application_terminal_outbox(session_log_path, run_id, &mut handler).map_err(
-        |error| {
-            HttpRunDriverError::new(format!("pending terminal outbox replay failed: {error:#}"))
-        },
+    replay_pending_http_public_outboxes_matching(
+        session_log_path,
+        durable_session_scope_id,
+        event_bus,
+        Some(run_id),
+        Some(registry),
     )
 }
 
-fn replay_pending_http_terminal_outboxes(
+fn replay_pending_http_public_outboxes(
     session_log_path: &Path,
     durable_session_scope_id: &str,
     event_bus: &Arc<HttpLiveEventBus>,
+    registry: Option<&HttpSessionRunRegistry>,
 ) -> Result<usize, HttpRunDriverError> {
+    replay_pending_http_public_outboxes_matching(
+        session_log_path,
+        durable_session_scope_id,
+        event_bus,
+        None,
+        registry,
+    )
+}
+
+/// Rebuilds only the registered terminal-lifecycle reducer from verified source. This does not
+/// republish retained history, write any receipt, or invoke a terminal-owner cleanup effect.
+fn restore_registered_http_terminal_lifecycle_projection(
+    source: &[PublicRunEvent],
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    run_filter: Option<&str>,
+    registry: &HttpSessionRunRegistry,
+) -> Result<BTreeSet<(String, String, u64)>, HttpRunDriverError> {
+    let canonical_session_path = canonical_http_session_path(session_log_path)
+        .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
+    let mut runs = BTreeSet::new();
+    for event in source {
+        if !matches!(&event.event, PublicRunEventKind::TerminalLifecycle { .. })
+            || run_filter.is_some_and(|run_id| event.run_id != run_id)
+        {
+            continue;
+        }
+        if event.session_id != durable_session_scope_id {
+            return Err(HttpRunDriverError::new(
+                "terminal lifecycle outbox session does not match the attached HTTP session",
+            ));
+        }
+        match registry.get_run(&event.run_id) {
+            Ok(run) => {
+                let session = registry
+                    .get_session(&run.session_id)
+                    .map_err(registry_driver_error)?;
+                if session.durable_session_scope_id != durable_session_scope_id
+                    || canonical_http_session_path(Path::new(&session.session_log_path))
+                        .map_err(|error| HttpRunDriverError::new(error.to_string()))?
+                        .as_path()
+                        != canonical_session_path.as_path()
+                {
+                    return Err(HttpRunDriverError::new(
+                        "registered HTTP run does not belong to the durable terminal lifecycle attachment",
+                    ));
+                }
+                runs.insert((event.session_id.clone(), event.run_id.clone()));
+            }
+            Err(HttpRegistryError::RunNotFound { .. }) => {}
+            Err(error) => return Err(registry_driver_error(error)),
+        }
+    }
+    if runs.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    registry
+        .restore_terminal_lifecycle_projection_from_source(source, &runs)
+        .map_err(registry_driver_error)
+}
+
+/// Replays pending public events from their durable source, rebuilding only a bounded HTTP
+/// journal projection whose retained prefix no longer covers one pending durable event. The
+/// source reset is never an acknowledgement: every selected source event must append before any
+/// pending item is broadcast and receipted.
+fn replay_pending_http_public_outboxes_matching(
+    session_log_path: &Path,
+    durable_session_scope_id: &str,
+    event_bus: &Arc<HttpLiveEventBus>,
+    run_filter: Option<&str>,
+    registry: Option<&HttpSessionRunRegistry>,
+) -> Result<usize, HttpRunDriverError> {
+    let replay_projection_revision = event_bus.replay_projection_revision().map_err(|error| {
+        HttpRunDriverError::new(format!(
+            "HTTP public replay projection revision is unavailable: {error}"
+        ))
+    })?;
     let store = JsonlSessionStore::new(session_log_path)
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
     let records = store
@@ -6926,21 +6985,262 @@ fn replay_pending_http_terminal_outboxes(
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
     let projection = PublicEventOutboxProjectionV1::from_records(&records)
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
-    let run_ids = projection
+    let pending_ids = projection
         .pending_for_adapter("http")
         .into_iter()
-        .filter(|entry| is_application_terminal_public_event(&entry.event.event))
-        .map(|entry| entry.run_id.as_str())
+        .map(|entry| entry.public_event_id.as_str())
         .collect::<BTreeSet<_>>();
-    run_ids.into_iter().try_fold(0, |replayed, run_id| {
-        replay_pending_http_terminal_outbox(
-            session_log_path,
-            durable_session_scope_id,
-            run_id,
+    let pending_entries = projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| {
+            pending_ids.contains(entry.public_event_id.as_str())
+                && run_filter.is_none_or(|run_id| entry.run_id == run_id)
+        })
+        .collect::<Vec<_>>();
+    for entry in &pending_entries {
+        if entry.event.session_id != durable_session_scope_id {
+            return Err(HttpRunDriverError::new(
+                "pending public outbox session does not match the attached HTTP session",
+            ));
+        }
+    }
+    let source = projection
+        .events_in_order()
+        .into_iter()
+        .map(|entry| entry.event.clone())
+        .collect::<Vec<_>>();
+    let lifecycle_close_stream_after = registry
+        .map(|registry| {
+            restore_registered_http_terminal_lifecycle_projection(
+                &source,
+                session_log_path,
+                durable_session_scope_id,
+                run_filter,
+                registry,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let recorder = PublicEventOutboxRecorder::new(store);
+    let mut expired_runs = BTreeSet::new();
+    for entry in &pending_entries {
+        let protocol =
+            crate::HttpProtocolEvent::from_run_event(entry.event.clone()).map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "HTTP adapter could not canonicalize pending public outbox event {}: {error}",
+                    entry.public_event_id
+                ))
+            })?;
+        if !protocol.is_durable() {
+            continue;
+        }
+        if event_bus
+            .retained_run_event_at(durable_session_scope_id, &entry.run_id, entry.sequence)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("HTTP public replay state is unavailable: {error}"))
+            })?
+            .is_none()
+        {
+            expired_runs.insert((entry.event.session_id.clone(), entry.run_id.clone()));
+        }
+    }
+    let mut replayed = 0usize;
+    let mut rebuilt_ids = BTreeSet::new();
+    if !expired_runs.is_empty() {
+        let rebuilt_pending = pending_entries
+            .iter()
+            .copied()
+            .filter(|entry| {
+                expired_runs.contains(&(entry.event.session_id.clone(), entry.run_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        let pending_by_key = rebuilt_pending
+            .iter()
+            .copied()
+            .map(|entry| {
+                (
+                    (
+                        entry.event.session_id.clone(),
+                        entry.run_id.clone(),
+                        entry.sequence,
+                    ),
+                    entry,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let pending_keys = pending_by_key.keys().cloned().collect::<BTreeSet<_>>();
+        let source_has_lifecycle = source.iter().any(|event| {
+            expired_runs.contains(&(event.session_id.clone(), event.run_id.clone()))
+                && matches!(&event.event, PublicRunEventKind::TerminalLifecycle { .. })
+        });
+        if source_has_lifecycle && registry.is_none() {
+            return Err(HttpRunDriverError::new(
+                "verified terminal lifecycle rebuild requires its registered HTTP lifecycle projection",
+            ));
+        }
+        let close_stream_after = if source_has_lifecycle {
+            registry.ok_or_else(|| {
+                HttpRunDriverError::new(
+                    "verified terminal lifecycle rebuild requires its registered HTTP lifecycle projection",
+                )
+            })?;
+            lifecycle_close_stream_after.clone()
+        } else {
+            BTreeSet::new()
+        };
+        let rebuilt_events = event_bus
+            .rebuild_runs_from_verified_public_events(
+                &source,
+                &expired_runs,
+                &pending_keys,
+                &close_stream_after,
+                replay_projection_revision.ok_or_else(|| {
+                    HttpRunDriverError::new(
+                        "HTTP public outbox journal rebuild requires a durable replay projection",
+                    )
+                })?,
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "HTTP public outbox journal rebuild failed: {error}"
+                ))
+            })?;
+        for event in rebuilt_events {
+            let key = (
+                event.session_id.clone(),
+                event.run_id.clone(),
+                event.sequence,
+            );
+            let entry = pending_by_key.get(&key).ok_or_else(|| {
+                HttpRunDriverError::new(
+                    "HTTP public outbox rebuild delivery lost its receipt identity",
+                )
+            })?;
+            deliver_pending_http_public_outbox_event(
+                registry,
+                event_bus,
+                durable_session_scope_id,
+                entry,
+                true,
+                matches!(
+                    &entry.event.event,
+                    PublicRunEventKind::TerminalLifecycle { .. }
+                )
+                .then(|| close_stream_after.contains(&key)),
+            )?;
+            recorder
+                .append_delivery(&PublicEventDeliveryReceiptV1 {
+                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    public_event_id: entry.public_event_id.clone(),
+                    adapter: "http".to_owned(),
+                    delivered_at_unix_ms: current_unix_time_ms(),
+                })
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "failed to persist HTTP delivery receipt for pending public outbox event {}: {error:#}",
+                        entry.public_event_id
+                    ))
+                })?;
+            rebuilt_ids.insert(entry.public_event_id.as_str());
+            replayed = replayed.saturating_add(1);
+        }
+    }
+    for entry in pending_entries
+        .into_iter()
+        .filter(|entry| !rebuilt_ids.contains(entry.public_event_id.as_str()))
+    {
+        deliver_pending_http_public_outbox_event(
+            registry,
             event_bus,
+            durable_session_scope_id,
+            entry,
+            false,
+            matches!(
+                &entry.event.event,
+                PublicRunEventKind::TerminalLifecycle { .. }
+            )
+            .then(|| {
+                lifecycle_close_stream_after.contains(&(
+                    entry.event.session_id.clone(),
+                    entry.run_id.clone(),
+                    entry.sequence,
+                ))
+            }),
         )
-        .map(|count| replayed + count)
-    })
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "HTTP adapter rejected pending public outbox event {}: {error:#}",
+                entry.public_event_id
+            ))
+        })?;
+        recorder
+            .append_delivery(&PublicEventDeliveryReceiptV1 {
+                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: entry.public_event_id.clone(),
+                adapter: "http".to_owned(),
+                delivered_at_unix_ms: current_unix_time_ms(),
+            })
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "failed to persist HTTP delivery receipt for pending public outbox event {}: {error:#}",
+                    entry.public_event_id
+                ))
+            })?;
+        replayed += 1;
+    }
+    Ok(replayed)
+}
+
+fn deliver_pending_http_public_outbox_event(
+    registry: Option<&HttpSessionRunRegistry>,
+    event_bus: &HttpLiveEventBus,
+    durable_session_scope_id: &str,
+    entry: &sigil_kernel::PublicEventOutboxEntryV1,
+    already_live_delivered: bool,
+    planned_stream_close: Option<bool>,
+) -> Result<(), HttpRunDriverError> {
+    if matches!(
+        &entry.event.event,
+        PublicRunEventKind::TerminalLifecycle { .. }
+    ) {
+        let registry = registry.ok_or_else(|| {
+            HttpRunDriverError::new(
+                "pending terminal lifecycle requires its registered HTTP lifecycle projection",
+            )
+        })?;
+        deliver_exact_http_terminal_lifecycle_public_event(
+            registry,
+            event_bus,
+            durable_session_scope_id,
+            &entry.run_id,
+            entry.event.clone(),
+            planned_stream_close,
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "HTTP adapter rejected pending terminal lifecycle {}: {error:#}",
+                entry.public_event_id
+            ))
+        })
+    } else if already_live_delivered {
+        Ok(())
+    } else {
+        publish_exact_http_outbox_event(
+            event_bus,
+            durable_session_scope_id,
+            &entry.run_id,
+            entry.event.clone(),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            HttpRunDriverError::new(format!(
+                "HTTP adapter rejected pending public outbox event {}: {error:#}",
+                entry.public_event_id
+            ))
+        })
+    }
 }
 
 /// Restores this process-local registry from already validated durable terminal pairs.
@@ -6965,27 +7265,50 @@ fn reconcile_registered_http_terminal_outboxes(
     let projection = PublicEventOutboxProjectionV1::from_records(&records)
         .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
     let mut reconciled = 0usize;
-    for entry in projection
-        .events_in_order()
-        .into_iter()
-        .filter(|entry| is_application_terminal_public_event(&entry.event.event))
-    {
+    for entry in projection.events_in_order() {
+        let revision_attempt = records
+            .iter()
+            .find(|record| record.stored_event().event_id == entry.domain_event_id)
+            .map(|record| {
+                record
+                    .session_log_entry()
+                    .map_err(|error| HttpRunDriverError::new(error.to_string()))
+            })
+            .transpose()?
+            .and_then(|entry| match entry {
+                Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) => {
+                    Some(attempt)
+                }
+                _ => None,
+            });
+        let revision_terminal = if let Some(attempt) = revision_attempt.as_ref() {
+            if attempt.revision_request_id.is_some()
+                && is_durable_revision_waiting_outbox(attempt, &entry.event.event)
+            {
+                // A revision Waiting bundle is a resumable checkpoint.  It must not enter the
+                // terminal registry path merely because the public DTO is represented as a
+                // paused HTTP snapshot.
+                continue;
+            }
+            if attempt.revision_request_id.is_some()
+                && !is_durable_revision_terminal_outbox(attempt, &entry.event.event)
+            {
+                return Err(HttpRunDriverError::new(
+                    "plan-review revision outbox does not match a durable waiting or terminal attempt",
+                ));
+            }
+            attempt.revision_request_id.is_some()
+        } else {
+            false
+        };
+        let Some(outcome) = http_terminal_from_durable_public_event(&entry.event.event) else {
+            continue;
+        };
         if entry.event.session_id != durable_session_scope_id {
             return Err(HttpRunDriverError::new(
                 "durable terminal outbox session does not match the attached HTTP session",
             ));
         }
-        let outcome =
-            http_terminal_from_durable_public_event(&entry.event.event).ok_or_else(|| {
-                HttpRunDriverError::new(
-                    "durable terminal outbox entry has no HTTP terminal outcome",
-                )
-            })?;
-        let revision_terminal = records.iter().any(|record| {
-            record.stored_event().event_id == entry.domain_event_id
-                && record.stored_event().event_kind()
-                    == Some(sigil_kernel::DurableEventType::PlanReviewAttempt)
-        });
         match registry.get_run(&entry.run_id) {
             Ok(run) => {
                 let session = registry
@@ -7025,6 +7348,47 @@ fn reconcile_registered_http_terminal_outboxes(
         }
     }
     Ok(reconciled)
+}
+
+/// A revision waiting pair is recoverable input state, even though HTTP presents the current
+/// snapshot as `Paused`.  Only its exact domain status and public payload establish that meaning.
+fn is_durable_revision_waiting_outbox(
+    attempt: &sigil_kernel::PlanReviewAttemptEntry,
+    event: &PublicRunEventKind,
+) -> bool {
+    attempt.status == PlanReviewAttemptStatus::WaitingForInput
+        && matches!(event, PublicRunEventKind::RunAwaitingUserInput { .. })
+}
+
+/// A PlanReview attempt can close the HTTP registry only when both durable sides agree on one
+/// final revision outcome. `WaitingForInput`, `Started`, and `Finalizing` are deliberately not
+/// terminal registry facts.
+fn is_durable_revision_terminal_outbox(
+    attempt: &sigil_kernel::PlanReviewAttemptEntry,
+    event: &PublicRunEventKind,
+) -> bool {
+    matches!(
+        (attempt.status, event),
+        (
+            PlanReviewAttemptStatus::DraftReady | PlanReviewAttemptStatus::CompletedWithoutDraft,
+            PublicRunEventKind::RunFinished { .. }
+        ) | (
+            PlanReviewAttemptStatus::Cancelled,
+            PublicRunEventKind::RunCancelled
+        ) | (
+            PlanReviewAttemptStatus::Interrupted,
+            PublicRunEventKind::RunInterrupted { .. }
+        ) | (
+            PlanReviewAttemptStatus::Blocked,
+            PublicRunEventKind::RunBlocked { .. }
+        ) | (
+            PlanReviewAttemptStatus::Paused,
+            PublicRunEventKind::RunPaused { .. }
+        ) | (
+            PlanReviewAttemptStatus::Failed,
+            PublicRunEventKind::RunFailed { .. }
+        )
+    )
 }
 
 fn durable_application_execution_terminal(

@@ -274,12 +274,18 @@ pub async fn prepare_application_task_continuation(
         .enforce(&mut session, current_unix_time_ms())
         .map_err(ApplicationRunPrepareError::execution)?;
     orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
-    let terminal_lifecycle_sink = Arc::new(crate::ApplicationTerminalLifecycleRouter::new(
+    let session_id = session.session_scope_id().to_owned();
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    let terminal_lifecycle_sink = application_terminal_lifecycle_sink(
         mutation_recorder.clone(),
-        session.session_scope_id(),
-        &run_id,
         services.terminal_lifecycle_handler.clone(),
-    )) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
+        events.clone(),
+    );
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider_capabilities,
@@ -303,17 +309,9 @@ pub async fn prepare_application_task_continuation(
     )
     .map_err(ApplicationRunPrepareError::execution)?;
 
-    let session_id = session.session_scope_id().to_owned();
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::with_outbox(
-        session_id.clone(),
-        run_id.clone(),
-        PublicEventOutboxRecorder::new(
-            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
-        ),
-    );
     let task_execution = ApplicationTaskExecutionRuntime {
         root_config: root_config.clone(),
         workspace_root: workspace_root.clone(),
@@ -430,7 +428,7 @@ impl ApplicationTaskContinuationExecution {
         self.conversation_lifecycle
             .append_started(&self.conversation_start)
             .context("failed to persist application Task continuation start")?;
-        let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler);
+        let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler)?;
         bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.public_prompt,
         })?;
@@ -476,6 +474,14 @@ impl ApplicationTaskContinuationExecution {
             approval_handler,
         )
         .await;
+        let result = match result {
+            Err(error) if is_application_public_outbox_append_error(&error) => {
+                return Err(error).context(
+                    "application Task public outbox append was not confirmed; durable recovery must decide the next terminal",
+                );
+            }
+            result => result,
+        };
         let result = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
             &mut self.session,
             &self.task.task_id,

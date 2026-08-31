@@ -13,7 +13,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use sigil_kernel::project_conversation_prompt_for_persistence;
-use sigil_kernel::{SessionRef, safe_persistence_text};
+use sigil_kernel::{PublicRunEvent, PublicRunEventKind, SessionRef, safe_persistence_text};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -2324,6 +2324,44 @@ impl HttpSessionRunRegistry {
         self.record_terminal_lifecycle_with_publication(run_id, event, |_, _| Ok(()))
     }
 
+    /// Rehydrates registered lifecycle state from verified source without sending historical
+    /// events, adding receipts, or restarting terminal-owner effects. The returned close set
+    /// applies only when a still-pending exact event is subsequently delivered.
+    pub(crate) fn restore_terminal_lifecycle_projection_from_source(
+        &self,
+        source: &[PublicRunEvent],
+        runs: &BTreeSet<(String, String)>,
+    ) -> Result<BTreeSet<(String, String, u64)>, HttpRegistryError> {
+        let mut state = self.lock_state();
+        let closures = plan_terminal_lifecycle_stream_closures_from_state(&state, source, runs)?;
+        for event in source {
+            let key = (event.session_id.clone(), event.run_id.clone());
+            if !runs.contains(&key) {
+                continue;
+            }
+            let PublicRunEventKind::TerminalLifecycle { event: lifecycle } = &event.event else {
+                continue;
+            };
+            let run = state
+                .runs
+                .get_mut(&event.run_id)
+                .expect("validated lifecycle source must keep its registered run");
+            let task_id = lifecycle.task_id.as_str();
+            if run
+                .terminal_tasks
+                .get(task_id)
+                .is_some_and(|current| current.generation >= lifecycle.generation)
+            {
+                continue;
+            }
+            run.terminal_tasks.insert(
+                task_id.to_owned(),
+                HttpTerminalLifecycleView::from(lifecycle),
+            );
+        }
+        Ok(closures)
+    }
+
     /// Durably publishes and then commits one terminal lifecycle projection under the run lock.
     ///
     /// The publication callback receives the exact next stream sequence and whether this event
@@ -2355,11 +2393,7 @@ impl HttpSessionRunRegistry {
             return Ok(None);
         }
         let candidate = HttpTerminalLifecycleView::from(event);
-        let all_tasks_terminal = candidate.status.is_terminal()
-            && run.terminal_tasks.iter().all(|(existing_id, existing)| {
-                existing_id == task_id || existing.status.is_terminal()
-            });
-        let close_stream_after_publication = run.status.is_terminal() && all_tasks_terminal;
+        let close_stream_after_publication = terminal_lifecycle_closes_stream(run, event);
         let sequence = run.stream_sequence.saturating_add(1);
         publish(sequence, close_stream_after_publication).map_err(|message| {
             HttpRegistryError::DriverRejected {
@@ -4483,6 +4517,218 @@ impl HttpSessionRunRegistry {
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
+}
+
+fn plan_terminal_lifecycle_stream_closures_from_state(
+    state: &HttpRegistryState,
+    source: &[PublicRunEvent],
+    runs: &BTreeSet<(String, String)>,
+) -> Result<BTreeSet<(String, String, u64)>, HttpRegistryError> {
+    let mut expected_sequences = BTreeMap::<(String, String), u64>::new();
+    let mut source_task_ids = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut source_latest_generations = BTreeMap::<String, BTreeMap<String, u64>>::new();
+    let mut closures = BTreeSet::new();
+    for event in source {
+        let key = (event.session_id.clone(), event.run_id.clone());
+        if !runs.contains(&key) {
+            continue;
+        }
+        let expected = expected_sequences.get(&key).copied().unwrap_or(1);
+        if event.sequence != expected {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "plan terminal lifecycle replay",
+                run_id: event.run_id.clone(),
+                message: "verified public outbox source is not contiguous from sequence one"
+                    .to_owned(),
+            });
+        }
+        expected_sequences.insert(
+            key,
+            expected
+                .checked_add(1)
+                .ok_or_else(|| HttpRegistryError::DriverRejected {
+                    operation: "plan terminal lifecycle replay",
+                    run_id: event.run_id.clone(),
+                    message: "verified public outbox sequence overflowed".to_owned(),
+                })?,
+        );
+        let run = state
+            .runs
+            .get(&event.run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: event.run_id.clone(),
+            })?;
+        let session = state.sessions.get(&run.session_id).ok_or_else(|| {
+            HttpRegistryError::SessionNotFound {
+                session_id: run.session_id.clone(),
+            }
+        })?;
+        if session.binding.session_scope_id != event.session_id {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "plan terminal lifecycle replay",
+                run_id: event.run_id.clone(),
+                message: "public outbox lifecycle belongs to another durable session".to_owned(),
+            });
+        }
+        if let PublicRunEventKind::TerminalLifecycle { event: lifecycle } = &event.event {
+            source_task_ids
+                .entry(event.run_id.clone())
+                .or_default()
+                .insert(lifecycle.task_id.as_str().to_owned());
+            source_latest_generations
+                .entry(event.run_id.clone())
+                .or_default()
+                .entry(lifecycle.task_id.as_str().to_owned())
+                .and_modify(|generation| *generation = (*generation).max(lifecycle.generation))
+                .or_insert(lifecycle.generation);
+        }
+    }
+    if expected_sequences.len() != runs.len() {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "plan terminal lifecycle replay",
+            run_id: runs
+                .iter()
+                .next()
+                .map_or_else(String::new, |(_, run_id)| run_id.clone()),
+            message: "verified public outbox source is missing a requested run".to_owned(),
+        });
+    }
+    let mut staged_tasks = BTreeMap::<
+        String,
+        (
+            BTreeMap<String, HttpTerminalLifecycleView>,
+            BTreeSet<String>,
+            bool,
+        ),
+    >::new();
+    for (_, run_id) in runs {
+        let run = state
+            .runs
+            .get(run_id)
+            .ok_or_else(|| HttpRegistryError::RunNotFound {
+                run_id: run_id.clone(),
+            })?;
+        let source_ids = source_task_ids.get(run_id).cloned().unwrap_or_default();
+        // A source-touched task must be rebuilt from its durable lifecycle history, never from
+        // a newer in-memory generation. Retain only tasks absent from this source batch as the
+        // registry-owned base state.
+        let base_tasks = run
+            .terminal_tasks
+            .iter()
+            .filter(|(task_id, _)| !source_ids.contains(task_id.as_str()))
+            .map(|(task_id, task)| (task_id.clone(), task.clone()))
+            .collect();
+        if source_latest_generations
+            .get(run_id)
+            .is_some_and(|source_generations| {
+                source_generations
+                    .iter()
+                    .any(|(task_id, source_generation)| {
+                        run.terminal_tasks
+                            .get(task_id)
+                            .is_some_and(|current| current.generation > *source_generation)
+                    })
+            })
+        {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "plan terminal lifecycle replay",
+                run_id: run_id.clone(),
+                message: "terminal lifecycle source is older than the registered generation"
+                    .to_owned(),
+            });
+        }
+        staged_tasks.insert(run_id.clone(), (base_tasks, BTreeSet::new(), false));
+    }
+    for event in source {
+        let key = (event.session_id.clone(), event.run_id.clone());
+        if !runs.contains(&key) {
+            continue;
+        }
+        let (terminal_tasks, seen_source_tasks, source_foreground_terminal) = staged_tasks
+            .get_mut(&event.run_id)
+            .expect("selected runs must have staged lifecycle state");
+        if public_event_is_source_foreground_terminal(&event.event) {
+            *source_foreground_terminal = true;
+            let every_source_task_is_known = source_task_ids
+                .get(&event.run_id)
+                .is_none_or(|source_ids| source_ids.is_subset(seen_source_tasks));
+            if every_source_task_is_known
+                && terminal_tasks
+                    .values()
+                    .all(|terminal_task| terminal_task.status.is_terminal())
+            {
+                closures.insert((
+                    event.session_id.clone(),
+                    event.run_id.clone(),
+                    event.sequence,
+                ));
+            }
+            continue;
+        }
+        let PublicRunEventKind::TerminalLifecycle { event: lifecycle } = &event.event else {
+            continue;
+        };
+        let task_id = lifecycle.task_id.as_str();
+        if terminal_tasks
+            .get(task_id)
+            .is_some_and(|current| current.generation >= lifecycle.generation)
+        {
+            continue;
+        }
+        seen_source_tasks.insert(task_id.to_owned());
+        let every_source_task_is_known = source_task_ids
+            .get(&event.run_id)
+            .is_none_or(|source_ids| source_ids.is_subset(seen_source_tasks));
+        terminal_tasks.insert(
+            task_id.to_owned(),
+            HttpTerminalLifecycleView::from(lifecycle),
+        );
+        if *source_foreground_terminal
+            && every_source_task_is_known
+            && lifecycle.status.is_terminal()
+            && terminal_tasks
+                .values()
+                .all(|terminal_task| terminal_task.status.is_terminal())
+        {
+            closures.insert((
+                event.session_id.clone(),
+                event.run_id.clone(),
+                event.sequence,
+            ));
+        }
+    }
+    Ok(closures)
+}
+
+fn public_event_is_source_foreground_terminal(event: &PublicRunEventKind) -> bool {
+    matches!(
+        event,
+        PublicRunEventKind::RunFinished { .. }
+            | PublicRunEventKind::RunFailed { .. }
+            | PublicRunEventKind::RunCancelled
+            | PublicRunEventKind::RunInterrupted { .. }
+            | PublicRunEventKind::RunPaused { .. }
+            | PublicRunEventKind::RunBlocked { .. }
+    )
+}
+
+fn terminal_lifecycle_closes_stream(
+    run: &HttpRunState,
+    event: &sigil_kernel::TerminalLifecycleEvent,
+) -> bool {
+    terminal_lifecycle_closes_stream_for_tasks(run.status, &run.terminal_tasks, event)
+}
+
+fn terminal_lifecycle_closes_stream_for_tasks(
+    status: HttpRunStatus,
+    terminal_tasks: &BTreeMap<String, HttpTerminalLifecycleView>,
+    event: &sigil_kernel::TerminalLifecycleEvent,
+) -> bool {
+    event.status.is_terminal()
+        && status.is_terminal()
+        && terminal_tasks.iter().all(|(existing_id, existing)| {
+            existing_id == event.task_id.as_str() || existing.status.is_terminal()
+        })
 }
 
 fn http_run_admission_registry_error(error: HttpRunAdmissionError) -> HttpRegistryError {

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use sigil_kernel::resource::CanonicalHash;
 use sigil_kernel::{
@@ -217,6 +217,310 @@ fn durable_journal_replays_after_process_reopen() {
 }
 
 #[test]
+fn replacement_rejects_invalid_source_without_mutating_retained_runs() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 16).expect("journal should initialize");
+    journal
+        .append(durable_event_for("session-kept", "run-kept", 1))
+        .expect("unrelated retained event should persist");
+    journal
+        .append(durable_event_for("session-target", "run-target", 1))
+        .expect("target retained event should persist");
+    let replacement_runs = BTreeSet::from([("session-target".to_owned(), "run-target".to_owned())]);
+
+    assert!(matches!(
+        journal.replace_run_replay_projections(
+            &replacement_runs,
+            &[(
+                durable_event_for("session-kept", "run-kept", 2),
+                false,
+                false
+            )],
+            journal
+                .replay_projection_revision()
+                .expect("cache revision"),
+        ),
+        Err(HttpProtocolJournalError::Corrupt { .. })
+    ));
+    let transient = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+        "session-target",
+        "run-target",
+        2,
+        PublicRunEventKind::TextDelta {
+            text: "not a durable journal source".to_owned(),
+        },
+    ))
+    .expect("transient event should still project for the rejection test");
+    assert!(matches!(
+        journal.replace_run_replay_projections(
+            &replacement_runs,
+            &[(transient, false, false)],
+            journal
+                .replay_projection_revision()
+                .expect("cache revision"),
+        ),
+        Err(HttpProtocolJournalError::TransientEvent)
+    ));
+    let retained_other = journal
+        .replay_run_after("session-kept", "run-kept", None)
+        .expect("foreign source rejection must retain another run");
+    assert_eq!(
+        retained_other
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let retained_target = journal
+        .replay_run_after("session-target", "run-target", None)
+        .expect("invalid replacement must retain the original target window");
+    assert_eq!(
+        retained_target
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
+fn replacement_rejects_a_source_snapshot_behind_the_current_journal_frontier() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 16).expect("journal should initialize");
+    journal
+        .append(durable_event_for("session-other", "run-other", 1))
+        .expect("another run should persist");
+    journal
+        .append(durable_event_for("session-race", "run-race", 1))
+        .expect("initial event should persist");
+    let stale_source = vec![(
+        durable_event_for("session-race", "run-race", 1),
+        false,
+        false,
+    )];
+    journal
+        .append(durable_event_for("session-race", "run-race", 2))
+        .expect("the active publisher should advance the durable journal");
+    journal
+        .close_stream("session-race", "run-race")
+        .expect("the current stream should close");
+    let before = std::fs::read(&path).expect("the current journal should be readable");
+
+    let runs = BTreeSet::from([("session-race".to_owned(), "run-race".to_owned())]);
+    assert!(matches!(
+        journal.replace_run_replay_projections(
+            &runs,
+            &stale_source,
+            journal
+                .replay_projection_revision()
+                .expect("cache revision"),
+        ),
+        Err(HttpProtocolJournalError::NonMonotonicSequence {
+            latest: 2,
+            received: 1,
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("the rejected replacement must retain the journal"),
+        before,
+        "stale recovery must not change the durable journal or stream-close state"
+    );
+    drop(journal);
+    let journal = HttpDurableProtocolJournal::open(&path, 16)
+        .expect("the original state should survive a real reopen");
+    let retained = journal
+        .replay_run_after("session-race", "run-race", None)
+        .expect("a rejected stale replacement must leave the active journal unchanged");
+    assert_eq!(
+        retained
+            .iter()
+            .map(|event| event.run_event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        journal
+            .replay_run_after("session-other", "run-other", None)
+            .expect("another run must remain replayable")
+            .len(),
+        1
+    );
+    assert!(matches!(
+        journal.append(durable_event_for("session-race", "run-race", 3)),
+        Err(HttpProtocolJournalError::StreamAlreadyTerminal { .. })
+    ));
+}
+
+#[test]
+fn replacement_revision_rejects_a_stale_source_after_closed_watermark_eviction() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 1).expect("journal should initialize");
+    let first = durable_event_for("session-race", "run-race", 1);
+    journal
+        .append(first.clone())
+        .expect("first event should persist");
+    let revision_before_source = journal
+        .replay_projection_revision()
+        .expect("cache revision");
+    let old_source = vec![(first.clone(), false, false)];
+    let final_event = durable_event_for("session-race", "run-race", 2);
+    journal
+        .append_and_close_stream(final_event.clone())
+        .expect("the newer final event should atomically close its stream");
+    journal
+        .append_and_close_stream(durable_event_for("session-other", "run-other", 1))
+        .expect("another run should evict the closed stream's entire window");
+    assert_eq!(
+        journal
+            .latest_run_sequence("session-race", "run-race")
+            .expect("watermark lookup"),
+        None,
+        "the race must exercise an absent watermark, not only a lower source frontier"
+    );
+    let before = std::fs::read(&path).expect("current journal bytes");
+    let runs = BTreeSet::from([("session-race".to_owned(), "run-race".to_owned())]);
+    assert!(matches!(
+        journal.replace_run_replay_projections(&runs, &old_source, revision_before_source),
+        Err(HttpProtocolJournalError::StaleReplayProjection)
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("unchanged journal bytes"),
+        before
+    );
+    assert!(
+        journal
+            .replay_run_after("session-race", "run-race", None)
+            .expect("retained lookup")
+            .is_empty()
+    );
+    assert_eq!(
+        journal
+            .replay_run_after("session-other", "run-other", None)
+            .expect("other run replay")
+            .len(),
+        1
+    );
+
+    // A subsequent recovery reads a fresh source/revision and can restore the exact closed
+    // suffix. Neither the old snapshot nor a permanent per-run tombstone is needed.
+    let fresh_revision = journal
+        .replay_projection_revision()
+        .expect("fresh cache revision");
+    journal
+        .replace_run_replay_projections(
+            &runs,
+            &[(first, false, false), (final_event, false, true)],
+            fresh_revision,
+        )
+        .expect("fresh complete source should restore the closed replay suffix");
+    assert_eq!(
+        journal
+            .stream_accepts_events("session-race", "run-race")
+            .expect("closed lookup"),
+        Some(false)
+    );
+    drop(journal);
+    let reopened =
+        HttpDurableProtocolJournal::open(&path, 1).expect("recovery should survive reopen");
+    assert_eq!(
+        reopened
+            .latest_run_sequence("session-race", "run-race")
+            .expect("restored frontier"),
+        Some(2)
+    );
+    assert!(matches!(
+        reopened.replay_run_after("session-race", "run-race", None),
+        Err(HttpProtocolReplayError::CursorExpired)
+    ));
+}
+
+#[test]
+fn replacement_rejects_a_retained_identity_conflict_without_changing_either_copy() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 4).expect("journal should initialize");
+    let original = durable_event_for("session-conflict", "run-conflict", 1);
+    journal
+        .append(original.clone())
+        .expect("original event should persist");
+    let conflicting = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+        "session-conflict",
+        "run-conflict",
+        1,
+        PublicRunEventKind::Notice {
+            message: "different immutable payload".to_owned(),
+        },
+    ))
+    .expect("the conflicting source should itself be canonical");
+    let before = std::fs::read(&path).expect("current journal bytes");
+    let revision = journal
+        .replay_projection_revision()
+        .expect("cache revision");
+    assert!(matches!(
+        journal.replace_run_replay_projections(
+            &BTreeSet::from([("session-conflict".to_owned(), "run-conflict".to_owned())]),
+            &[(conflicting, false, false)],
+            revision,
+        ),
+        Err(HttpProtocolJournalError::Corrupt { .. })
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("unchanged journal bytes"),
+        before
+    );
+    assert_eq!(
+        journal
+            .replay_projection_revision()
+            .expect("unchanged revision"),
+        revision
+    );
+    let retained = journal
+        .replay_run_after("session-conflict", "run-conflict", None)
+        .expect("retained original");
+    assert_eq!(
+        serde_json::to_value(&retained[0].run_event).expect("retained bytes"),
+        serde_json::to_value(&original.run_event).expect("original bytes")
+    );
+}
+
+#[test]
+fn replacement_at_equal_frontier_preserves_an_existing_stream_close() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let path = temp.path().join("protocol-journal.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 4).expect("journal should initialize");
+    let original = durable_event_for("session-closed", "run-closed", 1);
+    journal
+        .append_and_close_stream(original.clone())
+        .expect("original stream should close");
+    journal
+        .replace_run_replay_projections(
+            &BTreeSet::from([("session-closed".to_owned(), "run-closed".to_owned())]),
+            &[(original, false, false)],
+            journal
+                .replay_projection_revision()
+                .expect("cache revision"),
+        )
+        .expect("an equal exact source should remain replayable without reopening");
+    assert_eq!(
+        journal
+            .stream_accepts_events("session-closed", "run-closed")
+            .expect("closed lookup"),
+        Some(false)
+    );
+    drop(journal);
+    let reopened =
+        HttpDurableProtocolJournal::open(&path, 4).expect("closed stream should reopen read-only");
+    assert!(matches!(
+        reopened.append(durable_event_for("session-closed", "run-closed", 2)),
+        Err(HttpProtocolJournalError::StreamAlreadyTerminal { .. })
+    ));
+}
+
+#[test]
 fn replay_rebuild_quarantines_invalid_source_under_journal_owner() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let path = temp.path().join("protocol-journal.json");
@@ -277,6 +581,67 @@ fn current_schema_protocol_replay_uses_managed_namespace_and_reopens_from_it() {
         .expect("managed event should replay");
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].run_event.sequence, 1);
+}
+
+#[test]
+fn occupied_managed_journal_owner_rejects_reattach_before_any_state_or_lease_change() {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1;
+
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let writer = managed_writer(&temp);
+    let journal = HttpDurableProtocolJournal::open(temp.path().join("legacy-protocol.json"), 16)
+        .expect("journal should initialize");
+    journal
+        .attach_managed_writer(Arc::clone(&writer), "original-replay")
+        .expect("first owner should attach");
+    journal
+        .append(durable_event(1))
+        .expect("original owner should persist");
+    let original_path = writer
+        .managed_named_leaf_path(
+            StorageWriterChannelV1::AdapterDurableState,
+            "original-replay",
+        )
+        .expect("original managed leaf")
+        .join("records.jsonl");
+    let rejected_path = writer
+        .managed_named_leaf_path(
+            StorageWriterChannelV1::AdapterDurableState,
+            "rejected-replay",
+        )
+        .expect("candidate managed leaf")
+        .join("records.jsonl");
+    let before = std::fs::read(&original_path).expect("original managed bytes");
+    let revision = journal
+        .replay_projection_revision()
+        .expect("current cache revision");
+    assert!(matches!(
+        journal.attach_managed_writer(Arc::clone(&writer), "rejected-replay"),
+        Err(HttpProtocolJournalError::Unavailable)
+    ));
+    assert_eq!(
+        std::fs::read(&original_path).expect("original bytes after rejection"),
+        before
+    );
+    assert!(
+        !rejected_path.exists(),
+        "rejection must precede the replacement lease/write"
+    );
+    assert_eq!(
+        journal
+            .replay_projection_revision()
+            .expect("unchanged cache revision"),
+        revision
+    );
+    assert_eq!(
+        journal
+            .stream_accepts_events("session-1", "run-1")
+            .expect("original stream state"),
+        Some(true)
+    );
+    journal
+        .append(durable_event(2))
+        .expect("the original owner and open stream must remain usable");
 }
 
 #[test]

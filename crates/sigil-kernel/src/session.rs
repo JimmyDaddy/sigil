@@ -132,6 +132,7 @@ mod effect_reconciliation;
 mod entry;
 mod facade;
 mod plan_review_terminal;
+mod plan_review_waiting;
 mod portable_compaction;
 mod projection;
 mod provider_attempt;

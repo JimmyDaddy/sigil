@@ -19,6 +19,9 @@ use uuid::Uuid;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use super::active_projection::ActiveSessionProjection;
+use super::public_event_outbox::{
+    PublicEventOutboxAdmissionIndexV1, PublicEventOutboxAppendDecisionV1,
+};
 use super::*;
 
 const DURABLE_IDENTITY_MAX_BYTES: usize = 512;
@@ -159,6 +162,84 @@ impl SharedSessionCoordinator {
         Ok(events)
     }
 
+    pub(super) fn append_public_event_outbox(
+        &self,
+        entry: &PublicEventOutboxEntryV1,
+    ) -> Result<bool> {
+        let (appended, notice) = {
+            let mut writer = self.lock_writer()?;
+            writer.ensure_public_event_outbox_index()?;
+            writer.validate_public_event_outbox_session_identity(entry)?;
+            match writer
+                .public_event_outbox_index()
+                .context("public event outbox index is unavailable")?
+                .admit_outbox(entry)?
+            {
+                PublicEventOutboxAppendDecisionV1::AlreadyRecorded => return Ok(false),
+                PublicEventOutboxAppendDecisionV1::Append => {}
+            }
+            let pending = PendingStoredEvent {
+                event_type: DurableEventType::PublicEventOutbox,
+                event_class: EventClass::Critical,
+                payload: serde_json::to_value(entry)
+                    .context("failed to encode public outbox event")?,
+                event_id: Some(entry.public_event_id.clone()),
+                correlation_id: Some(entry.public_event_id.clone()),
+                causation_id: None,
+            };
+            let (events, _) = writer.append_crash_safe_bundle(vec![pending])?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (true, notice)
+        };
+        self.notify(notice);
+        Ok(appended)
+    }
+
+    pub(super) fn append_public_event_delivery(
+        &self,
+        receipt: &PublicEventDeliveryReceiptV1,
+    ) -> Result<bool> {
+        let (appended, notice) = {
+            let mut writer = self.lock_writer()?;
+            writer.ensure_public_event_outbox_index()?;
+            match writer
+                .public_event_outbox_index()
+                .context("public event outbox index is unavailable")?
+                .admit_delivery(receipt)?
+            {
+                PublicEventOutboxAppendDecisionV1::AlreadyRecorded => return Ok(false),
+                PublicEventOutboxAppendDecisionV1::Append => {}
+            }
+            let receipt_identity = format!("{}|{}", receipt.public_event_id, receipt.adapter);
+            let pending = PendingStoredEvent {
+                event_type: DurableEventType::PublicEventDeliveryReceipt,
+                event_class: EventClass::Critical,
+                payload: serde_json::to_value(receipt)
+                    .context("failed to encode public delivery receipt")?,
+                event_id: Some(stable_event_uuid(
+                    "sigil-public-event-delivery-v1",
+                    &receipt_identity,
+                )),
+                correlation_id: Some(receipt.public_event_id.clone()),
+                causation_id: None,
+            };
+            let (events, _) = writer.append_crash_safe_bundle(vec![pending])?;
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (true, notice)
+        };
+        self.notify(notice);
+        Ok(appended)
+    }
+
+    pub(super) fn public_event_outbox_durable_sequence(&self, run_id: &str) -> Result<u64> {
+        let mut writer = self.lock_writer()?;
+        writer.ensure_public_event_outbox_index()?;
+        Ok(writer
+            .public_event_outbox_index()
+            .context("public event outbox index is unavailable")?
+            .durable_sequence(run_id))
+    }
+
     pub(super) fn append_events_if_active<F>(
         &self,
         pending: Vec<PendingStoredEvent>,
@@ -217,8 +298,8 @@ impl SharedSessionCoordinator {
     where
         F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
     {
-        if pending.len() < 2 {
-            bail!("conditional crash-safe bundle requires at least two events");
+        if pending.is_empty() {
+            bail!("conditional crash-safe bundle requires at least one event");
         }
         let (events, notice) = {
             let mut writer = self.lock_writer()?;
@@ -1499,6 +1580,7 @@ pub(super) struct LinearSessionWriter {
     parent_dir_synced: bool,
     tail: Option<SessionWriterTail>,
     event_links: Option<DurableEventLinkIndex>,
+    public_event_outbox_index: Option<PublicEventOutboxAdmissionIndexV1>,
     requires_reload: bool,
     #[cfg(test)]
     full_scan_count: u64,
@@ -1650,6 +1732,7 @@ impl LinearSessionWriter {
             parent_dir_synced: false,
             tail: None,
             event_links: None,
+            public_event_outbox_index: None,
             requires_reload: false,
             #[cfg(test)]
             full_scan_count: 0,
@@ -1787,8 +1870,77 @@ impl LinearSessionWriter {
         Ok(())
     }
 
+    fn ensure_public_event_outbox_index(&mut self) -> Result<()> {
+        self.ensure_writer_lease()?;
+        let mut file = self.open_locked_data_file()?;
+        if self.public_event_outbox_index.is_none() || self.tail_needs_reload(&mut file) {
+            self.reload_from_file(&mut file)?;
+        }
+        Ok(())
+    }
+
+    fn public_event_outbox_index(&self) -> Option<&PublicEventOutboxAdmissionIndexV1> {
+        self.public_event_outbox_index.as_ref()
+    }
+
+    fn validate_public_event_outbox_session_identity(
+        &self,
+        entry: &PublicEventOutboxEntryV1,
+    ) -> Result<()> {
+        let session_id = self
+            .tail
+            .as_ref()
+            .context("session writer tail is unavailable for public outbox validation")?
+            .session_id
+            .as_str();
+        if entry.event.session_id != session_id {
+            bail!("public outbox event belongs to another durable session");
+        }
+        Ok(())
+    }
+
+    fn validate_pending_public_event_outbox_records(
+        &self,
+        pending: &[PendingStoredEvent],
+    ) -> Result<()> {
+        let Some(index) = self.public_event_outbox_index.as_ref() else {
+            bail!("public event outbox index is unavailable");
+        };
+        let entries = pending
+            .iter()
+            .filter(|event| event.event_type == DurableEventType::PublicEventOutbox)
+            .map(|event| {
+                let entry =
+                    serde_json::from_value::<PublicEventOutboxEntryV1>(event.payload.clone())
+                        .context("failed to decode pending public outbox event")?;
+                if event.event_id.as_deref() != Some(entry.public_event_id.as_str()) {
+                    bail!("public outbox envelope must use its exact public event id");
+                }
+                self.validate_public_event_outbox_session_identity(&entry)?;
+                Ok(entry)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let receipts = pending
+            .iter()
+            .filter(|event| event.event_type == DurableEventType::PublicEventDeliveryReceipt)
+            .map(|event| {
+                serde_json::from_value::<PublicEventDeliveryReceiptV1>(event.payload.clone())
+                    .context("failed to decode pending public delivery receipt")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        index.validate_durable_appends(&entries, &receipts)
+    }
+
+    fn apply_public_event_outbox_delta(&mut self, events: &[StoredEvent]) -> Result<()> {
+        self.public_event_outbox_index
+            .as_mut()
+            .context("public event outbox index is unavailable")?
+            .apply_stored_events(events)
+    }
+
     fn reload_from_file(&mut self, file: &mut File) -> Result<Vec<SessionStreamRecord>> {
         self.event_links = None;
+        self.public_event_outbox_index = None;
         let previous_tail = self.tail.clone();
         let recovered = recover_tail_if_needed_locked(file, &self.path)?;
         if self.require_existing && recovered.records.is_empty() {
@@ -1807,6 +1959,10 @@ impl LinearSessionWriter {
             &recovered.records,
             &recovered.content,
         )?);
+        self.public_event_outbox_index = Some(
+            PublicEventOutboxAdmissionIndexV1::from_records(&recovered.records)
+                .context("failed to rebuild public event outbox admission index")?,
+        );
         self.requires_reload = false;
         Ok(recovered.records)
     }
@@ -1823,8 +1979,8 @@ impl LinearSessionWriter {
         &mut self,
         pending: Vec<PendingStoredEvent>,
     ) -> Result<StoredEventAppendResult> {
-        if pending.len() < 2 {
-            bail!("crash-safe append bundle requires at least two events");
+        if pending.is_empty() {
+            bail!("crash-safe append bundle requires at least one event");
         }
         self.append_events_inner(pending, true, true)
     }
@@ -1852,6 +2008,7 @@ impl LinearSessionWriter {
         } else {
             self.ensure_current_tail(&mut file)?;
         }
+        self.validate_pending_public_event_outbox_records(&pending)?;
         let (session_id, mut next_sequence, mut prefix_hasher) = {
             let tail = self
                 .tail
@@ -2078,6 +2235,7 @@ impl LinearSessionWriter {
         if let Some(event_links) = self.event_links.as_mut() {
             event_links.extend(&events);
         }
+        self.apply_public_event_outbox_delta(&events)?;
         self.requires_reload = false;
         let _ = ensure_session_emergency_reserve(&self.path);
         Ok((events, offsets))

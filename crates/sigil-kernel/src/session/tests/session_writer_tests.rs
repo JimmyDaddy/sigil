@@ -179,7 +179,7 @@ fn session_writer_open_existing_reuses_only_a_prior_nonempty_stream() -> Result<
         store.append_event(
             DurableEventType::RunStatusChanged,
             EventClass::Critical,
-            serde_json::json!({"status": "waiting"}),
+            serde_json::json!({"run_status": "running", "terminal_reason": "in_progress", "tool_calls": 0}),
         )?;
     }
     let original = fs::read(&path)?;
@@ -191,7 +191,7 @@ fn session_writer_open_existing_reuses_only_a_prior_nonempty_stream() -> Result<
     reopened.append_event(
         DurableEventType::RunFinalized,
         EventClass::Critical,
-        serde_json::json!({"status": "completed"}),
+        serde_json::json!({"run_status": "completed", "terminal_reason": "completed", "tool_calls": 0}),
     )?;
 
     let after = fs::read(&path)?;
@@ -1076,7 +1076,7 @@ fn session_writer_reloads_valid_external_extension_before_next_append() -> Resul
     let first = store.append_event(
         DurableEventType::RunStatusChanged,
         EventClass::Critical,
-        serde_json::json!({ "source": "owner" }),
+        serde_json::json!({"run_status": "running", "terminal_reason": "in_progress", "tool_calls": 0}),
     )?;
     let external = StoredEvent::new(
         DurableEventType::RunStatusChanged,
@@ -1084,7 +1084,7 @@ fn session_writer_reloads_valid_external_extension_before_next_append() -> Resul
         uuid::Uuid::new_v4().to_string(),
         first.session_id.clone(),
         2,
-        serde_json::json!({ "source": "external" }),
+        serde_json::json!({"run_status": "running", "terminal_reason": "in_progress", "tool_calls": 1}),
     )?;
     let mut file = OpenOptions::new().append(true).open(&path)?;
     file.write_all(external.to_json_line()?.as_bytes())?;
@@ -1093,7 +1093,7 @@ fn session_writer_reloads_valid_external_extension_before_next_append() -> Resul
     let appended = store.append_event(
         DurableEventType::RunFinalized,
         EventClass::Critical,
-        serde_json::json!({ "source": "owner-reloaded" }),
+        serde_json::json!({"run_status": "completed", "terminal_reason": "completed", "tool_calls": 1}),
     )?;
 
     assert_eq!(appended.stream_sequence, 3);

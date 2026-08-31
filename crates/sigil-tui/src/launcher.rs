@@ -1748,7 +1748,25 @@ async fn refresh_application_projection(
         return false;
     };
     match application.refresh().await {
-        Ok(projection) => app.apply_application_projection(&projection),
+        Ok(projection) => {
+            let mut changed = app.apply_application_projection(&projection);
+            if let Err(error) = application
+                .acknowledge_public_events_through(&projection)
+                .await
+            {
+                // The TUI reducer and product state have committed, but the durable public-outbox
+                // ACK did not. Leave the exact entries pending for the next refresh/restart;
+                // receiving a worker message was never an acknowledgement.
+                tracing::warn!(%error, "TUI public event delivery acknowledgement is pending replay");
+                if let Err(notice_error) = app.handle_worker_message(WorkerMessage::Notice(
+                    "event delivery acknowledgement is pending; it will replay safely".to_owned(),
+                )) {
+                    tracing::debug!(%notice_error, "failed to surface TUI delivery acknowledgement notice");
+                }
+                changed = true;
+            }
+            changed
+        }
         Err(error) => {
             tracing::debug!(%error, "application projection refresh unavailable");
             false

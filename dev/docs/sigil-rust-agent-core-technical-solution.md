@@ -962,6 +962,8 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 
 ## 7. Agent runtime、runner 与事件流
 
+公开事件的交付与恢复遵守 [RFC-0069 §13.2 的 A2 协议](rfcs/0069-recoverability-boundaries-plan-materialization-and-workspace-concurrency-v1.md#132-durable-outbox)：session outbox 是 public sequence/identity/payload 的唯一 durable 来源，adapter journal 与 UI 不重新编号或改变结果。经 application public bridge 输出的非终态先提交再发送，发送/ACK 失败重放原事件；revision 等待输入与其通知同 bundle 提交，但不占用 revision 的最终 terminal pair。delivery ACK、domain outcome 与 presentation completion 是三个不同事实。普通 Control 与公开 DTO 的同源提交、TUI 常规原始事件生产链迁移、approval/tool/route 的 adapter registry 与 broker 同源恢复仍未完成，不能把这一切片当作整个 A2/E08 或 RFC-0070 application-port 整改完成。
+
 当前实现没有单独的 `controller/` 模块。通用执行入口由 `sigil-kernel::Agent`、`AgentRunOptions`、`RunEvent` 和 `EventHandler` 承担；TUI 的交互控制由 `sigil-tui/src/runner/*` 的 worker protocol、spawn、event bridge、approval bridge 与 session flow 承担。
 
 这个拆法的边界是：

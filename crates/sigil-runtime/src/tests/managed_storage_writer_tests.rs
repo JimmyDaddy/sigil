@@ -470,7 +470,11 @@ fn finalized_kernel_session_log_namespace(
             .append_event(
                 sigil_kernel::DurableEventType::RunStatusChanged,
                 sigil_kernel::EventClass::Critical,
-                serde_json::json!({"status": "waiting"}),
+                serde_json::json!({
+                    "run_status": "running",
+                    "terminal_reason": "in_progress",
+                    "tool_calls": 0
+                }),
             )
             .expect("initial durable event");
     }
@@ -546,7 +550,11 @@ fn r71_sw_existing_session_log_mutation_reopens_only_a_prior_kernel_stream() {
                 .append_event(
                     sigil_kernel::DurableEventType::RunFinalized,
                     sigil_kernel::EventClass::Critical,
-                    serde_json::json!({"status": "completed"}),
+                    serde_json::json!({
+                        "run_status": "completed",
+                        "terminal_reason": "completed",
+                        "tool_calls": 0
+                    }),
                 )
                 .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
             Ok::<_, ManagedStorageWriterErrorV1>(())

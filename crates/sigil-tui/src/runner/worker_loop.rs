@@ -147,6 +147,8 @@ pub(in crate::runner) use agent_runtime::PlanReviewExecutionResult;
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::agent_result_continuation_run_result;
 #[cfg(test)]
+pub(in crate::runner) use agent_runtime::commit_tui_plan_review_revision_waiting;
+#[cfg(test)]
 pub(in crate::runner) use agent_runtime::tui_plan_review_result_from_durable_revision_outcome;
 pub(in crate::runner) use agent_runtime::{
     WorkerAgentEventSink, WorkerSupervisorEventSink, agent_result_continuation_new_thread_ids,

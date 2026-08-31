@@ -50,6 +50,15 @@ fn recorder_retries_exact_start_and_terminal_as_no_ops() -> Result<()> {
     assert!(recorder.append_started(&start)?);
     assert!(!recorder.append_started(&start)?);
     let outbox = terminal_outbox(session.session_scope_id(), &final_entry)?;
+    let mut skipped = outbox.clone();
+    skipped.sequence = 2;
+    skipped.event.sequence = 2;
+    skipped.payload_digest = crate::stable_event_hash(serde_json::to_vec(&skipped.event)?);
+    assert!(
+        recorder
+            .append_finalized_with_outbox(&final_entry, &skipped)
+            .is_err()
+    );
     assert!(recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
     assert!(!recorder.append_finalized_with_outbox(&final_entry, &outbox)?);
     assert!(
@@ -68,6 +77,46 @@ fn recorder_retries_exact_start_and_terminal_as_no_ops() -> Result<()> {
             ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(final_entry),
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn terminal_bundle_follows_previously_durable_public_progress() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let session = Session::new("provider", "model").with_store(store.clone());
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&started("run-progress", 10)?)?;
+    let event = crate::PublicRunEvent::new(
+        session.session_scope_id(),
+        "run-progress",
+        1,
+        PublicRunEventKind::Notice {
+            message: "progress".to_owned(),
+        },
+    );
+    crate::PublicEventOutboxRecorder::new(store.clone()).append_outbox(
+        &crate::PublicEventOutboxEntryV1 {
+            schema_version: crate::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: "progress-1".to_owned(),
+            domain_event_id: "progress-1".to_owned(),
+            run_id: "run-progress".to_owned(),
+            sequence: 1,
+            payload_digest: crate::stable_event_hash(serde_json::to_vec(&event)?),
+            event,
+        },
+    )?;
+    let terminal = succeeded("run-progress", 20)?;
+    let mut outbox = terminal_outbox(session.session_scope_id(), &terminal)?;
+    outbox.sequence = 2;
+    outbox.event.sequence = 2;
+    outbox.payload_digest = crate::stable_event_hash(serde_json::to_vec(&outbox.event)?);
+    assert!(lifecycle.append_finalized_with_outbox(&terminal, &outbox)?);
+    assert!(!lifecycle.append_finalized_with_outbox(&terminal, &outbox)?);
+    let projection =
+        PublicEventOutboxProjectionV1::from_records(&store.read_event_records_writer()?)?;
+    assert_eq!(projection.durable_sequence("run-progress"), 2);
+    assert_eq!(projection.events_in_order().len(), 2);
     Ok(())
 }
 
@@ -102,12 +151,12 @@ fn recorder_recovers_one_unfinished_run_and_rejects_overlapping_history() -> Res
     let overlapping_recorder = overlapping_session.conversation_run_lifecycle_recorder()?;
     assert!(overlapping_recorder.append_started(&started("run-1", 20)?)?);
     assert!(overlapping_recorder.append_started(&started("run-2", 21)?)?);
+    let error = overlapping_recorder
+        .reconcile_unfinished(22)
+        .expect_err("overlapping active runs must fail closed");
     assert!(
-        overlapping_recorder
-            .reconcile_unfinished(22)
-            .expect_err("overlapping active runs must fail closed")
-            .to_string()
-            .contains("overlapping active runs")
+        format!("{error:#}").contains("overlapping active runs"),
+        "{error:#}"
     );
     Ok(())
 }

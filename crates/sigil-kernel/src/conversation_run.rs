@@ -398,6 +398,13 @@ impl ConversationRunLifecycleRecorder {
                         bail!("conversation terminal and outbox have no matching durable bundle");
                     }
                     (None, None) => {
+                        let next_sequence = projection.events_in_order().iter()
+                            .filter(|recorded| recorded.run_id == outbox.run_id)
+                            .map(|recorded| recorded.sequence).max().unwrap_or(0)
+                            .checked_add(1).context("conversation public sequence exhausted")?;
+                        if outbox.sequence != next_sequence {
+                            bail!("conversation terminal outbox does not follow the durable sequence");
+                        }
                         if projection.events_in_order().iter().any(|recorded| {
                             recorded.run_id == outbox.run_id
                                 && (recorded.sequence >= outbox.sequence
@@ -500,7 +507,7 @@ pub(crate) fn validate_terminal_outbox(
     terminal: &ConversationRunFinalizedEntryV1,
     outbox: &PublicEventOutboxEntryV1,
 ) -> Result<()> {
-    PublicEventOutboxProjectionV1::default().apply_outbox(outbox.clone())?;
+    crate::session::validate_public_event_outbox_entry(outbox)?;
     if outbox.run_id != terminal.run_id()
         || outbox.domain_event_id == outbox.public_event_id
         || outbox.event.schema_version != crate::PUBLIC_RUN_EVENT_SCHEMA_VERSION

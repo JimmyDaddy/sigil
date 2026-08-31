@@ -735,6 +735,131 @@ impl PlanReviewCoordinator {
         }
     }
 
+    /// Reconstructs a resumable revision suspension from its exact durable attempt/outbox pair.
+    ///
+    /// Unlike a terminal result, this only remains recoverable while the same attempt is still
+    /// `WaitingForInput`. A later answer or finalizer must not let an old suspension reopen the
+    /// review.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the outbox, request lineage, attempt, or input binding disagree.
+    pub fn revision_waiting_outcome_from_outbox(
+        session: &Session,
+        request: &PlanReviewRunRequest,
+        outbox: &PublicEventOutboxEntryV1,
+    ) -> Result<PlanReviewRunOutcome> {
+        if outbox.run_id != request.child_logical_run_id()
+            || outbox.event.session_id != session.session_scope_id()
+            || outbox.event.run_id != outbox.run_id
+        {
+            bail!("durable plan-review waiting outbox belongs to another revision run");
+        }
+        let review_projection = PlanReviewProjection::from_entries(session.entries());
+        let attempt = review_projection
+            .latest_attempt(&request.plan_review_id)
+            .filter(|attempt| attempt.attempt_id == request.attempt_id)
+            .context("durable plan-review waiting lost its matching attempt")?;
+        validate_revision_attempt_request_binding(attempt, request)?;
+        if attempt.status != PlanReviewAttemptStatus::WaitingForInput {
+            bail!("durable plan-review waiting attempt is no longer resumable");
+        }
+        let pending = attempt
+            .pending_user_input
+            .as_deref()
+            .context("durable plan-review waiting lost its input request")?;
+        if !matches!(
+            &outbox.event.event,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id,
+                generation,
+                request_hash,
+            } if request_id == pending.identity.request_id.as_str()
+                && *generation == pending.identity.generation
+                && request_hash == &pending.request_hash
+        ) {
+            bail!("durable plan-review waiting payload does not match its input request");
+        }
+        Ok(PlanReviewRunOutcome::AwaitingUserInput {
+            request: Box::new(pending.clone()),
+        })
+    }
+
+    /// Atomically records a revision `WaitingForInput` attempt and its exact public outbox
+    /// notification. The session owns both durable facts; runtime only delivers the returned
+    /// event after this call succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this is not a revision, the request/input binding conflicts, or the
+    /// writer cannot confirm the atomic pair.
+    pub fn commit_revision_waiting_with_outbox(
+        parent: &mut Session,
+        request: &PlanReviewRunRequest,
+        pending: &sigil_kernel::PublicUserInputRequestV1,
+        event: PublicRunEvent,
+        now_ms: u64,
+    ) -> Result<PublicEventOutboxEntryV1> {
+        validate_plan_review_request_lineage(request)?;
+        validate_plan_review_request_objective(parent, request)?;
+        if request.revision_request_id.is_none() {
+            bail!("non-revision plan review cannot commit a revision waiting bundle");
+        }
+        if event.session_id != parent.session_scope_id()
+            || event.run_id != request.child_logical_run_id()
+        {
+            bail!("plan-review waiting public event does not match the parent session or attempt");
+        }
+        if !matches!(
+            &event.event,
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id,
+                generation,
+                request_hash,
+            } if request_id == pending.identity.request_id.as_str()
+                && *generation == pending.identity.generation
+                && request_hash == &pending.request_hash
+        ) {
+            bail!("plan-review waiting public event does not match its input request");
+        }
+        if let Some(outbox) =
+            parent.reconcile_plan_review_revision_waiting(&request.child_logical_run_id())?
+        {
+            Self::revision_waiting_outcome_from_outbox(parent, request, &outbox)?;
+            if serde_json::to_value(&outbox.event)? != serde_json::to_value(&event)? {
+                bail!("plan-review waiting retry conflicts with its original public event");
+            }
+            return Ok(outbox);
+        }
+        let mut attempt = plan_review_attempt_status_entry(
+            parent,
+            request,
+            PlanReviewAttemptStatus::WaitingForInput,
+            None,
+            now_ms,
+        )?
+        .context("plan-review waiting transition was already recorded without its public outbox")?;
+        attempt.pending_user_input = Some(Box::new(pending.clone()));
+        let expected_event = event.clone();
+        match parent.append_plan_review_revision_waiting(attempt, event) {
+            Ok(outbox) => Ok(outbox),
+            Err(error) => parent
+                .reconcile_plan_review_revision_waiting(&request.child_logical_run_id())?
+                .ok_or(error)
+                .and_then(|outbox| {
+                    Self::revision_waiting_outcome_from_outbox(parent, request, &outbox)?;
+                    if serde_json::to_value(&outbox.event)?
+                        != serde_json::to_value(&expected_event)?
+                    {
+                        bail!(
+                            "plan-review waiting recovery conflicts with its original public event"
+                        );
+                    }
+                    Ok(outbox)
+                }),
+        }
+    }
+
     /// Atomically records a terminal revision outcome and its exact public outbox entry.
     ///
     /// The parent `Session` owns the only durable PlanReview attempt/draft/decision facts. This
@@ -1784,10 +1909,8 @@ impl PlanReviewCoordinator {
     ) -> Result<()> {
         validate_plan_review_request_lineage(request)?;
         validate_plan_review_request_objective(session, request)?;
-        if request.revision_request_id.is_some()
-            && !matches!(outcome, PlanReviewRunOutcome::AwaitingUserInput { .. })
-        {
-            bail!("revision terminal requires the atomic revision terminal and public outbox");
+        if request.revision_request_id.is_some() {
+            bail!("revision close requires an atomic terminal or waiting attempt/outbox bundle");
         }
         let closed = match outcome {
             PlanReviewRunOutcome::DraftReady { .. }
@@ -2429,7 +2552,7 @@ impl PlanReviewCoordinator {
         Option<PublicEventOutboxEntryV1>,
     )> {
         let (request, current_waiting_attempt) =
-            plan_review_research_input_target(parent, &command, None)?;
+            plan_review_research_input_target(parent, &command)?;
         let mut child = build_plan_review_child_session(parent, &request, None)?;
         let receipt =
             Self::accept_plan_review_research_input_in_child(&mut child, command, now_ms)?;
@@ -2437,20 +2560,19 @@ impl PlanReviewCoordinator {
             parent,
             receipt,
             now_ms,
-            None,
             request,
             current_waiting_attempt,
         )
     }
 
-    /// Accepts plan-research input while using an adapter-reserved terminal sequence when a
-    /// cancellation finalizes a revision. HTTP owns that reservation because its live journal
-    /// has already emitted nonterminal events for the same logical run.
-    pub fn accept_plan_review_research_input_with_terminal_sequence(
+    /// Accepts plan-research input through its managed child resource bundle. A cancelled
+    /// revision derives its terminal sequence only from the parent's durable public outbox while
+    /// committing the exact terminal bundle; adapters never inject a competing live-journal
+    /// sequence.
+    pub fn accept_plan_review_research_input_with_resources(
         parent: &mut Session,
         command: sigil_kernel::UserInputDecisionCommandV1,
         now_ms: u64,
-        terminal_public_sequence: Option<u64>,
         provisioner: &dyn PlanReviewChildResourceProvisionerV1,
     ) -> Result<(
         sigil_kernel::UserInputDecisionReceiptV1,
@@ -2458,7 +2580,7 @@ impl PlanReviewCoordinator {
         Option<PublicEventOutboxEntryV1>,
     )> {
         let (request, current_waiting_attempt) =
-            plan_review_research_input_target(parent, &command, terminal_public_sequence)?;
+            plan_review_research_input_target(parent, &command)?;
         let expected_scope = command.identity.session_scope_id.as_str().to_owned();
         let bundle = provisioner.mutate_research_session(&request)?;
         let result = bundle.with_child_session(parent, &expected_scope, |child| {
@@ -2469,7 +2591,6 @@ impl PlanReviewCoordinator {
             parent,
             receipt,
             now_ms,
-            terminal_public_sequence,
             request,
             current_waiting_attempt,
         )
@@ -2506,50 +2627,12 @@ impl PlanReviewCoordinator {
             .collect::<Vec<_>>();
         let mut recovered = Vec::new();
         for attempt in candidates {
-            let pending = attempt
-                .pending_user_input
-                .as_deref()
-                .context("waiting plan-review attempt lost its public input request")?;
-            if !matches!(
-                &pending.source,
-                sigil_kernel::UserInputSourceV1::PlanReviewResearch {
-                    plan_review_id,
-                    attempt_id,
-                } if plan_review_id == &attempt.plan_review_id && attempt_id == &attempt.attempt_id
-            ) {
-                bail!("waiting plan-review attempt has an invalid research input binding");
-            }
             let request = plan_review_request_from_attempt(parent, &attempt)?;
-            if pending.identity.root_logical_run_id.as_str() != request.child_logical_run_id() {
-                bail!("waiting plan-review input belongs to another logical child run");
-            }
-
-            let bundle = provisioner.recover_research_session(&request)?;
-            let result = (|| {
-                let child_entries = bundle.entries(pending.identity.session_scope_id.as_str())?;
-                if child_entries.is_empty() {
-                    bail!("managed plan-review research session log is empty");
-                }
-                let child_projection =
-                    sigil_kernel::UserInputProjectionV1::from_session_entries(&child_entries)?;
-                let state = child_projection
-                    .request(&pending.identity)
-                    .filter(|state| {
-                        state.requested.request.identity == pending.identity
-                            && state.requested.request_hash == pending.request_hash
-                            && matches!(
-                                &state.requested.request.source,
-                                sigil_kernel::UserInputSourceV1::PlanReviewResearch {
-                                    plan_review_id,
-                                    attempt_id,
-                                } if plan_review_id == &attempt.plan_review_id
-                                    && attempt_id == &attempt.attempt_id
-                            )
-                    })
-                    .context("managed plan-review research child lost its exact input receipt")?;
-                recover_plan_review_research_decision_from_child_state(state)
-            })();
-            if let Some(command) = combine_child_resource_settlement(result, bundle.finish())? {
+            if let Some(command) = Self::recover_managed_plan_review_research_input_for_attempt(
+                &request,
+                &attempt,
+                provisioner,
+            )? {
                 recovered.push(command);
             }
         }
@@ -2559,6 +2642,100 @@ impl PlanReviewCoordinator {
             1 => Ok(recovered.pop()),
             _ => bail!("session contains multiple plan-review answers awaiting parent settlement"),
         }
+    }
+
+    /// Returns whether the exact suspended revision has a managed child receipt that permits its
+    /// worker to resume. This is an executor-side admission check: the parent remains Waiting
+    /// until the worker owns the actual `Started` transition, so a crash before worker admission
+    /// remains recoverable from the original child receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a conflicted parent projection or a malformed/missing managed child
+    /// receipt. A child cancellation is not a resume permit because its parent terminal is owned
+    /// by the existing input-settlement path.
+    pub(crate) fn managed_plan_review_research_input_allows_resume(
+        parent: &Session,
+        request: &PlanReviewRunRequest,
+        provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+    ) -> Result<bool> {
+        let projection = PlanReviewProjection::from_entries(parent.entries());
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        let Some(attempt) = projection
+            .latest_attempt(&request.plan_review_id)
+            .filter(|attempt| attempt.attempt_id == request.attempt_id)
+        else {
+            return Ok(false);
+        };
+        validate_revision_attempt_request_binding(attempt, request)?;
+        if attempt.status != PlanReviewAttemptStatus::WaitingForInput {
+            return Ok(false);
+        }
+        let Some(command) = Self::recover_managed_plan_review_research_input_for_attempt(
+            request,
+            attempt,
+            provisioner,
+        )?
+        else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            command.decision,
+            sigil_kernel::UserInputDecisionV1::Submitted { .. }
+                | sigil_kernel::UserInputDecisionV1::Declined
+        ))
+    }
+
+    fn recover_managed_plan_review_research_input_for_attempt(
+        request: &PlanReviewRunRequest,
+        attempt: &PlanReviewAttemptEntry,
+        provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+    ) -> Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
+        validate_revision_attempt_request_binding(attempt, request)?;
+        let pending = attempt
+            .pending_user_input
+            .as_deref()
+            .context("waiting plan-review attempt lost its public input request")?;
+        if !matches!(
+            &pending.source,
+            sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                plan_review_id,
+                attempt_id,
+            } if plan_review_id == &attempt.plan_review_id && attempt_id == &attempt.attempt_id
+        ) {
+            bail!("waiting plan-review attempt has an invalid research input binding");
+        }
+        if pending.identity.root_logical_run_id.as_str() != request.child_logical_run_id() {
+            bail!("waiting plan-review input belongs to another logical child run");
+        }
+        let bundle = provisioner.recover_research_session(request)?;
+        let result = (|| {
+            let child_entries = bundle.entries(pending.identity.session_scope_id.as_str())?;
+            if child_entries.is_empty() {
+                bail!("managed plan-review research session log is empty");
+            }
+            let child_projection =
+                sigil_kernel::UserInputProjectionV1::from_session_entries(&child_entries)?;
+            let state = child_projection
+                .request(&pending.identity)
+                .filter(|state| {
+                    state.requested.request.identity == pending.identity
+                        && state.requested.request_hash == pending.request_hash
+                        && matches!(
+                            &state.requested.request.source,
+                            sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                                plan_review_id,
+                                attempt_id,
+                            } if plan_review_id == &attempt.plan_review_id
+                                && attempt_id == &attempt.attempt_id
+                        )
+                })
+                .context("managed plan-review research child lost its exact input receipt")?;
+            recover_plan_review_research_decision_from_child_state(state)
+        })();
+        combine_child_resource_settlement(result, bundle.finish())
     }
 
     fn accept_plan_review_research_input_in_child(
@@ -2576,7 +2753,6 @@ impl PlanReviewCoordinator {
         parent: &mut Session,
         receipt: sigil_kernel::UserInputDecisionReceiptV1,
         now_ms: u64,
-        terminal_public_sequence: Option<u64>,
         request: PlanReviewRunRequest,
         current_waiting_attempt: bool,
     ) -> Result<(
@@ -2601,9 +2777,7 @@ impl PlanReviewCoordinator {
                 let event = PublicRunEvent::new(
                     parent.session_scope_id(),
                     request.child_logical_run_id(),
-                    terminal_public_sequence.unwrap_or(
-                        parent.next_plan_review_public_sequence(&request.child_logical_run_id())?,
-                    ),
+                    parent.next_plan_review_public_sequence(&request.child_logical_run_id())?,
                     PublicRunEventKind::RunCancelled,
                 );
                 let outbox = Self::commit_revision_terminal_with_outbox(
@@ -3533,6 +3707,28 @@ fn revision_terminal_attempt_entry(
         .context("plan review terminal retry lost its matching durable attempt")
 }
 
+fn validate_revision_attempt_request_binding(
+    attempt: &PlanReviewAttemptEntry,
+    request: &PlanReviewRunRequest,
+) -> Result<()> {
+    if attempt.plan_review_id != request.plan_review_id
+        || attempt.plan_id != request.plan_id
+        || attempt.source != request.source
+        || attempt.source_turn != request.source_turn
+        || attempt.route_decision_id != request.route_decision_id
+        || attempt.child_session_ref != request.child_session_ref
+        || attempt.finalizer_session_ref.as_ref() != Some(&request.finalizer_session_ref)
+        || attempt.revision_request_id != request.revision_request_id
+        || attempt.attempt_ordinal != request.attempt_ordinal
+        || attempt.base_plan_id != request.base_plan_id
+        || attempt.base_plan_hash != request.base_plan_hash
+        || attempt.workspace_snapshot_id != request.workspace_snapshot_id
+    {
+        bail!("durable plan-review attempt does not match the requested revision lineage");
+    }
+    Ok(())
+}
+
 fn plan_review_attempt_status_entry(
     session: &Session,
     request: &PlanReviewRunRequest,
@@ -3719,7 +3915,6 @@ fn plan_review_provider_terminal_allows_submit_only_recovery(
 fn plan_review_research_input_target(
     parent: &Session,
     command: &sigil_kernel::UserInputDecisionCommandV1,
-    terminal_public_sequence: Option<u64>,
 ) -> Result<(PlanReviewRunRequest, bool)> {
     let projection = PlanReviewProjection::from_entries(parent.entries());
     if projection.has_conflicts() {
@@ -3737,14 +3932,6 @@ fn plan_review_research_input_target(
         })
         .is_some();
     let request = plan_review_request_from_attempt(parent, &attempt)?;
-    if let Some(sequence) = terminal_public_sequence {
-        if sequence == 0 {
-            bail!("plan-review terminal public sequence must be positive");
-        }
-        if command.identity.root_logical_run_id.as_str() != request.child_logical_run_id() {
-            bail!("adapter-reserved plan-review terminal sequence belongs to another logical run");
-        }
-    }
     Ok((request, current_waiting_attempt))
 }
 
@@ -5642,7 +5829,6 @@ pub fn application_plan_review_research_input_decision(
     session_log_path: &Path,
     expected_scope: &str,
     command: sigil_kernel::UserInputDecisionCommandV1,
-    terminal_public_sequence: Option<u64>,
     child_resource_provisioner: &dyn PlanReviewChildResourceProvisionerV1,
 ) -> Result<(
     sigil_kernel::UserInputDecisionReceiptV1,
@@ -5664,11 +5850,10 @@ pub fn application_plan_review_research_input_decision(
     if session.session_scope_id() != expected_scope {
         bail!("plan-review research input parent scope mismatch");
     }
-    PlanReviewCoordinator::accept_plan_review_research_input_with_terminal_sequence(
+    PlanReviewCoordinator::accept_plan_review_research_input_with_resources(
         &mut session,
         command,
         now_ms(),
-        terminal_public_sequence,
         child_resource_provisioner,
     )
 }

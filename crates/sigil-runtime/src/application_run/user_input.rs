@@ -16,9 +16,6 @@ pub struct ApplicationUserInputDecisionRequest {
     pub expected_session_scope_id: String,
     /// Adapter-owned physical run id reserved for a submitted-answer continuation.
     pub run_id: String,
-    /// Exact sequence reserved by the adapter's live event journal for a cancelled revision
-    /// terminal.  Normal and TUI-only decisions leave this absent and keep their existing path.
-    pub revision_terminal_public_sequence: Option<u64>,
     /// Exact public request identity rendered to the caller.
     pub identity: sigil_kernel::UserInputIdentityV1,
     /// Exact request hash rendered to the caller.
@@ -359,7 +356,6 @@ pub async fn prepare_application_user_input_decision(
                     command_id: request.command_id,
                     decision: request.decision,
                 },
-                request.revision_terminal_public_sequence,
                 child_resource_provisioner.as_ref(),
             )
             .map_err(ApplicationRunPrepareError::execution)?;
@@ -648,12 +644,18 @@ pub async fn prepare_application_user_input_decision(
                 message: safe_persistence_text(&error.to_string()),
             },
         )?;
-    let terminal_lifecycle_sink = Arc::new(crate::ApplicationTerminalLifecycleRouter::new(
+    let session_id = session.session_scope_id().to_owned();
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    let terminal_lifecycle_sink = application_terminal_lifecycle_sink(
         mutation_recorder.clone(),
-        session.session_scope_id(),
-        &run_id,
         services.terminal_lifecycle_handler.clone(),
-    )) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
+        events.clone(),
+    );
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -707,17 +709,9 @@ pub async fn prepare_application_user_input_decision(
         root_config.task.routing_policy,
     )
     .with_orchestration_route_guard(orchestration_route_guard);
-    let session_id = session.session_scope_id().to_owned();
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::with_outbox(
-        session_id.clone(),
-        run_id.clone(),
-        PublicEventOutboxRecorder::new(
-            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
-        ),
-    );
     let terminal_control = ApplicationTerminalTaskControl::new(
         workspace_root,
         surface.terminal_control,

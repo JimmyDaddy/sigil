@@ -118,7 +118,7 @@ fn recover_append_bundle_if_needed_locked(file: &mut File, path: &Path) -> Resul
     let Some(intent) = read_append_bundle_intent(path)? else {
         return Ok(());
     };
-    if intent.event_count < 2
+    if intent.event_count == 0
         || intent.end_offset <= intent.start_offset
         || !intent.bundle_sha256.starts_with("sha256:")
     {

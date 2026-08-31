@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
@@ -960,6 +963,27 @@ impl HttpProtocolEventBuffer {
             .map(|event| event.run_event.sequence)
             .max()
     }
+
+    fn retained_run_event_at(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> Result<Option<HttpProtocolEvent>, HttpProtocolReplayError> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| HttpProtocolReplayError::JournalUnavailable)?;
+        Ok(events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.run_event.session_id == session_id
+                    && event.run_event.run_id == run_id
+                    && event.run_event.sequence == sequence
+            })
+            .cloned())
+    }
 }
 
 /// Bounded live event bus for local clients.
@@ -1045,6 +1069,21 @@ impl HttpLiveEventBus {
             .map_err(|error| HttpEventPublishError::Journal {
                 message: error.to_string(),
             })
+    }
+
+    /// Captures the in-process derived-journal revision before an outbox replay reads its source.
+    /// In-memory-only buses have no replaceable durable projection and therefore return `None`.
+    pub(crate) fn replay_projection_revision(&self) -> Result<Option<u64>, HttpEventPublishError> {
+        self.durable_journal
+            .as_ref()
+            .map(|journal| {
+                journal.replay_projection_revision().map_err(|error| {
+                    HttpEventPublishError::Journal {
+                        message: error.to_string(),
+                    }
+                })
+            })
+            .transpose()
     }
 
     /// Records one run event and broadcasts it to active subscribers.
@@ -1146,6 +1185,19 @@ impl HttpLiveEventBus {
                 .expect("http protocol event buffer lock should not be poisoned")
                 .push(event.clone());
         }
+        self.broadcast_persisted_protocol_event_locked(
+            event,
+            keep_stream_open,
+            close_stream_after_event,
+        )
+    }
+
+    fn broadcast_persisted_protocol_event_locked(
+        &self,
+        event: HttpProtocolEvent,
+        keep_stream_open: bool,
+        close_stream_after_event: bool,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
         let sequence_key = HttpRunSequenceKey {
             session_id: event.run_event.session_id.clone(),
             run_id: event.run_event.run_id.clone(),
@@ -1186,111 +1238,172 @@ impl HttpLiveEventBus {
         Ok(event)
     }
 
-    /// Allocates the next public sequence under the bus publication lock, then publishes the
-    /// event. Production adapters use this for every event source so foreground output and
-    /// out-of-band terminal lifecycle callbacks cannot race sequence allocation.
+    /// Keeps the same stream-ownership policy used for exact public-outbox delivery while a
+    /// derived journal window is reconstructed. A revision Waiting notification closes only the
+    /// live response; it does not make the durable protocol stream terminal.
+    fn public_event_keeps_stream_open(event: &PublicRunEventKind) -> bool {
+        matches!(
+            event,
+            PublicRunEventKind::RunFinished { .. }
+                | PublicRunEventKind::RunFailed { .. }
+                | PublicRunEventKind::RunBlocked { .. }
+                | PublicRunEventKind::RunPaused { .. }
+                | PublicRunEventKind::RunInterrupted { .. }
+                | PublicRunEventKind::RunCancelled
+                | PublicRunEventKind::RunAwaitingUserInput { .. }
+        )
+    }
+
+    /// Rebuilds selected run windows from the verified public outbox under the publication lock.
+    ///
+    /// The HTTP journal is only a bounded adapter projection. Its selected run windows are
+    /// replaced in one candidate commit before any pending event is sent to a live subscriber;
+    /// a failed rebuild returns before acknowledgements, so the next attachment retries the same
+    /// durable source. Global retention may still evict another run's oldest suffix.
+    pub(crate) fn rebuild_runs_from_verified_public_events(
+        &self,
+        source: &[PublicRunEvent],
+        runs: &BTreeSet<(String, String)>,
+        pending: &BTreeSet<(String, String, u64)>,
+        close_stream_after: &BTreeSet<(String, String, u64)>,
+        expected_journal_revision: u64,
+    ) -> Result<Vec<PublicRunEvent>, HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        let journal =
+            self.durable_journal
+                .as_ref()
+                .ok_or_else(|| HttpEventPublishError::Journal {
+                    message: "verified public outbox rebuild requires a durable HTTP journal"
+                        .to_owned(),
+                })?;
+        let mut expected_sequences = BTreeMap::<(String, String), u64>::new();
+        let mut prepared = Vec::<(PublicRunEvent, HttpProtocolEvent)>::new();
+        let mut seen_runs = BTreeSet::new();
+        for event in source {
+            let key = (event.session_id.clone(), event.run_id.clone());
+            if !runs.contains(&key) {
+                continue;
+            }
+            seen_runs.insert(key.clone());
+            let expected = expected_sequences.get(&key).copied().unwrap_or(1);
+            if event.sequence != expected {
+                return Err(HttpEventPublishError::Journal {
+                    message: "verified public outbox rebuild does not start at sequence one or is not contiguous per run".to_owned(),
+                });
+            }
+            expected_sequences.insert(
+                key,
+                expected
+                    .checked_add(1)
+                    .ok_or_else(|| HttpEventPublishError::Journal {
+                        message: "verified public outbox rebuild sequence overflowed".to_owned(),
+                    })?,
+            );
+            let protocol = HttpProtocolEvent::from_run_event(event.clone()).map_err(|error| {
+                HttpEventPublishError::Cursor {
+                    message: error.to_string(),
+                }
+            })?;
+            // Preserve the source order, including transient protocol classes: a rebuilt durable
+            // window must not ACK durable sequence 1 and 3 before re-attempting transient 2.
+            prepared.push((event.clone(), protocol));
+        }
+        if seen_runs != *runs {
+            return Err(HttpEventPublishError::Journal {
+                message: "verified public outbox rebuild lost a requested run source".to_owned(),
+            });
+        }
+        let rebuilt_pending = prepared
+            .iter()
+            .filter(|(event, _)| {
+                pending.contains(&(
+                    event.session_id.clone(),
+                    event.run_id.clone(),
+                    event.sequence,
+                ))
+            })
+            .count();
+        if rebuilt_pending != pending.len() {
+            return Err(HttpEventPublishError::Journal {
+                message: "verified public outbox rebuild lost a pending event".to_owned(),
+            });
+        }
+        let journal_source = prepared
+            .iter()
+            .filter(|(_, protocol)| protocol.is_durable())
+            .map(|(event, protocol)| {
+                (
+                    protocol.clone(),
+                    Self::public_event_keeps_stream_open(&event.event),
+                    close_stream_after.contains(&(
+                        event.session_id.clone(),
+                        event.run_id.clone(),
+                        event.sequence,
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+        journal
+            .replace_run_replay_projections(runs, &journal_source, expected_journal_revision)
+            .map_err(|error| HttpEventPublishError::Journal {
+                message: error.to_string(),
+            })?;
+        let mut deliveries = Vec::new();
+        for (event, protocol) in prepared {
+            if pending.contains(&(
+                event.session_id.clone(),
+                event.run_id.clone(),
+                event.sequence,
+            )) {
+                let keep_stream_open = Self::public_event_keeps_stream_open(&event.event);
+                let close_stream_after_event = close_stream_after.contains(&(
+                    event.session_id.clone(),
+                    event.run_id.clone(),
+                    event.sequence,
+                ));
+                deliveries.push((event, protocol, keep_stream_open, close_stream_after_event));
+            }
+        }
+        for (event, protocol, keep_stream_open, close_stream_after_event) in &deliveries {
+            self.broadcast_persisted_protocol_event_locked(
+                protocol.clone(),
+                *keep_stream_open,
+                *close_stream_after_event,
+            )?;
+            if matches!(
+                &event.event,
+                PublicRunEventKind::RunAwaitingUserInput { .. }
+            ) {
+                let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
+                    session_id: event.session_id.clone(),
+                    run_id: event.run_id.clone(),
+                });
+            }
+        }
+        Ok(deliveries
+            .into_iter()
+            .map(|(event, _, _, _)| event)
+            .collect())
+    }
+
+    /// Allocates a sequence for an adapter-owned outcome that exists before the runtime can own
+    /// a durable public outbox. Application and terminal-lifecycle events always use their exact
+    /// session-outbox sequence through the `publish_run_event*` methods instead.
     pub fn publish_next_run_event(
         &self,
         event: PublicRunEvent,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
-        self.publish_next_run_event_with_policy(event, None, false, false)
-    }
-
-    /// Allocates and publishes a foreground terminal while retaining its owned terminal stream.
-    pub fn publish_next_run_event_with_stream_continuation(
-        &self,
-        event: PublicRunEvent,
-    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
-        self.publish_next_run_event_with_policy(event, None, true, false)
-    }
-
-    /// Allocates and publishes the final lifecycle while atomically closing the retained stream.
-    pub fn publish_next_run_event_and_close_stream(
-        &self,
-        event: PublicRunEvent,
-    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
-        self.publish_next_run_event_with_policy(event, None, false, true)
-    }
-
-    /// Allocates an approval sequence and lets the caller bind that sequence into the durable
-    /// protocol projection before publication. The production adapter pre-registers routing
-    /// state before entering this publication lock, which keeps registry and event-bus lock order
-    /// acyclic while ensuring subscribers never observe an unroutable approval.
-    pub fn publish_next_run_event_with_approval<F>(
-        &self,
-        mut event: PublicRunEvent,
-        register: F,
-    ) -> Result<HttpProtocolEvent, HttpEventPublishError>
-    where
-        F: FnOnce(u64) -> Result<HttpPendingApproval, HttpEventPublishError>,
-    {
-        let _publication =
-            self.publication_lock
-                .lock()
-                .map_err(|_| HttpEventPublishError::Journal {
-                    message: "http event publication sequencer is unavailable".to_owned(),
-                })?;
-        let latest = self
-            .latest_run_sequence(&event.session_id, &event.run_id)
-            .map_err(|error| HttpEventPublishError::Journal {
-                message: error.to_string(),
-            })?
-            .unwrap_or(0);
-        event.sequence = latest.saturating_add(1);
-        let approval_request = register(event.sequence)?;
-        self.publish_run_event_with_policy_locked(event, Some(approval_request), false, false)
-    }
-
-    /// Gives a durable domain commit the next sequence while holding the same publication lock
-    /// that will publish its exact event.
-    ///
-    /// This is deliberately narrower than a general reservation API: a failed commit publishes
-    /// nothing and consumes no sequence, while a successful commit cannot race another producer
-    /// into the same sequence before the canonical event reaches the journal.
-    pub(crate) fn commit_and_publish_next_run_event<T, F>(
-        &self,
-        session_id: &str,
-        run_id: &str,
-        commit: F,
-    ) -> Result<T, HttpEventPublishError>
-    where
-        F: FnOnce(u64) -> Result<(T, PublicRunEvent), HttpEventPublishError>,
-    {
-        let _publication =
-            self.publication_lock
-                .lock()
-                .map_err(|_| HttpEventPublishError::Journal {
-                    message: "http event publication sequencer is unavailable".to_owned(),
-                })?;
-        let latest = self
-            .latest_run_sequence(session_id, run_id)
-            .map_err(|error| HttpEventPublishError::Journal {
-                message: error.to_string(),
-            })?
-            .unwrap_or(0);
-        let sequence = latest
-            .checked_add(1)
-            .ok_or_else(|| HttpEventPublishError::Journal {
-                message: "http event sequence exhausted".to_owned(),
-            })?;
-        let (value, event) = commit(sequence)?;
-        if event.session_id != session_id || event.run_id != run_id || event.sequence != sequence {
-            return Err(HttpEventPublishError::Journal {
-                message:
-                    "durable commit returned a public event outside its allocated HTTP sequence"
-                        .to_owned(),
-            });
-        }
-        self.publish_run_event_with_policy_locked(event, None, false, false)?;
-        Ok(value)
+        self.publish_next_run_event_with_policy(event)
     }
 
     fn publish_next_run_event_with_policy(
         &self,
         mut event: PublicRunEvent,
-        approval_request: Option<HttpPendingApproval>,
-        keep_stream_open: bool,
-        close_stream_after_event: bool,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
         let _publication =
             self.publication_lock
@@ -1305,12 +1418,7 @@ impl HttpLiveEventBus {
             })?
             .unwrap_or(0);
         event.sequence = latest.saturating_add(1);
-        self.publish_run_event_with_policy_locked(
-            event,
-            approval_request,
-            keep_stream_open,
-            close_stream_after_event,
-        )
+        self.publish_run_event_with_policy_locked(event, None, false, false)
     }
 
     /// Closes a stream retained past the foreground terminal after every terminal task settles.
@@ -1460,6 +1568,23 @@ impl HttpLiveEventBus {
             None => self
                 .buffer
                 .replay_run_after(session_id, run_id, last_event_id),
+        }
+    }
+
+    /// Reads one retained protocol event for exact durable-outbox de-duplication without
+    /// materializing a full replay suffix. An evicted predecessor remains the responsibility of
+    /// the verified-source rebuild path, not evidence that an exact event was accepted.
+    pub(crate) fn retained_run_event_at(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> Result<Option<HttpProtocolEvent>, HttpProtocolReplayError> {
+        match &self.durable_journal {
+            Some(journal) => journal.retained_run_event_at(session_id, run_id, sequence),
+            None => self
+                .buffer
+                .retained_run_event_at(session_id, run_id, sequence),
         }
     }
 }

@@ -1649,11 +1649,10 @@ where
                             .map(|(receipt, request)| (receipt, request, None))
                         } else {
                             match managed_plan_review_child_resources.as_ref() {
-                                Some(provisioner) => sigil_runtime::PlanReviewCoordinator::accept_plan_review_research_input_with_terminal_sequence(
+                                Some(provisioner) => sigil_runtime::PlanReviewCoordinator::accept_plan_review_research_input_with_resources(
                                     session,
                                     command,
                                     current_unix_time_ms(),
-                                    None,
                                     provisioner.as_ref(),
                                 ),
                                 None => Err(anyhow::anyhow!(

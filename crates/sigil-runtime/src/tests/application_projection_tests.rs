@@ -99,13 +99,41 @@ fn projection_state_rebuilds_from_delivered_history() {
     let mut entries = vec![&finished, &started, &notice];
     entries.sort_by_key(|entry| entry.sequence);
 
-    let state = ProjectionEventState::from_events(&entries);
+    let state = ProjectionEventState::from_events(&entries, &BTreeSet::new());
     assert_eq!(state.run_status, "finished");
     assert!(!state.run_active);
     assert_eq!(
         state.last_notice.as_ref().map(SafeText::as_str),
         Some("checkpoint")
     );
+}
+
+#[test]
+fn resumed_revision_run_started_clears_historical_waiting_projection() {
+    let waiting = outbox_entry(
+        1,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: "revision-question".to_owned(),
+            generation: 1,
+            request_hash: "sha256:revision-question".to_owned(),
+        },
+    );
+    let resumed = outbox_entry(
+        2,
+        PublicRunEventKind::RunStarted {
+            prompt: "plan review revision".to_owned(),
+        },
+    );
+    let entries = vec![&waiting, &resumed];
+    let revision_waiting_public_event_ids = BTreeSet::from([waiting.public_event_id.clone()]);
+
+    let state = ProjectionEventState::from_events(&entries, &revision_waiting_public_event_ids);
+
+    assert_eq!(state.run_status, "running");
+    assert!(state.run_active);
+    assert_eq!(state.plan_status, "started");
+    assert!(!state.user_input_pending);
+    assert!(state.user_input_binding.is_none());
 }
 
 #[test]
@@ -165,7 +193,7 @@ fn awaiting_user_input_rebuild_is_inactive_and_preserves_durable_request() {
     );
     let entries = vec![&started, &changed, &awaiting];
 
-    let state = ProjectionEventState::from_events(&entries);
+    let state = ProjectionEventState::from_events(&entries, &BTreeSet::new());
 
     assert_eq!(state.run_status, "awaiting-user-input");
     assert!(!state.run_active);
@@ -200,4 +228,127 @@ fn terminal_surface_projection_replays_latest_bounded_task_state() {
     assert_eq!(projection.tasks[0].status.as_str(), "running");
     assert_eq!(projection.tasks[0].output_total_bytes, 20);
     assert!(projection.tasks[0].output_hash.is_none());
+}
+
+#[tokio::test]
+async fn tui_outbox_ack_uses_the_exact_projection_cut_and_rejects_foreign_frontiers()
+-> anyhow::Result<()> {
+    fn entry(
+        session_id: &str,
+        run_id: &str,
+        sequence: u64,
+    ) -> sigil_kernel::PublicEventOutboxEntryV1 {
+        let event = sigil_kernel::PublicRunEvent::new(
+            session_id,
+            run_id,
+            sequence,
+            PublicRunEventKind::Notice {
+                message: format!("notice-{sequence}"),
+            },
+        );
+        let public_event_id = format!("application-public:{session_id}:{run_id}:{sequence}");
+        sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            domain_event_id: public_event_id.clone(),
+            public_event_id,
+            run_id: run_id.to_owned(),
+            sequence,
+            payload_digest: sigil_kernel::stable_event_hash(
+                serde_json::to_vec(&event).expect("test public event must serialize"),
+            ),
+            event,
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
+    let session = sigil_kernel::Session::load_from_store("deepseek", "model", store)?;
+    let session_id = session.session_scope_id().to_owned();
+    let recorder = sigil_kernel::PublicEventOutboxRecorder::new(
+        sigil_kernel::JsonlSessionStore::new(&session_path)?,
+    );
+    recorder.append_outbox(&entry(&session_id, "run-ack", 1))?;
+    recorder.append_outbox(&entry(&session_id, "run-ack", 2))?;
+    let records = sigil_kernel::JsonlSessionStore::read_event_records(&session_path)?;
+    let outbox_stream_sequences = records
+        .iter()
+        .filter(|record| {
+            record.stored_event().event_kind()
+                == Some(sigil_kernel::DurableEventType::PublicEventOutbox)
+        })
+        .map(sigil_kernel::SessionStreamRecord::stream_sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(outbox_stream_sequences.len(), 2);
+    let binding = RuntimeSessionProjectionBinding::new(
+        temp.path().join("config.json"),
+        temp.path().to_path_buf(),
+        session_path.clone(),
+        session_id.clone(),
+        sigil_application::ApplicationInstanceId::new("projection-ack-test")?,
+        sigil_application::AuthenticatedSubject::new("local-user")?,
+        None,
+        1,
+        1,
+        1,
+        1,
+    )?;
+    let frontier = ApplicationFrontier {
+        schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+        scope: binding.scope.clone(),
+        writer_generation: 1,
+        stream_generation: 1,
+        through_sequence: outbox_stream_sequences[0],
+        durable_cursor: format!("session-stream:{}", outbox_stream_sequences[0]),
+    };
+
+    assert_eq!(
+        binding
+            .acknowledge_tui_public_outbox_through(&frontier)
+            .await?,
+        1
+    );
+    let after_first = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &sigil_kernel::JsonlSessionStore::read_event_records(&session_path)?,
+    )?;
+    assert_eq!(after_first.pending_for_adapter("tui").len(), 1);
+    assert_eq!(
+        after_first.pending_for_adapter("tui")[0].sequence,
+        2,
+        "the later outbox entry is beyond the committed projection cut"
+    );
+
+    let mut foreign_scope = frontier.clone();
+    foreign_scope.scope.session = Some(sigil_application::SessionScopeId::new("foreign")?);
+    assert!(matches!(
+        binding
+            .acknowledge_tui_public_outbox_through(&foreign_scope)
+            .await,
+        Err(ApplicationError::ScopeMismatch)
+    ));
+    let mut invalid_cursor = frontier.clone();
+    invalid_cursor.durable_cursor = "session-stream:wrong".to_owned();
+    assert!(matches!(
+        binding
+            .acknowledge_tui_public_outbox_through(&invalid_cursor)
+            .await,
+        Err(ApplicationError::ResetRequired)
+    ));
+
+    let second_frontier = ApplicationFrontier {
+        through_sequence: outbox_stream_sequences[1],
+        durable_cursor: format!("session-stream:{}", outbox_stream_sequences[1]),
+        ..frontier
+    };
+    assert_eq!(
+        binding
+            .acknowledge_tui_public_outbox_through(&second_frontier)
+            .await?,
+        1
+    );
+    let complete = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &sigil_kernel::JsonlSessionStore::read_event_records(&session_path)?,
+    )?;
+    assert!(complete.pending_for_adapter("tui").is_empty());
+    Ok(())
 }

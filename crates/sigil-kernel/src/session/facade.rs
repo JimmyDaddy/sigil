@@ -1142,8 +1142,12 @@ impl Session {
         for control in controls {
             match control {
                 ControlEntry::PlanReviewAttempt(attempt) => {
-                    if super::plan_review_terminal::is_revision_terminal(attempt) {
-                        bail!("revision terminal must use its atomic domain/outbox writer");
+                    if super::plan_review_terminal::is_revision_terminal(attempt)
+                        || super::plan_review_waiting::is_revision_waiting(attempt)
+                    {
+                        bail!(
+                            "revision terminal or suspension must use its atomic domain/outbox writer"
+                        );
                     }
                     if attempt.revision_request_id.is_some()
                         && attempt.status == crate::PlanReviewAttemptStatus::Started

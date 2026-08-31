@@ -34,6 +34,7 @@ use crate::{
 /// to construct a CAS-bound command; paths and physical authority objects remain in the runtime.
 pub(crate) struct TuiApplicationSession {
     application: TuiApplicationAdapter,
+    projection_binding: Arc<sigil_runtime::RuntimeSessionProjectionBinding>,
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
     session_maintenance_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionMaintenanceBinding>>>,
@@ -77,6 +78,7 @@ impl TuiApplicationSession {
     fn new(
         port: Arc<dyn ApplicationPort>,
         scope: ApplicationScope,
+        projection_binding: Arc<sigil_runtime::RuntimeSessionProjectionBinding>,
         observer_generation: u64,
         client_epoch: u64,
         connection_instance: HostConnectionInstanceId,
@@ -97,6 +99,7 @@ impl TuiApplicationSession {
                 client_epoch,
                 connection_instance,
             )?,
+            projection_binding,
             reasoning_effort,
             session_bindings,
             session_maintenance_bindings,
@@ -214,6 +217,19 @@ impl TuiApplicationSession {
 
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
         self.application.refresh().await
+    }
+
+    /// Marks only the public events represented by a successfully committed TUI projection as
+    /// delivered.  This runs on the TUI owner after its application reducer and product state
+    /// have both accepted the projection; a worker-channel enqueue is deliberately not enough.
+    pub(crate) async fn acknowledge_public_events_through(
+        &self,
+        projection: &ApplicationProjection,
+    ) -> Result<usize> {
+        self.projection_binding
+            .acknowledge_tui_public_outbox_through(&projection.frontier)
+            .await
+            .map_err(Into::into)
     }
 
     /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
@@ -1047,7 +1063,7 @@ pub(crate) fn build_for_worker(
         )?),
     };
     let session_scope_id = app.session_id.clone();
-    let projection = sigil_runtime::RuntimeSessionProjectionBinding::new(
+    let projection = Arc::new(sigil_runtime::RuntimeSessionProjectionBinding::new(
         app.config_path.clone(),
         std::env::current_dir()?,
         app.session_log_path.clone(),
@@ -1059,7 +1075,7 @@ pub(crate) fn build_for_worker(
         1,
         1,
         1,
-    )?;
+    )?);
     let reservations = sigil_runtime::ManagedApplicationReservationStore::open(
         Arc::clone(&composition.storage_writer),
         "tui-application",
@@ -1088,8 +1104,10 @@ pub(crate) fn build_for_worker(
         mcp_oauth_bindings: Arc::clone(&mcp_oauth_bindings),
         configuration_bindings: Arc::clone(&configuration_bindings),
     });
+    let projection_source: Arc<dyn sigil_runtime::RuntimeApplicationProjectionSource> =
+        projection.clone();
     let service = Arc::new(sigil_runtime::RuntimeApplicationService::new(
-        Arc::new(projection),
+        projection_source,
         executor,
         Arc::new(reservations),
         Arc::new(delivery_acks),
@@ -1099,6 +1117,7 @@ pub(crate) fn build_for_worker(
     TuiApplicationSession::new(
         service,
         scope,
+        projection,
         1,
         client_epoch,
         connection,

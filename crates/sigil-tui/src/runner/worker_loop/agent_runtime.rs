@@ -610,6 +610,72 @@ pub(in crate::runner) enum PlanReviewExecutionResult {
     Interrupted { reason: String },
 }
 
+/// Commits a revision-input suspension and its public notification before the worker asks the
+/// legacy TUI shell to render the input form. The worker channel remains only a wake-up/product
+/// edge; the session outbox is the recoverable source consumed by the application projection.
+pub(in crate::runner) fn commit_tui_plan_review_revision_waiting(
+    session: &mut Session,
+    request: &sigil_runtime::PlanReviewRunRequest,
+    pending: &sigil_kernel::PublicUserInputRequestV1,
+) -> std::result::Result<sigil_kernel::PublicEventOutboxEntryV1, String> {
+    if request.revision_request_id.is_none() {
+        return Err(
+            "non-revision plan review cannot commit a revision input suspension".to_owned(),
+        );
+    }
+    let run_id = request.child_logical_run_id();
+    if let Some(outbox) = session
+        .reconcile_plan_review_revision_waiting(&run_id)
+        .map_err(|error| {
+            format!("failed to recover durable plan revision waiting state: {error:#}")
+        })?
+    {
+        if !matches!(
+            &outbox.event.event,
+            sigil_kernel::PublicRunEventKind::RunAwaitingUserInput {
+                request_id,
+                generation,
+                request_hash,
+            } if request_id == pending.identity.request_id.as_str()
+                && *generation == pending.identity.generation
+                && request_hash == &pending.request_hash
+        ) {
+            return Err(
+                "durable plan revision waiting state conflicts with the current input request"
+                    .to_owned(),
+            );
+        }
+        sigil_runtime::PlanReviewCoordinator::revision_waiting_outcome_from_outbox(
+            session, request, &outbox,
+        )
+        .map_err(|error| {
+            format!("failed to reconstruct durable plan revision waiting state: {error:#}")
+        })?;
+        return Ok(outbox);
+    }
+    let sequence = session
+        .next_plan_review_public_sequence(&run_id)
+        .map_err(|error| format!("failed to allocate plan revision waiting sequence: {error:#}"))?;
+    let event = sigil_kernel::PublicRunEvent::new(
+        session.session_scope_id(),
+        run_id,
+        sequence,
+        sigil_kernel::PublicRunEventKind::RunAwaitingUserInput {
+            request_id: pending.identity.request_id.as_str().to_owned(),
+            generation: pending.identity.generation,
+            request_hash: pending.request_hash.clone(),
+        },
+    );
+    sigil_runtime::PlanReviewCoordinator::commit_revision_waiting_with_outbox(
+        session,
+        request,
+        pending,
+        event,
+        current_unix_time_ms(),
+    )
+    .map_err(|error| format!("failed to commit durable plan revision waiting state: {error:#}"))
+}
+
 fn commit_tui_plan_review_revision_terminal(
     session: &mut Session,
     request: &sigil_runtime::PlanReviewRunRequest,
@@ -868,15 +934,7 @@ where
     if request.revision_request_id.is_some() {
         let durable_outcome = match outcome_result {
             Ok(sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput { request: pending }) => {
-                sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
-                    run_session,
-                    request,
-                    &sigil_runtime::PlanReviewRunOutcome::AwaitingUserInput {
-                        request: pending.clone(),
-                    },
-                    current_unix_time_ms(),
-                )
-                .map_err(|error| format!("failed to suspend plan review: {error:#}"))?;
+                commit_tui_plan_review_revision_waiting(run_session, request, &pending)?;
                 return Ok(PlanReviewExecutionResult::AwaitingUserInput(
                     sigil_kernel::UserInputRequestRefV1 {
                         identity: pending.identity.clone(),

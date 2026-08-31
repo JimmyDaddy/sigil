@@ -95,7 +95,7 @@ fn event(
     PublicRunEvent::new(
         session.session_scope_id().to_owned(),
         plan_review_revision_run_id(attempt),
-        7,
+        1,
         kind,
     )
 }
@@ -344,13 +344,15 @@ fn nonrevision_attempt_cannot_back_a_terminal_outbox() -> Result<()> {
     attempt.base_plan_id = None;
     attempt.base_plan_hash = None;
     attempt.status = PlanReviewAttemptStatus::CompletedWithoutDraft;
-    let public = event(
+    let mut public = event(
         &session,
         &attempt,
         PublicRunEventKind::RunFinished {
             final_text: "not a revision terminal".into(),
         },
     );
+    public.session_id = store::session_id_for_path(store.path());
+    attempt.source_turn.session_scope_id = public.session_id.clone();
     let outbox = PublicEventOutboxEntryV1 {
         schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
         domain_event_id: stable_event_uuid("test-domain", "nonrevision"),

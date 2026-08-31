@@ -1076,6 +1076,28 @@ async fn managed_plan_review_recovery_reopens_the_exact_child_submitted_receipt(
 
     let (_temp, parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
+    assert!(
+        !PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+            &parent,
+            &request,
+            provisioner.as_ref(),
+        )?,
+        "a still-requested child question must leave the parent Waiting"
+    );
+    let mut stale_request = request.clone();
+    stale_request.attempt_ordinal = stale_request.attempt_ordinal.saturating_add(1);
+    let stale = PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+        &parent,
+        &stale_request,
+        provisioner.as_ref(),
+    )
+    .expect_err("a stale revision request must not claim a child receipt");
+    assert!(
+        stale
+            .to_string()
+            .contains("does not match the requested revision lineage"),
+        "stale request must fail before a child resume admission: {stale:#}"
+    );
     let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
     let mut child = Session::load_from_store(
         parent.provider_name(),
@@ -1104,6 +1126,14 @@ async fn managed_plan_review_recovery_reopens_the_exact_child_submitted_receipt(
     )?
     .expect("accepted managed research answer must recover while parent remains Waiting");
     assert_eq!(recovered, command);
+    assert!(
+        PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+            &parent,
+            &request,
+            provisioner.as_ref(),
+        )?,
+        "the exact submitted child receipt must admit the worker-side resume"
+    );
     assert_eq!(
         PlanReviewProjection::from_entries(parent.entries())
             .latest_attempt(&request.plan_review_id)
@@ -1146,6 +1176,58 @@ async fn managed_plan_review_recovery_replays_resolved_child_cancel_for_waiting_
     )?
     .expect("resolved managed child cancel must recover while parent remains Waiting");
     assert_eq!(recovered, command);
+    assert!(
+        !PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+            &parent,
+            &request,
+            provisioner.as_ref(),
+        )?,
+        "child cancellation must remain on the parent terminal-settlement path"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_plan_review_declined_research_input_allows_the_same_attempt_to_resume()
+-> Result<()> {
+    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
+
+    let (_temp, parent, request, pending, provisioner) =
+        managed_plan_review_research_waiting_fixture().await?;
+    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let mut child = Session::load_from_store(
+        parent.provider_name(),
+        parent.model_name(),
+        JsonlSessionStore::new(bundle.session_log_path())?,
+    )?;
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: pending.identity,
+        request_hash: pending.request_hash,
+        command_id: sigil_kernel::UserInputCommandId::new("managed-research-recovery-decline")?,
+        decision: sigil_kernel::UserInputDecisionV1::Declined,
+    };
+    let receipt = sigil_kernel::accept_user_input_decision(&mut child, command, 120)?;
+    assert!(matches!(
+        receipt.request.resolution,
+        Some(sigil_kernel::UserInputResolutionV1::Declined)
+    ));
+    bundle.finish()?;
+
+    assert!(
+        PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+            &parent,
+            &request,
+            provisioner.as_ref(),
+        )?,
+        "a declined clarification resumes the same attempt's submit-only finalization"
+    );
+    assert_eq!(
+        PlanReviewProjection::from_entries(parent.entries())
+            .latest_attempt(&request.plan_review_id)
+            .map(|attempt| attempt.status),
+        Some(PlanReviewAttemptStatus::WaitingForInput),
+        "the parent remains recoverable until the worker owns Started"
+    );
     Ok(())
 }
 
@@ -1202,11 +1284,10 @@ async fn managed_plan_review_input_acceptance_fails_closed_without_recreating_a_
         decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
     };
 
-    let error = PlanReviewCoordinator::accept_plan_review_research_input_with_terminal_sequence(
+    let error = PlanReviewCoordinator::accept_plan_review_research_input_with_resources(
         &mut parent,
         command,
         120,
-        None,
         provisioner.as_ref(),
     )
     .expect_err("accepted input must not recreate a missing managed child record");
@@ -2227,7 +2308,6 @@ credential = {{ source = "none" }}
         &workspace_root,
         &session_path,
         &revision_request,
-        0,
         &mut handler,
         None,
         None,
@@ -2462,14 +2542,53 @@ credential = {{ source = "none" }}
     else {
         panic!("revision research must suspend for a durable question");
     };
-    PlanReviewCoordinator::close_plan_review_run(
+    assert!(
+        PlanReviewCoordinator::close_plan_review_run(
+            &mut session,
+            &request,
+            &PlanReviewRunOutcome::AwaitingUserInput {
+                request: pending.clone(),
+            },
+            210,
+        )
+        .is_err()
+    );
+    let run_id = request.child_logical_run_id();
+    let waiting_event = sigil_kernel::PublicRunEvent::new(
+        session.session_scope_id(),
+        &run_id,
+        session.next_plan_review_public_sequence(&run_id)?,
+        sigil_kernel::PublicRunEventKind::RunAwaitingUserInput {
+            request_id: pending.identity.request_id.as_str().to_owned(),
+            generation: pending.identity.generation,
+            request_hash: pending.request_hash.clone(),
+        },
+    );
+    let waiting_outbox = PlanReviewCoordinator::commit_revision_waiting_with_outbox(
         &mut session,
         &request,
-        &PlanReviewRunOutcome::AwaitingUserInput {
-            request: pending.clone(),
-        },
+        &pending,
+        waiting_event,
         210,
     )?;
+    assert!(matches!(
+        PlanReviewCoordinator::revision_waiting_outcome_from_outbox(
+            &session,
+            &request,
+            &waiting_outbox,
+        )?,
+        PlanReviewRunOutcome::AwaitingUserInput { .. }
+    ));
+    let waiting_records = JsonlSessionStore::new(&session_path)?.read_event_records_writer()?;
+    let waiting_projection =
+        sigil_kernel::PublicEventOutboxProjectionV1::from_records(&waiting_records)?;
+    assert!(
+        waiting_projection
+            .pending_for_adapter("application")
+            .iter()
+            .any(|entry| entry.public_event_id == waiting_outbox.public_event_id),
+        "the revision Waiting notification remains durable-but-unpublished before cancellation"
+    );
     let (receipt, resumed, outbox) = PlanReviewCoordinator::accept_plan_review_research_input(
         &mut session,
         sigil_kernel::UserInputDecisionCommandV1 {
@@ -2494,6 +2613,11 @@ credential = {{ source = "none" }}
         PublicRunEventKind::RunCancelled
     ));
     assert_eq!(outbox.run_id, request.child_logical_run_id());
+    assert_eq!(
+        outbox.sequence,
+        waiting_outbox.event.sequence + 1,
+        "the cancelled terminal advances only from the durable Waiting outbox frontier"
+    );
     let projection = PlanReviewProjection::from_entries(session.entries());
     let attempt = projection
         .latest_attempt(&request.plan_review_id)

@@ -152,9 +152,37 @@ fn session(
     port: Arc<dyn ApplicationPort>,
     scope: ApplicationScope,
 ) -> Result<TuiApplicationSession> {
+    let session_scope_id = scope
+        .session
+        .as_ref()
+        .expect("test application scope has a session")
+        .as_str()
+        .to_owned();
+    let projection_binding = Arc::new(sigil_runtime::RuntimeSessionProjectionBinding::new(
+        std::path::PathBuf::from("sigil.toml"),
+        std::env::current_dir()?,
+        std::path::PathBuf::from("tui-application-bridge-test.jsonl"),
+        session_scope_id,
+        scope.application_instance.clone(),
+        scope.authenticated_subject.clone(),
+        scope.workspace.clone(),
+        1,
+        1,
+        1,
+        1,
+    )?);
+    session_with_projection_binding(port, scope, projection_binding)
+}
+
+fn session_with_projection_binding(
+    port: Arc<dyn ApplicationPort>,
+    scope: ApplicationScope,
+    projection_binding: Arc<sigil_runtime::RuntimeSessionProjectionBinding>,
+) -> Result<TuiApplicationSession> {
     TuiApplicationSession::new(
         port,
         scope,
+        projection_binding,
         1,
         1,
         HostConnectionInstanceId::new("tui-recovery-test-connection")?,
@@ -166,6 +194,122 @@ fn session(
         Arc::new(Mutex::new(BTreeMap::new())),
     )
     .map_err(Into::into)
+}
+
+#[tokio::test]
+async fn tui_projection_commit_precedes_the_exact_durable_public_outbox_ack() -> Result<()> {
+    use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = crate::app::tests::common::test_config();
+    std::fs::write(&config_path, toml::to_string(&config)?)?;
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let session_path = temp.path().join("tui-public-outbox-ack.jsonl");
+    let mut durable_session = sigil_kernel::Session::new_with_route(provider_name, route)
+        .with_store(sigil_kernel::JsonlSessionStore::new(&session_path)?);
+    durable_session.ensure_identity_entry()?;
+    let session_scope_id = durable_session.session_scope_id().to_owned();
+    let event = sigil_kernel::PublicRunEvent::new(
+        &session_scope_id,
+        "tui-public-outbox-run",
+        1,
+        sigil_kernel::PublicRunEventKind::Notice {
+            message: "durable TUI acknowledgement".to_owned(),
+        },
+    );
+    let public_event_id = format!("tui-public:{session_scope_id}:1");
+    sigil_kernel::PublicEventOutboxRecorder::new(sigil_kernel::JsonlSessionStore::new(
+        &session_path,
+    )?)
+    .append_outbox(&sigil_kernel::PublicEventOutboxEntryV1 {
+        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: public_event_id.clone(),
+        domain_event_id: public_event_id,
+        run_id: event.run_id.clone(),
+        sequence: event.sequence,
+        payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&event)?),
+        event,
+    })?;
+
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("tui-public-ack")?,
+        authenticated_subject: AuthenticatedSubject::new("local-user")?,
+        workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
+        session: Some(sigil_application::SessionScopeId::new(&session_scope_id)?),
+    };
+    let projection_binding = Arc::new(sigil_runtime::RuntimeSessionProjectionBinding::new(
+        config_path.clone(),
+        std::env::current_dir()?,
+        session_path.clone(),
+        session_scope_id.clone(),
+        scope.application_instance.clone(),
+        scope.authenticated_subject.clone(),
+        scope.workspace.clone(),
+        1,
+        1,
+        1,
+        1,
+    )?);
+    let state_root = temp.path().join("state");
+    let execution_temp = temp.path().join("execution-temp");
+    std::fs::create_dir_all(state_root.join("cache"))?;
+    std::fs::create_dir_all(&execution_temp)?;
+    let composition = sigil_runtime::r71_authority_composition::compose_runtime_authority(
+        &state_root,
+        &execution_temp,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0x61; 32]),
+        Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
+            sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
+        )),
+        &[Channel::ApplicationControlLog],
+    )?;
+    let (worker_tx, _worker_rx) = WorkerCommandSender::test_channel();
+    let executor = Arc::new(TuiWorkerCommandExecutor {
+        worker_tx,
+        reasoning_effort: ReasoningEffort::Medium,
+        session_id: session_scope_id,
+        session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        mcp_oauth_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+        configuration_bindings: Arc::new(Mutex::new(BTreeMap::new())),
+    });
+    let projection_source: Arc<dyn sigil_runtime::RuntimeApplicationProjectionSource> =
+        projection_binding.clone();
+    let service: Arc<dyn ApplicationPort> =
+        Arc::new(sigil_runtime::RuntimeApplicationService::new(
+            projection_source,
+            executor,
+            Arc::new(sigil_runtime::ManagedApplicationReservationStore::open(
+                Arc::clone(&composition.storage_writer),
+                "tui-application",
+            )?),
+            Arc::new(NoopDeliveryAcker),
+        ));
+    let application = session_with_projection_binding(service, scope, projection_binding)?;
+
+    let projection = application.refresh().await?;
+    let mut app = crate::AppState::from_root_config(&config_path, &config);
+    assert!(
+        app.apply_application_projection(&projection),
+        "the durable application projection must commit into AppState before its ACK"
+    );
+    assert_eq!(
+        application
+            .acknowledge_public_events_through(&projection)
+            .await?,
+        1
+    );
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &sigil_kernel::JsonlSessionStore::read_event_records(&session_path)?,
+    )?;
+    assert!(
+        outbox.pending_for_adapter("tui").is_empty(),
+        "the runtime-owned ACK must consume only the projection's committed durable cut"
+    );
+    Ok(())
 }
 
 #[test]

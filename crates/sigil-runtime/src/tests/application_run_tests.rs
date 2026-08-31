@@ -18,16 +18,19 @@ use sigil_kernel::{
     ConversationRunLifecycleRecordV1, ConversationRunStartedEntryV1,
     ConversationRunTerminalStatusV1, DisclosurePresentationError, DisclosurePresentationReceipt,
     EgressDisclosurePresenter, EventHandler, IntegrationPlanId, InteractionMode, JsonlSessionStore,
-    MemoryConfig, ModelMessage, NoopEventHandler, PreEgressDisclosure, Provider,
-    ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
-    ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
-    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RuntimeContextCandidates,
-    Session, SessionLogEntry, SessionRef, StartDurableTaskAction, StartPlanReviewAction,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TaskHandoffId, TaskId,
-    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest, Tool, ToolAccess,
-    ToolApproval, ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
+    MemoryConfig, ModelMessage, MutationEventRecorder, NoopEventHandler, PreEgressDisclosure,
+    Provider, ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind,
+    ReasoningEffort, ReasoningStreamSupport, RootConfig, RunCancellationOwner,
+    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
+    RuntimeContextCandidates, Session, SessionLogEntry, SessionRef, StartDurableTaskAction,
+    StartPlanReviewAction, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+    TERMINAL_TASK_SCHEMA_VERSION, TaskHandoffId, TaskId, TaskIntegrationReviewRequest,
+    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRoutingPolicy,
+    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepStatus, TaskVerificationRerunRequest, TerminalLifecycleEvent,
+    TerminalLifecycleUpdateV2, TerminalReadinessKind, TerminalReadinessStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolArtifactSensitivity, ToolArtifactStore, ToolCall, ToolCategory, ToolContext,
     ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry,
     ToolRegistryScope, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec, UsageStats,
     UserInputActionV1, UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId,
@@ -38,6 +41,7 @@ use sigil_kernel::{
 };
 
 use crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
+use crate::application_run::is_application_public_outbox_append_error;
 use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
@@ -60,8 +64,7 @@ use super::{
     default_application_session_path, optional_eager_mcp_warning, prepare_application_run,
     prepare_application_run_blocking, prepare_application_task_continuation,
     prepare_application_user_input_decision, record_application_preparation_cancellation,
-    replay_pending_application_terminal_outbox, rerun_application_verification,
-    validate_execution_contract,
+    replay_pending_application_outbox, rerun_application_verification, validate_execution_contract,
 };
 
 fn application_conversation_lifecycle(
@@ -78,11 +81,11 @@ fn durable_application_event_sequence(
     run_id: &str,
     path: &Path,
 ) -> Result<ApplicationRunEventSequence> {
-    Ok(ApplicationRunEventSequence::with_outbox(
+    ApplicationRunEventSequence::with_outbox(
         session_id.to_owned(),
         run_id.to_owned(),
-        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(path)?),
-    ))
+        JsonlSessionStore::new(path)?,
+    )
 }
 
 fn application_internal_context_fixture() -> RuntimeContextCandidates {
@@ -342,7 +345,6 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
             session_attachment: None,
             expected_session_scope_id: binding.session_scope_id.clone(),
             run_id: "user-input-continuation-1".to_owned(),
-            revision_terminal_public_sequence: None,
             identity: requested.request.identity.clone(),
             request_hash: requested.request_hash.clone(),
             command_id: UserInputCommandId::new("user-input-command-1")?,
@@ -470,7 +472,6 @@ async fn submitted_user_input_remains_retryable_when_provider_preparation_fails(
             session_attachment: None,
             expected_session_scope_id: binding.session_scope_id.clone(),
             run_id: "user-input-provider-failure-run".to_owned(),
-            revision_terminal_public_sequence: None,
             identity: requested.request.identity.clone(),
             request_hash: requested.request_hash.clone(),
             command_id: command_id.clone(),
@@ -2893,9 +2894,12 @@ fn public_event_bridge_rejects_a_root_terminal_without_a_durable_finalizer() -> 
         }
     }
 
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
     let mut recorder = Recorder::default();
-    let events = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
-    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder);
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let events = durable_application_event_sequence(session.session_scope_id(), "run-1", &path)?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
     bridge.emit(PublicRunEventKind::RunStarted {
         prompt: "hello".to_owned(),
     })?;
@@ -2946,9 +2950,12 @@ fn public_event_bridge_projects_task_controls_and_preserves_unknown_controls() -
         }
     }
 
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
     let mut recorder = Recorder::default();
-    let events = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
-    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder);
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let events = durable_application_event_sequence(session.session_scope_id(), "run-1", &path)?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
     sigil_kernel::EventHandler::handle(
         &mut bridge,
         RunEvent::Control(ControlEntry::TaskRun(TaskRunEntry {
@@ -3005,7 +3012,10 @@ fn public_event_sequence_rejects_a_root_terminal_without_a_durable_finalizer() -
         }
     }
 
-    let sequence = ApplicationRunEventSequence::new("session-1".to_owned(), "run-1".to_owned());
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let sequence = durable_application_event_sequence(session.session_scope_id(), "run-1", &path)?;
     let mut recorder = Recorder::default();
     sequence.emit(
         &mut recorder,
@@ -3038,6 +3048,228 @@ fn public_event_sequence_rejects_a_root_terminal_without_a_durable_finalizer() -
 }
 
 #[test]
+fn nonterminal_delivery_failure_replays_all_pending_entries_before_later_live_publication()
+-> Result<()> {
+    struct FailFirstAdapter {
+        failed: bool,
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for FailFirstAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            if !self.failed {
+                self.failed = true;
+                anyhow::bail!("adapter is temporarily unavailable");
+            }
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingAdapter(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for RecordingAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let events =
+        durable_application_event_sequence(session.session_scope_id(), "run-replay", &path)?;
+    let mut failing = FailFirstAdapter {
+        failed: false,
+        events: Vec::new(),
+    };
+    events.emit(
+        &mut failing,
+        PublicRunEventKind::RunStarted {
+            prompt: "first".to_owned(),
+        },
+    )?;
+    // The second fact is durable but must not bypass the first pending delivery on the live edge.
+    events.emit(
+        &mut failing,
+        PublicRunEventKind::Notice {
+            message: "second".to_owned(),
+        },
+    )?;
+    assert!(events.delivery_is_degraded()?);
+    assert!(failing.events.is_empty());
+
+    let mut replay = RecordingAdapter::default();
+    let mut bridge = PublicApplicationEventBridge::new(
+        durable_application_event_sequence(session.session_scope_id(), "run-replay", &path)?,
+        &mut replay,
+    )?;
+    bridge.emit(PublicRunEventKind::Notice {
+        message: "third".to_owned(),
+    })?;
+    drop(bridge);
+    assert_eq!(
+        replay
+            .0
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "a fresh bridge replays every durable predecessor before its later live event"
+    );
+
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    assert!(projection.pending_for_adapter("application").is_empty());
+    Ok(())
+}
+
+#[test]
+fn conflicting_durable_sequence_does_not_publish_an_unproven_candidate() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let sequence =
+        durable_application_event_sequence(session.session_scope_id(), "run-conflict", &path)?;
+    let foreign_event = PublicRunEvent::new(
+        session.session_scope_id(),
+        "run-conflict",
+        1,
+        PublicRunEventKind::Notice {
+            message: "already durable under another exact identity".to_owned(),
+        },
+    );
+    let foreign_public_event_id = "foreign-public-event".to_owned();
+    sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?).append_outbox(
+        &sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            domain_event_id: foreign_public_event_id.clone(),
+            public_event_id: foreign_public_event_id,
+            run_id: "run-conflict".to_owned(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&foreign_event)?),
+            event: foreign_event,
+        },
+    )?;
+
+    let mut recorder = Recorder::default();
+    let error = sequence
+        .emit(
+            &mut recorder,
+            PublicRunEventKind::Notice {
+                message: "candidate must never leak".to_owned(),
+            },
+        )
+        .expect_err("same sequence under another identity cannot prove this candidate");
+    assert!(is_application_public_outbox_append_error(&error));
+    assert_eq!(
+        recorder.0.len(),
+        1,
+        "only the already-durable predecessor is replayed"
+    );
+    assert!(matches!(
+        &recorder.0[0].event,
+        PublicRunEventKind::Notice { message }
+            if message == "already durable under another exact identity"
+    ));
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    assert_eq!(projection.events_in_order().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn application_execution_does_not_rewrite_an_unconfirmed_public_append_as_run_failed()
+-> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "prove the append authority boundary",
+        "run-unconfirmed-public-append",
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let prepared = prepare_application_run(request, &services).await?;
+    let session_id = prepared.execution.session_id.clone();
+    let run_id = prepared.execution.run_id.clone();
+    let session_path = prepared.execution.session_log_path.clone();
+    // The execution bridge was initialized at durable sequence zero. A concurrent durable entry
+    // at sequence one cannot prove its subsequently prepared RunStarted candidate, even though
+    // the adapter can receive/replay the pre-existing entry.
+    let foreign_event = PublicRunEvent::new(
+        &session_id,
+        &run_id,
+        1,
+        PublicRunEventKind::Notice {
+            message: "pre-existing public fact".to_owned(),
+        },
+    );
+    let foreign_public_event_id = "foreign-pre-existing-public-fact".to_owned();
+    sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&session_path)?)
+        .append_outbox(&sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            domain_event_id: foreign_public_event_id.clone(),
+            public_event_id: foreign_public_event_id,
+            run_id: run_id.clone(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&foreign_event)?),
+            event: foreign_event,
+        })?;
+
+    let mut recorder = Recorder::default();
+    let mut approvals = AutoApproveHandler;
+    let error = prepared
+        .execution
+        .execute(&mut recorder, &mut approvals)
+        .await
+        .expect_err("the runtime must not publish or terminalize an unproven candidate");
+    assert!(is_application_public_outbox_append_error(&error));
+    assert!(recorder.0.iter().all(|event| {
+        !matches!(event.event, PublicRunEventKind::RunFailed { .. })
+            && !matches!(event.event, PublicRunEventKind::RunStarted { .. })
+    }));
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    assert!(records.iter().all(|record| {
+        !matches!(
+            record.stored_event().event_kind(),
+            Some(sigil_kernel::DurableEventType::RunFinalized)
+        )
+    }));
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert!(projection.events_in_order().iter().all(|entry| {
+        !matches!(entry.event.event, PublicRunEventKind::RunFailed { .. })
+            && !matches!(entry.event.event, PublicRunEventKind::RunStarted { .. })
+    }));
+    Ok(())
+}
+
+#[test]
 fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_domain_state()
 -> Result<()> {
     struct FailFirstTerminal {
@@ -3065,8 +3297,8 @@ fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_doma
     let sequence = ApplicationRunEventSequence::with_outbox(
         session.session_scope_id().to_owned(),
         "run-1".to_owned(),
-        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
-    );
+        JsonlSessionStore::new(&path)?,
+    )?;
     let mut handler = FailFirstTerminal {
         failed: false,
         events: Vec::new(),
@@ -3127,6 +3359,355 @@ fn failed_terminal_delivery_keeps_the_exact_event_pending_without_rewriting_doma
 }
 
 #[test]
+fn direct_terminal_control_replays_older_pending_public_events_first() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let session_id = session.session_scope_id().to_owned();
+    let old_event = PublicRunEvent::new(
+        &session_id,
+        "run-terminal-replay",
+        1,
+        PublicRunEventKind::Notice {
+            message: "older pending progress".to_owned(),
+        },
+    );
+    let old_public_event_id = format!("application-public:{session_id}:run-terminal-replay:1");
+    sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?).append_outbox(
+        &sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            domain_event_id: old_public_event_id.clone(),
+            public_event_id: old_public_event_id,
+            run_id: "run-terminal-replay".to_owned(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(&old_event)?),
+            event: old_event,
+        },
+    )?;
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new(
+        "run-terminal-replay",
+        1,
+    )?)?;
+    let sequence = durable_application_event_sequence(&session_id, "run-terminal-replay", &path)?;
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        "run-terminal-replay",
+        ConversationRunTerminalStatusV1::Interrupted,
+        None,
+        Some("stop"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    let mut recorder = Recorder::default();
+    sequence.emit_terminal(
+        &lifecycle,
+        &mut recorder,
+        &terminal,
+        PublicRunEventKind::RunInterrupted {
+            reason: "stop".to_owned(),
+        },
+    )?;
+    assert_eq!(
+        recorder
+            .0
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    assert!(projection.pending_for_adapter("application").is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_lifecycle_reuses_the_outbox_sequence_after_terminal_and_replays_lost_receipts()
+-> Result<()> {
+    #[derive(Default)]
+    struct PreviousAdapter;
+
+    impl ApplicationRunEventHandler for PreviousAdapter {
+        fn handle_public_event(&mut self, _event: PublicRunEvent) -> Result<()> {
+            Ok(())
+        }
+
+        fn public_event_adapter_id(&self) -> &'static str {
+            "previous_adapter"
+        }
+    }
+
+    #[derive(Debug)]
+    struct LifecycleAdapter {
+        session_log_path: std::path::PathBuf,
+        parked_session_log_path: std::path::PathBuf,
+        lose_first_lifecycle_receipt: AtomicBool,
+        events: Arc<Mutex<Vec<PublicRunEvent>>>,
+    }
+
+    impl crate::ApplicationTerminalLifecycleHandler for LifecycleAdapter {
+        fn handle_public_event(&self, event: PublicRunEvent) -> Result<()> {
+            if matches!(&event.event, PublicRunEventKind::TerminalLifecycle { .. })
+                && self
+                    .lose_first_lifecycle_receipt
+                    .swap(false, Ordering::SeqCst)
+            {
+                std::fs::rename(&self.session_log_path, &self.parked_session_log_path)?;
+                std::fs::create_dir(&self.session_log_path)?;
+            }
+            self.events
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal lifecycle test event state is unavailable"))?
+                .push(event);
+            Ok(())
+        }
+
+        fn public_event_adapter_id(&self) -> &'static str {
+            "terminal_lifecycle_test"
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingLifecycleAdapter(Arc<Mutex<Vec<PublicRunEvent>>>);
+
+    impl crate::ApplicationTerminalLifecycleHandler for RecordingLifecycleAdapter {
+        fn handle_public_event(&self, event: PublicRunEvent) -> Result<()> {
+            self.0
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal lifecycle test event state is unavailable"))?
+                .push(event);
+            Ok(())
+        }
+
+        fn public_event_adapter_id(&self) -> &'static str {
+            "terminal_lifecycle_test"
+        }
+    }
+
+    struct RunAdapter(Arc<dyn crate::ApplicationTerminalLifecycleHandler>);
+
+    impl ApplicationRunEventHandler for RunAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.handle_public_event(event)
+        }
+
+        fn public_event_adapter_id(&self) -> &'static str {
+            self.0.public_event_adapter_id()
+        }
+    }
+
+    fn terminal_update(
+        generation: u64,
+        status: TerminalTaskStatus,
+    ) -> Result<TerminalLifecycleUpdateV2> {
+        let task = TerminalTaskEntry {
+            schema_version: TERMINAL_TASK_SCHEMA_VERSION,
+            handle: TerminalTaskHandle {
+                task_id: TerminalTaskId::new("terminal-outbox-sequence")?,
+                command_sha256: "0".repeat(64),
+                cwd_label: ".".to_owned(),
+                shell_label: "zsh".to_owned(),
+                shell_sha256: "1".repeat(64),
+                log_ref: "terminal-log:terminal-outbox-sequence".to_owned(),
+                created_at_ms: 1,
+                execution_backend: None,
+                execution_backend_capabilities: None,
+                enforcement_backend: None,
+                enforcement_backend_capabilities: None,
+                sandbox_profile: None,
+            },
+            generation,
+            status,
+            readiness: TerminalReadinessStatus::Ready {
+                kind: TerminalReadinessKind::OutputContains,
+                ready_at_ms: generation,
+            },
+            output_preview: None,
+            output_hash: None,
+            output_truncated: false,
+            output_total_bytes: 0,
+            output_limit_bytes: None,
+            output_termination_reason: None,
+            cleanup: None,
+            updated_at_ms: generation,
+        };
+        Ok(TerminalLifecycleUpdateV2 {
+            event: TerminalLifecycleEvent {
+                task_id: task.handle.task_id.clone(),
+                execution_backend: task.handle.execution_backend,
+                sandbox_profile: task.handle.sandbox_profile,
+                generation: task.generation,
+                status: task.status.clone(),
+                readiness: task.readiness.clone(),
+                total_output_bytes: task.output_total_bytes,
+                emitted_at_ms: task.updated_at_ms,
+            },
+            task,
+        })
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let session = Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    let session_id = session.session_scope_id().to_owned();
+    let lifecycle = session.conversation_run_lifecycle_recorder()?;
+    lifecycle.append_started(&ConversationRunStartedEntryV1::new(
+        "run-terminal-lifecycle",
+        1,
+    )?)?;
+    let sequence =
+        durable_application_event_sequence(&session_id, "run-terminal-lifecycle", &path)?;
+
+    // The public lifecycle adapter must replay this older ordinary event before it can send a
+    // lifecycle update, even though another adapter already received it.
+    sequence.emit(
+        &mut PreviousAdapter,
+        PublicRunEventKind::RunStarted {
+            prompt: "foreground run".to_owned(),
+        },
+    )?;
+    // A bridge is bound to one active adapter. Reattach from the durable source before the
+    // lifecycle adapter takes over; its receipts must not be inferred from the previous adapter.
+    let sequence =
+        durable_application_event_sequence(&session_id, "run-terminal-lifecycle", &path)?;
+
+    let first_events = Arc::new(Mutex::new(Vec::new()));
+    let parked = temp.path().join("session-before-lifecycle-receipt.jsonl");
+    let first_handler: Arc<dyn crate::ApplicationTerminalLifecycleHandler> =
+        Arc::new(LifecycleAdapter {
+            session_log_path: path.clone(),
+            parked_session_log_path: parked.clone(),
+            lose_first_lifecycle_receipt: AtomicBool::new(true),
+            events: Arc::clone(&first_events),
+        });
+    let router = crate::ApplicationTerminalLifecycleRouter::new(MutationEventRecorder::new(
+        JsonlSessionStore::new(&path)?,
+    ))
+    .with_application_public_events(Arc::clone(&first_handler), sequence.clone());
+    sigil_kernel::TerminalLifecycleSink::publish(
+        &router,
+        terminal_update(1, TerminalTaskStatus::Running)?,
+    )
+    .await?;
+    assert!(sequence.delivery_is_degraded()?);
+    assert_eq!(
+        first_events
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal lifecycle test event state is unavailable"))?
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+
+    std::fs::remove_dir(&path)?;
+    std::fs::rename(&parked, &path)?;
+    let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
+        "run-terminal-lifecycle",
+        ConversationRunTerminalStatusV1::Succeeded,
+        Some("foreground-final-message".to_owned()),
+        Some("foreground complete"),
+        2,
+        &sigil_kernel::SecretRedactor::empty(),
+    )?;
+    sequence.emit_terminal(
+        &lifecycle,
+        &mut RunAdapter(Arc::clone(&first_handler)),
+        &terminal,
+        PublicRunEventKind::RunFinished {
+            final_text: "foreground complete".to_owned(),
+        },
+    )?;
+
+    let recovered_events = Arc::new(Mutex::new(Vec::new()));
+    let recovered_handler: Arc<dyn crate::ApplicationTerminalLifecycleHandler> =
+        Arc::new(RecordingLifecycleAdapter(Arc::clone(&recovered_events)));
+    let recovered_sequence =
+        durable_application_event_sequence(&session_id, "run-terminal-lifecycle", &path)?;
+    let mut recovered_run_handler = RunAdapter(Arc::clone(&recovered_handler));
+    let late_progress = recovered_sequence.emit(
+        &mut recovered_run_handler,
+        PublicRunEventKind::Notice {
+            message: "invalid late foreground progress".to_owned(),
+        },
+    );
+    assert!(
+        late_progress
+            .expect_err("a reopened finalized run must still reject ordinary progress")
+            .to_string()
+            .contains("already terminal")
+    );
+    let recovered_router = crate::ApplicationTerminalLifecycleRouter::new(
+        MutationEventRecorder::new(JsonlSessionStore::new(&path)?),
+    )
+    .with_application_public_events(recovered_handler, recovered_sequence);
+    sigil_kernel::TerminalLifecycleSink::publish(
+        &recovered_router,
+        terminal_update(2, TerminalTaskStatus::Exited { exit_code: Some(0) })?,
+    )
+    .await?;
+
+    assert_eq!(
+        recovered_events
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal lifecycle test event state is unavailable"))?
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3, 4],
+        "receipt recovery must replay lifecycle and foreground terminal before late exit"
+    );
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
+        &JsonlSessionStore::read_event_records(&path)?,
+    )?;
+    let outbox = projection
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == "run-terminal-lifecycle")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        outbox
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(matches!(
+        &outbox[0].event.event,
+        PublicRunEventKind::RunStarted { .. }
+    ));
+    assert!(matches!(
+        &outbox[1].event.event,
+        PublicRunEventKind::TerminalLifecycle { .. }
+    ));
+    assert!(matches!(
+        &outbox[2].event.event,
+        PublicRunEventKind::RunFinished { .. }
+    ));
+    assert!(matches!(
+        &outbox[3].event.event,
+        PublicRunEventKind::TerminalLifecycle { .. }
+    ));
+    assert!(
+        projection
+            .pending_for_adapter("terminal_lifecycle_test")
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_outbox_replays_a_terminal_with_its_original_public_event_id() -> Result<()> {
     struct FailingAdapter;
 
@@ -3145,8 +3726,8 @@ fn durable_outbox_replays_a_terminal_with_its_original_public_event_id() -> Resu
     let sequence = ApplicationRunEventSequence::with_outbox(
         session.session_scope_id().to_owned(),
         "run-outbox".to_owned(),
-        sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
-    );
+        JsonlSessionStore::new(&path)?,
+    )?;
     let mut adapter = FailingAdapter;
     let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
         "run-outbox",
@@ -3216,7 +3797,7 @@ fn durable_outbox_replays_a_terminal_with_its_original_public_event_id() -> Resu
 
     let mut replay = RecordingAdapter { events: Vec::new() };
     assert_eq!(
-        replay_pending_application_terminal_outbox(&path, "run-outbox", &mut replay)?,
+        replay_pending_application_outbox(&path, "run-outbox", &mut replay)?,
         1
     );
     assert_eq!(replay.events.len(), 1);
@@ -3226,7 +3807,7 @@ fn durable_outbox_replays_a_terminal_with_its_original_public_event_id() -> Resu
         PublicRunEventKind::RunBlocked { .. }
     ));
     assert_eq!(
-        replay_pending_application_terminal_outbox(&path, "run-outbox", &mut replay)?,
+        replay_pending_application_outbox(&path, "run-outbox", &mut replay)?,
         0
     );
     Ok(())
@@ -3278,8 +3859,8 @@ fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay()
         let sequence = ApplicationRunEventSequence::with_outbox(
             session.session_scope_id().to_owned(),
             "run-receipt".to_owned(),
-            sigil_kernel::PublicEventOutboxRecorder::new(JsonlSessionStore::new(&path)?),
-        );
+            JsonlSessionStore::new(&path)?,
+        )?;
         let terminal = sigil_kernel::ConversationRunFinalizedEntryV1::new(
             "run-receipt",
             ConversationRunTerminalStatusV1::Paused,
@@ -3305,10 +3886,7 @@ fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay()
         parked_session_log_path: parked.clone(),
         event: None,
     };
-    assert!(
-        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut receipt_failure)
-            .is_err()
-    );
+    assert!(replay_pending_application_outbox(&path, "run-receipt", &mut receipt_failure).is_err());
     let first_delivery = receipt_failure
         .event
         .take()
@@ -3319,7 +3897,7 @@ fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay()
 
     let mut replay = RecordingAdapter { events: Vec::new() };
     assert_eq!(
-        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut replay)?,
+        replay_pending_application_outbox(&path, "run-receipt", &mut replay)?,
         1
     );
     assert_eq!(
@@ -3327,7 +3905,7 @@ fn receipt_write_failure_keeps_terminal_outbox_pending_for_exact_second_replay()
         serde_json::to_value(vec![first_delivery])?
     );
     assert_eq!(
-        replay_pending_application_terminal_outbox(&path, "run-receipt", &mut replay)?,
+        replay_pending_application_outbox(&path, "run-receipt", &mut replay)?,
         0
     );
     Ok(())
@@ -3856,7 +4434,6 @@ credential = {{ source = "none" }}
             session_attachment: None,
             expected_session_scope_id: session_scope_id.clone(),
             run_id: "application-planner-answer-run".to_owned(),
-            revision_terminal_public_sequence: None,
             identity: command.identity.clone(),
             request_hash: command.request_hash.clone(),
             command_id: command.command_id.clone(),
@@ -3896,7 +4473,6 @@ credential = {{ source = "none" }}
             session_attachment: None,
             expected_session_scope_id: session_scope_id.clone(),
             run_id: "application-planner-answer-recovery-run".to_owned(),
-            revision_terminal_public_sequence: None,
             identity: recovered_command.identity,
             request_hash: recovered_command.request_hash,
             command_id: recovered_command.command_id,
@@ -4166,6 +4742,137 @@ credential = {{ source = "none" }}
             .count(),
         1
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_run() -> Result<()> {
+    struct ConflictingTaskAdapter {
+        store: JsonlSessionStore,
+        inserted: bool,
+        events: Vec<PublicRunEvent>,
+    }
+
+    impl ApplicationRunEventHandler for ConflictingTaskAdapter {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            if !self.inserted && matches!(event.event, PublicRunEventKind::TaskPlanUpdated { .. }) {
+                let next = event.sequence + 1;
+                let foreign_id = format!("task-conflicting-public:{next}");
+                let foreign = PublicRunEvent::new(
+                    &event.session_id,
+                    &event.run_id,
+                    next,
+                    PublicRunEventKind::Notice {
+                        message: "exact competing fact, not the runtime candidate".to_owned(),
+                    },
+                );
+                sigil_kernel::PublicEventOutboxRecorder::new(self.store.clone()).append_outbox(
+                    &sigil_kernel::PublicEventOutboxEntryV1 {
+                        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                        public_event_id: foreign_id.clone(),
+                        domain_event_id: foreign_id,
+                        run_id: event.run_id.clone(),
+                        sequence: next,
+                        payload_digest: sigil_kernel::stable_event_hash(serde_json::to_vec(
+                            &foreign,
+                        )?),
+                        event: foreign,
+                    },
+                )?;
+                self.inserted = true;
+            }
+            self.events.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let session_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let root_config = RootConfig::load(&config_path)?;
+    let (provider_name, route) =
+        crate::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    let mut session = Session::load_from_store_with_route(
+        provider_name,
+        route.model_ref.model_id.clone(),
+        Some(route),
+        store.clone(),
+    )?;
+    let task_id = TaskId::new("task-public-append-failure")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "continue without inventing a terminal on publication failure".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: Some("restart".to_owned()),
+    }))?;
+    let session_scope_id = session.session_scope_id().to_owned();
+    drop(session);
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+    let prepared = prepare_application_task_continuation(
+        ApplicationTaskContinuationRequest {
+            config_path,
+            launch_cwd: temp.path().to_path_buf(),
+            session_path: session_path.clone(),
+            session_attachment: None,
+            expected_session_scope_id: session_scope_id,
+            run_id: "run-task-public-append-failure".to_owned(),
+            task_id: task_id.clone(),
+            guidance: None,
+            interaction: ApplicationRunInteraction::NonInteractive,
+            permission_mode: None,
+        },
+        &services,
+    )
+    .await?;
+    let (execution, _control) = prepared.into_parts();
+    let mut handler = ConflictingTaskAdapter {
+        store,
+        inserted: false,
+        events: Vec::new(),
+    };
+    let error = execution
+        .execute(&mut handler, &mut AutoApproveHandler)
+        .await
+        .expect_err("an unconfirmed public append must stop the original execution");
+    assert!(
+        handler.inserted,
+        "inject after entering the real Task execution path"
+    );
+    assert!(
+        is_application_public_outbox_append_error(&error),
+        "{error:#}"
+    );
+    assert!(
+        handler
+            .events
+            .iter()
+            .all(|event| !matches!(event.event, PublicRunEventKind::RunFailed { .. }))
+    );
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    for record in records {
+        assert_ne!(
+            record.stored_event().event_kind(),
+            Some(sigil_kernel::DurableEventType::RunFinalized)
+        );
+        if let Some(SessionLogEntry::Control(ControlEntry::TaskRun(task))) =
+            record.session_log_entry()?
+        {
+            assert_ne!(
+                task.status,
+                TaskRunStatus::Failed,
+                "publication failure is not Task failure"
+            );
+        }
+    }
     Ok(())
 }
 

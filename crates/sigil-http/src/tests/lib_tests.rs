@@ -3781,10 +3781,10 @@ async fn local_sse_closes_when_foreground_terminal_reconciles_after_final_task_e
         .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
             assert!(!close_stream);
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
-                    1,
+                    2,
                     PublicRunEventKind::TerminalLifecycle {
                         event: running.clone(),
                     },
@@ -3794,10 +3794,10 @@ async fn local_sse_closes_when_foreground_terminal_reconciles_after_final_task_e
         })
         .expect("running lifecycle should publish");
     event_bus
-        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+        .publish_run_event_with_stream_continuation(PublicRunEvent::new(
             &session.durable_session_scope_id,
             &run.id,
-            1,
+            3,
             PublicRunEventKind::RunFinished {
                 final_text: "foreground finished".to_owned(),
             },
@@ -3847,10 +3847,10 @@ async fn local_sse_closes_when_foreground_terminal_reconciles_after_final_task_e
                 "the foreground registry terminal has not committed yet"
             );
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
-                    1,
+                    4,
                     PublicRunEventKind::TerminalLifecycle {
                         event: exited.clone(),
                     },
@@ -3963,10 +3963,10 @@ async fn local_sse_drains_ordered_terminal_events_before_the_close_marker() {
         .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
             assert!(!close_stream);
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
-                    1,
+                    2,
                     PublicRunEventKind::TerminalLifecycle {
                         event: running.clone(),
                     },
@@ -3976,10 +3976,10 @@ async fn local_sse_drains_ordered_terminal_events_before_the_close_marker() {
         })
         .expect("running lifecycle should publish");
     event_bus
-        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+        .publish_run_event_with_stream_continuation(PublicRunEvent::new(
             &session.durable_session_scope_id,
             &run.id,
-            1,
+            3,
             PublicRunEventKind::RunFinished {
                 final_text: "foreground finished".to_owned(),
             },
@@ -3995,10 +3995,10 @@ async fn local_sse_drains_ordered_terminal_events_before_the_close_marker() {
         .record_terminal_lifecycle_with_publication(&run.id, &exited, |_, close_stream| {
             assert!(!close_stream);
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
-                    1,
+                    4,
                     PublicRunEventKind::TerminalLifecycle {
                         event: exited.clone(),
                     },
@@ -5217,7 +5217,7 @@ fn run_terminal_reconciles_stream_when_final_terminal_lifecycle_won_the_race() {
         .record_terminal_lifecycle_with_publication(&run.id, &running, |_, close_stream| {
             assert!(!close_stream);
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
                     1,
@@ -5230,10 +5230,10 @@ fn run_terminal_reconciles_stream_when_final_terminal_lifecycle_won_the_race() {
         })
         .expect("running lifecycle should publish");
     event_bus
-        .publish_next_run_event_with_stream_continuation(PublicRunEvent::new(
+        .publish_run_event_with_stream_continuation(PublicRunEvent::new(
             &session.durable_session_scope_id,
             &run.id,
-            1,
+            2,
             PublicRunEventKind::RunFinished {
                 final_text: "done".to_owned(),
             },
@@ -5253,10 +5253,10 @@ fn run_terminal_reconciles_stream_when_final_terminal_lifecycle_won_the_race() {
                 "the foreground registry terminal has not committed yet"
             );
             event_bus
-                .publish_next_run_event(PublicRunEvent::new(
+                .publish_run_event(PublicRunEvent::new(
                     &session.durable_session_scope_id,
                     &run.id,
-                    1,
+                    3,
                     PublicRunEventKind::TerminalLifecycle {
                         event: exited.clone(),
                     },
@@ -6557,12 +6557,12 @@ fn live_event_bus_serializes_next_sequence_allocation_across_event_sources() {
 }
 
 #[test]
-fn live_event_bus_binds_approval_display_to_the_allocated_public_sequence() {
+fn live_event_bus_binds_approval_display_to_the_exact_public_sequence() {
     let bus = HttpLiveEventBus::new(8);
-    bus.publish_next_run_event(PublicRunEvent::new(
+    bus.publish_run_event(PublicRunEvent::new(
         "session-1",
         "run-1",
-        99,
+        1,
         PublicRunEventKind::Notice {
             message: "interleaved lifecycle".to_owned(),
         },
@@ -6585,7 +6585,7 @@ fn live_event_bus_binds_approval_display_to_the_allocated_public_sequence() {
     let event = PublicRunEvent::new(
         "session-1",
         "run-1",
-        1,
+        2,
         PublicRunEventKind::ApprovalRequested {
             approval_identity: ApprovalRequestIdentityV2 {
                 session_id: "session-1".to_owned(),
@@ -6620,15 +6620,13 @@ fn live_event_bus_binds_approval_display_to_the_allocated_public_sequence() {
             preview: None,
         },
     );
+    let mut pending = pending_approval(&call.id, &call.name);
+    pending.tool_call_hash = "c".repeat(64);
+    pending.display.event_sequence = 2;
+    pending.display.analysis_status = "complete".to_owned();
     let published = bus
-        .publish_next_run_event_with_approval(event, |sequence| {
-            let mut pending = pending_approval(&call.id, &call.name);
-            pending.tool_call_hash = "c".repeat(64);
-            pending.display.event_sequence = sequence;
-            pending.display.analysis_status = "complete".to_owned();
-            Ok(pending)
-        })
-        .expect("approval should bind its allocated sequence");
+        .publish_run_event_with_approval(event, Some(pending))
+        .expect("approval should bind its exact durable sequence");
     assert_eq!(published.run_event.sequence, 2);
     assert_eq!(
         published

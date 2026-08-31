@@ -360,6 +360,24 @@ impl JsonlSessionStore {
             .is_some())
     }
 
+    pub(crate) fn append_public_event_outbox(
+        &self,
+        entry: &PublicEventOutboxEntryV1,
+    ) -> Result<bool> {
+        self.writer.append_public_event_outbox(entry)
+    }
+
+    pub(crate) fn append_public_event_delivery(
+        &self,
+        receipt: &PublicEventDeliveryReceiptV1,
+    ) -> Result<bool> {
+        self.writer.append_public_event_delivery(receipt)
+    }
+
+    pub(crate) fn public_event_outbox_durable_sequence(&self, run_id: &str) -> Result<u64> {
+        self.writer.public_event_outbox_durable_sequence(run_id)
+    }
+
     pub(super) fn append_event_if_with_identity<F>(
         &self,
         event_type: DurableEventType,

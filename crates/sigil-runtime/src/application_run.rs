@@ -930,13 +930,29 @@ impl ApplicationRunServices {
     }
 }
 
+fn application_terminal_lifecycle_sink(
+    recorder: MutationEventRecorder,
+    handler: Option<Arc<dyn crate::ApplicationTerminalLifecycleHandler>>,
+    events: ApplicationRunEventSequence,
+) -> Arc<dyn sigil_kernel::TerminalLifecycleSink> {
+    let router = crate::ApplicationTerminalLifecycleRouter::new(recorder);
+    let router = if let Some(handler) = handler {
+        router.with_application_public_events(handler, events)
+    } else {
+        router
+    };
+    Arc::new(router)
+}
+
 /// Sink for ordered provider-neutral application events.
 pub trait ApplicationRunEventHandler {
     /// Handles one public event.
     ///
     /// # Errors
     ///
-    /// Returns an error when the adapter cannot accept the event and execution should stop.
+    /// Returns an error when this adapter cannot currently accept the event. Runtime retains the
+    /// already durable outbox entry for ordered replay; this transport result does not decide the
+    /// application run's domain terminal.
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()>;
 
     /// Bounded durable adapter identity used by the public outbox receipt.  Implementations that
@@ -2202,10 +2218,15 @@ impl ApplicationRunExecution {
         self.conversation_lifecycle
             .append_started(&self.conversation_start)
             .context("failed to persist application conversation run start")?;
-        let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler);
+        let mut bridge = PublicApplicationEventBridge::new(self.events.clone(), handler)?;
         if let Err(error) = bridge.emit(PublicRunEventKind::RunStarted {
             prompt: self.prompt.clone(),
         }) {
+            if is_application_public_outbox_append_error(&error) {
+                return Err(error).context(
+                    "application run start public outbox append was not confirmed; durable recovery must decide the next terminal",
+                );
+            }
             let safe_error = self.redactor.redact_text(&format!("{error:#}"));
             bridge.emit_conversation_terminal(
                 &self.conversation_lifecycle,
@@ -2225,6 +2246,11 @@ impl ApplicationRunExecution {
         })?;
         for warning in std::mem::take(&mut self.warnings) {
             if let Err(error) = bridge.emit(PublicRunEventKind::Notice { message: warning }) {
+                if is_application_public_outbox_append_error(&error) {
+                    return Err(error).context(
+                        "application run warning public outbox append was not confirmed; durable recovery must decide the next terminal",
+                    );
+                }
                 let safe_error = self.redactor.redact_text(&format!("{error:#}"));
                 bridge.emit_conversation_terminal(
                     &self.conversation_lifecycle,
@@ -2266,6 +2292,11 @@ impl ApplicationRunExecution {
             if let Err(error) =
                 bridge.emit(user_input::application_user_input_changed_event(request))
             {
+                if is_application_public_outbox_append_error(&error) {
+                    return Err(error).context(
+                        "application user-input public outbox append was not confirmed; durable recovery must decide the next terminal",
+                    );
+                }
                 let resolution = user_input::reconcile_failed_application_user_input_continuation(
                     &mut self.session,
                     context,
@@ -2382,6 +2413,14 @@ impl ApplicationRunExecution {
                     )
                     .await
                     .map(|output| output.status);
+                let status = match status {
+                    Err(error) if is_application_public_outbox_append_error(&error) => {
+                        return Err(error).context(
+                            "planner continuation public outbox append was not confirmed; durable recovery must decide the next terminal",
+                        );
+                    }
+                    status => status,
+                };
                 let status = crate::agent_supervisor::task_execution::finalize_task_root(
                     &mut self.session,
                     &task.task_id,
@@ -2522,6 +2561,9 @@ impl ApplicationRunExecution {
             // cancellation instead of publishing a competing blocked terminal.
             Err(error) if self.cancellation_handle.is_cancel_requested() => Err(error)
                 .context("application run cancellation is pending terminal cleanup confirmation"),
+            Err(error) if is_application_public_outbox_append_error(&error) => Err(error).context(
+                "application public outbox append was not confirmed; durable recovery must decide the next terminal",
+            ),
             Err(error)
                 if error
                     .downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>()
@@ -2917,6 +2959,14 @@ where
             .await,
             Err(error) => Err(error),
         };
+    let result = match result {
+        Err(error) if is_application_public_outbox_append_error(&error) => {
+            return Err(error).context(
+                "typed Task continuation public outbox append was not confirmed; durable recovery must decide the next terminal",
+            );
+        }
+        result => result,
+    };
     let status = crate::agent_supervisor::task_execution::finalize_task_continuation_root(
         session,
         &action.task_id,
@@ -3804,12 +3854,20 @@ async fn prepare_application_run_internal(
             .map_err(ApplicationRunPrepareError::execution)?;
     }
     orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
-    let terminal_lifecycle_sink = Arc::new(crate::ApplicationTerminalLifecycleRouter::new(
+    let session_id = session.session_scope_id().to_owned();
+    // Construct the only public-event sequence before terminal tools retain the lifecycle sink.
+    // The sink may publish while the foreground execution is active or after it finalizes.
+    let events = ApplicationRunEventSequence::with_outbox(
+        session_id.clone(),
+        run_id.clone(),
+        JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    let terminal_lifecycle_sink = application_terminal_lifecycle_sink(
         mutation_recorder.clone(),
-        session.session_scope_id(),
-        &run_id,
         services.terminal_lifecycle_handler.clone(),
-    )) as Arc<dyn sigil_kernel::TerminalLifecycleSink>;
+        events.clone(),
+    );
     let (surface, warnings) = assemble_application_tool_surface(
         &root_config,
         &provider.capabilities(),
@@ -3971,7 +4029,6 @@ async fn prepare_application_run_internal(
         } else {
             None
         };
-    let session_id = session.session_scope_id().to_owned();
     let plan_review_workspace_snapshot_id =
         crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
             .ok()
@@ -4008,13 +4065,6 @@ async fn prepare_application_run_internal(
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;
-    let events = ApplicationRunEventSequence::with_outbox(
-        session_id.clone(),
-        run_id.clone(),
-        PublicEventOutboxRecorder::new(
-            JsonlSessionStore::new(&session_path).map_err(ApplicationRunPrepareError::execution)?,
-        ),
-    );
     let kind = if let Some(request) = explicit_plan_review_request {
         ApplicationRunExecutionKind::ExplicitPlanReview {
             request: Box::new(request),
@@ -6350,10 +6400,11 @@ fn canonical_session_lease_path(path: &Path) -> Result<PathBuf> {
 }
 
 #[derive(Debug, Clone)]
-struct ApplicationRunEventSequence {
+pub(crate) struct ApplicationRunEventSequence {
     session_id: String,
     run_id: String,
-    outbox: Option<PublicEventOutboxRecorder>,
+    outbox_store: JsonlSessionStore,
+    outbox: PublicEventOutboxRecorder,
     state: Arc<Mutex<ApplicationRunEventState>>,
 }
 
@@ -6363,48 +6414,174 @@ struct ApplicationRunEventState {
     terminal: bool,
     terminal_delivered: bool,
     delivery_degraded: bool,
+    live_delivery_prepared: bool,
+}
+
+/// A public outbox append is a durability/authority failure, not an adapter-delivery failure.
+/// The execution owner must leave its durable recovery path intact rather than manufacture a
+/// `RunFailed` terminal from this wrapper.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to durably append application public outbox event")]
+struct ApplicationPublicOutboxAppendError {
+    #[source]
+    source: anyhow::Error,
+}
+
+fn is_application_public_outbox_append_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<ApplicationPublicOutboxAppendError>()
+        .is_some()
 }
 
 impl ApplicationRunEventSequence {
-    #[cfg(test)]
-    fn new(session_id: String, run_id: String) -> Self {
-        Self::with_initial_sequence(session_id, run_id, 0)
-    }
-
-    /// Rejoins one adapter-owned public stream from its already durable sequence watermark.
+    /// Rejoins the one durable public stream for this run from the session outbox watermark.
     ///
-    /// The caller may only supply a value read from that adapter's canonical journal; this keeps
-    /// an interrupted/restarted runtime bridge from reusing an earlier public sequence.
-    fn with_initial_sequence(session_id: String, run_id: String, sequence: u64) -> Self {
-        Self {
+    /// Runtime is the single live producer while this bridge is attached, but session outbox is
+    /// the only durable source of its sequence. An adapter journal must never provide a second
+    /// initial sequence or let a restarted bridge reuse an earlier value.
+    pub(crate) fn with_outbox(
+        session_id: String,
+        run_id: String,
+        outbox_store: JsonlSessionStore,
+    ) -> Result<Self> {
+        let outbox = PublicEventOutboxRecorder::new(outbox_store.clone());
+        let records = outbox_store.read_event_records_writer()?;
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        let sequence = projection.durable_sequence(&run_id);
+        let conversation_terminals = records
+            .iter()
+            .map(|record| record.stored_event())
+            .filter(|event| {
+                event.event_kind() == Some(sigil_kernel::DurableEventType::RunFinalized)
+            })
+            .map(|event| event.event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        // Reopening the bridge must not reopen a finalized foreground run. The validated
+        // pairs distinguish a root Awaiting terminal from a resumable revision Waiting event.
+        let terminal = projection.events_in_order().into_iter().any(|entry| {
+            entry.run_id == run_id
+                && is_terminal_public_run_event(&entry.event.event)
+                && (!matches!(
+                    entry.event.event,
+                    PublicRunEventKind::RunAwaitingUserInput { .. }
+                ) || conversation_terminals.contains(entry.domain_event_id.as_str()))
+        });
+        Ok(Self {
             session_id,
             run_id,
-            outbox: None,
+            outbox_store,
+            outbox,
             state: Arc::new(Mutex::new(ApplicationRunEventState {
                 sequence,
+                terminal,
                 ..ApplicationRunEventState::default()
             })),
-        }
+        })
     }
 
-    fn with_outbox(session_id: String, run_id: String, outbox: PublicEventOutboxRecorder) -> Self {
-        Self {
-            session_id,
-            run_id,
-            outbox: Some(outbox),
-            state: Arc::new(Mutex::new(ApplicationRunEventState::default())),
+    /// Replays every pending predecessor for this run before the live bridge can publish a new
+    /// event. Delivery/receipt failure makes the bridge degraded and suppresses later live
+    /// publication; malformed or unreadable durable state remains an authority error.
+    fn replay_pending_before_live<H>(&self, handler: &mut H) -> Result<usize>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let records = self.outbox_store.read_event_records_writer()?;
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        let adapter = handler.public_event_adapter_id();
+        let pending_ids = projection
+            .pending_for_adapter(adapter)
+            .into_iter()
+            .filter(|entry| entry.run_id == self.run_id)
+            .map(|entry| entry.public_event_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut replayed = 0;
+        for entry in projection
+            .events_in_order()
+            .into_iter()
+            .filter(|entry| pending_ids.contains(entry.public_event_id.as_str()))
+        {
+            if handler.handle_public_event(entry.event.clone()).is_err()
+                || self
+                    .outbox
+                    .append_delivery(&PublicEventDeliveryReceiptV1 {
+                        schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                        public_event_id: entry.public_event_id.clone(),
+                        adapter: adapter.to_owned(),
+                        delivered_at_unix_ms: current_unix_time_ms(),
+                    })
+                    .is_err()
+            {
+                self.mark_delivery_degraded()?;
+                return Ok(replayed);
+            }
+            replayed += 1;
         }
+        self.mark_live_delivery_prepared()?;
+        Ok(replayed)
+    }
+
+    /// Ensures control paths that do not construct `PublicApplicationEventBridge` still replay
+    /// all older pending entries before their first live publication. This matters for durable
+    /// cancellation and Task finalizers, which must not let a terminal overtake a prior failed
+    /// progress delivery.
+    fn ensure_pending_replayed_before_live<H>(&self, handler: &mut H) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let prepared = self
+            .state
+            .lock()
+            .map(|state| state.live_delivery_prepared)
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if !prepared {
+            self.replay_pending_before_live(handler)?;
+        }
+        Ok(())
     }
 
     fn emit<H>(&self, handler: &mut H, event: PublicRunEventKind) -> Result<()>
     where
         H: ApplicationRunEventHandler,
     {
+        self.emit_nonterminal(handler, event, false)
+    }
+
+    /// Appends an owned terminal-task lifecycle update to the same public outbox stream.
+    ///
+    /// A persistent terminal task can outlive the foreground conversation terminal, so this is
+    /// intentionally the only nonterminal event allowed to advance that stream afterwards.
+    /// All ordinary application events remain rejected once the foreground terminal is durable.
+    pub(crate) fn emit_terminal_lifecycle<H>(
+        &self,
+        handler: &mut H,
+        event: sigil_kernel::TerminalLifecycleEvent,
+    ) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        self.emit_nonterminal(
+            handler,
+            PublicRunEventKind::TerminalLifecycle { event },
+            true,
+        )
+    }
+
+    fn emit_nonterminal<H>(
+        &self,
+        handler: &mut H,
+        event: PublicRunEventKind,
+        allow_after_foreground_terminal: bool,
+    ) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        self.ensure_pending_replayed_before_live(handler)?;
         let mut state = self
             .state
             .lock()
             .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
-        if state.terminal {
+        if state.terminal && !allow_after_foreground_terminal {
             bail!("application run event stream is already terminal");
         }
         let sequence = state
@@ -6422,91 +6599,35 @@ impl ApplicationRunEventSequence {
             sequence,
             event,
         );
-        let public_event_id = format!(
-            "application-public:{}:{}:{}",
-            self.session_id, self.run_id, sequence
-        );
-        let payload_digest = sigil_kernel::stable_event_hash(
-            &serde_json::to_vec(&public)
-                .context("failed to encode application public outbox event")?,
-        );
-        let outbox_recorded = self.outbox.as_ref().is_none_or(|outbox| {
-            let entry = PublicEventOutboxEntryV1 {
-                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-                public_event_id: public_event_id.clone(),
-                domain_event_id: format!("application-domain:{}:{}", self.run_id, sequence),
-                run_id: self.run_id.clone(),
-                sequence,
-                payload_digest: payload_digest.clone(),
-                event: public.clone(),
-            };
-            outbox.append_outbox(&entry).is_ok()
-        });
-        let delivered = handler.handle_public_event(public).is_ok();
-        if outbox_recorded && delivered {
-            if let Some(outbox) = self.outbox.as_ref() {
-                let receipt = PublicEventDeliveryReceiptV1 {
-                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-                    public_event_id,
-                    adapter: handler.public_event_adapter_id().to_owned(),
-                    delivered_at_unix_ms: current_unix_time_ms(),
-                };
-                let receipt_recorded = outbox.append_delivery(&receipt).is_ok();
-                if !receipt_recorded {
-                    state.delivery_degraded = true;
-                }
-            }
-        } else {
-            // Delivery and its journal are recoverable adapter boundaries.  Preserve the domain
-            // sequence and, when the outbox append succeeded, leave the exact event pending for
-            // replay instead of allowing an adapter error to manufacture a RunFailed terminal.
-            state.delivery_degraded = true;
-        }
-        state.sequence = sequence;
-        Ok(())
-    }
-
-    /// Emits the one resumable plan-review suspension event without creating a terminal outbox.
-    ///
-    /// `RunAwaitingUserInput` closes the current adapter stream, but it does not finalize the
-    /// durable PlanReview attempt: the same child logical run may resume after an exact answer.
-    /// A1 therefore keeps it on the existing live-delivery path instead of creating a second
-    /// terminal bundle before A2 owns nonterminal/replay semantics.
-    fn emit_resumable_awaiting_user_input<H>(
-        &mut self,
-        handler: &mut H,
-        event: PublicRunEventKind,
-    ) -> Result<PublicRunEvent>
-    where
-        H: ApplicationRunEventHandler,
-    {
-        if !matches!(event, PublicRunEventKind::RunAwaitingUserInput { .. }) {
-            bail!("resumable application event must be RunAwaitingUserInput");
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
-        if state.terminal {
-            bail!("application run event stream is already terminal");
-        }
-        let sequence = state
-            .sequence
-            .checked_add(1)
-            .context("application run event sequence exhausted")?;
-        let public = PublicRunEvent::new(
-            self.session_id.clone(),
-            self.run_id.clone(),
+        let public_event_id = application_public_event_id(&self.session_id, &self.run_id, sequence);
+        let entry = PublicEventOutboxEntryV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            // A nonterminal public event is its own publication fact. Terminal bundles retain
+            // their separately owned domain envelope below.
+            domain_event_id: public_event_id.clone(),
+            public_event_id,
+            run_id: self.run_id.clone(),
             sequence,
-            event,
-        );
-        // A2 owns durable nonterminal delivery. The current live notifier must not rewrite the
-        // durable Waiting fact into a different domain conclusion when adapter delivery fails.
-        if handler.handle_public_event(public.clone()).is_err() {
-            state.delivery_degraded = true;
+            payload_digest: sigil_kernel::stable_event_hash(
+                &serde_json::to_vec(&public)
+                    .context("failed to encode application public outbox event")?,
+            ),
+            event: public.clone(),
+        };
+        if let Err(source) = self.outbox.append_outbox(&entry) {
+            // An append acknowledgement can be lost after the writer commits. The watermark
+            // alone is not enough evidence: another entry can occupy the same sequence. Retry
+            // the exact immutable entry so the kernel verifies every identity and payload field
+            // before this bridge is allowed to publish it.
+            if self.outbox.append_outbox(&entry).is_err() {
+                return Err(anyhow::Error::new(ApplicationPublicOutboxAppendError {
+                    source,
+                }));
+            }
         }
         state.sequence = sequence;
-        Ok(public)
+        self.deliver_committed(&mut state, handler, public, &entry.public_event_id);
+        Ok(())
     }
 
     fn emit_terminal<H>(
@@ -6522,10 +6643,7 @@ impl ApplicationRunEventSequence {
         if !is_terminal_public_run_event(&event) {
             bail!("application conversation terminal requires a terminal public run event");
         }
-        let outbox = self
-            .outbox
-            .as_ref()
-            .context("application conversation terminal requires a durable public event outbox")?;
+        self.ensure_pending_replayed_before_live(handler)?;
         let mut state = self
             .state
             .lock()
@@ -6543,10 +6661,7 @@ impl ApplicationRunEventSequence {
             sequence,
             event,
         );
-        let public_event_id = format!(
-            "application-public:{}:{}:{}",
-            self.session_id, self.run_id, sequence
-        );
+        let public_event_id = application_public_event_id(&self.session_id, &self.run_id, sequence);
         let outbox_entry = PublicEventOutboxEntryV1 {
             schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
             public_event_id: public_event_id.clone(),
@@ -6571,21 +6686,87 @@ impl ApplicationRunEventSequence {
         // are recoverable transport concerns and must never revise this business conclusion.
         state.sequence = sequence;
         state.terminal = true;
-        let delivered = handler.handle_public_event(public).is_ok();
-        let mut receipt_recorded = false;
-        if delivered {
-            let receipt = PublicEventDeliveryReceiptV1 {
-                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-                public_event_id,
-                adapter: handler.public_event_adapter_id().to_owned(),
-                delivered_at_unix_ms: current_unix_time_ms(),
-            };
-            receipt_recorded = outbox.append_delivery(&receipt).is_ok();
+        state.terminal_delivered =
+            self.deliver_committed(&mut state, handler, public, &outbox_entry.public_event_id);
+        Ok(())
+    }
+
+    /// Prepares the exact resumable revision-waiting publication. The corresponding attempt and
+    /// outbox entry must be committed together by the kernel before this payload is delivered.
+    fn prepare_plan_review_revision_waiting(
+        &self,
+        event: PublicRunEventKind,
+    ) -> Result<PublicRunEvent> {
+        if !matches!(event, PublicRunEventKind::RunAwaitingUserInput { .. }) {
+            bail!("resumable plan-review event must be RunAwaitingUserInput");
         }
-        if !delivered || !receipt_recorded {
-            state.delivery_degraded = true;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
         }
-        state.terminal_delivered = delivered && receipt_recorded;
+        let sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        Ok(PublicRunEvent::new(
+            self.session_id.clone(),
+            self.run_id.clone(),
+            sequence,
+            event,
+        ))
+    }
+
+    /// Advances this live producer only after the kernel has committed the exact Waiting pair.
+    fn mark_plan_review_revision_waiting_committed(&self, event: &PublicRunEvent) -> Result<()> {
+        if event.session_id != self.session_id || event.run_id != self.run_id {
+            bail!("committed plan-review waiting belongs to another event stream");
+        }
+        if !matches!(event.event, PublicRunEventKind::RunAwaitingUserInput { .. }) {
+            bail!("committed plan-review waiting has the wrong public payload");
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let expected_sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        if event.sequence != expected_sequence {
+            bail!("committed plan-review waiting sequence does not match the runtime bridge");
+        }
+        state.sequence = event.sequence;
+        Ok(())
+    }
+
+    /// Delivers an already committed revision Waiting notification without creating a second
+    /// writer path. A delivery failure leaves this exact outbox entry pending for ordered replay.
+    fn deliver_plan_review_revision_waiting<H>(
+        &self,
+        handler: &mut H,
+        event: PublicRunEvent,
+        public_event_id: &str,
+    ) -> Result<()>
+    where
+        H: ApplicationRunEventHandler,
+    {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        if event.sequence != state.sequence {
+            bail!("committed plan-review waiting does not match the runtime bridge frontier");
+        }
+        self.deliver_committed(&mut state, handler, event, public_event_id);
         Ok(())
     }
 
@@ -6638,6 +6819,40 @@ impl ApplicationRunEventSequence {
         Ok(())
     }
 
+    /// Attempts the adapter edge only after its event is durable. Once an adapter or receipt
+    /// fails, the live bridge stops publishing later events so a future replay preserves order.
+    /// These errors are deliberately not returned into the agent event path: they are transport
+    /// degradation, not a new domain terminal.
+    fn deliver_committed<H>(
+        &self,
+        state: &mut ApplicationRunEventState,
+        handler: &mut H,
+        event: PublicRunEvent,
+        public_event_id: &str,
+    ) -> bool
+    where
+        H: ApplicationRunEventHandler,
+    {
+        if state.delivery_degraded {
+            return false;
+        }
+        if handler.handle_public_event(event).is_err() {
+            state.delivery_degraded = true;
+            return false;
+        }
+        let receipt = PublicEventDeliveryReceiptV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: public_event_id.to_owned(),
+            adapter: handler.public_event_adapter_id().to_owned(),
+            delivered_at_unix_ms: current_unix_time_ms(),
+        };
+        if self.outbox.append_delivery(&receipt).is_err() {
+            state.delivery_degraded = true;
+            return false;
+        }
+        true
+    }
+
     fn terminal_was_delivered(&self) -> Result<bool> {
         self.state
             .lock()
@@ -6651,9 +6866,31 @@ impl ApplicationRunEventSequence {
             .map(|state| state.delivery_degraded)
             .map_err(|_| anyhow!("application run event sequence is unavailable"))
     }
+
+    fn mark_delivery_degraded(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map(|mut state| {
+                state.delivery_degraded = true;
+                state.live_delivery_prepared = true;
+            })
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))
+    }
+
+    fn mark_live_delivery_prepared(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map(|mut state| state.live_delivery_prepared = true)
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))
+    }
 }
 
-/// Replays the exact pending terminal public events for one application run to one adapter.
+fn application_public_event_id(session_id: &str, run_id: &str, sequence: u64) -> String {
+    format!("application-public:{session_id}:{run_id}:{sequence}")
+}
+
+/// Replays the exact pending public events for one application run to one adapter in durable
+/// order.
 ///
 /// This is a transport-recovery operation only: it reads the already committed outbox entry,
 /// forwards its original id/sequence/payload to the adapter, and appends that adapter's receipt
@@ -6662,8 +6899,9 @@ impl ApplicationRunEventSequence {
 /// # Errors
 ///
 /// Returns an error when the durable outbox cannot be rebuilt, the adapter rejects an exact
-/// pending event, or the corresponding delivery receipt cannot be persisted.
-pub fn replay_pending_application_terminal_outbox<H>(
+/// pending event, or the corresponding delivery receipt cannot be persisted. Replay stops at the
+/// first failure so later entries can never overtake an unresolved predecessor.
+pub fn replay_pending_application_outbox<H>(
     session_log_path: &Path,
     run_id: &str,
     handler: &mut H,
@@ -6678,7 +6916,7 @@ where
     let pending_ids = projection
         .pending_for_adapter(adapter)
         .into_iter()
-        .filter(|entry| entry.run_id == run_id && is_terminal_public_run_event(&entry.event.event))
+        .filter(|entry| entry.run_id == run_id)
         .map(|entry| entry.public_event_id.as_str())
         .collect::<BTreeSet<_>>();
     let recorder = PublicEventOutboxRecorder::new(store);
@@ -6692,7 +6930,7 @@ where
             .handle_public_event(entry.event.clone())
             .with_context(|| {
                 format!(
-                    "adapter {adapter} rejected pending application terminal public event {}",
+                    "adapter {adapter} rejected pending application public event {}",
                     entry.public_event_id
                 )
             })?;
@@ -6707,6 +6945,9 @@ where
     Ok(replayed)
 }
 
+/// Root-conversation terminal classification. A revision Waiting event intentionally shares the
+/// public `RunAwaitingUserInput` kind, but is admitted only through its separate atomic
+/// plan-review Waiting attempt/outbox bundle rather than this root terminal path.
 fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
     matches!(
         event,
@@ -6743,8 +6984,9 @@ pub struct PlanReviewRevisionExecution {
     /// The only terminal payload an adapter may publish. `None` is only valid for a resumable
     /// waiting-input outcome.
     pub terminal_outbox: Option<PublicEventOutboxEntryV1>,
-    /// The live-only suspension event for a resumable research question. It is never a terminal
-    /// outbox; a later answer resumes this same child logical run.
+    /// The exact durable suspension event for a resumable research question. It is not a terminal
+    /// finalizer; a later answer resumes this same child logical run from the paired Waiting
+    /// attempt and outbox record.
     pub waiting_public_event: Option<PublicRunEvent>,
 }
 
@@ -6760,7 +7002,6 @@ pub async fn execute_plan_review_revision_with_managed_execution<H>(
     workspace_root: &Path,
     session_log_path: &Path,
     request: &crate::PlanReviewRunRequest,
-    initial_public_sequence: u64,
     handler: &mut H,
     cancellation: Option<sigil_kernel::RunCancellationHandle>,
     managed_command_execution: Option<
@@ -6798,6 +7039,30 @@ where
             waiting_public_event: None,
         });
     }
+    let managed_research_input_allows_resume = child_resource_provisioner
+        .as_deref()
+        .map(|provisioner| {
+            crate::PlanReviewCoordinator::managed_plan_review_research_input_allows_resume(
+                &session,
+                request,
+                provisioner,
+            )
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if let Some(outbox) =
+        session.reconcile_plan_review_revision_waiting(&request.child_logical_run_id())?
+        && !managed_research_input_allows_resume
+    {
+        let outcome = crate::PlanReviewCoordinator::revision_waiting_outcome_from_outbox(
+            &session, request, &outbox,
+        )?;
+        return Ok(PlanReviewRevisionExecution {
+            outcome,
+            terminal_outbox: None,
+            waiting_public_event: Some(outbox.event),
+        });
+    }
     let model_ref = session
         .resolved_model_route()
         .map(|route| route.model_ref.clone())
@@ -6809,13 +7074,19 @@ where
     )?;
     let cancellation_handle = cancellation.unwrap_or_else(|| RunCancellationOwner::new().handle());
     let mut bridge = PublicApplicationEventBridge::new(
-        ApplicationRunEventSequence::with_initial_sequence(
+        ApplicationRunEventSequence::with_outbox(
             session.session_scope_id().to_owned(),
             request.child_logical_run_id(),
-            initial_public_sequence,
-        ),
+            JsonlSessionStore::new(session_log_path)?,
+        )?,
         handler,
-    );
+    )?;
+    // A revision Waiting attempt is resumable, not terminal. Its next execution must append a
+    // fresh durable start so application projections clear the old waiting presentation only
+    // after an actual resumed run has been admitted.
+    bridge.emit(PublicRunEventKind::RunStarted {
+        prompt: "plan review revision".to_owned(),
+    })?;
     let execution = (async {
         let provider = crate::build_provider_for_model_ref_async(root_config, &model_ref).await?;
         let mut base_registry = sigil_kernel::ToolRegistry::new();
@@ -6925,6 +7196,11 @@ where
     .await;
     let outcome = match execution {
         Ok(outcome) => outcome,
+        Err(error) if is_application_public_outbox_append_error(&error) => {
+            return Err(error).context(
+                "plan review revision public outbox append was not confirmed; durable recovery must decide the next terminal",
+            );
+        }
         Err(error) => {
             if let Some(outbox) =
                 session.reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
@@ -6982,26 +7258,32 @@ where
         &outcome,
         crate::PlanReviewRunOutcome::AwaitingUserInput { .. }
     ) {
-        crate::PlanReviewCoordinator::close_plan_review_run(
-            &mut session,
-            request,
-            &outcome,
-            current_unix_time_ms(),
-        )?;
         let crate::PlanReviewRunOutcome::AwaitingUserInput { request: pending } = &outcome else {
             unreachable!("AwaitingUserInput was matched above");
         };
-        let waiting_public_event = bridge.emit_resumable_plan_review_waiting(
+        let waiting_event = bridge.prepare_plan_review_revision_waiting(
             PublicRunEventKind::RunAwaitingUserInput {
                 request_id: pending.identity.request_id.as_str().to_owned(),
                 generation: pending.identity.generation,
                 request_hash: pending.request_hash.clone(),
             },
         )?;
+        let waiting_outbox = crate::PlanReviewCoordinator::commit_revision_waiting_with_outbox(
+            &mut session,
+            request,
+            pending,
+            waiting_event,
+            current_unix_time_ms(),
+        )?;
+        bridge.mark_plan_review_revision_waiting_committed(&waiting_outbox.event)?;
+        bridge.deliver_plan_review_revision_waiting(
+            waiting_outbox.event.clone(),
+            &waiting_outbox.public_event_id,
+        )?;
         return Ok(PlanReviewRevisionExecution {
             outcome,
             terminal_outbox: None,
-            waiting_public_event: Some(waiting_public_event),
+            waiting_public_event: Some(waiting_outbox.event),
         });
     }
     let public_kind = crate::PlanReviewCoordinator::revision_terminal_public_event(&outcome)
@@ -7050,7 +7332,6 @@ where
         workspace_root,
         session_log_path,
         request,
-        0,
         handler,
         cancellation,
         None,
@@ -7071,12 +7352,13 @@ impl<'a, H> PublicApplicationEventBridge<'a, H>
 where
     H: ApplicationRunEventHandler,
 {
-    fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Self {
-        Self {
+    fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Result<Self> {
+        events.replay_pending_before_live(handler)?;
+        Ok(Self {
             events,
             task_events: PublicTaskEventProjector::default(),
             handler,
-        }
+        })
     }
 
     fn emit(&mut self, event: PublicRunEventKind) -> Result<()> {
@@ -7117,12 +7399,25 @@ where
         self.events.mark_terminal_committed(event)
     }
 
-    fn emit_resumable_plan_review_waiting(
-        &mut self,
+    fn prepare_plan_review_revision_waiting(
+        &self,
         event: PublicRunEventKind,
     ) -> Result<PublicRunEvent> {
+        self.events.prepare_plan_review_revision_waiting(event)
+    }
+
+    fn mark_plan_review_revision_waiting_committed(&self, event: &PublicRunEvent) -> Result<()> {
         self.events
-            .emit_resumable_awaiting_user_input(self.handler, event)
+            .mark_plan_review_revision_waiting_committed(event)
+    }
+
+    fn deliver_plan_review_revision_waiting(
+        &mut self,
+        event: PublicRunEvent,
+        public_event_id: &str,
+    ) -> Result<()> {
+        self.events
+            .deliver_plan_review_revision_waiting(self.handler, event, public_event_id)
     }
 }
 

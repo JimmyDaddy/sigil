@@ -21,14 +21,165 @@ use crate::runner::{
         PlanReviewExecutionResult, VerificationCheckPromotionKind,
         VerificationCheckPromotionOutcome, append_mcp_elicitation_audits, append_plan_draft,
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
-        configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
-        configured_provider_route_concurrency_limit, delete_mutation_artifact,
-        deliver_durable_revision_terminal_after_audit, materialize_task_verification_config,
-        prepare_task_run_cancellation, preserve_revision_result_after_audit,
-        promote_workspace_verification_check, revision_terminal_worker_message,
-        tui_plan_review_result_from_durable_revision_outcome,
+        commit_tui_plan_review_revision_waiting, configured_max_parallel_changeset_steps,
+        configured_max_parallel_read_steps, configured_provider_route_concurrency_limit,
+        delete_mutation_artifact, deliver_durable_revision_terminal_after_audit,
+        materialize_task_verification_config, prepare_task_run_cancellation,
+        preserve_revision_result_after_audit, promote_workspace_verification_check,
+        revision_terminal_worker_message, tui_plan_review_result_from_durable_revision_outcome,
     },
 };
+
+#[test]
+fn worker_revision_waiting_commits_the_exact_public_outbox_before_tui_wakeup() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("revision-waiting.jsonl");
+    let mut session = Session::load_from_store(
+        "tui-worker-test",
+        "test-model",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    let session_id = session.session_scope_id().to_owned();
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        &session_id,
+        "revision-waiting-source-message",
+        "revision-waiting-root-run",
+    )?;
+    let review_id = sigil_kernel::PlanReviewId::new("revision-waiting-review")?;
+    let base_attempt_id = sigil_kernel::PlanReviewAttemptId::new("revision-waiting-base")?;
+    let base_plan_id = sigil_kernel::PlanId::new("revision-waiting-base-plan")?;
+    let base = sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
+        base_plan_id.clone(),
+        "Keep the durable public-event contract.",
+        sigil_kernel::PlanSourceRef {
+            source_turn: Some(source_turn.clone()),
+            plan_review_id: Some(review_id.clone()),
+            ..sigil_kernel::PlanSourceRef::default()
+        },
+        10,
+        None,
+    )?
+    .expect("test fixture needs a base plan");
+    let base_attempt = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: review_id.clone(),
+        attempt_id: base_attempt_id.clone(),
+        plan_id: base_plan_id,
+        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+        source_turn: source_turn.clone(),
+        explicit_objective: Some("Keep the durable public-event contract.".to_owned()),
+        route_decision_id: None,
+        child_session_ref: sigil_kernel::plan_review_child_session_ref(
+            &review_id,
+            &base_attempt_id,
+        ),
+        finalizer_session_ref: Some(sigil_kernel::plan_review_finalizer_session_ref(
+            &review_id,
+            &base_attempt_id,
+            1,
+        )),
+        revision_request_id: None,
+        attempt_ordinal: 1,
+        base_plan_id: None,
+        base_plan_hash: None,
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: sigil_kernel::PlanReviewAttemptStatus::DraftReady,
+        terminal_reason: None,
+        recorded_at_ms: 11,
+    };
+    let mut base_started = base_attempt.clone();
+    base_started.status = sigil_kernel::PlanReviewAttemptStatus::Started;
+    base_started.finalizer_session_ref = None;
+    base_started.recorded_at_ms = 9;
+    session.append_control(ControlEntry::PlanReviewAttempt(base_started))?;
+    session.append_controls(vec![
+        ControlEntry::PlanDraftCreated(base.clone()),
+        ControlEntry::PlanReviewAttempt(base_attempt),
+    ])?;
+    let guidance = sigil_runtime::PlanReviewCoordinator::request_plan_revision_guidance(
+        &mut session,
+        &base.plan_id,
+        &base.plan_hash,
+        12,
+    )?;
+    let (_, revision) = sigil_runtime::PlanReviewCoordinator::accept_plan_revision_guidance(
+        &mut session,
+        sigil_kernel::UserInputDecisionCommandV1 {
+            identity: guidance.request.identity,
+            request_hash: guidance.request_hash,
+            command_id: sigil_kernel::UserInputCommandId::new("revision-waiting-guidance")?,
+            decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                answers: vec![sigil_kernel::UserInputAnswerV1 {
+                    question_id: "revision_guidance".to_owned(),
+                    value: sigil_kernel::UserInputAnswerValueV1::Text {
+                        value: "Ask one bounded research question first.".to_owned(),
+                    },
+                }],
+            },
+        },
+        None,
+        13,
+    )?;
+    let revision = revision.expect("accepted guidance must prepare a revision worker run");
+    sigil_runtime::PlanReviewCoordinator::ensure_attempt_started(&mut session, &revision, 14)?;
+    let pending = sigil_kernel::PublicUserInputRequestV1 {
+        identity: sigil_kernel::UserInputIdentityV1 {
+            session_scope_id: sigil_kernel::SessionScopeId::new(&session_id)?,
+            root_logical_run_id: sigil_kernel::LogicalRunId::new(revision.child_logical_run_id())?,
+            source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+            request_id: sigil_kernel::UserInputRequestId::new("revision-waiting-research")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        request_hash: format!("sha256:{}", "b".repeat(64)),
+        source: sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+            plan_review_id: revision.plan_review_id.clone(),
+            attempt_id: revision.attempt_id.clone(),
+        },
+        purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+        prompt: "Which invariant is still unproven?".to_owned(),
+        questions: Vec::new(),
+        allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+        requested_at_unix_ms: 15,
+        status: sigil_kernel::UserInputStatusV1::Requested,
+        answer_receipt: None,
+        resolution: None,
+    };
+
+    let outbox = commit_tui_plan_review_revision_waiting(&mut session, &revision, &pending)
+        .map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        &outbox.event.event,
+        PublicRunEventKind::RunAwaitingUserInput { request_id, generation: 1, .. }
+            if request_id == "revision-waiting-research"
+    ));
+    let records = JsonlSessionStore::read_event_records(&session_path)?;
+    let outbox_projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    assert!(
+        outbox_projection
+            .pending_for_adapter("tui")
+            .iter()
+            .any(|entry| {
+                entry.public_event_id == outbox.public_event_id
+                    && entry.event.sequence == outbox.event.sequence
+            })
+    );
+    let waiting_record = records
+        .iter()
+        .find(|record| record.stored_event().event_id == outbox.domain_event_id)
+        .expect("waiting domain record must be committed with the public outbox");
+    let public_record = records
+        .iter()
+        .find(|record| record.stored_event().event_id == outbox.public_event_id)
+        .expect("waiting public record must be committed with the domain record");
+    assert_eq!(
+        public_record.stream_sequence(),
+        waiting_record.stream_sequence().saturating_add(1),
+        "the real worker Waiting transition must use the kernel's adjacent atomic pair"
+    );
+    Ok(())
+}
 
 #[test]
 fn durable_revision_terminals_keep_their_typed_worker_projection() {
