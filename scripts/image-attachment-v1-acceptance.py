@@ -21,7 +21,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import termios
 import threading
 import time
@@ -29,6 +28,8 @@ from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+
+from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
 ANSI_RE = re.compile(
@@ -1065,6 +1066,7 @@ def run_case(
 
 
 def main() -> int:
+    ensure_isolated_entry()
     args = parse_args()
     root = repo_root()
     binary = args.binary
@@ -1077,12 +1079,9 @@ def main() -> int:
         output_dir = root / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    temporary: tempfile.TemporaryDirectory[str] | None = None
-    if args.keep_temp:
-        fixture_root = Path(tempfile.mkdtemp(prefix="sigil-image-acceptance-"))
-    else:
-        temporary = tempfile.TemporaryDirectory(prefix="sigil-image-acceptance-")
-        fixture_root = Path(temporary.name)
+    fixture_root = create_fixture_tempdir(
+        "sigil-image-acceptance-", keep=args.keep_temp, repository_root=root
+    )
     server = FixtureServer(("127.0.0.1", 0), FixtureHandler)
     server.fixture = FixtureState()
     server.daemon_threads = True
@@ -1142,8 +1141,8 @@ def main() -> int:
         thread.join(timeout=5)
         if args.keep_temp:
             print(f"Temporary fixture: {fixture_root}")
-        elif temporary is not None:
-            temporary.cleanup()
+        else:
+            shutil.rmtree(fixture_root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -252,6 +252,8 @@
 - 跨层链路再补集成测试
 - 对 TUI，优先测状态转换，而不是只测渲染文本
 
+测试存储必须与真实用户目录隔离：执行入口使用 `python3 scripts/run-isolated-tests.py -- <command...>`；有副作用的 fixture 仍须拥有独立 storage/config/workspace，child 使用显式子进程环境。不要通过全局共享 storage override 或强制整个测试套件单线程掩盖隔离缺陷。环境构造与验证边界见[测试隔离设计](../docs/test-isolation.md)。
+
 ### 5.3 测试目录规范
 
 单元测试必须和业务代码物理分离。业务文件中只保留测试模块声明，不再回填 inline `mod tests { ... }` 测试实现。
@@ -294,7 +296,7 @@
 ```bash
 cargo fmt --all --check
 cargo check
-cargo test
+python3 scripts/run-isolated-tests.py -- cargo test
 cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```

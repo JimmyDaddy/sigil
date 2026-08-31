@@ -233,10 +233,39 @@ export SIGIL_R71_BOOTSTRAP_ISOLATED=1
 export SIGIL_R71_BOOTSTRAP_RETENTION_POLICY="exact-temp-home-with-marker"
 export SIGIL_R71_QUALIFICATION_HOME="$qualification_home"
 
+# Resolve the caller-owned evidence destination before rebinding TMPDIR. The default must not
+# land below qualification_home, because the EXIT trap intentionally removes that exact root.
 evidence_dir="${SIGIL_R71_EVIDENCE_DIR:-$(mktemp -d -t sigil-r71-release-XXXXXX)}"
 mkdir -p "$evidence_dir/logs"
 steps_file="$evidence_dir/steps.tsv"
 : > "$steps_file"
+
+# Keep this dedicated OS qualification's own direct Cargo steps inside the same temporary
+# identity. The nested conformance scripts create their own canonical runner roots, but these
+# platform probes intentionally run here so they can exercise the host backend. Do not let an
+# operator's ambient Sigil roots or storage selectors redirect this qualification.
+for qualification_env_name in \
+  SIGIL_STATE_HOME SIGIL_CACHE_HOME SIGIL_SCRATCH_DIR SIGIL_CONFIG SIGIL_CONFIG_PATH \
+  XDG_RUNTIME_DIR XDG_DATA_HOME TMPDIR TMP TEMP; do
+  unset "$qualification_env_name"
+done
+mkdir -p "$qualification_home/tmp" "$qualification_home/.runtime" "$qualification_home/.local/share"
+export TMPDIR="$qualification_home/tmp"
+export TMP="$qualification_home/tmp"
+export TEMP="$qualification_home/tmp"
+export XDG_RUNTIME_DIR="$qualification_home/.runtime"
+export XDG_DATA_HOME="$qualification_home/.local/share"
+if [[ "$platform" == "windows" ]]; then
+  qualification_home_drive="${qualification_home_windows%%\\*}"
+  qualification_home_path="${qualification_home_windows#"$qualification_home_drive"}"
+  export USERPROFILE="$qualification_home_windows"
+  export APPDATA="${qualification_home_windows}\\AppData\\Roaming"
+  export LOCALAPPDATA="${qualification_home_windows}\\AppData\\Local"
+  export HOMEDRIVE="$qualification_home_drive"
+  export HOMEPATH="$qualification_home_path"
+else
+  unset USERPROFILE APPDATA LOCALAPPDATA HOMEDRIVE HOMEPATH
+fi
 
 identity_json="$(python3 - "$ROOT" "$candidate_sha" "$base_sha" <<'PY'
 import json

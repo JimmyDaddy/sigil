@@ -27,6 +27,8 @@ python3 - "$ROOT/dev/governance/r71-conformance-inventory-v1.toml" <<'MANIFEST_C
 import re, subprocess, sys, tomllib
 from pathlib import Path
 doc = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+root = Path(sys.argv[1]).parents[2]
+isolated_runner = root / "scripts" / "run-isolated-tests.py"
 cases = doc.get("cases", [])
 if len(cases) != 228:
     print(f"FAIL: manifest must contain exactly 228 required fault cases, found {len(cases)}", file=sys.stderr)
@@ -60,7 +62,19 @@ for package, package_expected in expected.items():
     families = sorted({prefix.rsplit("_", 1)[0] for prefix in package_expected})
     for family_prefix in families:
         result = subprocess.run(
-            ["cargo", "test", "-p", package, "--lib", family_prefix, "--", "--list"],
+            [
+                sys.executable,
+                str(isolated_runner),
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                package,
+                "--lib",
+                family_prefix,
+                "--",
+                "--list",
+            ],
             check=False, capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -107,7 +121,7 @@ run_suite() {
   local expected="$2"
   shift 2
   local output
-  output=$("$@" 2>&1) || {
+  output=$(python3 "${ROOT}/scripts/run-isolated-tests.py" -- "$@" 2>&1) || {
     echo "FAIL(campaign/$label): cargo exited non-zero" >&2
     echo "$output" | tail -20 >&2
     exit 1

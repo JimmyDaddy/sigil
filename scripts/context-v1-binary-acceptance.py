@@ -18,12 +18,13 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 from dataclasses import asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -529,6 +530,7 @@ def binary_sha256(path: Path) -> str:
 
 
 def main() -> int:
+    ensure_isolated_entry()
     args = parse_args()
     root = Path(__file__).resolve().parent.parent
     binary = args.binary if args.binary.is_absolute() else root / args.binary
@@ -546,7 +548,9 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    temp_root = Path(tempfile.mkdtemp(prefix="sigil-context-v1-acceptance-"))
+    temp_root = create_fixture_tempdir(
+        "sigil-context-v1-acceptance-", keep=args.keep_temp, repository_root=root
+    )
     workspace = temp_root / "workspace"
     state_root = temp_root / "state"
     cache_root = temp_root / "cache"

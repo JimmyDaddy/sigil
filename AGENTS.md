@@ -74,8 +74,9 @@ CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 - 代码变更完成后至少跑相关 gate；默认优先跑：
   - `cargo fmt --all --check`
   - `cargo check`
-  - `cargo test`
+  - `python3 scripts/run-isolated-tests.py -- cargo test`
   - `cargo clippy --all-targets -- -D warnings`
+- 测试及其产品子进程必须通过统一隔离入口，或使用已验证的等价独立 fixture 环境；不能继承真实用户的 Sigil 配置、凭证、bootstrap、state/cache。禁止用共享 `SIGIL_STATE_HOME`/`SIGIL_CACHE_HOME` 覆盖各 fixture 的显式 storage。具体约束见 [`dev/docs/test-isolation.md`](dev/docs/test-isolation.md)。
 - docs-only 变更可以不跑全量 gate，但要确认链接、路径和命令没有写错
 
 ### 文档同步

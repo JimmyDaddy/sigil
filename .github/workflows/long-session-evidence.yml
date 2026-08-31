@@ -34,11 +34,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Verify evidence collector contract
-        run: python3 scripts/test-long-session-evidence.py
+        run: python3 scripts/run-isolated-tests.py -- python3 scripts/test-long-session-evidence.py
 
       - name: Collect release-profile evidence
         run: |
-          python3 scripts/long-session-evidence.py \
+          python3 scripts/run-isolated-tests.py -- python3 scripts/long-session-evidence.py \
             --output target/long-session-evidence.json
 
       - name: Upload machine-readable evidence

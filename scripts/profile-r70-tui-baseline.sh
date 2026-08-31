@@ -3,6 +3,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ISOLATED_TEST_RUNNER=(python3 "$ROOT/scripts/run-isolated-tests.py" --)
 OUTPUT_DIR="${SIGIL_R70_PROFILE_DIR:-$ROOT/.repo-local-dev/r70-baseline/profile}"
 mkdir -p "$OUTPUT_DIR"
 
@@ -14,7 +15,8 @@ tests=(
 for test_name in "${tests[@]}"; do
   log_path="$OUTPUT_DIR/${test_name}.log"
   echo "profiling $test_name -> $log_path"
-  SIGIL_TUI_PHASE_TIMINGS=1 cargo test -p sigil-tui-app --lib "$test_name" -- --nocapture >"$log_path" 2>&1
+  "${ISOLATED_TEST_RUNNER[@]}" env SIGIL_TUI_PHASE_TIMINGS=1 \
+    cargo test -p sigil-tui-app --lib "$test_name" -- --nocapture >"$log_path" 2>&1
 done
 
 python3 - "$OUTPUT_DIR" <<'PY'

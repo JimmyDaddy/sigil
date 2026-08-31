@@ -109,6 +109,7 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "${repo_root}"
+isolated_test_runner=(python3 "${repo_root}/scripts/run-isolated-tests.py" --)
 
 if [[ -z "${output_dir}" ]]; then
   timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -128,8 +129,10 @@ if [[ "${mode}" == "deterministic" ]]; then
   mkdir -p "${output_dir}"
   node dev/evals/generate-orchestration-corpus.mjs --check
   ./scripts/check-orchestration-deterministic.sh
-  cargo test -p sigil-tools-builtin bash_permission_plan_matches_deterministic_risk_corpus
-  SIGIL_DETERMINISTIC_EVAL_REPORT_DIR="${output_dir}" \
+  "${isolated_test_runner[@]}" cargo test -p sigil-tools-builtin \
+    bash_permission_plan_matches_deterministic_risk_corpus
+  "${isolated_test_runner[@]}" env \
+    "SIGIL_DETERMINISTIC_EVAL_REPORT_DIR=${output_dir}" \
     cargo test -p sigil-kernel eval_report_writes_deterministic_artifacts -- --nocapture
 else
   if [[ -z "${config_path}" || ${#cases[@]} -eq 0 || -z "${repetitions}" || -z "${max_cost_usd}" ]]; then

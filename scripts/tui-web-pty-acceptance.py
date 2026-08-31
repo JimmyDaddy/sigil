@@ -19,7 +19,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import termios
 import threading
 import time
@@ -27,6 +26,8 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+
+from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
 ANSI_RE = re.compile(
@@ -769,6 +770,7 @@ def write_report(
 
 
 def main() -> int:
+    ensure_isolated_entry()
     args = parse_args()
     root = repo_root()
     binary = args.binary if args.binary.is_absolute() else root / args.binary
@@ -789,7 +791,9 @@ def main() -> int:
     server_thread.start()
     port = int(server.server_address[1])
 
-    temp_root = Path(tempfile.mkdtemp(prefix="sigil-web-pty-"))
+    temp_root = create_fixture_tempdir(
+        "sigil-web-pty-", keep=args.keep_workspace, repository_root=root
+    )
     workspace = temp_root / "workspace"
     state_dir = temp_root / "state"
     cache_dir = temp_root / "cache"

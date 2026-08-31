@@ -20,6 +20,11 @@ on:
       - "rustfmt.toml"
       - "dev/evals/**"
       - "scripts/coverage.sh"
+      - "scripts/run-isolated-tests.py"
+      - "scripts/test-run-isolated-tests.py"
+      - "scripts/isolated_test_entry.py"
+      - "scripts/check-isolated-test-entrypoints.py"
+      - "scripts/test-isolated-test-entrypoints.py"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
@@ -82,6 +87,11 @@ on:
       - "rustfmt.toml"
       - "dev/evals/**"
       - "scripts/coverage.sh"
+      - "scripts/run-isolated-tests.py"
+      - "scripts/test-run-isolated-tests.py"
+      - "scripts/isolated_test_entry.py"
+      - "scripts/check-isolated-test-entrypoints.py"
+      - "scripts/test-isolated-test-entrypoints.py"
       - "scripts/alpha-dogfood-campaign.py"
       - "scripts/test-alpha-dogfood-campaign.py"
       - "scripts/check-test-layout.py"
@@ -153,32 +163,35 @@ jobs:
 
       - name: Verify dogfood and distribution contracts
         run: |
-          python3 scripts/test-alpha-dogfood-campaign.py
-          python3 scripts/test-run-evals.py
-          python3 scripts/test-tui-stateful-pty-acceptance.py
-          python3 scripts/test-tui-orchestration-pty-acceptance.py
-          python3 scripts/test-tui-web-pty-acceptance.py
-          node scripts/test-desktop-macos-signing.mjs
-          node scripts/test-desktop-notarization-state.mjs
-          python3 scripts/test-extract-verified-desktop-updater-app.py
-          node scripts/test-product-surface-positioning.mjs
-          node scripts/test-update-distribution-markers.mjs
-          node scripts/test-release-tooling.mjs
-          scripts/test-publish-npm-packages.sh
-          scripts/test-published-distribution-smoke.sh
+          python3 scripts/check-isolated-test-entrypoints.py
+          python3 scripts/test-run-isolated-tests.py
+          python3 scripts/test-isolated-test-entrypoints.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-alpha-dogfood-campaign.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-run-evals.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-tui-stateful-pty-acceptance.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-tui-orchestration-pty-acceptance.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-tui-web-pty-acceptance.py
+          python3 scripts/run-isolated-tests.py -- node scripts/test-desktop-macos-signing.mjs
+          python3 scripts/run-isolated-tests.py -- node scripts/test-desktop-notarization-state.mjs
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-extract-verified-desktop-updater-app.py
+          python3 scripts/run-isolated-tests.py -- node scripts/test-product-surface-positioning.mjs
+          python3 scripts/run-isolated-tests.py -- node scripts/test-update-distribution-markers.mjs
+          python3 scripts/run-isolated-tests.py -- node scripts/test-release-tooling.mjs
+          python3 scripts/run-isolated-tests.py -- scripts/test-publish-npm-packages.sh
+          python3 scripts/run-isolated-tests.py -- scripts/test-published-distribution-smoke.sh
 
       - name: Enforce physical Rust test layout
         run: |
-          python3 scripts/test-check-test-layout.py
-          python3 scripts/check-test-layout.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-check-test-layout.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/check-test-layout.py
 
       - name: Enforce model-owned prompt semantics
         run: |
-          python3 scripts/test-check-no-prompt-phrase-routing.py
-          python3 scripts/check-no-prompt-phrase-routing.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-check-no-prompt-phrase-routing.py
+          python3 scripts/run-isolated-tests.py -- python3 scripts/check-no-prompt-phrase-routing.py
 
       - name: Verify long-session evidence contract
-        run: python3 scripts/test-long-session-evidence.py
+        run: python3 scripts/run-isolated-tests.py -- python3 scripts/test-long-session-evidence.py
 
   fmt:
     runs-on: ubuntu-latest
@@ -230,7 +243,7 @@ jobs:
         run: pnpm --dir apps/desktop install --frozen-lockfile
 
       - name: Verify generated contract and frontend
-        run: pnpm --dir apps/desktop check
+        run: python3 scripts/run-isolated-tests.py -- pnpm --dir apps/desktop check
 
   check:
     needs:
@@ -316,7 +329,8 @@ jobs:
 
       - name: Run model-owned orchestration real-PTY acceptance
         run: >-
-          timeout 120s python3 scripts/tui-orchestration-pty-acceptance.py
+          python3 scripts/run-isolated-tests.py -- timeout 120s
+          python3 scripts/tui-orchestration-pty-acceptance.py
           --binary target/debug/sigil
 
       - name: Upload orchestration PTY acceptance artifacts
@@ -364,11 +378,11 @@ jobs:
 
       - name: Test macOS runtime and execution surfaces
         if: runner.os == 'macOS'
-        run: cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib -- --test-threads=1
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-kernel -p sigil-process -p sigil-tools-builtin -p sigil-code-intel -p sigil-runtime --lib -- --test-threads=1
 
       - name: Test Windows kernel durability
         if: runner.os == 'Windows'
-        run: cargo test --locked -p sigil-kernel --lib
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-kernel --lib
 
   platform-windows-mcp:
     name: Platform reliability (Windows MCP)
@@ -392,7 +406,7 @@ jobs:
         run: cargo check --locked -p sigil-process -p sigil-mcp --all-targets
 
       - name: Test Windows MCP transport
-        run: cargo test --locked -p sigil-process -p sigil-mcp --lib -- --test-threads=1
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-process -p sigil-mcp --lib -- --test-threads=1
 
   platform-windows-builtin:
     name: Platform reliability (Windows builtin)
@@ -416,7 +430,7 @@ jobs:
         run: cargo check --locked -p sigil-tools-builtin --all-targets
 
       - name: Test Windows builtin tools and terminal semantics
-        run: cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-tools-builtin --lib -- --test-threads=2
 
   platform-windows-runtime:
     name: "Platform reliability (Windows runtime: ${{ matrix.name }})"
@@ -479,7 +493,7 @@ jobs:
         run: cargo check --locked -p sigil-runtime --all-targets
 
       - name: Test Windows runtime integration (${{ matrix.name }})
-        run: cargo test --locked -p sigil-runtime --lib -- --test-threads=1 ${{ matrix.test-args }}
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-runtime --lib -- --test-threads=1 ${{ matrix.test-args }}
 
   platform-windows-http:
     name: Platform reliability (Windows HTTP)
@@ -503,7 +517,7 @@ jobs:
         run: cargo check --locked -p sigil-http --all-targets
 
       - name: Test Windows HTTP durable journal
-        run: cargo test --locked -p sigil-http --all-targets -- --test-threads=1
+        run: python3 scripts/run-isolated-tests.py -- cargo test --locked -p sigil-http --all-targets -- --test-threads=1
 
   oauth-keyring-conformance:
     name: Provider and OAuth keyring conformance (${{ matrix.name }})
@@ -668,7 +682,7 @@ jobs:
         run: cargo build --locked -p sigil
 
       - name: Run deterministic Web V1 real-PTY acceptance
-        run: timeout 150s python3 scripts/tui-web-pty-acceptance.py --binary target/debug/sigil
+        run: python3 scripts/run-isolated-tests.py -- timeout 150s python3 scripts/tui-web-pty-acceptance.py --binary target/debug/sigil
 
       - name: Upload Web V1 PTY acceptance artifacts
         if: always()

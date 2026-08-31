@@ -87,7 +87,8 @@ run_cargo_fixture() {
   local label="$1"
   shift
   local output
-  output=$("$@" 2>&1) || {
+  output=$(python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+    env "SIGIL_TEST_ISOLATED_ROOT=${SIGIL_TEST_ISOLATED_ROOT}" "$@" 2>&1) || {
     echo "FAIL($label): cargo command exited non-zero" >&2
     echo "$output" | tail -30 >&2
     exit 1

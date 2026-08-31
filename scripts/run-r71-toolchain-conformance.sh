@@ -87,5 +87,6 @@ git -C "$ROOT" status --porcelain=v1 >/dev/null
 
 # The sandbox binding fixture proves the typed CAS agreement. The command above proves the
 # actual Rust/Node/Git executables remain usable with a fresh HOME and offline policy.
-cargo test --locked -p sigil-sandbox --lib toolchain -- --format terse
+python3 "$ROOT/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-sandbox --lib toolchain -- --format terse
 echo "r71-toolchain-conformance: Rust/Node/Git warm offline profile passed"

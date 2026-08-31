@@ -16,12 +16,13 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import termios
 import threading
 import time
 from pathlib import Path
 from typing import Callable
+
+from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
 ANSI_RE = re.compile(
@@ -389,6 +390,7 @@ def write_report(
 
 
 def main() -> int:
+    ensure_isolated_entry()
     if os.name != "posix":
         print("tui feedback PTY acceptance requires a POSIX host", file=sys.stderr)
         return 2
@@ -399,7 +401,9 @@ def main() -> int:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     raw_log = output_dir / f"tui-feedback-pty-{timestamp}.log"
     report_path = output_dir / f"tui-feedback-pty-{timestamp}.json"
-    fixture_root = Path(tempfile.mkdtemp(prefix="sigil-feedback-pty-"))
+    fixture_root = create_fixture_tempdir(
+        "sigil-feedback-pty-", keep=args.keep_fixture, repository_root=root
+    )
     workspace = fixture_root / "workspace"
     state_dir = fixture_root / "state"
     cache_dir = fixture_root / "cache"

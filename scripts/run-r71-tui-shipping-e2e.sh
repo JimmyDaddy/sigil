@@ -11,7 +11,7 @@ run() {
   local label="$1"
   shift
   local output
-  output=$("$@" 2>&1) || {
+  output=$(python3 "${ROOT}/scripts/run-isolated-tests.py" -- "$@" 2>&1) || {
     echo "FAIL(tui-shipping/$label): command exited non-zero" >&2
     echo "$output" | tail -40 >&2
     exit 1

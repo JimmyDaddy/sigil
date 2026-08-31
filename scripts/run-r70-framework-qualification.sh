@@ -9,7 +9,8 @@ LOG_PATH="$OUTPUT_DIR/framework-qualification.log"
 REPORT_PATH="$OUTPUT_DIR/framework-qualification.md"
 cd "$ROOT"
 
-cargo test --locked -p sigil-tui --test r70_qualification --release -- --nocapture 2>&1 | tee "$LOG_PATH"
+python3 "$ROOT/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-tui --test r70_qualification --release -- --nocapture 2>&1 | tee "$LOG_PATH"
 
 python3 - "$LOG_PATH" "$REPORT_PATH" <<'PY'
 from __future__ import annotations

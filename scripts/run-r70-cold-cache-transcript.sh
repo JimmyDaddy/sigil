@@ -5,4 +5,5 @@ set -euo pipefail
 # the test runner's TempDir and exercises the same streaming page function used by runtime.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-cargo test --locked -p sigil-runtime --lib cold_cache_transcript_page_100k_keeps_the_resident_page_bounded -- --ignored --nocapture
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-runtime --lib cold_cache_transcript_page_100k_keeps_the_resident_page_bounded -- --ignored --nocapture

@@ -54,7 +54,8 @@ esac
 
 mkdir -p "${output_dir}"
 
-SIGIL_CONTEXT_QUALITY_REPORT_DIR="${output_dir}" \
+python3 "${repo_root}/scripts/run-isolated-tests.py" -- \
+  env "SIGIL_CONTEXT_QUALITY_REPORT_DIR=${output_dir}" \
   cargo test -p sigil-kernel context_quality_report_writes_evidence_artifacts -- --nocapture
 
 for artifact in context-quality.jsonl summary.md manifest.json; do

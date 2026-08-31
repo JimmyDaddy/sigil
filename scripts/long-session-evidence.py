@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from isolated_test_entry import ensure_isolated_entry
+
 
 MARKER = "SIGIL_LONG_SESSION_EVIDENCE "
 SCHEMA_VERSION = 1
@@ -318,6 +320,7 @@ def collect(root: Path) -> list[dict[str, Any]]:
 
 
 def main() -> int:
+    ensure_isolated_entry()
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

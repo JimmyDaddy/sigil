@@ -34,6 +34,16 @@ and tool behavior.
    Use `--tier standard` for session, event, mutation, verification,
    permission, tool, provider, or TUI runner changes. Use `--tier full` before
    release-sized or broad cross-crate changes.
+
+   Run individual tests through the same isolated user environment:
+
+   ```bash
+   python3 scripts/run-isolated-tests.py -- cargo test -p sigil-runtime <test-filter>
+   ```
+
+   Bare `cargo test` does not isolate your Sigil configuration, credentials,
+   bootstrap data, or default storage. Fixtures must still own separate temporary
+   resource roots; see [test isolation](dev/docs/test-isolation.md).
 6. Use a clear Conventional Commit subject and open a pull request that
    explains the user-visible outcome, risk, and validation performed.
 

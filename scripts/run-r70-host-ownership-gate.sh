@@ -14,6 +14,7 @@ cargo check --locked -p sigil-tui --lib
 cargo check --locked -p sigil-tui-host --lib
 cargo check --locked -p sigil --bin sigil
 cargo check --locked -p sigil-http --lib
-cargo test --locked -p sigil-tui-host --lib --quiet
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-tui-host --lib --quiet
 
 echo "r70.6 host ownership gate: application package, public framework, host wiring and migration edges passed"

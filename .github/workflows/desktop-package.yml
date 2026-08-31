@@ -18,6 +18,8 @@ on:
       - "!crates/**/tests/**"
       - "rust-toolchain.toml"
       - "scripts/prepare-desktop-sidecar.mjs"
+      - "scripts/run-isolated-tests.py"
+      - "scripts/isolated_test_entry.py"
       - "scripts/test-prepare-desktop-sidecar.mjs"
       - "scripts/package-desktop-macos-local.sh"
       - "scripts/finalize-desktop-macos-local.sh"
@@ -47,6 +49,8 @@ on:
       - "!crates/**/tests/**"
       - "rust-toolchain.toml"
       - "scripts/prepare-desktop-sidecar.mjs"
+      - "scripts/run-isolated-tests.py"
+      - "scripts/isolated_test_entry.py"
       - "scripts/test-prepare-desktop-sidecar.mjs"
       - "scripts/package-desktop-macos-local.sh"
       - "scripts/finalize-desktop-macos-local.sh"
@@ -138,13 +142,13 @@ jobs:
 
       - name: Test sidecar staging contract
         run: |
-          node scripts/test-prepare-desktop-sidecar.mjs
-          node scripts/test-desktop-macos-signing.mjs
-          python3 scripts/test-extract-verified-desktop-updater-app.py
+          python3 scripts/run-isolated-tests.py -- node scripts/test-prepare-desktop-sidecar.mjs
+          python3 scripts/run-isolated-tests.py -- node scripts/test-desktop-macos-signing.mjs
+          python3 scripts/run-isolated-tests.py -- python3 scripts/test-extract-verified-desktop-updater-app.py
 
       - name: Test asynchronous macOS notarization state
         if: runner.os != 'Windows'
-        run: node scripts/test-desktop-notarization-state.mjs
+        run: python3 scripts/run-isolated-tests.py -- node scripts/test-desktop-notarization-state.mjs
 
       - name: Build native desktop package with bundled runtime
         env:

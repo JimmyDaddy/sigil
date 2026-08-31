@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+run_isolated_test() {
+  python3 "${ROOT}/scripts/run-isolated-tests.py" -- "$@"
+}
+
 run_case() {
   local scenario="$1"
   local package="$2"
   local test_name="$3"
 
   printf 'orchestration acceptance: %s\n' "${scenario}"
-  cargo test --locked -p "${package}" --lib "${test_name}"
+  run_isolated_test cargo test --locked -p "${package}" --lib "${test_name}"
 }
 
 run_case \

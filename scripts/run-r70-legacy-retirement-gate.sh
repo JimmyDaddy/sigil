@@ -14,9 +14,12 @@ cargo fmt --all --check
 cargo check --locked -p sigil-application --lib
 cargo check --locked -p sigil-runtime --lib
 cargo check --locked -p sigil-tui-host --lib
-cargo test --locked -p sigil-application --lib resource_recovery --quiet
-cargo test --locked -p sigil-runtime --lib r71_global_cutover --quiet
-cargo test --locked -p sigil-tui-host --test r71_shipping_e2e --quiet
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-application --lib resource_recovery --quiet
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-runtime --lib r71_global_cutover --quiet
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked -p sigil-tui-host --test r71_shipping_e2e --quiet
 git diff --check
 
 echo "r70.8 legacy retirement gate: public compatibility paths and runtime recovery facade passed"

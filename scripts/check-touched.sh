@@ -85,6 +85,10 @@ run_cmd() {
   fi
 }
 
+run_isolated_test_cmd() {
+  run_cmd python3 "${ROOT}/scripts/run-isolated-tests.py" -- "$@"
+}
+
 changed_files() {
   case "${scope}" in
     dirty)
@@ -171,9 +175,12 @@ run_cmd scripts/test-check-touched-classifier.sh
 run_cmd python3 scripts/test-check-touched-packages.py
 run_cmd python3 scripts/test-check-no-prompt-phrase-routing.py
 run_cmd python3 scripts/check-no-prompt-phrase-routing.py
+run_cmd python3 "${ROOT}/scripts/check-isolated-test-entrypoints.py"
+run_cmd python3 "${ROOT}/scripts/test-run-isolated-tests.py"
+run_cmd python3 "${ROOT}/scripts/test-isolated-test-entrypoints.py"
 
 if [[ "${desktop_changed}" == "1" ]]; then
-  run_cmd pnpm --dir apps/desktop check
+  run_isolated_test_cmd pnpm --dir apps/desktop check
 fi
 
 if [[ "${docs_changed}" == "1" && "${rust_changed}" == "0" ]]; then
@@ -191,13 +198,13 @@ run_cmd cargo fmt --all --check
 run_cmd cargo check
 
 if [[ "${tier}" == "full" ]]; then
-  run_cmd cargo test
+  run_isolated_test_cmd cargo test
   run_cmd cargo clippy --all-targets -- -D warnings
   exit 0
 fi
 
 for package in "${packages[@]}"; do
-  run_cmd cargo test -p "${package}"
+  run_isolated_test_cmd cargo test -p "${package}"
 done
 
 if [[ "${tier}" == "standard" ]]; then

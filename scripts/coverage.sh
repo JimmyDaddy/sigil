@@ -57,4 +57,5 @@ if [[ "${coverage_no_report}" == "0" && -n "${coverage_ignore_regex}" ]]; then
   coverage_args+=(--ignore-filename-regex "${coverage_ignore_regex}")
 fi
 
-"${coverage_command[@]}" "${coverage_args[@]}" "$@"
+python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run-isolated-tests.py" \
+  -- "${coverage_command[@]}" "${coverage_args[@]}" "$@"

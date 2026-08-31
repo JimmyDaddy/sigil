@@ -13,7 +13,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import termios
 import threading
 import time
@@ -21,6 +20,8 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+
+from isolated_test_entry import create_fixture_tempdir, ensure_isolated_entry
 
 
 ANSI_RE = re.compile(
@@ -485,6 +486,7 @@ def run_case(
 
 
 def main() -> int:
+    ensure_isolated_entry()
     if os.name != "posix":
         print("attention PTY acceptance requires a POSIX host", file=sys.stderr)
         return 2
@@ -493,7 +495,9 @@ def main() -> int:
     output_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     binary = args.binary.resolve() if args.binary else build_binary(root)
-    fixture_root = Path(tempfile.mkdtemp(prefix="sigil-attention-pty-"))
+    fixture_root = create_fixture_tempdir(
+        "sigil-attention-pty-", keep=args.keep_fixture, repository_root=root
+    )
     server = FixtureServer(("127.0.0.1", 0), FixtureHandler)
     server.request_count = 0
     server.lock = threading.Lock()

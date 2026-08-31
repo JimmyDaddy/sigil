@@ -11,6 +11,8 @@ below explain how Sigil is engineered and why its internal boundaries exist.
 - [Engineering standards](../governance/engineering-standards.md): change
   workflow, quality-gate selection, documentation sync, and cross-surface
   product rules.
+- [Test isolation](test-isolation.md): isolated test entrypoints, fixture-owned
+  storage, subprocess environments, and real-user-data protection boundaries.
 - [Repository agent instructions](../../AGENTS.md): the short repository-wide
   constraints that apply before any code change.
 - [Contributing guide](../../CONTRIBUTING.md): public contribution and pull

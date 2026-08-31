@@ -23,10 +23,13 @@ cargo package --locked -p sigil-tui --allow-dirty \
   --config 'patch.crates-io.sigil-tui-core.path="crates/sigil-tui-core"' \
   --config 'patch.crates-io.sigil-tui-ratatui.path="crates/sigil-tui-ratatui"'
 
-cargo test --locked --manifest-path target/package/sigil-tui-core-0.1.0/Cargo.toml --all-targets --quiet
-cargo test --locked --manifest-path target/package/sigil-tui-ratatui-0.1.0/Cargo.toml --all-targets --quiet \
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked --manifest-path target/package/sigil-tui-core-0.1.0/Cargo.toml --all-targets --quiet
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked --manifest-path target/package/sigil-tui-ratatui-0.1.0/Cargo.toml --all-targets --quiet \
   --config "patch.crates-io.sigil-tui-core.path=\"$ROOT/crates/sigil-tui-core\""
-cargo test --locked --manifest-path target/package/sigil-tui-0.1.0/Cargo.toml --all-targets --quiet \
+python3 "${ROOT}/scripts/run-isolated-tests.py" -- \
+  cargo test --locked --manifest-path target/package/sigil-tui-0.1.0/Cargo.toml --all-targets --quiet \
   --config "patch.crates-io.sigil-tui-core.path=\"$ROOT/crates/sigil-tui-core\"" \
   --config "patch.crates-io.sigil-tui-ratatui.path=\"$ROOT/crates/sigil-tui-ratatui\""
 
