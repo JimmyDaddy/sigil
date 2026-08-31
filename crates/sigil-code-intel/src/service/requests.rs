@@ -1021,10 +1021,6 @@ impl CodeIntelligenceService {
         if !self.enabled() {
             return Err(CodeIntelError::Disabled.into());
         }
-        if let Some(handle) = self.inner.clients.lock().await.get(server_name).cloned() {
-            return Ok(handle);
-        }
-
         let config = self
             .server_plan_snapshot()
             .servers
@@ -1040,10 +1036,15 @@ impl CodeIntelligenceService {
                 .clone()
         };
         let mut server_slot = handle.lock().await;
-        if server_slot.is_some() {
+        if server_slot
+            .as_ref()
+            .is_some_and(|server| server.client.is_usable())
+        {
             drop(server_slot);
             return Ok(handle);
         }
+        // Discard a broken channel through the existing managed process shutdown owner.
+        drop(server_slot.take());
 
         *self.inner.status.lock().await = CodeIntelStatus::Starting {
             server: config.name.clone(),
@@ -1063,7 +1064,7 @@ impl CodeIntelligenceService {
                     error.downcast_ref::<CodeIntelError>().is_some_and(|error| {
                         matches!(error, CodeIntelError::WorkspaceTrustRequired { .. })
                     });
-                let reason = error.to_string();
+                let reason = format!("{error:#}");
                 *self.inner.status.lock().await = CodeIntelStatus::Degraded {
                     reason: format!("{server_name} {reason}"),
                 };

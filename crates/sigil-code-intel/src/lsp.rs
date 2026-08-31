@@ -12,11 +12,15 @@ use crate::{
     workspace::{file_uri_from_path, path_from_file_uri},
 };
 
+const MAX_LSP_HEADER_BYTES: usize = 8192;
+const MAX_LSP_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 pub struct LspClient<R, W> {
     reader: BufReader<R>,
     writer: W,
     next_id: u64,
     diagnostics_by_uri: BTreeMap<String, Vec<Value>>,
+    usable: bool,
 }
 
 impl<R, W> LspClient<R, W>
@@ -30,7 +34,12 @@ where
             writer,
             next_id: 1,
             diagnostics_by_uri: BTreeMap::new(),
+            usable: true,
         }
+    }
+
+    pub(super) fn is_usable(&self) -> bool {
+        self.usable
     }
 
     pub async fn initialize(
@@ -140,13 +149,14 @@ where
         uri: &str,
         timeout: Duration,
     ) -> Result<Vec<Value>> {
+        self.ensure_usable()?;
         if let Some(values) = self.diagnostics_by_uri.get(uri) {
             return Ok(values.clone());
         }
         let deadline = time::Instant::now() + timeout;
         while time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(time::Instant::now());
-            match time::timeout(remaining, read_lsp_message(&mut self.reader)).await {
+            match time::timeout(remaining, self.read_message()).await {
                 Ok(Ok(Some(message))) => {
                     self.handle_server_message(&message);
                     if let Some(values) = self.diagnostics_by_uri.get(uri) {
@@ -182,7 +192,7 @@ where
 
     async fn read_until_response(&mut self, id: u64) -> Result<Value> {
         loop {
-            let Some(message) = read_lsp_message(&mut self.reader).await? else {
+            let Some(message) = self.read_message().await? else {
                 bail!("language server closed stdout");
             };
             self.handle_server_message(&message);
@@ -200,12 +210,34 @@ where
         }
     }
 
+    fn ensure_usable(&self) -> Result<()> {
+        if !self.usable {
+            return Err(CodeIntelError::Protocol {
+                reason: "channel is unusable; reconnect before sending another request".to_owned(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> Result<Option<Value>> {
+        self.ensure_usable()?;
+        // An error or cancelled read may leave us inside a frame. Never reuse its tail.
+        self.usable = false;
+        let result = read_lsp_message(&mut self.reader).await;
+        self.usable = matches!(result, Ok(Some(_)));
+        result
+    }
+
     async fn write_message(&mut self, value: &Value) -> Result<()> {
+        self.ensure_usable()?;
         let body = serde_json::to_vec(value)?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        self.usable = false;
         self.writer.write_all(header.as_bytes()).await?;
         self.writer.write_all(&body).await?;
         self.writer.flush().await?;
+        self.usable = true;
         Ok(())
     }
 }
@@ -291,18 +323,25 @@ where
         match reader.read_exact(&mut byte).await {
             Ok(_) => {
                 header.push(byte[0]);
-                if header.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-                if header.len() > 8192 {
+                if header.len() > MAX_LSP_HEADER_BYTES {
                     return Err(CodeIntelError::Protocol {
-                        reason: "message header exceeded 8192 bytes".to_owned(),
+                        reason: format!("message header exceeded {MAX_LSP_HEADER_BYTES} bytes"),
                     }
                     .into());
                 }
+                if header.ends_with(b"\r\n\r\n") {
+                    break;
+                }
             }
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
-                return Ok(None);
+                return if header.is_empty() {
+                    Ok(None)
+                } else {
+                    Err(CodeIntelError::Protocol {
+                        reason: "message header ended before its terminator".to_owned(),
+                    }
+                    .into())
+                };
             }
             Err(error) => return Err(error.into()),
         }
@@ -312,8 +351,31 @@ where
         reason: format!("header is not utf-8: {error}"),
     })?;
     let content_length = parse_content_length(&header_text)?;
-    let mut content = vec![0_u8; content_length];
-    reader.read_exact(&mut content).await?;
+    if content_length > MAX_LSP_BODY_BYTES {
+        return Err(CodeIntelError::Protocol {
+            reason: format!(
+                "message body length {content_length} exceeded {MAX_LSP_BODY_BYTES} bytes"
+            ),
+        }
+        .into());
+    }
+    let mut content = Vec::new();
+    content
+        .try_reserve_exact(content_length)
+        .map_err(|error| CodeIntelError::Protocol {
+            reason: format!("could not allocate {content_length} message body bytes: {error}"),
+        })?;
+    content.resize(content_length, 0_u8);
+    match reader.read_exact(&mut content).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
+            return Err(CodeIntelError::Protocol {
+                reason: format!("message body ended before {content_length} bytes"),
+            }
+            .into());
+        }
+        Err(error) => return Err(error.into()),
+    }
     let value = serde_json::from_slice(&content).map_err(|error| CodeIntelError::Protocol {
         reason: format!("body is not valid json: {error}"),
     })?;
@@ -329,23 +391,42 @@ pub fn encode_lsp_message(value: &Value) -> Result<Vec<u8>> {
 }
 
 fn parse_content_length(header: &str) -> Result<usize> {
-    for line in header.lines() {
+    let mut content_length = None;
+    for line in header.lines().filter(|line| !line.is_empty()) {
         let Some((name, value)) = line.split_once(':') else {
-            continue;
+            return Err(CodeIntelError::Protocol {
+                reason: "invalid message header field".to_owned(),
+            }
+            .into());
         };
         if name.eq_ignore_ascii_case("Content-Length") {
-            return value.trim().parse::<usize>().map_err(|error| {
-                CodeIntelError::Protocol {
-                    reason: format!("invalid content length: {error}"),
+            if content_length.is_some() {
+                return Err(CodeIntelError::Protocol {
+                    reason: "duplicate Content-Length header".to_owned(),
                 }
-                .into()
-            });
+                .into());
+            }
+            let value = value.trim();
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(CodeIntelError::Protocol {
+                    reason: "invalid content length: expected decimal digits".to_owned(),
+                }
+                .into());
+            }
+            let length = value
+                .parse::<usize>()
+                .map_err(|error| CodeIntelError::Protocol {
+                    reason: format!("invalid content length: {error}"),
+                })?;
+            content_length = Some(length);
         }
     }
-    Err(CodeIntelError::Protocol {
-        reason: "missing Content-Length header".to_owned(),
-    }
-    .into())
+    content_length.ok_or_else(|| {
+        CodeIntelError::Protocol {
+            reason: "missing Content-Length header".to_owned(),
+        }
+        .into()
+    })
 }
 
 pub fn text_document_identifier(path: &Path) -> Value {

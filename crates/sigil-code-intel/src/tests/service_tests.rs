@@ -74,6 +74,148 @@ fn trusted_service(
     )
 }
 
+struct FramingTestLauncher {
+    launches: Arc<std::sync::atomic::AtomicUsize>,
+    dropped_readers: Arc<std::sync::atomic::AtomicUsize>,
+    fail_replacement: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::process::LanguageServerLaunchPortV1 for FramingTestLauncher {
+    async fn launch(
+        &self,
+        _request: crate::process::LanguageServerLaunchRequestV1,
+    ) -> Result<crate::process::LanguageServerProcessIoV1> {
+        let generation = self
+            .launches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if generation > 0 && self.fail_replacement {
+            bail!("replacement startup failed");
+        }
+        let mut bytes = crate::lsp::encode_lsp_message(&json!({
+            "jsonrpc": "2.0", "id": 1, "result": {"capabilities": {}}
+        }))?;
+        if generation == 0 {
+            bytes.extend_from_slice(b"Content-Length: 16777216\r\n\r\n");
+        } else {
+            bytes.extend_from_slice(&crate::lsp::encode_lsp_message(&json!({
+                "jsonrpc": "2.0", "id": 2, "result": "fresh channel"
+            }))?);
+        }
+        Ok(crate::process::LanguageServerProcessIoV1::new(
+            FramingTestReader {
+                source: std::io::Cursor::new(bytes),
+                dropped: self.dropped_readers.clone(),
+            },
+            tokio::io::sink(),
+            || {},
+        ))
+    }
+}
+
+struct FramingTestReader {
+    source: std::io::Cursor<Vec<u8>>,
+    dropped: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AsyncRead for FramingTestReader {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.source).poll_read(cx, buf)
+    }
+}
+
+impl Drop for FramingTestReader {
+    fn drop(&mut self) {
+        self.dropped
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn lsp_service_rebuilds_broken_channel_only_on_next_independent_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for fail_replacement in [false, true] {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut config = fake_config();
+        config.servers[0].command = std::env::current_exe()
+            .expect("existing executable for managed launch resolution")
+            .to_string_lossy()
+            .into_owned();
+        config.servers[0].startup_timeout_ms = 1_000;
+        let server_name = config.servers[0].name.clone();
+        let launches = Arc::new(AtomicUsize::new(0));
+        let dropped_readers = Arc::new(AtomicUsize::new(0));
+        let service = CodeIntelligenceService::new_with_workspace_trust_and_process_launcher(
+            workspace.path().to_path_buf(),
+            config,
+            WorkspaceTrust::Trusted,
+            Some(Arc::new(FramingTestLauncher {
+                launches: launches.clone(),
+                dropped_readers: dropped_readers.clone(),
+                fail_replacement,
+            })),
+        );
+        let original = service
+            .ensure_client_by_name(&server_name)
+            .await
+            .expect("initial managed channel");
+        {
+            let mut slot = original.lock().await;
+            let server = language_server_mut(&mut slot, "first").expect("initial server");
+            let error = server
+                .client
+                .request("first", Value::Null, Duration::from_secs(1))
+                .await
+                .expect_err("oversized response must fail this request");
+            assert!(matches!(
+                error.downcast_ref::<CodeIntelError>(),
+                Some(CodeIntelError::Protocol { .. })
+            ));
+        }
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert_eq!(dropped_readers.load(Ordering::SeqCst), 0);
+
+        let replacement = service.ensure_client_by_name(&server_name).await;
+        assert_eq!(launches.load(Ordering::SeqCst), 2);
+        assert_eq!(dropped_readers.load(Ordering::SeqCst), 1);
+        if fail_replacement {
+            let error = replacement.err().expect("replacement failure must surface");
+            assert!(matches!(
+                error.downcast_ref::<CodeIntelError>(),
+                Some(CodeIntelError::ServerUnavailable { reason, .. })
+                    if reason.contains("replacement startup failed")
+            ));
+            assert!(
+                !service
+                    .inner
+                    .clients
+                    .lock()
+                    .await
+                    .contains_key(&server_name)
+            );
+        } else {
+            let replacement = replacement.expect("next request rebuilds channel");
+            assert!(Arc::ptr_eq(&original, &replacement));
+            let mut slot = replacement.lock().await;
+            let server = language_server_mut(&mut slot, "second").expect("replacement server");
+            assert_eq!(
+                server
+                    .client
+                    .request("second", Value::Null, Duration::from_secs(1))
+                    .await
+                    .expect("fresh channel serves independent request"),
+                json!("fresh channel")
+            );
+            assert_eq!(launches.load(Ordering::SeqCst), 2);
+        }
+    }
+}
+
 #[tokio::test]
 async fn warm_lsp_context_snapshot_times_out_when_cache_read_blocks() {
     let temp = tempfile::tempdir().expect("tempdir");

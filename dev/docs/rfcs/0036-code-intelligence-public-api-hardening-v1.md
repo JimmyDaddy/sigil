@@ -131,3 +131,24 @@ git diff --check
   suppression or dead production API; the completeness audit found every acceptance criterion
   implemented. Hosted CI execution remains delivery evidence after a future push, not a release
   action in this RFC.
+
+## 10. LSP 消息边界加固（2026-08-31）
+
+本节补齐私有 LSP transport 的内存与恢复边界，不改变公开 façade、工作区信任要求、
+managed launch owner、用户配置或持久化 schema。此前 R36.0–R36.4 的完成记录只对应
+当时的 API 收窄，不代表已覆盖本节新增的故障场景。
+
+- header 总预算为 8192 bytes，正文固定上限为 8 MiB；后者是本实现的工程限额，
+  不是 LSP 协议规定。先检查 `Content-Length`，再使用可失败的预留操作分配正文。
+  拒绝重复、非法、溢出的长度及超限正文，不通过尝试巨大分配验证上限。
+- 截断 header/body、非法 JSON 等 framing 错误使用已有 typed `Protocol` 错误。
+  正常的 JSON-RPC error response 不意味着字节流损坏，不因此废弃连接。
+- 读写 framing 中途失败或 future 被取消后，连接标记为不可复用；不能把残余正文
+  当成下一条消息。下一次独立请求通过原 `start_server` 路径更换连接，重新执行原有
+  trust/launch 校验；不自动重放原请求。重建失败保留真实错误原因，不静默返回成功。
+- 旧连接交还现有 managed shutdown owner；当前 shutdown callback 不提供可观察的
+  reap receipt，本节不声称已经确认物理进程树清理。该强保证由单路径整改 E02/E03
+  的进程身份与 lifecycle 协议负责，不能从连接已丢弃推导出来。
+
+验收覆盖：合法上限、header 上限、超限/溢出/重复长度、截断与坏 JSON、读写中断后
+不可复用、合法 error response 后继续请求，以及下一次请求重建成功/失败。

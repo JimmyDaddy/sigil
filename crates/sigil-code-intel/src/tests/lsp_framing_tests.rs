@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     path::Path,
     pin::Pin,
     task::{Context, Poll},
@@ -22,6 +23,290 @@ async fn read_lsp_message_decodes_content_length_payload() {
         .expect("message should exist");
 
     assert_eq!(decoded, message);
+}
+
+#[tokio::test]
+async fn read_lsp_message_rejects_body_limits_before_reading_body() {
+    for length in [MAX_LSP_BODY_BYTES + 1, usize::MAX] {
+        let header = format!("Content-Length: {length}\r\n\r\n");
+        let source = std::io::Cursor::new(header.into_bytes()).chain(FailingReader);
+        let mut reader = BufReader::new(source);
+
+        let error = read_lsp_message(&mut reader)
+            .await
+            .expect_err("oversized body should fail before allocation or body reads");
+
+        assert!(matches!(
+            error.downcast_ref::<CodeIntelError>(),
+            Some(CodeIntelError::Protocol { reason })
+                if reason.contains("message body length")
+                    && reason.contains(&MAX_LSP_BODY_BYTES.to_string())
+        ));
+    }
+}
+
+#[tokio::test]
+async fn read_lsp_message_accepts_exact_body_limit_and_preserves_next_frame() {
+    let mut bytes = format!("Content-Length: {MAX_LSP_BODY_BYTES}\r\n\r\n\"").into_bytes();
+    bytes.resize(bytes.len() + MAX_LSP_BODY_BYTES - 2, b'x');
+    bytes.push(b'"');
+    bytes.extend_from_slice(&encode_lsp_message(&json!({"next": true})).expect("next frame"));
+    let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+
+    let value = read_lsp_message(&mut reader)
+        .await
+        .expect("exact body limit should decode")
+        .expect("body should exist");
+    let body = value.as_str().expect("body should be a json string");
+    assert_eq!(body.len(), MAX_LSP_BODY_BYTES - 2);
+    assert!(body.bytes().all(|byte| byte == b'x'));
+    assert_eq!(
+        read_lsp_message(&mut reader).await.expect("next frame"),
+        Some(json!({"next": true}))
+    );
+}
+
+#[tokio::test]
+async fn read_lsp_message_enforces_header_limit_including_terminator() {
+    for header_length in [MAX_LSP_HEADER_BYTES, MAX_LSP_HEADER_BYTES + 1] {
+        let prefix = "Content-Length: 2\r\nX-Padding: ";
+        let padding = "a".repeat(header_length - prefix.len() - 4);
+        let header = format!("{prefix}{padding}\r\n\r\n");
+        assert_eq!(header.len(), header_length);
+        let mut reader = BufReader::new(std::io::Cursor::new(format!("{header}{{}}")));
+        let result = read_lsp_message(&mut reader).await;
+
+        if header_length == MAX_LSP_HEADER_BYTES {
+            assert_eq!(result.expect("exact header limit"), Some(json!({})));
+        } else {
+            let error = result.expect_err("terminator must count towards header limit");
+            assert!(matches!(
+                error.downcast_ref::<CodeIntelError>(),
+                Some(CodeIntelError::Protocol { .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn read_lsp_message_rejects_ambiguous_invalid_and_overflowing_lengths() {
+    for header in [
+        "Content-Length: 2\r\ncontent-length: 2\r\n\r\n".to_owned(),
+        "Content-Length: 2\r\nContent-Length: 999999999999999999999\r\n\r\n".to_owned(),
+        "Content-Length: 2\r\nmalformed-field\r\n\r\n".to_owned(),
+        "Content-Length: \r\n\r\n".to_owned(),
+        "Content-Length: +2\r\n\r\n".to_owned(),
+        "Content-Length: -2\r\n\r\n".to_owned(),
+        format!("Content-Length: {}\r\n\r\n", "9".repeat(128)),
+    ] {
+        let mut reader = BufReader::new(std::io::Cursor::new(header).chain(FailingReader));
+        let error = read_lsp_message(&mut reader)
+            .await
+            .expect_err("bad length/header must fail without reading a body");
+        assert!(matches!(
+            error.downcast_ref::<CodeIntelError>(),
+            Some(CodeIntelError::Protocol { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn read_lsp_message_distinguishes_clean_eof_from_truncated_frames() {
+    let mut empty = BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+    assert!(
+        read_lsp_message(&mut empty)
+            .await
+            .expect("clean eof")
+            .is_none()
+    );
+
+    for bytes in [
+        b"Content-Length: 2\r\n\r".as_slice(),
+        b"Content-Length: 5\r\n\r\n{}".as_slice(),
+        b"Content-Length: 0\r\n\r\n".as_slice(),
+    ] {
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        let error = read_lsp_message(&mut reader)
+            .await
+            .expect_err("truncated frame or empty json must fail");
+        assert!(matches!(
+            error.downcast_ref::<CodeIntelError>(),
+            Some(CodeIntelError::Protocol { .. })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn lsp_client_framing_error_prevents_reusing_body_as_another_frame() {
+    for first_frame in [
+        format!("Content-Length: {}\r\n\r\n", MAX_LSP_BODY_BYTES + 1).into_bytes(),
+        b"Content-Length: 1\r\n\r\n{".to_vec(),
+    ] {
+        let mut bytes = first_frame;
+        bytes.extend_from_slice(
+            &encode_lsp_message(&json!({"jsonrpc": "2.0", "id": 2, "result": "wrong"}))
+                .expect("trailing bytes"),
+        );
+        let mut client = LspClient::new(std::io::Cursor::new(bytes), Vec::<u8>::new());
+        let error = client
+            .request("first", Value::Null, Duration::from_secs(1))
+            .await
+            .expect_err("bad frame must fail");
+        assert!(matches!(
+            error.downcast_ref::<CodeIntelError>(),
+            Some(CodeIntelError::Protocol { .. })
+        ));
+        assert!(!client.is_usable());
+        let written = client.writer.len();
+        let unread = client.reader.buffer().to_vec();
+
+        client
+            .request("second", Value::Null, Duration::from_secs(1))
+            .await
+            .expect_err("broken channel must not send another request");
+        client
+            .notify("notification", Value::Null)
+            .await
+            .expect_err("broken channel must not send notifications");
+        client
+            .wait_for_diagnostics("file:///missing.rs", Duration::from_secs(1))
+            .await
+            .expect_err("broken channel must not read another frame");
+        assert_eq!(client.writer.len(), written);
+        assert_eq!(client.reader.buffer(), unread);
+    }
+}
+
+#[tokio::test]
+async fn lsp_client_diagnostics_framing_error_invalidates_channel() {
+    let bytes = format!("Content-Length: {}\r\n\r\n", MAX_LSP_BODY_BYTES + 1);
+    let mut client = LspClient::new(std::io::Cursor::new(bytes), tokio::io::sink());
+
+    client
+        .wait_for_diagnostics("file:///missing.rs", Duration::from_secs(1))
+        .await
+        .expect_err("diagnostics must enforce the same frame budget");
+    assert!(!client.is_usable());
+}
+
+#[tokio::test]
+async fn lsp_client_partial_frame_timeout_invalidates_channel() {
+    let (client_io, mut server_io) = tokio::io::duplex(8192);
+    server_io
+        .write_all(b"Content-Length: 100\r\n\r\n{")
+        .await
+        .expect("partial frame");
+    let (reader, writer) = tokio::io::split(client_io);
+    let mut client = LspClient::new(reader, writer);
+
+    let error = client
+        .request("partial", Value::Null, Duration::from_millis(10))
+        .await
+        .expect_err("partial response must time out");
+    assert!(matches!(
+        error.downcast_ref::<CodeIntelError>(),
+        Some(CodeIntelError::Timeout { .. })
+    ));
+    assert!(!client.is_usable());
+}
+
+#[tokio::test]
+async fn lsp_client_write_failure_invalidates_channel() {
+    let (client_io, server_io) = tokio::io::duplex(64);
+    let (reader, writer) = tokio::io::split(client_io);
+    let mut client = LspClient::new(reader, writer);
+    drop(server_io);
+
+    let error = client
+        .notify("first", Value::Null)
+        .await
+        .expect_err("closed peer must fail the actual write");
+    assert!(matches!(
+        error.downcast_ref::<std::io::Error>(),
+        Some(error) if error.kind() == std::io::ErrorKind::BrokenPipe
+    ));
+    assert!(!client.is_usable());
+
+    let error = client
+        .notify("second", Value::Null)
+        .await
+        .expect_err("failed writer must reject subsequent operations");
+    assert!(matches!(
+        error.downcast_ref::<CodeIntelError>(),
+        Some(CodeIntelError::Protocol { .. })
+    ));
+}
+
+#[tokio::test]
+async fn lsp_client_write_cancellation_keeps_partial_frame_channel_unusable() {
+    let (client_io, mut server_io) = tokio::io::duplex(8);
+    let (reader, writer) = tokio::io::split(client_io);
+    let mut client = LspClient::new(reader, writer);
+    {
+        let notification = client.notify("first", Value::Null);
+        tokio::pin!(notification);
+        std::future::poll_fn(|cx| {
+            assert!(notification.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+    }
+    assert!(!client.is_usable());
+
+    let mut written_prefix = [0_u8; 8];
+    time::timeout(
+        Duration::from_secs(1),
+        server_io.read_exact(&mut written_prefix),
+    )
+    .await
+    .expect("partial header must already be in the real duplex buffer")
+    .expect("partial header must be readable");
+    assert_eq!(&written_prefix, b"Content-");
+
+    let error = time::timeout(Duration::from_secs(1), client.notify("second", Value::Null))
+        .await
+        .expect("poisoned channel must fail without waiting for a write")
+        .expect_err("cancelled write must reject another notification");
+    assert!(matches!(
+        error.downcast_ref::<CodeIntelError>(),
+        Some(CodeIntelError::Protocol { .. })
+    ));
+    drop(client);
+    let mut remaining = Vec::new();
+    time::timeout(
+        Duration::from_secs(1),
+        server_io.read_to_end(&mut remaining),
+    )
+    .await
+    .expect("dropping the client must close its duplex endpoint")
+    .expect("remaining bytes must be readable");
+    assert!(remaining.is_empty(), "no second frame may be written");
+}
+
+#[tokio::test]
+async fn lsp_client_jsonrpc_error_keeps_framed_channel_usable() {
+    let mut bytes = encode_lsp_message(&json!({
+        "jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "request rejected"}
+    }))
+    .expect("error frame");
+    bytes.extend_from_slice(
+        &encode_lsp_message(&json!({"jsonrpc": "2.0", "id": 2, "result": "ok"}))
+            .expect("success frame"),
+    );
+    let mut client = LspClient::new(std::io::Cursor::new(bytes), tokio::io::sink());
+
+    client
+        .request("first", Value::Null, Duration::from_secs(1))
+        .await
+        .expect_err("server application error");
+    assert!(client.is_usable());
+    assert_eq!(
+        client
+            .request("second", Value::Null, Duration::from_secs(1))
+            .await
+            .expect("valid channel should remain usable"),
+        json!("ok")
+    );
 }
 
 #[tokio::test]
