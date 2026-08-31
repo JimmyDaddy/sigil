@@ -229,9 +229,25 @@ record schema 和 public trait，避免把 API key、OAuth token 与 continuatio
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
 |---|---|---|---|---|---|
 | `fs2` | `0.4.3`；默认 feature | `sigil-http/durable_io` | 对 protocol/disclosure journal 的 sidecar lock file 取得 OS advisory exclusive lease，拒绝同一路径双 writer；不用于跨网络协调，也不把 lock file 当 durable evidence | `MIT OR Apache-2.0`；`danburkert/fs2-rs` | `sigil-http` 新增直接消费；journal owner drop 后释放 lease，append 的 durability 仍由原子替换与 sync 单独证明 |
-| `windows-sys` | `0.61.2`；仅 Windows target；按 owner 启用 `Win32_Storage_FileSystem,Win32_Foundation,Win32_Globalization,Win32_Security,Win32_Security_Authorization,Win32_Security_Isolation,Win32_System_JobObjects,Win32_System_Pipes,Win32_System_Threading` | `sigil-http/durable_io`、`sigil-process`、`sigil-tools-builtin/execution_backends` | HTTP durable journal 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`；`sigil-process` 统一 Job Object lifecycle ownership；tools 的 RFC-0041 私有探针使用原生 restricted-token、ACL、exact inherited-handle 与 AppContainer security-capabilities API，避免 runtime helper 或 shell wrapper | `MIT OR Apache-2.0`；Microsoft/windows-rs | 仅在 `cfg(windows)` 编译且未引入新版本；AppContainer/restricting-SID 仍是 hosted containment gate 后的私有探针，不构成公开 filesystem/network sandbox 声明；Unix 保持既有 rename/fsync 与 process-group 实现 |
+| `windows-sys` | `0.61.2`；仅 Windows target；按 owner 启用 `Win32_Storage_FileSystem,Win32_Foundation,Win32_Globalization,Win32_Security,Win32_Security_Authorization,Win32_Security_Isolation,Win32_System_JobObjects,Win32_System_Pipes,Win32_System_Threading` | `sigil-http/durable_io`、`sigil-process`、`sigil-tools-builtin/execution_backends` | HTTP durable journal 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`；`sigil-process` 统一 Job Object lifecycle ownership，并以 query+synchronize process handle、zero-timeout wait 与 creation FILETIME 取得 Live birth facts（running process 的 exit FILETIME 未定义，不作推断）；tools 的 RFC-0041 私有探针使用原生 restricted-token、ACL、exact inherited-handle 与 AppContainer security-capabilities API，避免 runtime helper 或 shell wrapper | `MIT OR Apache-2.0`；Microsoft/windows-rs | 仅在 `cfg(windows)` 编译且未引入新版本；AppContainer/restricting-SID 仍是 hosted containment gate 后的私有探针，不构成公开 filesystem/network sandbox 声明；Unix 保持既有 rename/fsync 与 process-group 实现 |
 
 P26.4B 复用 kernel 的 `MAX_EVENT_BYTES` 与 SafePersist 文本投影，不为 HTTP journal 引入另一套 secret scanner 或 event-size 常量。journal 的 exclusive lease 只解决单机同路径 writer ownership；它不替代 append-only session evidence、command identity store 或跨进程服务选主。
+
+## Process birth identity and current-host observation（RFC-0071 E02）
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `sha2` + `thiserror` | `0.10.9` / `2.0.19`；默认 feature | `sigil-process/identity` | 对私有的 OS birth material 计算 domain-separated opaque binding，并以 closed typed error 区分 `Absent`、已退出/僵尸的 `NotLive` 与不可观测；不从 PID、shell exit status 或通用 DTO 构造 process identity | MIT OR Apache-2.0；RustCrypto/hashes、dtolnay/thiserror | workspace 已锁定版本；本次成为 `sigil-process` 的直接依赖，不增加版本或来源。hash 只用于 binding，调用方仍须重观测完整 birth identity |
+| `libc` | `0.2.189`；仅 `cfg(target_os = "macos")` | `sigil-process/identity` | 只调用 Darwin public `proc_pidinfo(PROC_PIDTBSDINFO)` 与 `sysctlbyname(kern.bootsessionuuid)` 读取 PID birth facts；无 shell、无信号探测、无 process control | MIT OR Apache-2.0；rust-lang/libc | 从 observer 的不再使用项移动为 macOS platform primitive；workspace 已锁定版本，不改变 Windows/Linux target graph |
+| `sigil-process` | workspace path crate；无 feature | `sigil-process-observer` | 消费受封装的 platform birth facts，当前仅为本 host self 签发短时、one-shot `Live` evidence；不签资源、业务或 tree-quiescence proof | Sigil first-party crate；本仓库维护 | 原有 path dependency 现在是 observer 唯一的 process-fact 来源；factory 的 service/verifier 共享私有 issuance state，任意伪造 DTO、跨 factory、过期或 birth drift 均拒绝 |
+| `ring` | `0.17.14`；workspace 默认 feature | `sigil-process-observer` | 用 `SystemRandom::fill` 取得 16 bytes CSPRNG，再交给 uuid 仅做格式化；熵源失败返回 typed `NotObservable`，不得写入 issuance record | Apache-2.0 或 ISC 或 MIT；briansmith/ring | workspace 已锁定版本；本次成为 observer 的直接依赖，不增加版本或来源。该 fallible path 取代会 panic 的 UUID convenience API，不会为随机失败伪造 evidence |
+| `uuid` | `1.24.0`；workspace `serde,v4,v5`，本实现仅从已取得的随机 bytes 构造 v4 格式 issuer reference | `sigil-process-observer` | 格式化不可预测的 transient issuer reference，索引 factory 私有的 one-shot evidence record；它不是 process ID、owner group、持久化 capability 或业务 identity | MIT OR Apache-2.0；uuid-rs/社区维护 | workspace 已锁定版本；本次成为 observer 的直接依赖，不增加版本或来源。record 60 秒过期并在后续签发时清除，且有 1024 条上限 |
+
+E02 不新增 network client、shell helper、持久化 verifier 或权限 owner。`sigil-process` 既有的 `windows-sys` target
+feature 继续只用于 public Win32 API；本次使用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 和
+`GetProcessTimes`，未新增 Windows feature 或依赖版本。Linux 读取受限大小的 `/proc/sys/kernel/random/boot_id`、
+`/proc/self/ns/pid`、`/proc/<pid>/ns/pid` 与 `/proc/<pid>/stat` field 3/22；observer namespace 解释 PID，target namespace 与 start time 共同绑定实际被读进程，僵尸/死亡 state 是 `NotLive`；读取/解析/权限失败始终是不可观测，不得折算为 absence 或
+Quiescent。TerminalProof 仍须 E02 后续 RA 提供经认证的 expected birth/scope subject，当前明确 typed 拒绝。
 
 ## Public TUI Unicode text contract（RFC-0070 R70.3）
 

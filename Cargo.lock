@@ -5748,7 +5748,10 @@ name = "sigil-process"
 version = "0.0.1-beta.4"
 dependencies = [
  "anyhow",
+ "libc",
  "nix 0.29.0",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
  "windows-sys 0.61.2",
 ]
 
@@ -5756,11 +5759,12 @@ dependencies = [
 name = "sigil-process-observer"
 version = "0.0.1-beta.4"
 dependencies = [
- "libc",
+ "ring",
  "sha2 0.10.9",
  "sigil-kernel",
  "sigil-process",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

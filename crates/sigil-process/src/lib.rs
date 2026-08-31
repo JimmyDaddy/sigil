@@ -6,6 +6,13 @@
 
 use std::process::Command;
 
+mod identity;
+
+pub use identity::{
+    ProcessIdentityObservationErrorV1, ProcessIdentityV1, observe_current_process_identity,
+    observe_process_identity,
+};
+
 /// Configures a child command to become the root of an owned process tree.
 ///
 /// Unix uses a new process group. Windows attaches the concrete process to a Job Object after

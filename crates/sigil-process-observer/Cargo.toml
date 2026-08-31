@@ -7,8 +7,9 @@ license.workspace = true
 [dependencies]
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-process = { path = "../sigil-process" }
+ring.workspace = true
 sha2.workspace = true
-libc.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
