@@ -402,12 +402,13 @@ impl AuthorityBootstrapStoreV1 {
         &self,
     ) -> Result<AuthorityBootstrapPublicationGuard, BootstrapErrorV1> {
         ensure_owner_only_directory(&self.namespace)?;
-        ensure_owner_only_directory(&self.root)?;
         let namespace_lock_path = self.namespace.join(AUTHORITY_BOOTSTRAP_TRANSACTION_LOCK);
         let namespace_lock = open_private_lock_file(&namespace_lock_path)?;
         namespace_lock
             .lock_exclusive()
             .map_err(|_| BootstrapErrorV1::WriterLockContended)?;
+        self.validate_active_epoch()?;
+        ensure_owner_only_directory(&self.root)?;
         let lock_path = self.path(AuthorityBootstrapObjectClassV1::WriterLock);
         let lock = open_private_lock_file(&lock_path).map_err(|error| {
             BootstrapErrorV1::HardeningFailed(format!(
@@ -600,7 +601,19 @@ impl AuthorityBootstrapStoreV1 {
             return Err(BootstrapErrorV1::IdentityDrift);
         }
         ensure_owner_only_directory(&self.namespace)?;
+        self.validate_active_epoch()?;
         ensure_owner_only_directory(&self.root)
+    }
+
+    /// Revalidates the store's frozen root and epoch while the publication guard's shared
+    /// namespace transaction lock is held. A store opened before an active-pointer cutover must
+    /// fail before it hardens or opens anything in the old root.
+    fn validate_active_epoch(&self) -> Result<(), BootstrapErrorV1> {
+        let (active_root, active_epoch) = resolve_active_epoch(&self.namespace)?;
+        if active_root != self.root || active_epoch != self.authority_epoch {
+            return Err(BootstrapErrorV1::IdentityDrift);
+        }
+        Ok(())
     }
 }
 
@@ -2603,12 +2616,23 @@ mod recovery_tests {
             Err(BootstrapErrorV1::MetadataCorrupted(_))
         ));
         let expected_failed_bootstrap_hash = observed_bootstrap_digest(&namespace).expect("digest");
-        let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
-        let publication = store.acquire_publication().expect("publication");
-        store
-            .record_boot_failure(&publication, evidence())
-            .expect("failure evidence");
-        drop(publication);
+        // The ordinary store must now reject a corrupt active pointer before opening a
+        // publication lock. Build this deliberately corrupt-boot fixture through the private
+        // recovery test seam instead of weakening that production check.
+        let mut failure = DurableAuthorityBootFailureEvidenceV1 {
+            schema_version: BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION,
+            authority_epoch: 1,
+            status: "pending".to_owned(),
+            observed_bootstrap_hash: expected_failed_bootstrap_hash,
+            failed_journal_evidence: evidence(),
+            record_hash: CanonicalHash::from_bytes([0; 32]),
+        };
+        failure.record_hash = failure.compute_hash().expect("failure hash");
+        publish_private_bootstrap_file(
+            &namespace.join("boot-failure-evidence.json"),
+            &serde_json::to_vec(&failure).expect("failure evidence"),
+        )
+        .expect("failure evidence fixture");
         let state = base.join("state");
         let cache = base.join("cache");
         let execution_temp = base.join("execution-temp");

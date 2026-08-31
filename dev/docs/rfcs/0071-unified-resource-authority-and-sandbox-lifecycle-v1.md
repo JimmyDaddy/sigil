@@ -9726,6 +9726,48 @@ R71.6才在未发布release candidate的application startup选择唯一schema/au
 
 ---
 
+### 15.5 计划内 fresh cutover 协议（2026-08-31）
+
+用户已确认：旧目录原样保留，不迁移或重签旧权限；切换后从全新的受管存储开始，
+未完成任务重新开会话。本节是 E01 的实施约束，不代表所有 consumer 已完成切换。
+它优先于 §15.3/15.4 的历史 shadow/legacy 保留描述：当前实现不新增双路生产开关或旧路径 fallback；
+删除旧代码与保留旧数据是两件事。
+
+计划内升级与 §12.4 的故障恢复必须分开：不得伪造 journal failure 来调用 recovery，也不得
+用旧 root 中的 inert marker 实现“旧目录原样保留”。共享的 bootstrap 控制目录和 active pointer
+属于切换控制面；旧 state/cache/scratch/artifact/session/journal 数据目录不追加、不改权限、不 walk。
+
+切换由同一 authority namespace 的独占 transaction 线性化，顺序固定：
+
+1. 在关闭 admission 前，先在共享 bootstrap 控制目录持久化计划内 cutover intent：绑定 exact
+   source epoch/root、目标标识与初始 `AdmissionClosing` 阶段；该阶段本身就是后续启动的 admission
+   fence，不能依赖旧 host 的内存标志。之后收紧 admission 并停止旧 host 的新执行；确认旧 writer/holder/managed process 已按资源所需等级
+   结算。只有 PID 消失、观察失败或有限清理 receipt 都不能冒充全树停止证明。
+2. 重新验证旧 active epoch/root identity、配置身份及切换期望值。普通 bootstrap store 在每次
+   metadata/inventory publication 拿到 transaction lock 后也必须复查 active root/epoch；
+   stale handle 在接触旧 root 的权限和 publication lock 前返回 `IdentityDrift`。
+3. 在新的、物理分离的 epoch arena 创建空 journal、空 process inventory、当前配置绑定和
+   owner-only roots。保留真实 config generation；不得靠伪造配置变更触发重建，不复制旧 manifest/grant。
+4. 用现有 bootstrap current-schema intent/receipt 机制推进第 1 步的计划内专用操作，记录 exact
+   source/target identity 和阶段；必须先持久化目标的完整初始化证据，再原子发布 active pointer。
+   该专用操作仍待 E01 实现，不能把现有故障恢复入口改名后宣称完成。
+5. pointer 发布后只允许新 epoch 的 composition。各 consumer 的 source binding、lease、grant、
+   journal 和 session writer 必须来自同一新 generation；一个 mandatory consumer 不完整就拒绝启动。
+   旧 handles 不能换壳成新权限，旧任务只能新建会话重新开始。
+
+崩溃边界：intent 尚未持久化则没有切换副作用；`AdmissionClosing` 已持久化但 pointer 未切换时，
+重启沿同一 intent 重新验证/结算旧进程与 holder，并继续初始化目标，不能重开旧 admission，
+也不需要伪造 journal failure 才能继续。pointer 前保留旧 active selection，但在未证明安全前不恢复旧 admission；pointer 后
+只从目标的 current-schema intent/receipt fixed-forward。恢复不得读取旧 session 推断业务结果，
+不得因目标不完整回落旧 allocator。并发启动必须在同一锁下观察同一选择，旧 host 的存续
+fence 还需覆盖整个 effect 生命周期，不能仅靠 bootstrap metadata fence 代替。
+
+验收必须包括：intent 前/后及 admission-close 中断、pointer 前/后崩溃、并发启动、stale store/inventory 拒写、旧 resource handle
+撤权、空新 inventory 初始化、旧树内容/权限不变、全部 mandatory consumers 同代，以及无法
+证明旧进程清空时 fail closed。2026-08-31 的 metadata fence 只完成其中一个前置；完整 E01、
+真实全树 quiescence 和发布资格化在这些证据齐备前保持开放。测试只能使用隔离临时目录，
+本次开发不对用户旧存储执行切换或清理。
+
 ## 16. 完整故障与恢复矩阵
 
 | 注入点 | 预期 domain 结果 | Process effect | Recovery |
