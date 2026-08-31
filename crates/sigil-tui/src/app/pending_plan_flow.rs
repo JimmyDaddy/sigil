@@ -55,10 +55,20 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
+        // A durable Task shell alone is not completion while its post-approval
+        // materialization is blocked and still needs the Plan retry/revise surface.
+        let has_unresolved_materialization_blocker =
+            plans.tasks_created.get(&plan_id).is_some_and(|links| {
+                links.iter().any(|link| {
+                    plans
+                        .materialization_blocker_for_task(&link.task_id)
+                        .is_some()
+                })
+            });
         let completed = plans.latest_decision(&plan_id).is_some_and(|decision| {
             decision.decision == sigil_kernel::PlanDecision::Accepted
                 && plans.task_created_for_plan(&plan_id)
-        });
+        }) && !has_unresolved_materialization_blocker;
         if completed {
             self.clear_pending_plan_approval();
             self.composer.mode = super::ComposerMode::Build;
@@ -242,6 +252,48 @@ impl AppState {
         })
     }
 
+    /// Returns whether the durable Task attached to this exact approved Plan may retry
+    /// materialization despite a workspace-staleness presentation warning.
+    ///
+    /// This deliberately replays the durable facts instead of trusting
+    /// `PendingPlanApproval::retrying_materialization`, which is UI state and can be stale
+    /// across a refresh or restart.
+    fn has_durable_materialization_retry_admission(&self, pending: &PendingPlanApproval) -> bool {
+        let Some(plan_id) = pending
+            .plan_id
+            .as_ref()
+            .and_then(|plan_id| sigil_kernel::PlanId::new(plan_id.clone()).ok())
+        else {
+            return false;
+        };
+        let plans = sigil_kernel::PlanArtifactProjection::from_entries(
+            &self.session_browser.current_entries,
+        );
+        let draft_matches = plans
+            .plans
+            .get(&plan_id)
+            .is_some_and(|draft| draft.plan_hash == pending.plan_hash);
+        let accepted = plans.latest_decision(&plan_id).is_some_and(|decision| {
+            decision.decision == sigil_kernel::PlanDecision::Accepted
+                && decision.plan_hash == pending.plan_hash
+        });
+        draft_matches
+            && accepted
+            && plans.tasks_created.get(&plan_id).is_some_and(|links| {
+                links.iter().any(|link| {
+                    link.plan_hash == pending.plan_hash
+                        && plans
+                            .materialization_blocker_for_task(&link.task_id)
+                            .is_some_and(|blocked| {
+                                blocked.plan_hash == pending.plan_hash
+                                    && blocked.blocker.available_actions.contains(
+                                        &sigil_kernel::TaskBlockerActionV1::RetryAdmission,
+                                    )
+                            })
+                })
+            })
+    }
+
     fn create_task_from_pending_plan(
         &mut self,
         start_mode: PlanTaskStartMode,
@@ -252,7 +304,7 @@ impl AppState {
             self.last_notice = Some("run is unavailable in the current plan state".to_owned());
             return None;
         }
-        if pending.stale && !pending.retrying_materialization {
+        if pending.stale && !self.has_durable_materialization_retry_admission(pending) {
             self.last_notice = Some(
                 pending
                     .stale_reason

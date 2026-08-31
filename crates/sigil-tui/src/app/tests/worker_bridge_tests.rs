@@ -631,6 +631,13 @@ fn completed_rehydrated_plan_attention_does_not_capture_next_prompt() -> Result<
     .expect("structured plan should create draft");
     let task_id = sigil_kernel::TaskId::new("rehydrated-task")?;
     app.set_pending_plan_approval_from_draft(&draft, None);
+    // A stale presentation cache cannot keep attention open after durable recovery found no
+    // unresolved materialization blocker.
+    app.composer
+        .pending_plan_approval
+        .as_mut()
+        .expect("pending rehydrated plan")
+        .retrying_materialization = true;
     app.composer.mode = ComposerMode::Plan;
     app.session_browser.current_entries = vec![
         SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
@@ -5768,6 +5775,77 @@ fn materialization_blocker_reopens_the_plan_with_retry_and_revise_actions() -> R
             && entry.text.contains("R retries preparation")
             && !entry.text.contains("once the environment is resolved")
     }));
+
+    // The durable blocker, not a presentation cache, authorizes the retry surface.
+    app.composer
+        .pending_plan_approval
+        .as_mut()
+        .expect("reopened materialization plan")
+        .retrying_materialization = false;
+
+    let conflicting_decision_hash = format!("sha256:{}", "c".repeat(64));
+    let decision = app
+        .session_browser
+        .current_entries
+        .iter_mut()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision)) => {
+                Some(decision)
+            }
+            _ => None,
+        })
+        .expect("durable accepted decision");
+    decision.plan_hash = conflicting_decision_hash;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?
+            .is_none(),
+        "a mismatched accepted decision must not authorize a retry"
+    );
+    assert!(app.pending_plan_approval().is_some());
+    let decision = app
+        .session_browser
+        .current_entries
+        .iter_mut()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision)) => {
+                Some(decision)
+            }
+            _ => None,
+        })
+        .expect("durable accepted decision");
+    decision.plan_hash = draft.plan_hash.clone();
+
+    let conflicting_draft_hash = format!("sha256:{}", "d".repeat(64));
+    let durable_draft = app
+        .session_browser
+        .current_entries
+        .iter_mut()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(durable_draft)) => {
+                Some(durable_draft)
+            }
+            _ => None,
+        })
+        .expect("durable plan draft");
+    durable_draft.plan_hash = conflicting_draft_hash;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?
+            .is_none(),
+        "a mismatched durable draft must not authorize a retry"
+    );
+    assert!(app.pending_plan_approval().is_some());
+    let durable_draft = app
+        .session_browser
+        .current_entries
+        .iter_mut()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(durable_draft)) => {
+                Some(durable_draft)
+            }
+            _ => None,
+        })
+        .expect("durable plan draft");
+    durable_draft.plan_hash = draft.plan_hash.clone();
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
     assert!(matches!(
