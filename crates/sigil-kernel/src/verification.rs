@@ -23,6 +23,7 @@ use crate::{
     IntentVersionRef, PluginHookExecutionFinishedEntry, PluginHookExecutionStartedEntry,
     PluginHookExecutionStatus, PluginHookKind, PluginHookOutputEnvelope, Session, SessionId,
     StoredEvent, WorkspaceMutationDetected,
+    event::canonical_json_bytes,
     session::{ControlEntry, SessionLogEntry},
     stable_event_uuid,
 };
@@ -30,6 +31,9 @@ use crate::{
 #[cfg(test)]
 #[path = "tests/verification_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "tests/verification_canonical_tests.rs"]
+mod verification_canonical_tests;
 #[cfg(test)]
 #[path = "tests/workspace_trust_projection_tests.rs"]
 mod workspace_trust_projection_tests;
@@ -63,6 +67,6 @@ use readiness::finalize_new_run;
 use runner::sandbox_profile_hash_for_execution;
 #[cfg(test)]
 use runner::{CheckCommandOutput, check_failure_reason, sandbox_profile_hash, truncated_lossy};
-use shared::{canonical_json_bytes, stable_hash_parts};
+use shared::stable_hash_parts;
 #[cfg(test)]
 use snapshot::snapshot_entry_for_path;

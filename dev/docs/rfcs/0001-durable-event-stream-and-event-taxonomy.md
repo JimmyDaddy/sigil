@@ -200,6 +200,17 @@ Rules:
 - `record_checksum` is not tamper-proof and must not be described as a security signature.
 - Checksum is verified against the persisted wire form before typed payload deserialization.
 
+Implementation ownership: `sigil-kernel::event::canonical_json_bytes` is the single internal
+canonical JSON implementation, also used by verification policy, intent-scoped check specs and
+workspace snapshot manifests. Domain-specific input selection, prefixes and concatenation remain
+with their existing owners; `stable_hash_parts` is a distinct encoding, not a second canonicalizer.
+The consolidation preserves the current event algorithm and all valid verification bytes/hashes,
+without changing a schema or adding a legacy reader. Verification's current typed inputs contain
+no floating-point or arbitrary JSON fields; adding such fields requires a fresh hash-impact review.
+The existing integer/floating-point boundary behavior is pinned by compatibility goldens, not
+certified as standards-compliant or silently corrected by this deduplication. Any numeric-rule
+change needs a separate scheme and persistence-impact decision.
+
 Limits:
 
 - Current implementation uses a maximum event byte size of 1 MiB (`MAX_EVENT_BYTES`).

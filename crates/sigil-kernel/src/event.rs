@@ -2010,3 +2010,7 @@ impl EventHandler for NoopEventHandler {
 #[cfg(test)]
 #[path = "tests/event_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/event_canonical_tests.rs"]
+mod canonical_tests;
