@@ -121,6 +121,8 @@
 - `standard`：适合 session/event/mutation/verification/permission/tool/TUI runner 等高风险路径；在 `quick` 基础上追加 touched crate 的 `cargo clippy -p <crate> --all-targets -- -D warnings`。
 - `full`：适合发布前、跨多个核心 crate 的语义大改或需要合并长期分支时；执行 workspace `cargo test` 和 `cargo clippy --all-targets -- -D warnings`。
 
+Touched package必须从`cargo metadata`的workspace member/manifest path解析，不把目录名当package名：`crates/sigil-tui`对应`sigil-tui-host`，`crates/sigil-tui-framework`对应`sigil-tui`。根Cargo manifest/lock/toolchain变化选择全部workspace成员，即使同一diff也包含某个crate源码；解析失败必须停止，不能无声跳过测试。`python3 scripts/test-check-touched-packages.py`验证该映射与扩面规则。
+
 仍可手动运行完整门禁：
 
 ```bash

@@ -105,14 +105,6 @@ changed_files() {
   esac
 }
 
-workspace_packages() {
-  {
-    find crates -mindepth 2 -maxdepth 2 -name Cargo.toml -print \
-      | sed -E 's#^crates/([^/]+)/Cargo.toml$#\1#'
-    printf '%s\n' "sigil-desktop-app"
-  } | sort
-}
-
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 files_file="${tmp_dir}/changed-files"
@@ -127,31 +119,13 @@ fi
 
 rust_changed=0
 docs_changed=0
-workspace_manifest_changed=0
 high_risk_changed=0
 desktop_changed=0
 
 while IFS= read -r path; do
   case "${path}" in
-    crates/*/*)
-      crate="${path#crates/}"
-      crate="${crate%%/*}"
-      printf '%s\n' "${crate}" >>"${packages_file}"
-      ;;
-    apps/desktop/src-tauri/*|apps/desktop/src-tauri/**/*)
-      printf '%s\n' "sigil-desktop-app" >>"${packages_file}"
-      ;;
-  esac
-
-  case "${path}" in
     *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml)
       rust_changed=1
-      ;;
-  esac
-
-  case "${path}" in
-    Cargo.toml|Cargo.lock|rust-toolchain.toml)
-      workspace_manifest_changed=1
       ;;
   esac
 
@@ -170,7 +144,9 @@ while IFS= read -r path; do
   fi
 done <"${files_file}"
 
-sort -u "${packages_file}" -o "${packages_file}"
+if [[ "${rust_changed}" == "1" ]]; then
+  python3 "${ROOT}/scripts/check-touched-packages.py" --changed-files "${files_file}" >"${packages_file}"
+fi
 packages=()
 while IFS= read -r package; do
   [[ -n "${package}" ]] || continue
@@ -192,6 +168,7 @@ fi
 
 run_cmd git diff --check --
 run_cmd scripts/test-check-touched-classifier.sh
+run_cmd python3 scripts/test-check-touched-packages.py
 run_cmd python3 scripts/test-check-no-prompt-phrase-routing.py
 run_cmd python3 scripts/check-no-prompt-phrase-routing.py
 
@@ -217,15 +194,6 @@ if [[ "${tier}" == "full" ]]; then
   run_cmd cargo test
   run_cmd cargo clippy --all-targets -- -D warnings
   exit 0
-fi
-
-if [[ "${workspace_manifest_changed}" == "1" && "${#packages[@]}" -eq 0 ]]; then
-  workspace_packages >"${packages_file}"
-  packages=()
-  while IFS= read -r package; do
-    [[ -n "${package}" ]] || continue
-    packages+=("${package}")
-  done <"${packages_file}"
 fi
 
 for package in "${packages[@]}"; do
