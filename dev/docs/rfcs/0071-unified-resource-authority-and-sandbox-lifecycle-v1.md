@@ -100,6 +100,47 @@ Tool Call
 
 本节对应正文§10.5、§10.8、§10.9的分级资源结算及§12.4强fresh-epoch门槛；旧PID-only/伪proof、bool混合强弱、先reap后raw group kill和仅leader退出就全量release的生产路径须随正式接管同批删除。当前有效数据缺新identity/coverage字段时先列影响，不自动upcast、清空、改写或保留双读。
 
+### 1.2 生产进程登记与重启重验切片（E02-b，2026-08-31）
+
+本切片直接接入现有 bootstrap process inventory 和 sandbox spawn，不把尚无生产消费者的
+SessionWriterAttachment 接口当作交付正例；它不完成 §1.1 的全树清理或真实 fresh cutover。
+
+- `sigil-process` 继续唯一提供真实 OS birth/object facts；同一 observer factory 提供当前
+  authority owner 自登记、实际 sandbox child 登记及验证、仅向 RA 注入的 restart probe。
+  owner 登记不接受 caller PID；child 登记只能从实际 spawn 的物理 owner 经 Prepared scope
+  取得的登记入口提交。runtime 只做 composition，不判断进程死活或签发证明。
+- RA 在 Prepared 前固定 physical attempt、authority/composition epoch 和 execution scope；
+  Attached 消费 same-factory 私有签发表验证过的 birth/scope/nonce/service binding，不再
+  接受 PID-only Attached。可序列化的 verified identity 是 durable fact DTO，**不是**
+  不可伪造 capability；真实性来自私有 verifier 和重新认证的原 inventory，不来自字段私有性。
+- inventory V2 使用同一 bootstrap owner 的独立 durable key/realm 做 domain-separated
+  HMAC-SHA256 认证。key 是 CSPRNG 生成的固定、bounded、create-new/no-follow/owner-only
+  对象，须先持久化再引用；live observer issuance table 与 durable key 不混用。
+  初始化沿同一个 publication lock 使用 `PendingInventory → Active`：只有真实新建或
+  recovery-selected root 可首建 key，Pending 只用于恢复该 key 的未完成初始化；已有
+  snapshot 必须先通过 schema/MAC 验证才可补 marker。Active 后丢失 snapshot/marker
+  直接拒绝，不靠 caller bool 或旧 config generation 决定重新播种。
+  已有 inventory/required marker 却缺 key、key-id/realm/MAC 或 current frontier 不匹配均拒绝，
+  不生成新 key 重签旧记录、不把旧 V1 补成新身份。secret key 不进入 Debug、DTO 或日志。
+- restart 使用新 observer instance，先由 RA 认证原 subject/claim/scope/frontier，再取得新
+  OS observation 并由同 factory verifier 检验；旧 live token 不能跨实例复用。观察失败、
+  未登记对象、权限/namespace 漂移不变成成功，exact process Quiescent 也不意味着整树停止。
+- active spawn 的普通结算可以释放该 active slot，但不能抹掉 epoch 的历史弱覆盖事实；
+  原记录或 authenticated coverage/boot 摘要留在原 inventory。空 active 集合和单个 owner
+  消失不是 fresh epoch 的充分条件，不影响正常同 realm 的新命令准入。
+- 首次登记前已退出的短命令，只能凭当前物理 owner 对原 `Child` 的实际 reap 保留真实
+  exit 结果；不能补造 live 身份。Prepared 阶段即保留潜在弱暴露历史，错误路径只有在
+  kill/wait 确认原 child 已回收后才释放 active slot，未知则保留清理义务。
+- reap 后输出仍由原唯一 reader 有界读取：Unix nonblocking pipe；Windows 使用
+  [PeekNamedPipe](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi-peeknamedpipe)
+  查询后仅读已可用字节，前提是该同步 handle 无并发或 pending read。最多读取 cap+1
+  字节且最多 drain 50ms；继承 writer 未关、持续输出或到期明确记 capture incomplete，
+  不无限等待 EOF，也不把 capture 不完整改写成执行失败或整树静止。
+
+本切片的 key/inventory/真实 owned-child 测试必须同时隔离 storage roots 和 bootstrap user root；
+不得对用户旧 metadata、数据或权限执行创建、修改、迁移、重签或实际启用切换。macOS 真实运行与 Linux/Windows
+编译检查分开报告；关闭完整 E02 仍需要全部受支持平台和 scope 的真实资格化。
+
 ---
 
 ## 2. 事故证据与直接结论

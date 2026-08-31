@@ -5891,8 +5891,10 @@ name = "sigil-resource-authority"
 version = "0.0.1-beta.4"
 dependencies = [
  "fs2",
+ "hmac",
  "libc",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5957,6 +5959,7 @@ version = "0.0.1-beta.4"
 dependencies = [
  "async-trait",
  "futures",
+ "libc",
  "portable-pty 0.8.1",
  "portable-pty 0.9.0",
  "serde",
@@ -5964,10 +5967,12 @@ dependencies = [
  "sha2 0.10.9",
  "sigil-kernel",
  "sigil-process",
+ "sigil-process-observer",
  "sigil-resource-authority",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

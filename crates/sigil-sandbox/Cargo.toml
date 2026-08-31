@@ -15,13 +15,16 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+libc.workspace = true
 portable-pty = "=0.9.0"
 
 [target.'cfg(windows)'.dependencies]
 portable-pty = "=0.8.1"
+windows-sys = { workspace = true, features = ["Win32_System_Pipes"] }
 
 [dev-dependencies]
 futures.workspace = true
+sigil-process-observer = { path = "../sigil-process-observer" }
 sigil-resource-authority = { path = "../sigil-resource-authority", features = ["test-support"] }
 tempfile.workspace = true
 serde_json.workspace = true

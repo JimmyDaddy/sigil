@@ -676,12 +676,27 @@ fn r71_full_composition_gate() {
         sigil_resource_authority::AuthorityBootstrapStoreV1::for_config_path(&config_path)
             .expect("bootstrap");
     let publication = bootstrap.acquire_publication().expect("publication");
+    let process_factory = sigil_process_observer::ProcessObserverFactoryV1::new(
+        sigil_process_observer::canonical_digest(
+            b"r71-full-composition-cutover-test-process-observer-v2",
+        ),
+    )
+    .expect("current test process birth identity")
+    .instantiate();
+    let process_inventory_binding =
+        sigil_resource_authority::AuthorityProcessInventoryBootstrapBindingV1 {
+            application_composition_epoch: 1,
+            owner_execution_scope_hash: sigil_process_observer::canonical_digest(
+                b"r71-full-composition-cutover-test-process-owner-v2",
+            ),
+        };
     let process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> =
         Arc::new(
             sigil_resource_authority::AuthorityManagedProcessInventoryV1::initialize(
                 bootstrap,
                 &publication,
-                true,
+                process_inventory_binding,
+                process_factory,
             )
             .expect("process inventory"),
         );

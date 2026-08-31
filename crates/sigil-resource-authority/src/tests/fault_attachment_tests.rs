@@ -1,203 +1,168 @@
-//! RFC-0071 section 16 R71-F-ATT-001..014: SessionLog writer attachment fixtures.
-//! Only one writer attachment is active; the old holder settles on exact process-birth
+//! E02-b fault coverage for the authenticated process-inventory attachment boundary.
+//!
+//! These tests use only an owned temporary bootstrap root and an owned child. They exercise the
+//! production observer/factory path rather than a PID-shaped fixture.
 
-//! observation (Live/Quiescent) via the same-instance verifier; PID existence, sidecar/Drop
+use crate::{
+    AuthorityBootstrapObjectClassV1, AuthorityBootstrapStoreV1, AuthorityManagedProcessInventoryV1,
+    AuthorityProcessInventoryBootstrapBindingV1, AuthorityProcessInventoryErrorV1,
+    AuthorityProcessInventoryPortV1, AuthorityProcessSpawnRequestV1,
+};
+use sigil_kernel::{
+    process_observation::HostProcessIdentityRegistrationV1,
+    resource::{CanonicalHash, PhysicalAttemptId},
+};
 
-//! or caller hash never prove release, and stale generation / tail drift are rejected.
-
-#![allow(dead_code)]
-
-use sigil_kernel::process_observation::{ProcessObservationPurposeV1, ProcessVitalityV1};
-
-use sigil_kernel::resource::CanonicalHash;
-
-fn h(seed: u8) -> CanonicalHash {
-    let mut b = [0u8; 32];
-    b[0] = seed;
-    CanonicalHash::from_bytes(b)
+fn hash(bytes: &[u8]) -> CanonicalHash {
+    crate::bootstrap::canonical_bootstrap_hash(bytes)
 }
 
-/// Attachment holder: exactly one active writer per SessionLog.
-struct AttachmentStateV1 {
-    active_holder: Option<String>,
-    attachment_generation: u64,
+fn factory()
+-> std::sync::Arc<dyn sigil_kernel::process_observation::HostProcessObservationFactoryV1> {
+    sigil_process_observer::ProcessObserverFactoryV1::new(hash(
+        b"r71-e02-process-inventory-fault-test-observer",
+    ))
+    .expect("current test process is observable")
+    .instantiate()
 }
 
-impl AttachmentStateV1 {
-    fn new() -> Self {
-        Self {
-            active_holder: None,
-
-            attachment_generation: 0,
-        }
-    }
-
-    fn acquire(&mut self, holder: &str) -> Result<(), AttErrorV1> {
-        if self
-            .active_holder
-            .as_deref()
-            .is_some_and(|existing| existing != holder)
-        {
-            return Err(AttErrorV1::AnotherControllerActive);
-        }
-        self.active_holder = Some(holder.to_owned());
-        self.attachment_generation = self.attachment_generation.saturating_add(1);
-        Ok(())
-    }
-
-    fn settle_old(&mut self, holder: &str, vitality: ProcessVitalityV1) -> Result<(), AttErrorV1> {
-        if let Some(existing) = &self.active_holder {
-            if existing == holder && vitality == ProcessVitalityV1::Live {
-                return Err(AttErrorV1::ProcessStillLive);
-            }
-        } else {
-            return Err(AttErrorV1::NoPreviousHolder);
-        }
-        self.active_holder = None;
-        Ok(())
+fn binding(composition_epoch: u64) -> AuthorityProcessInventoryBootstrapBindingV1 {
+    AuthorityProcessInventoryBootstrapBindingV1 {
+        application_composition_epoch: composition_epoch,
+        owner_execution_scope_hash: hash(b"r71-e02-process-inventory-fault-test-owner"),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AttErrorV1 {
-    AnotherControllerActive,
-    ProcessStillLive,
-    NoPreviousHolder,
-    StaleGeneration,
-    ForgedObservation,
+fn request(attempt: &str) -> AuthorityProcessSpawnRequestV1 {
+    AuthorityProcessSpawnRequestV1 {
+        attempt_id: PhysicalAttemptId::new(attempt.to_owned()),
+        execution_scope_hash: hash(attempt.as_bytes()),
+    }
 }
 
-// ATT-001: two controllers cannot both be active.
-#[test]
-fn r71_f_att_001_two_controllers_mutually_exclusive() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    let error = state.acquire("controller-b").expect_err("b");
-    assert!(matches!(error, AttErrorV1::AnotherControllerActive));
+#[cfg(unix)]
+fn spawn_owned_child() -> std::io::Result<std::process::Child> {
+    std::process::Command::new("sleep").arg("1").spawn()
 }
 
-// ATT-002: holder establishment is first append gate.
-#[test]
-fn r71_f_att_002_holder_established_first() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    assert_eq!(state.active_holder.as_deref(), Some("controller-a"));
+#[cfg(windows)]
+fn spawn_owned_child() -> std::io::Result<std::process::Child> {
+    std::process::Command::new("ping")
+        .args(["127.0.0.1", "-n", "2"])
+        .spawn()
 }
 
-// ATT-003: append boundary requires the attachment to be active.
 #[test]
-fn r71_f_att_003_append_requires_active_attachment() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    // An idle controller (no active holder) is rejected by the state machine at append.
+fn r71_e02_failed_child_attach_then_reap_and_settle_keeps_weak_coverage_history() {
+    let temp = tempfile::tempdir().expect("temporary authority root");
+    let store =
+        AuthorityBootstrapStoreV1::open_owned_temp_fixture(&temp, "e02-failed-child-attach", 1)
+            .expect("fresh owned temporary store");
+    let publication = store.acquire_publication().expect("publication");
+    let inventory = AuthorityManagedProcessInventoryV1::initialize(
+        store.clone(),
+        &publication,
+        binding(1),
+        factory(),
+    )
+    .expect("initialize authenticated inventory");
+    drop(publication);
 
-    let idle = AttachmentStateV1::new();
-    assert!(idle.active_holder.is_none());
+    let claim = inventory
+        .prepare_spawn(request("failed-attach-child"))
+        .expect("prepare");
+    let mut child = spawn_owned_child().expect("owned child");
+    let registration = claim
+        .register_spawned_process(child.id())
+        .expect("real live-birth registration");
+    let forged = HostProcessIdentityRegistrationV1::new(
+        registration.identity().clone(),
+        "foreign-issuance".to_owned(),
+        registration.observed_at_monotonic_ms(),
+    );
+    assert!(matches!(
+        inventory.attach_spawn(&claim, forged),
+        Err(AuthorityProcessInventoryErrorV1::Observation(_))
+    ));
+
+    child.kill().expect("terminate owned child");
+    child.wait().expect("reap owned child");
+    inventory
+        .settle_spawn(claim)
+        .expect("settle prepared claim");
+
+    let publication = store.acquire_publication().expect("inspection publication");
+    let snapshot_bytes = store
+        .read_bytes(
+            &publication,
+            AuthorityBootstrapObjectClassV1::ProcessInventory,
+        )
+        .expect("read authenticated inventory")
+        .expect("inventory exists");
+    let snapshot = crate::process_inventory::decode_snapshot(&snapshot_bytes)
+        .expect("decode authenticated inventory");
+    let authenticator_bytes = store
+        .read_bytes(
+            &publication,
+            AuthorityBootstrapObjectClassV1::ProcessInventoryAuthenticator,
+        )
+        .expect("read durable authenticator")
+        .expect("authenticator exists");
+    let authenticator = crate::process_inventory::decode_authenticator(&authenticator_bytes)
+        .expect("decode durable authenticator");
+    snapshot
+        .validate(store.authority_epoch(), &authenticator)
+        .expect("history remains authenticated");
+    assert!(
+        snapshot.entries.is_empty(),
+        "settlement clears only active claim"
+    );
+    assert_eq!(snapshot.bounded_native_exposure_count, 1);
+    assert!(snapshot.bounded_native_exposure_frontier.is_some());
+    assert!(
+        store
+            .read_bytes(
+                &publication,
+                AuthorityBootstrapObjectClassV1::ProcessInventory
+            )
+            .expect("inventory bytes")
+            .is_some(),
+        "settlement must retain an authenticated record rather than deleting it"
+    );
 }
 
-// ATT-004: finalize settles the old holder.
 #[test]
-fn r71_f_att_004_finalize_settles_holder() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    state
-        .settle_old("controller-a", ProcessVitalityV1::Quiescent)
-        .expect("settled");
-    assert!(state.active_holder.is_none());
-}
+fn r71_e02_same_birth_recomposition_fences_old_inventory_from_new_prepares() {
+    let temp = tempfile::tempdir().expect("temporary authority root");
+    let store =
+        AuthorityBootstrapStoreV1::open_owned_temp_fixture(&temp, "e02-same-owner-recompose", 1)
+            .expect("fresh owned temporary store");
+    let publication = store.acquire_publication().expect("initial publication");
+    let old_inventory = AuthorityManagedProcessInventoryV1::initialize(
+        store.clone(),
+        &publication,
+        binding(1),
+        factory(),
+    )
+    .expect("initial inventory");
+    drop(publication);
 
-// ATT-005: controller crash is recovered only after process quiescence.
-#[test]
-fn r71_f_att_005_crash_recovered_after_quiescence() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    // A live controller crash cannot release; only quiescent proves release.
-    let error = state
-        .settle_old("controller-a", ProcessVitalityV1::Live)
-        .expect_err("still live");
-    assert!(matches!(error, AttErrorV1::ProcessStillLive));
-}
+    let publication = store
+        .acquire_publication()
+        .expect("recomposition publication");
+    let new_inventory =
+        AuthorityManagedProcessInventoryV1::initialize(store, &publication, binding(2), factory())
+            .expect("same OS birth may recompose into a new scope");
+    drop(publication);
 
-// ATT-006: purpose-bound Live/Quiescent observation only.
-#[test]
-fn r71_f_att_006_purpose_bound_observation() {
-    let _purpose = ProcessObservationPurposeV1::SessionWriterAttachment;
-    let _vitality = ProcessVitalityV1::Quiescent;
-    // The verifier is invoked only for the attachment purpose; no storage admission use here.
-}
-
-// ATT-007: PID reuse is never proof of release.
-#[test]
-fn r71_f_att_007_pid_reuse_not_release() {
-    // Two different processes can share a PID over time; identity must be birth-bound.
-
-    let birth_a = h(1);
-    let birth_b = h(2);
-    assert_ne!(birth_a, birth_b);
-}
-
-// ATT-008: forged observation (wrong instance) rejected.
-#[test]
-fn r71_f_att_008_forged_observation_rejected() {
-    let verifier_instance = h(10);
-    let forged_instance = h(11);
-    assert_ne!(verifier_instance, forged_instance);
-}
-
-// ATT-009: expired observation rejected.
-#[test]
-fn r71_f_att_009_expired_observation_rejected() {
-    // Expired evidence is not accepted because the quiescence proof must be fresh.
-
-    let fresh = h(20);
-    let expired = h(0);
-    assert_ne!(fresh, expired);
-}
-
-// ATT-010: cross-instance process observation rejected.
-#[test]
-fn r71_f_att_010_cross_instance_rejected() {
-    let host_a = h(30);
-    let host_b = h(31);
-    assert_ne!(host_a, host_b);
-}
-
-// ATT-011: process still live blocks old settlement.
-#[test]
-fn r71_f_att_011_process_still_live_blocks_settlement() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    let error = state
-        .settle_old("controller-a", ProcessVitalityV1::Live)
-        .expect_err("live");
-    assert!(matches!(error, AttErrorV1::ProcessStillLive));
-}
-
-// ATT-012: stale attachment generation cannot be reacquired.
-#[test]
-fn r71_f_att_012_stale_generation_rejected() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    let generation_after_a = state.attachment_generation;
-    assert!(generation_after_a >= 1);
-}
-
-// ATT-013: reacquire after quiescence is allowed with a fresh generation.
-#[test]
-fn r71_f_att_013_reacquire_after_quiescence() {
-    let mut state = AttachmentStateV1::new();
-    state.acquire("controller-a").expect("a");
-    state
-        .settle_old("controller-a", ProcessVitalityV1::Quiescent)
-        .expect("settled");
-    state.acquire("controller-b").expect("b");
-    assert_eq!(state.active_holder.as_deref(), Some("controller-b"));
-}
-
-// ATT-014: tail drift rejects the old holder's continuation.
-#[test]
-fn r71_f_att_014_tail_drift_rejected() {
-    let tail_observed = h(40);
-    let tail_current = h(41);
-    assert_ne!(tail_observed, tail_current);
+    assert!(matches!(
+        old_inventory.prepare_spawn(request("old-handle-new-attempt")),
+        Err(AuthorityProcessInventoryErrorV1::InvalidClaim)
+    ));
+    let fresh_claim = new_inventory
+        .prepare_spawn(request("new-handle-new-attempt"))
+        .expect("new composition may prepare its own attempt");
+    new_inventory
+        .settle_spawn(fresh_claim)
+        .expect("new composition settles its exact claim");
 }

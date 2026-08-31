@@ -1,9 +1,8 @@
-//! RFC-0071 host-process observation adapter.
+//! RFC-0071 host-process identity observation adapter.
 //!
-//! `sigil-process` supplies platform birth facts. This crate only turns a current-host Live
-//! observation into kernel-shaped evidence and verifies its private issuance record. It does not
-//! decide resource settlement, interpret authority inventory, or turn a missing PID into a
-//! terminal/tree-quiescence proof.
+//! `sigil-process` supplies platform birth facts. This crate turns those facts into scoped,
+//! one-shot evidence. It never interprets an authority inventory or decides whether a resource or
+//! a process tree may settle.
 
 use std::{
     collections::BTreeMap,
@@ -15,58 +14,68 @@ use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     process_observation::{
-        HostProcessObservationFactoryV1, HostProcessObservationServiceV1, HostProcessObservationV1,
-        HostProcessObservationVerifierV1, ProcessObservationErrorV1, ProcessObservationPurposeV1,
-        ProcessVitalityV1, VerifiedProcessObservationV1,
+        HostProcessIdentityRecoveryProbeV1, HostProcessIdentityRegistrationV1,
+        HostProcessObservationFactoryV1, HostProcessObservationServiceV1,
+        HostProcessObservationVerifierV1, HostProcessRecoveryObservationV1,
+        ProcessObservationErrorV1, ProcessObservationScopeV1, ProcessObservationSubjectKindV1,
+        ProcessVitalityV1, VerifiedHostProcessIdentityV1, VerifiedHostProcessRecoveryObservationV1,
     },
     resource::CanonicalHash,
 };
 use sigil_process::{
     ProcessIdentityObservationErrorV1, ProcessIdentityV1, observe_current_process_identity,
+    observe_process_identity,
 };
 use uuid::Uuid;
 
-const OBSERVATION_DOMAIN: &[u8] = b"sigil-process-observer-live-observation-v1\0";
-const VERIFIED_OBSERVATION_DOMAIN: &[u8] = b"sigil-process-observer-verified-observation-v1\0";
+const OBSERVATION_DOMAIN: &[u8] = b"sigil-process-observer-v2\0";
+const REGISTRATION_DOMAIN: &[u8] = b"sigil-process-observer-registration-v2\0";
+const RECOVERY_DOMAIN: &[u8] = b"sigil-process-observer-recovery-v2\0";
 const DEFAULT_MAX_EVIDENCE_AGE: Duration = Duration::from_secs(60);
-const MAX_PENDING_LIVE_OBSERVATIONS: usize = 1024;
+const MAX_PENDING_OBSERVATIONS: usize = 1024;
+const SERVICE_GENERATION: u64 = 1;
 
 #[derive(Clone)]
-struct IssuedLiveObservationV1 {
-    purpose: ProcessObservationPurposeV1,
-    process_ref: String,
+struct IssuedRegistrationV1 {
+    identity: VerifiedHostProcessIdentityV1,
     birth_identity: ProcessIdentityV1,
-    birth_identity_hash: CanonicalHash,
-    observed_at_ms: u64,
+    issued_at: Instant,
+}
+
+#[derive(Clone)]
+struct IssuedRecoveryObservationV1 {
+    subject_registration_hash: CanonicalHash,
+    vitality: ProcessVitalityV1,
+    observed_at_monotonic_ms: u64,
     issued_at: Instant,
 }
 
 struct ObserverStateV1 {
-    verifier_instance_hash: CanonicalHash,
+    service_instance_hash: CanonicalHash,
     started_at: Instant,
     max_evidence_age: Duration,
-    issued: Mutex<BTreeMap<String, IssuedLiveObservationV1>>,
+    registrations: Mutex<BTreeMap<String, IssuedRegistrationV1>>,
+    recovery_observations: Mutex<BTreeMap<String, IssuedRecoveryObservationV1>>,
 }
 
 impl ObserverStateV1 {
-    fn new(verifier_instance_hash: CanonicalHash, max_evidence_age: Duration) -> Self {
+    fn new(service_instance_hash: CanonicalHash, max_evidence_age: Duration) -> Self {
         Self {
-            verifier_instance_hash,
+            service_instance_hash,
             started_at: Instant::now(),
             max_evidence_age,
-            issued: Mutex::new(BTreeMap::new()),
+            registrations: Mutex::new(BTreeMap::new()),
+            recovery_observations: Mutex::new(BTreeMap::new()),
         }
     }
 
-    fn observed_at_ms(&self) -> u64 {
+    fn observed_at_monotonic_ms(&self) -> u64 {
         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 }
 
-/// Real current-host observation service.
-///
-/// Construction is private to [`ProcessObserverFactoryV1`] so every service/verifier pair shares
-/// the same private one-shot issuance state.
+/// Real host-process observation service. Construction is private to the factory so its three
+/// facets share one private, one-shot issuance state.
 pub struct ProcessObserverServiceV1 {
     state: Arc<ObserverStateV1>,
 }
@@ -76,181 +85,339 @@ impl ProcessObserverServiceV1 {
         Self { state }
     }
 
-    fn observe_current_host_live(
+    fn register_process(
         &self,
-        purpose: ProcessObservationPurposeV1,
-        process_ref: &str,
-    ) -> Result<HostProcessObservationV1, ProcessObservationErrorV1> {
-        self.observe_current_host_live_with_observation_id(
-            purpose,
-            process_ref,
-            new_live_observation_id,
-        )
+        subject_kind: ProcessObservationSubjectKindV1,
+        scope: ProcessObservationScopeV1,
+        process_id: u32,
+    ) -> Result<HostProcessIdentityRegistrationV1, ProcessObservationErrorV1> {
+        self.register_process_with_id_source(subject_kind, scope, process_id, new_observation_id)
     }
 
-    fn observe_current_host_live_with_observation_id(
+    fn register_process_with_id_source(
         &self,
-        purpose: ProcessObservationPurposeV1,
-        process_ref: &str,
-        new_observation_id: impl FnOnce() -> Result<String, ProcessObservationErrorV1>,
-    ) -> Result<HostProcessObservationV1, ProcessObservationErrorV1> {
-        let current_process_ref = std::process::id().to_string();
-        if process_ref != current_process_ref {
-            return Err(ProcessObservationErrorV1::NotObservable);
+        subject_kind: ProcessObservationSubjectKindV1,
+        scope: ProcessObservationScopeV1,
+        process_id: u32,
+        mut next_observation_id: impl FnMut() -> Result<String, ProcessObservationErrorV1>,
+    ) -> Result<HostProcessIdentityRegistrationV1, ProcessObservationErrorV1> {
+        if !scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
         }
-        let birth_identity = observe_current_process_identity().map_err(map_process_error)?;
+        let birth_identity =
+            observe_process_identity(process_id).map_err(map_registration_error)?;
         let birth_identity_hash =
             CanonicalHash::from_bytes(birth_identity.birth_identity_fingerprint());
-        let observed_at_ms = self.state.observed_at_ms();
-        let observation_id = new_observation_id()?;
-        let issued = IssuedLiveObservationV1 {
-            purpose,
-            process_ref: current_process_ref.clone(),
-            birth_identity,
+        let registration_nonce = next_observation_id()?;
+        let registration_hash = registration_hash(
+            process_id,
             birth_identity_hash,
-            observed_at_ms,
-            issued_at: Instant::now(),
-        };
-        let mut issued_observations = self
+            subject_kind,
+            &scope,
+            &registration_nonce,
+            self.state.service_instance_hash,
+        );
+        let identity = VerifiedHostProcessIdentityV1::from_verified_registration(
+            process_id,
+            birth_identity_hash,
+            subject_kind,
+            scope,
+            registration_nonce,
+            registration_hash,
+            self.state.service_instance_hash,
+            SERVICE_GENERATION,
+        );
+        let issuance_id = next_observation_id()?;
+        let observed_at_monotonic_ms = self.state.observed_at_monotonic_ms();
+        let mut registrations = self
             .state
-            .issued
+            .registrations
             .lock()
             .map_err(|_| ProcessObservationErrorV1::NotObservable)?;
-        issued_observations
-            .retain(|_, issued| issued.issued_at.elapsed() <= self.state.max_evidence_age);
-        if issued_observations.len() >= MAX_PENDING_LIVE_OBSERVATIONS {
+        registrations.retain(|_, issued| issued.issued_at.elapsed() <= self.state.max_evidence_age);
+        if registrations.len() >= MAX_PENDING_OBSERVATIONS {
             return Err(ProcessObservationErrorV1::NotObservable);
         }
-        issued_observations.insert(observation_id.clone(), issued);
-        Ok(HostProcessObservationV1 {
-            process_ref: current_process_ref,
-            birth_identity_hash,
-            vitality: ProcessVitalityV1::Live,
-            // Kernel V1 calls this a process ref. It is deliberately an opaque one-shot issuer
-            // reference, not an owner group, PID alias, or platform locator.
-            owner_process_ref: observation_id,
-            observed_at_ms,
-        })
+        registrations.insert(
+            issuance_id.clone(),
+            IssuedRegistrationV1 {
+                identity: identity.clone(),
+                birth_identity,
+                issued_at: Instant::now(),
+            },
+        );
+        Ok(HostProcessIdentityRegistrationV1::new(
+            identity,
+            issuance_id,
+            observed_at_monotonic_ms,
+        ))
     }
 
-    fn verify_live_observation(
+    fn verify_registration(
         &self,
-        purpose: ProcessObservationPurposeV1,
-        observation: &HostProcessObservationV1,
-    ) -> Result<VerifiedProcessObservationV1, ProcessObservationErrorV1> {
+        registration: HostProcessIdentityRegistrationV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+    ) -> Result<VerifiedHostProcessIdentityV1, ProcessObservationErrorV1> {
+        if !expected_scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
+        }
         let issued = self
             .state
-            .issued
+            .registrations
             .lock()
             .map_err(|_| ProcessObservationErrorV1::NotObservable)?
-            .get(&observation.owner_process_ref)
+            .get(registration.issuance_id())
             .cloned()
-            .ok_or(ProcessObservationErrorV1::NotObservable)?;
-        if issued.purpose != purpose {
-            return Err(ProcessObservationErrorV1::PurposeMismatch);
-        }
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
         if issued.issued_at.elapsed() > self.state.max_evidence_age {
-            return Err(ProcessObservationErrorV1::NotObservable);
+            return Err(ProcessObservationErrorV1::EvidenceExpired);
         }
-        if observation.process_ref != issued.process_ref
-            || observation.birth_identity_hash != issued.birth_identity_hash
-            || observation.vitality != ProcessVitalityV1::Live
-            || observation.observed_at_ms != issued.observed_at_ms
+        if !issued
+            .identity
+            .has_exact_binding(expected_kind, expected_scope)
         {
-            return Err(ProcessObservationErrorV1::NotObservable);
+            return Err(if issued.identity.subject_kind() != expected_kind {
+                ProcessObservationErrorV1::SubjectKindMismatch
+            } else {
+                ProcessObservationErrorV1::ScopeMismatch
+            });
         }
-
-        let current_identity = observe_current_process_identity().map_err(map_process_error)?;
-        if current_identity != issued.birth_identity {
-            return Err(ProcessObservationErrorV1::BirthIdentityUnresolved);
+        if registration.identity() != &issued.identity {
+            return Err(ProcessObservationErrorV1::VerifierInstanceDrift);
         }
-
-        // The evidence identifier is one-shot: consuming a verified Live observation prevents a
-        // caller from replaying the same DTO after it has crossed the kernel boundary.
+        match observe_process_identity(issued.identity.process_id()) {
+            Ok(current_identity) if current_identity == issued.birth_identity => {}
+            Ok(_) => return Err(ProcessObservationErrorV1::BirthIdentityMismatch),
+            // The concrete child was observed live when the private issuance was made. It can
+            // finish while the sandbox crosses into Resource Authority. This does not fabricate
+            // a live observation: the returned DTO is that historical birth registration, and
+            // the sandbox must still reap/settle its owned child while recovery re-observes it as
+            // Quiescent. Retaining this narrow outcome keeps an ordinary short command from
+            // failing solely because it exited between the two birth reads.
+            Err(ProcessIdentityObservationErrorV1::Absent)
+            | Err(ProcessIdentityObservationErrorV1::NotLive(_)) => {}
+            Err(error) => return Err(map_registration_error(error)),
+        }
         self.state
-            .issued
+            .registrations
             .lock()
             .map_err(|_| ProcessObservationErrorV1::NotObservable)?
-            .remove(&observation.owner_process_ref)
-            .ok_or(ProcessObservationErrorV1::NotObservable)?;
+            .remove(registration.issuance_id())
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
+        Ok(issued.identity)
+    }
 
-        Ok(VerifiedProcessObservationV1 {
-            process_ref: issued.process_ref,
-            birth_identity_hash: issued.birth_identity_hash,
-            vitality: ProcessVitalityV1::Live,
-            verifier_instance_hash: self.state.verifier_instance_hash,
-            verified_observation_hash: verified_observation_hash(
-                &self.state.verifier_instance_hash,
-                purpose,
-                observation,
+    fn observe_for_recovery(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+    ) -> Result<HostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
+        if !expected_scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
+        }
+        if !subject.has_exact_binding(expected_kind, expected_scope) {
+            return Err(if subject.subject_kind() != expected_kind {
+                ProcessObservationErrorV1::SubjectKindMismatch
+            } else {
+                ProcessObservationErrorV1::ScopeMismatch
+            });
+        }
+        let vitality = match observe_process_identity(subject.process_id()) {
+            Ok(identity) => {
+                if CanonicalHash::from_bytes(identity.birth_identity_fingerprint())
+                    != subject.birth_identity_hash()
+                {
+                    return Err(ProcessObservationErrorV1::BirthIdentityMismatch);
+                }
+                ProcessVitalityV1::Live
+            }
+            Err(ProcessIdentityObservationErrorV1::Absent)
+            | Err(ProcessIdentityObservationErrorV1::NotLive(_)) => ProcessVitalityV1::Quiescent,
+            Err(
+                ProcessIdentityObservationErrorV1::InvalidProcessId
+                | ProcessIdentityObservationErrorV1::NotObservable(_),
+            ) => return Err(ProcessObservationErrorV1::NotObservable),
+        };
+        let issuance_id = new_observation_id()?;
+        let observed_at_monotonic_ms = self.state.observed_at_monotonic_ms();
+        let mut observations = self
+            .state
+            .recovery_observations
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?;
+        observations.retain(|_, issued| issued.issued_at.elapsed() <= self.state.max_evidence_age);
+        if observations.len() >= MAX_PENDING_OBSERVATIONS {
+            return Err(ProcessObservationErrorV1::NotObservable);
+        }
+        observations.insert(
+            issuance_id.clone(),
+            IssuedRecoveryObservationV1 {
+                subject_registration_hash: subject.registration_hash(),
+                vitality,
+                observed_at_monotonic_ms,
+                issued_at: Instant::now(),
+            },
+        );
+        Ok(HostProcessRecoveryObservationV1::new(
+            subject.registration_hash(),
+            vitality,
+            issuance_id,
+            observed_at_monotonic_ms,
+        ))
+    }
+
+    fn verify_recovery_observation(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        observation: HostProcessRecoveryObservationV1,
+    ) -> Result<VerifiedHostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
+        if !expected_scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
+        }
+        if !subject.has_exact_binding(expected_kind, expected_scope) {
+            return Err(if subject.subject_kind() != expected_kind {
+                ProcessObservationErrorV1::SubjectKindMismatch
+            } else {
+                ProcessObservationErrorV1::ScopeMismatch
+            });
+        }
+        let issued = self
+            .state
+            .recovery_observations
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?
+            .get(observation.issuance_id())
+            .cloned()
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
+        if issued.issued_at.elapsed() > self.state.max_evidence_age {
+            return Err(ProcessObservationErrorV1::EvidenceExpired);
+        }
+        if observation.subject_registration_hash() != subject.registration_hash()
+            || observation.subject_registration_hash() != issued.subject_registration_hash
+            || observation.vitality() != issued.vitality
+            || observation.observed_at_monotonic_ms() != issued.observed_at_monotonic_ms
+        {
+            return Err(ProcessObservationErrorV1::VerifierInstanceDrift);
+        }
+        self.state
+            .recovery_observations
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?
+            .remove(observation.issuance_id())
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
+        Ok(VerifiedHostProcessRecoveryObservationV1 {
+            vitality: issued.vitality,
+            verifier_instance_hash: self.state.service_instance_hash,
+            verifier_service_generation: SERVICE_GENERATION,
+            verified_observation_hash: recovery_observation_hash(
+                subject,
+                issued.vitality,
+                issued.observed_at_monotonic_ms,
+                self.state.service_instance_hash,
             ),
         })
     }
 }
 
 impl HostProcessObservationServiceV1 for ProcessObserverServiceV1 {
-    fn observe(
+    fn register_current_authority_owner(
         &self,
-        purpose: ProcessObservationPurposeV1,
-        process_ref: &str,
-    ) -> Result<HostProcessObservationV1, ProcessObservationErrorV1> {
-        match purpose {
-            ProcessObservationPurposeV1::SessionWriterAttachment
-            | ProcessObservationPurposeV1::StorageAdmission => {
-                self.observe_current_host_live(purpose, process_ref)
-            }
-            // V1 carries only an untrusted PID-shaped string. Without a durable authenticated
-            // expected birth identity it cannot distinguish an exited old process from PID reuse,
-            // permission loss, or a different host process. The RA-only recovery facet added by
-            // the E02 integration must supply that exact subject before Quiescent can exist.
-            ProcessObservationPurposeV1::TerminalProof => {
-                Err(ProcessObservationErrorV1::BirthIdentityUnresolved)
-            }
-        }
+        scope: ProcessObservationScopeV1,
+    ) -> Result<HostProcessIdentityRegistrationV1, ProcessObservationErrorV1> {
+        self.register_process(
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            scope,
+            std::process::id(),
+        )
+    }
+
+    fn register_spawned_process(
+        &self,
+        scope: ProcessObservationScopeV1,
+        process_id: u32,
+    ) -> Result<HostProcessIdentityRegistrationV1, ProcessObservationErrorV1> {
+        self.register_process(
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            scope,
+            process_id,
+        )
+    }
+}
+
+impl HostProcessIdentityRecoveryProbeV1 for ProcessObserverServiceV1 {
+    fn observe_identity_for_authority_recovery(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+    ) -> Result<HostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
+        self.observe_for_recovery(subject, expected_kind, expected_scope)
     }
 }
 
 impl HostProcessObservationVerifierV1 for ProcessObserverServiceV1 {
     fn verifier_instance_hash(&self) -> CanonicalHash {
-        self.state.verifier_instance_hash
+        self.state.service_instance_hash
     }
 
-    fn verify_observation(
+    fn verifier_service_generation(&self) -> u64 {
+        SERVICE_GENERATION
+    }
+
+    fn verify_registration(
         &self,
-        purpose: ProcessObservationPurposeV1,
-        observation: &HostProcessObservationV1,
-    ) -> Result<VerifiedProcessObservationV1, ProcessObservationErrorV1> {
-        self.verify_live_observation(purpose, observation)
+        registration: HostProcessIdentityRegistrationV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+    ) -> Result<VerifiedHostProcessIdentityV1, ProcessObservationErrorV1> {
+        self.verify_registration(registration, expected_kind, expected_scope)
+    }
+
+    fn verify_recovery_observation(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        observation: HostProcessRecoveryObservationV1,
+    ) -> Result<VerifiedHostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
+        self.verify_recovery_observation(subject, expected_kind, expected_scope, observation)
     }
 }
 
-/// Same-instance factory (the only public constructor for service/verifier pairs).
+/// Same-instance factory (the only public constructor for all three observation facets).
 pub struct ProcessObserverFactoryV1 {
     state: Arc<ObserverStateV1>,
 }
 
 impl ProcessObserverFactoryV1 {
-    #[must_use]
-    pub fn new(verifier_instance_hash: CanonicalHash) -> Self {
-        Self {
-            state: Arc::new(ObserverStateV1::new(
-                verifier_instance_hash,
-                DEFAULT_MAX_EVIDENCE_AGE,
-            )),
-        }
+    /// Builds a factory bound to the current real host process. The binding value is composition
+    /// input, while the service instance is also bound to this process birth and fresh entropy.
+    pub fn new(factory_binding_hash: CanonicalHash) -> Result<Self, ProcessObservationErrorV1> {
+        Self::with_max_evidence_age(factory_binding_hash, DEFAULT_MAX_EVIDENCE_AGE)
     }
 
-    #[cfg(test)]
     fn with_max_evidence_age(
-        verifier_instance_hash: CanonicalHash,
+        factory_binding_hash: CanonicalHash,
         max_evidence_age: Duration,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ProcessObservationErrorV1> {
+        let current = observe_current_process_identity().map_err(map_registration_error)?;
+        let nonce = new_observation_id()?;
+        let mut hasher = Sha256::new();
+        hasher.update(OBSERVATION_DOMAIN);
+        hasher.update(factory_binding_hash.as_bytes());
+        hasher.update(current.birth_identity_fingerprint());
+        update_sized_bytes(&mut hasher, nonce.as_bytes());
+        let service_instance_hash = CanonicalHash::from_bytes(hasher.finalize().into());
+        Ok(Self {
             state: Arc::new(ObserverStateV1::new(
-                verifier_instance_hash,
+                service_instance_hash,
                 max_evidence_age,
             )),
-        }
+        })
     }
 
     #[must_use]
@@ -260,8 +427,14 @@ impl ProcessObserverFactoryV1 {
 }
 
 impl HostProcessObservationFactoryV1 for ProcessObserverFactoryV1 {
-    fn observation_service(&self) -> Box<dyn HostProcessObservationServiceV1> {
-        Box::new(ProcessObserverServiceV1::from_state(Arc::clone(
+    fn observation_service(&self) -> Arc<dyn HostProcessObservationServiceV1> {
+        Arc::new(ProcessObserverServiceV1::from_state(Arc::clone(
+            &self.state,
+        )))
+    }
+
+    fn authority_recovery_probe(&self) -> Arc<dyn HostProcessIdentityRecoveryProbeV1> {
+        Arc::new(ProcessObserverServiceV1::from_state(Arc::clone(
             &self.state,
         )))
     }
@@ -273,12 +446,10 @@ impl HostProcessObservationFactoryV1 for ProcessObserverFactoryV1 {
     }
 }
 
-fn map_process_error(error: ProcessIdentityObservationErrorV1) -> ProcessObservationErrorV1 {
+fn map_registration_error(error: ProcessIdentityObservationErrorV1) -> ProcessObservationErrorV1 {
     match error {
-        ProcessIdentityObservationErrorV1::Absent => {
-            ProcessObservationErrorV1::BirthIdentityUnresolved
-        }
         ProcessIdentityObservationErrorV1::InvalidProcessId
+        | ProcessIdentityObservationErrorV1::Absent
         | ProcessIdentityObservationErrorV1::NotLive(_)
         | ProcessIdentityObservationErrorV1::NotObservable(_) => {
             ProcessObservationErrorV1::NotObservable
@@ -286,51 +457,61 @@ fn map_process_error(error: ProcessIdentityObservationErrorV1) -> ProcessObserva
     }
 }
 
-fn new_live_observation_id() -> Result<String, ProcessObservationErrorV1> {
-    new_live_observation_id_from_random_source(|random_bytes| {
-        SystemRandom::new().fill(random_bytes).map_err(|_| ())
-    })
-}
-
-fn new_live_observation_id_from_random_source(
-    fill_random_bytes: impl FnOnce(&mut [u8; 16]) -> Result<(), ()>,
-) -> Result<String, ProcessObservationErrorV1> {
+fn new_observation_id() -> Result<String, ProcessObservationErrorV1> {
     let mut random_bytes = [0u8; 16];
-    fill_random_bytes(&mut random_bytes)
-        // The UUID convenience API can panic if its internal entropy call fails. Failure to
-        // obtain entropy is instead a closed observation failure, before a record reaches
-        // issuance.
-        .map_err(|()| ProcessObservationErrorV1::NotObservable)?;
+    SystemRandom::new()
+        .fill(&mut random_bytes)
+        .map_err(|_| ProcessObservationErrorV1::NotObservable)?;
     random_bytes[6] = (random_bytes[6] & 0x0f) | 0x40;
     random_bytes[8] = (random_bytes[8] & 0x3f) | 0x80;
     Ok(format!(
-        "host-observation-v1:{}",
+        "host-observation-v2:{}",
         Uuid::from_bytes(random_bytes)
     ))
 }
 
-fn verified_observation_hash(
-    verifier_instance_hash: &CanonicalHash,
-    purpose: ProcessObservationPurposeV1,
-    observation: &HostProcessObservationV1,
+fn registration_hash(
+    process_id: u32,
+    birth_identity_hash: CanonicalHash,
+    subject_kind: ProcessObservationSubjectKindV1,
+    scope: &ProcessObservationScopeV1,
+    registration_nonce: &str,
+    service_instance_hash: CanonicalHash,
 ) -> CanonicalHash {
     let mut hasher = Sha256::new();
-    hasher.update(VERIFIED_OBSERVATION_DOMAIN);
-    hasher.update(verifier_instance_hash.as_bytes());
-    hasher.update([purpose_discriminant(purpose)]);
-    update_sized_bytes(&mut hasher, observation.process_ref.as_bytes());
-    hasher.update(observation.birth_identity_hash.as_bytes());
-    hasher.update([vitality_discriminant(observation.vitality)]);
-    update_sized_bytes(&mut hasher, observation.owner_process_ref.as_bytes());
-    hasher.update(observation.observed_at_ms.to_be_bytes());
+    hasher.update(REGISTRATION_DOMAIN);
+    hasher.update(process_id.to_be_bytes());
+    hasher.update(birth_identity_hash.as_bytes());
+    hasher.update([subject_kind_discriminant(subject_kind)]);
+    hasher.update(scope.authority_epoch.to_be_bytes());
+    hasher.update(scope.application_composition_epoch.to_be_bytes());
+    hasher.update(scope.execution_scope_hash.as_bytes());
+    update_sized_bytes(&mut hasher, registration_nonce.as_bytes());
+    hasher.update(service_instance_hash.as_bytes());
+    hasher.update(SERVICE_GENERATION.to_be_bytes());
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
-fn purpose_discriminant(purpose: ProcessObservationPurposeV1) -> u8 {
-    match purpose {
-        ProcessObservationPurposeV1::SessionWriterAttachment => 1,
-        ProcessObservationPurposeV1::StorageAdmission => 2,
-        ProcessObservationPurposeV1::TerminalProof => 3,
+fn recovery_observation_hash(
+    subject: &VerifiedHostProcessIdentityV1,
+    vitality: ProcessVitalityV1,
+    observed_at_monotonic_ms: u64,
+    verifier_instance_hash: CanonicalHash,
+) -> CanonicalHash {
+    let mut hasher = Sha256::new();
+    hasher.update(RECOVERY_DOMAIN);
+    hasher.update(subject.registration_hash().as_bytes());
+    hasher.update([vitality_discriminant(vitality)]);
+    hasher.update(observed_at_monotonic_ms.to_be_bytes());
+    hasher.update(verifier_instance_hash.as_bytes());
+    hasher.update(SERVICE_GENERATION.to_be_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn subject_kind_discriminant(subject_kind: ProcessObservationSubjectKindV1) -> u8 {
+    match subject_kind {
+        ProcessObservationSubjectKindV1::AuthorityBootstrapOwner => 1,
+        ProcessObservationSubjectKindV1::ManagedExecution => 2,
     }
 }
 
@@ -346,11 +527,7 @@ fn update_sized_bytes(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-/// Returns a domain-separated canonical digest for non-process instance bindings.
-///
-/// Runtime and Resource Authority currently use this helper only to seed a factory verifier
-/// instance. Process birth identity is always calculated by `sigil-process`, never by this
-/// generic helper.
+/// Returns a domain-separated canonical digest for composition bindings.
 #[must_use]
 pub fn canonical_digest(payload: &[u8]) -> CanonicalHash {
     let mut hasher = Sha256::new();

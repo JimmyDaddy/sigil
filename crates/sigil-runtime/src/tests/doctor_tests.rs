@@ -1,6 +1,13 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::{env, ffi::OsString, fs, path::Path};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -17,13 +24,127 @@ fn toml_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+const AUTHORITY_RECOVERY_CHILD_CONFIG_ENV: &str = "SIGIL_DOCTOR_AUTHORITY_RECOVERY_CHILD_CONFIG";
+const AUTHORITY_RECOVERY_CHILD_LAUNCH_CWD_ENV: &str =
+    "SIGIL_DOCTOR_AUTHORITY_RECOVERY_CHILD_LAUNCH_CWD";
+const AUTHORITY_RECOVERY_CHILD_STATE_ENV: &str = "SIGIL_DOCTOR_AUTHORITY_RECOVERY_CHILD_STATE";
+const AUTHORITY_RECOVERY_CHILD_READY_ENV: &str = "SIGIL_DOCTOR_AUTHORITY_RECOVERY_CHILD_READY";
+const AUTHORITY_RECOVERY_CHILD_RELEASE_ENV: &str = "SIGIL_DOCTOR_AUTHORITY_RECOVERY_CHILD_RELEASE";
+
+/// Runs the entire failed old-epoch sequence in an owned child. The parent must prove that the
+/// child owner remains live before releasing it, then recover only after its exact birth exits.
+fn run_authority_recovery_owner_child_fixture() -> Result<bool> {
+    let Some(config_path) = env::var_os(AUTHORITY_RECOVERY_CHILD_CONFIG_ENV) else {
+        return Ok(false);
+    };
+    let launch_cwd = PathBuf::from(
+        env::var_os(AUTHORITY_RECOVERY_CHILD_LAUNCH_CWD_ENV)
+            .ok_or_else(|| anyhow::anyhow!("recovery child launch cwd is missing"))?,
+    );
+    let state_root = PathBuf::from(
+        env::var_os(AUTHORITY_RECOVERY_CHILD_STATE_ENV)
+            .ok_or_else(|| anyhow::anyhow!("recovery child state root is missing"))?,
+    );
+    let ready = PathBuf::from(
+        env::var_os(AUTHORITY_RECOVERY_CHILD_READY_ENV)
+            .ok_or_else(|| anyhow::anyhow!("recovery child ready marker is missing"))?,
+    );
+    let release = PathBuf::from(
+        env::var_os(AUTHORITY_RECOVERY_CHILD_RELEASE_ENV)
+            .ok_or_else(|| anyhow::anyhow!("recovery child release marker is missing"))?,
+    );
+    let config_path = PathBuf::from(config_path);
+
+    crate::r71_authority_composition::boot_current_schema(&config_path, &launch_cwd)?;
+    let corrupt_journal = state_root.join("authority-resources.journal.json");
+    fs::write(&corrupt_journal, b"{corrupt-authority-journal")?;
+    let failed =
+        match crate::r71_authority_composition::boot_current_schema(&config_path, &launch_cwd) {
+            Ok(_) => {
+                return Err(anyhow::anyhow!(
+                    "corrupt journal unexpectedly completed the old-epoch boot"
+                ));
+            }
+            Err(error) => error,
+        };
+    if !failed
+        .to_string()
+        .contains("durable authority journal failed")
+    {
+        return Err(anyhow::anyhow!(
+            "recovery child observed the wrong corrupt-journal failure: {failed}"
+        ));
+    }
+    fs::write(&ready, b"old-epoch-owner-ready")?;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !release.is_file() {
+        if Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "recovery child timed out waiting for parent release"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(true)
+}
+
+/// The parent owns this exact test child. Any parent-side failure releases and reaps it rather
+/// than leaving an owner process alive while the TempDir is removed.
+struct OwnedOldEpochChildV1 {
+    child: Option<std::process::Child>,
+    release: PathBuf,
+}
+
+impl OwnedOldEpochChildV1 {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("owned child is present until release")
+            .try_wait()
+    }
+
+    fn release_and_wait(mut self, reason: &[u8]) -> std::io::Result<std::process::Output> {
+        fs::write(&self.release, reason)?;
+        self.child
+            .take()
+            .expect("owned child is present until release")
+            .wait_with_output()
+    }
+}
+
+impl Drop for OwnedOldEpochChildV1 {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let _ = fs::write(&self.release, b"parent unwind releases old-epoch owner");
+        // This is an owned fixture child only. Kill after signaling so an unexpected test failure
+        // cannot leave a live durable owner or an unreaped process behind.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 #[test]
 fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result<()> {
+    if run_authority_recovery_owner_child_fixture()? {
+        return Ok(());
+    }
+
     let _environment_guard = crate::test_env::lock();
     let temp = tempdir()?;
     let home = temp.path().join("home");
     fs::create_dir(&home)?;
-    let _home = crate::test_env::EnvScope::set("HOME", &home);
+    let home_text = home.to_string_lossy().into_owned();
+    let _home = EnvScope::set_many(&[
+        ("HOME", home_text.as_str()),
+        ("USERPROFILE", home_text.as_str()),
+    ]);
+    // This test's [storage] roots are the contract under test; do not let a full-gate fixture
+    // override them through the higher-priority global SIGIL_* environment.
+    let _storage_env =
+        EnvScope::remove_many(&[crate::SIGIL_STATE_HOME_ENV, crate::SIGIL_CACHE_HOME_ENV]);
     let config_path = temp.path().join("sigil.toml");
     let state_a = temp.path().join("state-a");
     let cache_a = temp.path().join("cache-a");
@@ -37,20 +158,48 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
         )
     };
     fs::write(&config_path, config(&state_a, &cache_a))?;
-    crate::r71_authority_composition::boot_current_schema(&config_path, temp.path())?;
-
     let corrupt_journal = state_a.join("authority-resources.journal.json");
-    fs::write(&corrupt_journal, b"{corrupt-authority-journal")?;
-    let failed =
-        match crate::r71_authority_composition::boot_current_schema(&config_path, temp.path()) {
-            Ok(_) => panic!("corrupt journal must fail closed and record evidence"),
-            Err(error) => error,
-        };
-    assert!(
-        failed
-            .to_string()
-            .contains("durable authority journal failed")
-    );
+    let ready = temp.path().join("old-epoch-owner-ready");
+    let release = temp.path().join("release-old-epoch-owner");
+    let mut child = OwnedOldEpochChildV1 {
+        child: Some(
+            std::process::Command::new(env::current_exe()?)
+                .args([
+                    "--exact",
+                    "doctor::tests::authority_recovery_consumes_durable_failure_and_boots_fresh_roots",
+                    "--nocapture",
+                ])
+                .env(AUTHORITY_RECOVERY_CHILD_CONFIG_ENV, &config_path)
+                .env(AUTHORITY_RECOVERY_CHILD_LAUNCH_CWD_ENV, temp.path())
+                .env(AUTHORITY_RECOVERY_CHILD_STATE_ENV, &state_a)
+                .env(AUTHORITY_RECOVERY_CHILD_READY_ENV, &ready)
+                .env(AUTHORITY_RECOVERY_CHILD_RELEASE_ENV, &release)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+        ),
+        release: release.clone(),
+    };
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.is_file() && Instant::now() < ready_deadline {
+        if child.try_wait()?.is_some() {
+            let output = child.release_and_wait(b"child exited before readiness")?;
+            return Err(anyhow::anyhow!(
+                "old-epoch owner child exited before readiness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !ready.is_file() {
+        let output = child.release_and_wait(b"release after readiness timeout")?;
+        return Err(anyhow::anyhow!(
+            "old-epoch owner child did not become ready\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
 
     let state_b = temp.path().join("state-b");
     let cache_b = temp.path().join("cache-b");
@@ -66,6 +215,25 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
     let fresh_paths =
         crate::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
     fs::create_dir_all(&fresh_paths.scratch_root)?;
+
+    let live_owner =
+        recover_authority_bootstrap_with_confirmation(&config_path, temp.path(), |challenge| {
+            Ok(challenge.to_owned())
+        });
+
+    let output = child.release_and_wait(b"parent finished live-owner negative")?;
+    assert!(
+        output.status.success(),
+        "old-epoch owner child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let live_owner =
+        live_owner.expect_err("a live old authority owner must block fresh-root recovery");
+    assert!(
+        live_owner.contains("old authority process is still live"),
+        "live old owner must remain a typed recovery blocker: {live_owner}"
+    );
 
     let summary =
         recover_authority_bootstrap_with_confirmation(&config_path, temp.path(), |challenge| {

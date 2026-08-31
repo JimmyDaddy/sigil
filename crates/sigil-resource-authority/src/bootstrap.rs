@@ -61,6 +61,7 @@ pub enum AuthorityBootstrapObjectClassV1 {
     RecoveryReceipt,
     ProcessInventory,
     ProcessInventoryRequirement,
+    ProcessInventoryAuthenticator,
     BootFailureEvidence,
 }
 
@@ -346,6 +347,38 @@ impl AuthorityBootstrapStoreV1 {
         })
     }
 
+    /// Opens a bootstrap store only beneath an owned [`tempfile::TempDir`] fixture.
+    ///
+    /// This is deliberately feature-gated: cross-crate tests can exercise the production store
+    /// and durable inventory without exposing the raw production `open` path to host callers.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_owned_temp_fixture(
+        fixture: &tempfile::TempDir,
+        fixture_name: &str,
+        authority_epoch: u64,
+    ) -> Result<Self, BootstrapErrorV1> {
+        let name_path = Path::new(fixture_name);
+        if fixture_name.is_empty()
+            || name_path.is_absolute()
+            || name_path.components().count() != 1
+            || !matches!(
+                name_path.components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+        {
+            return Err(BootstrapErrorV1::MetadataCorrupted(
+                "test bootstrap fixture name must be one normal path component".to_owned(),
+            ));
+        }
+        let root = fs::canonicalize(fixture.path()).map_err(|error| {
+            BootstrapErrorV1::MetadataCorrupted(format!(
+                "owned test bootstrap root is unavailable: {error}"
+            ))
+        })?;
+        let namespace = root.join(fixture_name);
+        Self::open(&namespace, &namespace, authority_epoch)
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -388,6 +421,9 @@ impl AuthorityBootstrapStoreV1 {
             AuthorityBootstrapObjectClassV1::ProcessInventory => "process-inventory.json",
             AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement => {
                 "process-inventory-required.json"
+            }
+            AuthorityBootstrapObjectClassV1::ProcessInventoryAuthenticator => {
+                "process-inventory-authenticator.json"
             }
             AuthorityBootstrapObjectClassV1::BootFailureEvidence => "boot-failure-evidence.json",
         };
@@ -945,7 +981,7 @@ struct ChallengeRecordV1 {
 
 #[derive(Debug, Clone)]
 struct QuiescenceRecordV1 {
-    process_refs: Vec<String>,
+    subjects: Vec<sigil_kernel::process_observation::VerifiedHostProcessIdentityV1>,
     inventory_snapshot_hash: CanonicalHash,
     authority_epoch: u64,
     proof: OldAuthorityEpochQuiescenceProofV1,
@@ -1204,9 +1240,13 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         Ok(self.selection(root_ref)?.selection_hash)
     }
 
-    /// Proves that every authority-recorded old-epoch process is terminal or absent using the
-    /// host observer factory. The inventory is read from the active bootstrap epoch while the
-    /// shared transaction lock is held; callers cannot omit a process or fabricate an empty set.
+    /// Probes the authenticated old-epoch inventory while the shared transaction lock is held.
+    ///
+    /// A bounded-native exposure can be re-observed exactly, but cannot be upgraded into a
+    /// full-tree fresh-epoch proof merely because its registered child is now absent. The
+    /// inventory therefore retains a non-clearable weak-coverage frontier and this method returns
+    /// `NoQuiescence` after that exact re-observation. An owner-only epoch with no native exposure
+    /// remains the narrow positive case.
     pub fn probe_old_epoch_quiescence(
         &self,
         evidence_set_hash: CanonicalHash,
@@ -1216,58 +1256,92 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             .acquire_transaction()
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
         let snapshot = self.active_process_inventory()?;
-        let mut refs = Vec::with_capacity(snapshot.entries.len());
+        let recovery_probe = self.process_factory.authority_recovery_probe();
+        let verifier = self.process_factory.observation_verifier();
+        let owner_observation = recovery_probe
+            .observe_identity_for_authority_recovery(
+                &snapshot.owner_subject,
+                sigil_kernel::process_observation::ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                snapshot.owner_subject.scope(),
+            )
+            .map_err(|error| AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string()))?;
+        let owner_verified = verifier
+            .verify_recovery_observation(
+                &snapshot.owner_subject,
+                sigil_kernel::process_observation::ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                snapshot.owner_subject.scope(),
+                owner_observation,
+            )
+            .map_err(|error| AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string()))?;
+        if owner_verified.vitality == sigil_kernel::process_observation::ProcessVitalityV1::Live {
+            return Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(
+                snapshot.owner_subject.registration_hash().to_hex(),
+            ));
+        }
+        let mut subjects = Vec::with_capacity(snapshot.entries.len());
+        let mut observations = Vec::with_capacity(snapshot.entries.len());
         for entry in snapshot.entries.values() {
-            match entry.state {
-                crate::process_inventory::AuthorityProcessInventoryStateV1::Prepared => {
+            match &entry.state {
+                crate::process_inventory::AuthorityProcessInventoryStateV1::Prepared { .. } => {
                     return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
                 }
                 crate::process_inventory::AuthorityProcessInventoryStateV1::Attached {
-                    process_id,
-                } => refs.push(process_id.to_string()),
+                    subject,
+                } => {
+                    let observation = recovery_probe
+                        .observe_identity_for_authority_recovery(
+                            subject,
+                            sigil_kernel::process_observation::ProcessObservationSubjectKindV1::ManagedExecution,
+                            subject.scope(),
+                        )
+                        .map_err(|error| {
+                            AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
+                        })?;
+                    let verified = verifier
+                        .verify_recovery_observation(
+                            subject,
+                            sigil_kernel::process_observation::ProcessObservationSubjectKindV1::ManagedExecution,
+                            subject.scope(),
+                            observation,
+                        )
+                        .map_err(|error| {
+                            AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
+                        })?;
+                    if verified.vitality
+                        == sigil_kernel::process_observation::ProcessVitalityV1::Live
+                    {
+                        return Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(
+                            subject.registration_hash().to_hex(),
+                        ));
+                    }
+                    subjects.push(subject.clone());
+                    observations.push((
+                        subject.registration_hash(),
+                        verified.verified_observation_hash,
+                    ));
+                }
             }
         }
-        let service = self.process_factory.observation_service();
-        let verifier = self.process_factory.observation_verifier();
-        let mut observations = Vec::with_capacity(refs.len());
-        for process_ref in &refs {
-            let observation = service
-                .observe(
-                    sigil_kernel::process_observation::ProcessObservationPurposeV1::TerminalProof,
-                    process_ref,
-                )
-                .map_err(|error| {
-                    AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
-                })?;
-            let verified = verifier
-                .verify_observation(
-                    sigil_kernel::process_observation::ProcessObservationPurposeV1::TerminalProof,
-                    &observation,
-                )
-                .map_err(|error| {
-                    AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
-                })?;
-            if verified.vitality == sigil_kernel::process_observation::ProcessVitalityV1::Live {
-                return Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(
-                    process_ref.clone(),
-                ));
-            }
-            observations.push((observation, verified.verified_observation_hash));
+        if snapshot.bounded_native_exposure_count != 0 {
+            return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
         }
         let observed_at_ms = current_epoch_ms();
         let inventory_hash = snapshot.snapshot_hash;
         let owner_probe_hash = canonical_bootstrap_hash(
-            serde_json::to_vec(&observations)
-                .map_err(|error| {
-                    AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
-                })?
-                .as_slice(),
+            serde_json::to_vec(&(
+                snapshot.owner_subject.registration_hash(),
+                owner_verified.verified_observation_hash,
+            ))
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+            })?
+            .as_slice(),
         );
         let terminal_hash = canonical_bootstrap_hash(
             serde_json::to_vec(
                 &observations
                     .iter()
-                    .map(|(observation, verified_hash)| (&observation.process_ref, verified_hash))
+                    .map(|(registration_hash, verified_hash)| (registration_hash, verified_hash))
                     .collect::<Vec<_>>(),
             )
             .map_err(|error| {
@@ -1300,7 +1374,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             .insert(
                 proof_hash,
                 QuiescenceRecordV1 {
-                    process_refs: refs,
+                    subjects,
                     inventory_snapshot_hash: snapshot.snapshot_hash,
                     authority_epoch: snapshot.authority_epoch,
                     proof: proof.clone(),
@@ -1811,31 +1885,59 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         let snapshot = self.active_process_inventory()?;
         if snapshot.authority_epoch != proof.authority_epoch
             || snapshot.snapshot_hash != proof.inventory_snapshot_hash
+            || snapshot.bounded_native_exposure_count != 0
         {
             return Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
         }
-        let service = self.process_factory.observation_service();
+        let recovery_probe = self.process_factory.authority_recovery_probe();
         let verifier = self.process_factory.observation_verifier();
-        for process_ref in &proof.process_refs {
-            let observation = service
-                .observe(
-                    sigil_kernel::process_observation::ProcessObservationPurposeV1::TerminalProof,
-                    process_ref,
+        let owner_observation = recovery_probe
+            .observe_identity_for_authority_recovery(
+                &snapshot.owner_subject,
+                sigil_kernel::process_observation::ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                snapshot.owner_subject.scope(),
+            )
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
+            })?;
+        let owner = verifier
+            .verify_recovery_observation(
+                &snapshot.owner_subject,
+                sigil_kernel::process_observation::ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                snapshot.owner_subject.scope(),
+                owner_observation,
+            )
+            .map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
+            })?;
+        if owner.vitality == sigil_kernel::process_observation::ProcessVitalityV1::Live {
+            return Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(
+                snapshot.owner_subject.registration_hash().to_hex(),
+            ));
+        }
+        for subject in &proof.subjects {
+            let observation = recovery_probe
+                .observe_identity_for_authority_recovery(
+                    subject,
+                    sigil_kernel::process_observation::ProcessObservationSubjectKindV1::ManagedExecution,
+                    subject.scope(),
                 )
                 .map_err(|error| {
                     AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
                 })?;
             let verified = verifier
-                .verify_observation(
-                    sigil_kernel::process_observation::ProcessObservationPurposeV1::TerminalProof,
-                    &observation,
+                .verify_recovery_observation(
+                    subject,
+                    sigil_kernel::process_observation::ProcessObservationSubjectKindV1::ManagedExecution,
+                    subject.scope(),
+                    observation,
                 )
                 .map_err(|error| {
                     AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(error.to_string())
                 })?;
             if verified.vitality == sigil_kernel::process_observation::ProcessVitalityV1::Live {
                 return Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(
-                    process_ref.clone(),
+                    subject.registration_hash().to_hex(),
                 ));
             }
         }
@@ -1852,15 +1954,32 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         let path = root.join("process-inventory.json");
         let bytes =
             read_private_bytes(&path).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        let snapshot: crate::process_inventory::AuthorityProcessInventorySnapshotV1 =
-            serde_json::from_slice(&bytes).map_err(|error| {
+        let snapshot = crate::process_inventory::decode_snapshot(&bytes).map_err(|error| {
+            AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                error.to_string(),
+            ))
+        })?;
+        let authenticator_path = root.join("process-inventory-authenticator.json");
+        let authenticator_bytes = read_private_bytes(&authenticator_path)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let authenticator = crate::process_inventory::decode_authenticator(&authenticator_bytes)
+            .map_err(|error| {
                 AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
-                    format!("{}: {error}", path.display()),
+                    error.to_string(),
                 ))
             })?;
-        snapshot
-            .validate(epoch)
-            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if !authenticator.is_active() {
+            return Err(AuthorityBootstrapRecoveryErrorV1::Bootstrap(
+                BootstrapErrorV1::ReconciliationRequired(
+                    "authority process inventory key initialization is incomplete".to_owned(),
+                ),
+            ));
+        }
+        snapshot.validate(epoch, &authenticator).map_err(|error| {
+            AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                error.to_string(),
+            ))
+        })?;
         Ok(snapshot)
     }
 
@@ -2308,6 +2427,9 @@ fn observed_bootstrap_digest(root: &Path) -> Result<CanonicalHash, BootstrapErro
         OLD_EPOCH_INERT_FILE,
         RECOVERY_INTENT_FILE,
         RECOVERY_RECEIPT_FILE,
+        "process-inventory-authenticator.json",
+        "process-inventory.json",
+        "process-inventory-required.json",
     ] {
         material.extend_from_slice(name.as_bytes());
         material.push(0);
@@ -2573,7 +2695,28 @@ mod recovery_tests {
         sigil_process_observer::ProcessObserverFactoryV1::new(canonical_bootstrap_hash(
             b"r71-bootstrap-recovery-test-observer",
         ))
+        .expect("current test process observer")
         .instantiate()
+    }
+
+    fn process_inventory_binding(
+        composition_epoch: u64,
+    ) -> crate::process_inventory::AuthorityProcessInventoryBootstrapBindingV1 {
+        crate::process_inventory::AuthorityProcessInventoryBootstrapBindingV1 {
+            application_composition_epoch: composition_epoch,
+            owner_execution_scope_hash: canonical_bootstrap_hash(
+                format!("r71-bootstrap-recovery-owner-{composition_epoch}").as_bytes(),
+            ),
+        }
+    }
+
+    fn process_spawn_request(
+        attempt: &str,
+    ) -> crate::process_inventory::AuthorityProcessSpawnRequestV1 {
+        crate::process_inventory::AuthorityProcessSpawnRequestV1 {
+            attempt_id: sigil_kernel::resource::PhysicalAttemptId::new(attempt.to_owned()),
+            execution_scope_hash: canonical_bootstrap_hash(attempt.as_bytes()),
+        }
     }
 
     fn evidence() -> Vec<FailedAuthorityJournalEvidenceV1> {
@@ -2586,19 +2729,56 @@ mod recovery_tests {
         }]
     }
 
-    fn publish_process_inventory(
-        root: &Path,
-        entries: BTreeMap<String, crate::process_inventory::AuthorityProcessInventoryEntryV1>,
-    ) {
-        let mut snapshot = crate::process_inventory::AuthorityProcessInventorySnapshotV1::empty(1);
-        snapshot.entries = entries;
-        snapshot.sequence = 1;
-        snapshot.snapshot_hash = snapshot.compute_hash();
-        publish_private_bootstrap_file(
-            &root.join("process-inventory.json"),
-            &serde_json::to_vec(&snapshot).expect("inventory bytes"),
+    const RECOVERY_CHILD_NAMESPACE_ENV: &str = "SIGIL_E02_RECOVERY_CHILD_NAMESPACE";
+
+    #[test]
+    #[ignore]
+    fn r71_bootstrap_recovery_quiescent_inventory_child_fixture() {
+        let namespace = PathBuf::from(
+            std::env::var_os(RECOVERY_CHILD_NAMESPACE_ENV)
+                .expect("fixture namespace supplied by parent test"),
+        );
+        let root = namespace
+            .join(EPOCHS_DIRECTORY_NAME)
+            .join("epoch-1-e02-quiescent-child");
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &root, 1)
+            .expect("owned child bootstrap store");
+        // `open` creates the new epoch root but publication is fenced against the active-epoch
+        // pointer. Publish this owned, empty root first; otherwise the just-created epoch is
+        // correctly treated as a stale handle while `namespace` is still the active root.
+        let recovery = AuthorityBootstrapRecoveryNamespaceV1 {
+            namespace: namespace.clone(),
+        };
+        let transaction = recovery
+            .acquire_transaction()
+            .expect("child recovery transaction");
+        recovery
+            .publish_active_epoch(&transaction, 1, &root)
+            .expect("publish child active root");
+        drop(transaction);
+        let publication = store.acquire_publication().expect("child publication");
+        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            store,
+            &publication,
+            process_inventory_binding(1),
+            process_factory(),
         )
-        .expect("process inventory");
+        .expect("child authenticated inventory");
+    }
+
+    fn spawn_quiescent_inventory_child(namespace: &Path) {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("current test executable"),
+        )
+        .args([
+            "--ignored",
+            "--exact",
+            "bootstrap::recovery_tests::r71_bootstrap_recovery_quiescent_inventory_child_fixture",
+        ])
+        .env(RECOVERY_CHILD_NAMESPACE_ENV, namespace)
+        .status()
+        .expect("run owned recovery fixture child");
+        assert!(status.success(), "owned recovery fixture child succeeds");
     }
 
     #[test]
@@ -2606,19 +2786,13 @@ mod recovery_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
         let namespace = base.join("authority-namespace");
-        fs::create_dir(&namespace).expect("namespace");
-        publish_process_inventory(&namespace, BTreeMap::new());
-        let active_pointer = namespace.join(ACTIVE_EPOCH_POINTER_FILE);
-        sigil_kernel::atomic_publish_private_file(&active_pointer, b"{corrupt")
-            .expect("corrupt pointer fixture");
-        assert!(matches!(
-            resolve_active_epoch(&namespace),
-            Err(BootstrapErrorV1::MetadataCorrupted(_))
-        ));
-        let expected_failed_bootstrap_hash = observed_bootstrap_digest(&namespace).expect("digest");
-        // The ordinary store must now reject a corrupt active pointer before opening a
-        // publication lock. Build this deliberately corrupt-boot fixture through the private
-        // recovery test seam instead of weakening that production check.
+        spawn_quiescent_inventory_child(&namespace);
+        let (old_root, active_epoch) = resolve_active_epoch(&namespace).expect("active epoch");
+        assert_eq!(active_epoch, 1);
+        let expected_failed_bootstrap_hash = observed_bootstrap_digest(&old_root).expect("digest");
+        // The fixture is authored by a separate owned child that has exited. The normal recovery
+        // path can therefore obtain an authenticated, exact-birth quiescence observation without
+        // a PID-only snapshot or an in-process fake terminal proof.
         let mut failure = DurableAuthorityBootFailureEvidenceV1 {
             schema_version: BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION,
             authority_epoch: 1,
@@ -2629,7 +2803,7 @@ mod recovery_tests {
         };
         failure.record_hash = failure.compute_hash().expect("failure hash");
         publish_private_bootstrap_file(
-            &namespace.join("boot-failure-evidence.json"),
+            &old_root.join("boot-failure-evidence.json"),
             &serde_json::to_vec(&failure).expect("failure evidence"),
         )
         .expect("failure evidence fixture");
@@ -2681,20 +2855,25 @@ mod recovery_tests {
             .expect("fresh epoch");
         assert_eq!(receipt.old_authority_epoch, 1);
         assert_eq!(receipt.new_authority_epoch, 2);
-        let (active_root, active_epoch) = resolve_active_epoch(&namespace).expect("active epoch");
+        let (new_active_root, active_epoch) =
+            resolve_active_epoch(&namespace).expect("active epoch");
         assert_eq!(active_epoch, 2);
         assert_eq!(
-            active_root.parent(),
+            new_active_root.parent(),
             Some(namespace.join(EPOCHS_DIRECTORY_NAME).as_path())
         );
-        assert!(namespace.join(OLD_EPOCH_INERT_FILE).is_file());
+        assert!(
+            old_root.join(OLD_EPOCH_INERT_FILE).is_file(),
+            "the actual old epoch is inert before the new active pointer is published"
+        );
 
         let active_store = service.namespace.active_store().expect("new active store");
         let publication = active_store.acquire_publication().expect("new publication");
         crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
             active_store,
             &publication,
-            true,
+            process_inventory_binding(1),
+            process_factory(),
         )
         .expect("new process inventory");
         drop(publication);
@@ -2723,20 +2902,16 @@ mod recovery_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
         let namespace = base.join("authority-namespace");
-        fs::create_dir(&namespace).expect("namespace");
-        let process_id = std::process::id();
-        publish_process_inventory(
-            &namespace,
-            BTreeMap::from([(
-                "live-attempt".to_owned(),
-                crate::process_inventory::AuthorityProcessInventoryEntryV1 {
-                    attempt_id: "live-attempt".to_owned(),
-                    state: crate::process_inventory::AuthorityProcessInventoryStateV1::Attached {
-                        process_id,
-                    },
-                },
-            )]),
-        );
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
+        let publication = store.acquire_publication().expect("publication");
+        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            store,
+            &publication,
+            process_inventory_binding(1),
+            process_factory(),
+        )
+        .expect("authenticated inventory");
+        drop(publication);
         let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
             AuthorityBootstrapRecoveryNamespaceV1 { namespace },
             process_factory(),
@@ -2763,7 +2938,8 @@ mod recovery_tests {
         let inventory = crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
             store,
             &publication,
-            true,
+            process_inventory_binding(1),
+            process_factory(),
         )
         .expect("inventory");
         drop(publication);
@@ -2772,22 +2948,28 @@ mod recovery_tests {
             process_factory(),
         );
         let evidence_hash = canonical_bootstrap_hash(b"evidence");
-        let claim = inventory.prepare_spawn("attempt-1").expect("prepare");
+        let claim = inventory
+            .prepare_spawn(process_spawn_request("attempt-1"))
+            .expect("prepare");
         assert!(matches!(
             service.probe_old_epoch_quiescence(evidence_hash),
-            Err(AuthorityBootstrapRecoveryErrorV1::NoQuiescence)
+            Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_))
         ));
+        let registration = claim
+            .register_spawned_process(std::process::id())
+            .expect("current process registration");
         inventory
-            .attach_spawn(&claim, std::process::id())
+            .attach_spawn(&claim, registration)
             .expect("attach");
         assert!(matches!(
             service.probe_old_epoch_quiescence(evidence_hash),
             Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_))
         ));
         inventory.settle_spawn(claim).expect("settle");
-        service
-            .probe_old_epoch_quiescence(evidence_hash)
-            .expect("settled inventory is quiescent");
+        assert!(matches!(
+            service.probe_old_epoch_quiescence(evidence_hash),
+            Err(AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_))
+        ));
         fs::remove_file(store_again.path(AuthorityBootstrapObjectClassV1::ProcessInventory))
             .expect("remove inventory fixture");
         let publication = store_again.acquire_publication().expect("publication");
@@ -2795,19 +2977,20 @@ mod recovery_tests {
             crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
                 store_again.clone(),
                 &publication,
-                false,
+                process_inventory_binding(1),
+                process_factory(),
             ),
-            Err(
-                crate::process_inventory::AuthorityProcessInventoryErrorV1::Bootstrap(
-                    BootstrapErrorV1::MetadataCorrupted(_)
-                )
-            )
+            Err(crate::process_inventory::AuthorityProcessInventoryErrorV1::AuthenticatorCorrupted)
         ));
         drop(publication);
         fs::remove_file(
             store_again.path(AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement),
         )
         .expect("remove requirement fixture");
+        fs::remove_file(
+            store_again.path(AuthorityBootstrapObjectClassV1::ProcessInventoryAuthenticator),
+        )
+        .expect("remove durable authenticator fixture");
         let reopened = AuthorityBootstrapStoreV1::open(
             store_again.namespace(),
             store_again.root(),
@@ -2819,13 +3002,10 @@ mod recovery_tests {
             crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
                 reopened,
                 &publication,
-                false,
+                process_inventory_binding(1),
+                process_factory(),
             ),
-            Err(
-                crate::process_inventory::AuthorityProcessInventoryErrorV1::Bootstrap(
-                    BootstrapErrorV1::MetadataCorrupted(_)
-                )
-            )
+            Err(crate::process_inventory::AuthorityProcessInventoryErrorV1::AuthenticatorMissing)
         ));
     }
 
@@ -2835,7 +3015,6 @@ mod recovery_tests {
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
         let namespace = base.join("authority-namespace");
         fs::create_dir(&namespace).expect("namespace");
-        publish_process_inventory(&namespace, BTreeMap::new());
         let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
             AuthorityBootstrapRecoveryNamespaceV1 { namespace },
             process_factory(),
@@ -2870,7 +3049,8 @@ mod recovery_tests {
         crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
             store.clone(),
             &publication,
-            true,
+            process_inventory_binding(1),
+            process_factory(),
         )
         .expect("inventory");
         store

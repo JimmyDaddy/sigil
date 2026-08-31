@@ -845,9 +845,7 @@ fn load_authority_config_generation(
     Ok(Some(record))
 }
 
-fn load_or_advance_authority_config_generation(
-    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
-    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+fn candidate_authority_config_generation(
     current: Option<AuthorityConfigGenerationRecordV1>,
     config_hash: CanonicalHash,
 ) -> Result<u64, BootAuthorityErrorV1> {
@@ -858,6 +856,16 @@ fn load_or_advance_authority_config_generation(
         })?,
         None => 1,
     };
+    Ok(generation)
+}
+
+fn publish_authority_config_generation(
+    bootstrap: &sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1,
+    publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
+    current: Option<AuthorityConfigGenerationRecordV1>,
+    config_hash: CanonicalHash,
+    generation: u64,
+) -> Result<(), BootAuthorityErrorV1> {
     if current.as_ref().is_none_or(|record| {
         record.config_hash != config_hash
             || record.generation != generation
@@ -880,7 +888,7 @@ fn load_or_advance_authority_config_generation(
             )
             .map_err(BootAuthorityErrorV1::Bootstrap)?;
     }
-    Ok(generation)
+    Ok(())
 }
 
 /// Convenience: authoritative resource journal scope for the composition (application-level).
@@ -898,6 +906,41 @@ pub enum BootAuthorityErrorV1 {
     Composition(RuntimeAuthorityCompositionErrorV1),
     #[error("authority bootstrap failed: {0}")]
     Bootstrap(sigil_resource_authority::bootstrap::BootstrapErrorV1),
+}
+
+/// Keeps startup blockers that need the durable recovery protocol distinct from malformed
+/// bootstrap bytes. No inventory error is downgraded into an auto-repairable fresh bootstrap.
+fn map_process_inventory_boot_error(
+    error: sigil_resource_authority::AuthorityProcessInventoryErrorV1,
+) -> BootAuthorityErrorV1 {
+    use sigil_resource_authority::{
+        AuthorityProcessInventoryErrorV1 as InventoryError, bootstrap::BootstrapErrorV1,
+    };
+
+    match error {
+        InventoryError::Bootstrap(error) => BootAuthorityErrorV1::Bootstrap(error),
+        error @ (InventoryError::InvalidBootstrapBinding
+        | InventoryError::AuthenticatorUnavailable) => {
+            BootAuthorityErrorV1::Config(error.to_string())
+        }
+        InventoryError::AuthenticatorCorrupted => {
+            BootAuthorityErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                "authority process inventory authenticator is corrupted or mismatched".to_owned(),
+            ))
+        }
+        error @ (InventoryError::LegacySchema
+        | InventoryError::AuthenticatorMissing
+        | InventoryError::CapacityExhausted
+        | InventoryError::SequenceExhausted
+        | InventoryError::InvalidClaim
+        | InventoryError::PriorOwnerStillLive
+        | InventoryError::PriorManagedProcessStillLive(_)
+        | InventoryError::PreparedProcessRecoveryRequired
+        | InventoryError::Observation(_)
+        | InventoryError::LockPoisoned) => BootAuthorityErrorV1::Bootstrap(
+            BootstrapErrorV1::ReconciliationRequired(error.to_string()),
+        ),
+    }
 }
 
 fn build_current_boot_transaction(
@@ -1041,29 +1084,53 @@ fn compose_current_boot_authority_locked(
     use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = host_application_instance_id(config_snapshot.config_path());
     let current_config_generation = load_authority_config_generation(bootstrap, publication)?;
-    let allow_pre_inventory_cutover_seed = current_config_generation
-        .as_ref()
-        .is_none_or(|record| !record.process_inventory_required);
+    let application_generation = candidate_authority_config_generation(
+        current_config_generation.clone(),
+        config_snapshot.config_hash(),
+    )?;
+    let observer_binding = sigil_process_observer::canonical_digest(
+        format!(
+            "sigil-runtime-process-observer-v2\0{}\0{}\0{}",
+            bootstrap.authority_epoch(),
+            application_generation,
+            config_snapshot.config_hash(),
+        )
+        .as_bytes(),
+    );
+    let process_factory = sigil_process_observer::ProcessObserverFactoryV1::new(observer_binding)
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?
+        .instantiate();
+    let inventory_binding = sigil_resource_authority::AuthorityProcessInventoryBootstrapBindingV1 {
+        application_composition_epoch: application_generation,
+        owner_execution_scope_hash: sigil_process_observer::canonical_digest(
+            format!(
+                "sigil-runtime-process-inventory-owner-v2\0{}\0{}\0{}",
+                bootstrap.authority_epoch(),
+                application_generation,
+                config_snapshot.config_hash(),
+            )
+            .as_bytes(),
+        ),
+    };
     let process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> =
         Arc::new(
             sigil_resource_authority::AuthorityManagedProcessInventoryV1::initialize(
                 bootstrap.clone(),
                 publication,
-                allow_pre_inventory_cutover_seed,
+                inventory_binding,
+                process_factory,
             )
-            .map_err(|error| {
-                BootAuthorityErrorV1::Bootstrap(
-                    sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
-                        error.to_string(),
-                    ),
-                )
-            })?,
+            .map_err(map_process_inventory_boot_error)?,
         );
-    let application_generation = load_or_advance_authority_config_generation(
+    // The candidate is pure. Publish it only after the inventory's authenticated read/recovery
+    // gate accepts the existing state, so malformed V1 inventory, a missing durable key, or a
+    // bad MAC cannot be pre-emptively "repaired" by advancing configuration metadata.
+    publish_authority_config_generation(
         bootstrap,
         publication,
         current_config_generation,
         config_snapshot.config_hash(),
+        application_generation,
     )?;
     let authority = sigil_kernel::resource::AuthorityGeneration {
         epoch: bootstrap.authority_epoch(),

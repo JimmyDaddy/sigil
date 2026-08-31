@@ -1,212 +1,401 @@
-use std::{thread, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 
 use super::*;
-use sigil_kernel::process_observation::CapabilityVerifyErrorV1;
-use uuid::Uuid;
+
+fn scope(seed: u8) -> ProcessObservationScopeV1 {
+    ProcessObservationScopeV1 {
+        authority_epoch: 7,
+        application_composition_epoch: 11,
+        execution_scope_hash: CanonicalHash::from_bytes([seed; 32]),
+    }
+}
 
 fn factory() -> Arc<dyn HostProcessObservationFactoryV1> {
-    ProcessObserverFactoryV1::new(CanonicalHash::from_bytes([1u8; 32])).instantiate()
+    ProcessObserverFactoryV1::new(CanonicalHash::from_bytes([1_u8; 32]))
+        .expect("current test process must be observable")
+        .instantiate()
 }
 
 #[test]
-fn r71_process_observer_issues_and_consumes_current_host_live_evidence() {
+fn r71_process_observer_registers_and_consumes_current_owner_identity() {
     let factory = factory();
     let service = factory.observation_service();
     let verifier = factory.observation_verifier();
-    let observation = service
-        .observe(
-            ProcessObservationPurposeV1::StorageAdmission,
-            &std::process::id().to_string(),
-        )
-        .expect("current host must be observable");
+    let registration = service
+        .register_current_authority_owner(scope(1))
+        .expect("current owner registration");
+    assert_eq!(registration.identity().process_id(), std::process::id());
 
-    assert!(
-        observation
-            .owner_process_ref
-            .starts_with("host-observation-v1:")
-    );
-    let issuer_reference = observation
-        .owner_process_ref
-        .strip_prefix("host-observation-v1:")
-        .expect("issuer prefix");
-    let issuer_reference = Uuid::parse_str(issuer_reference).expect("v4 issuer UUID");
-    assert_eq!(issuer_reference.get_version_num(), 4);
-    let verified = verifier
-        .verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation)
-        .expect("factory-issued current-host Live evidence must verify");
-    assert_eq!(verified.vitality, ProcessVitalityV1::Live);
-    assert_eq!(verified.process_ref, std::process::id().to_string());
-    assert!(matches!(
-        verifier.verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation),
-        Err(ProcessObservationErrorV1::NotObservable)
+    let subject = verifier
+        .verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(1),
+        )
+        .expect("same-factory registration verifies");
+    assert!(subject.has_exact_binding(
+        ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+        &scope(1),
     ));
 }
 
 #[test]
-fn r71_process_observer_rejects_forged_live_dto_and_cross_purpose_use() {
-    let factory = factory();
-    let service = factory.observation_service();
-    let verifier = factory.observation_verifier();
-    let observation = service
-        .observe(
-            ProcessObservationPurposeV1::SessionWriterAttachment,
-            &std::process::id().to_string(),
+fn r71_process_observer_registration_rejects_cross_factory_kind_and_replay() {
+    let issuing = factory();
+    let foreign = factory();
+    let registration = issuing
+        .observation_service()
+        .register_current_authority_owner(scope(10))
+        .expect("real owner registration");
+    let copy = || {
+        HostProcessIdentityRegistrationV1::new(
+            registration.identity().clone(),
+            registration.issuance_id().to_owned(),
+            registration.observed_at_monotonic_ms(),
         )
-        .expect("current host must be observable");
-    let mut forged = observation.clone();
-    forged.birth_identity_hash = CanonicalHash::from_bytes([9u8; 32]);
-    let mut forged_process_ref = observation.clone();
-    forged_process_ref.process_ref = "not-the-current-host".to_owned();
-    let mut forged_vitality = observation.clone();
-    forged_vitality.vitality = ProcessVitalityV1::Quiescent;
-    let mut forged_observed_at = observation.clone();
-    forged_observed_at.observed_at_ms = forged_observed_at.observed_at_ms.wrapping_add(1);
-    let mut forged_issuer_ref = observation.clone();
-    forged_issuer_ref.owner_process_ref.push_str("-forged");
-
+    };
     assert!(matches!(
-        verifier.verify_observation(
-            ProcessObservationPurposeV1::SessionWriterAttachment,
-            &forged
+        foreign.observation_verifier().verify_registration(
+            copy(),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(10)
         ),
-        Err(ProcessObservationErrorV1::NotObservable)
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
     ));
-    for forged_content in [
-        forged_process_ref,
-        forged_vitality,
-        forged_observed_at,
-        forged_issuer_ref,
-    ] {
-        assert!(matches!(
-            verifier.verify_observation(
-                ProcessObservationPurposeV1::SessionWriterAttachment,
-                &forged_content
-            ),
-            Err(ProcessObservationErrorV1::NotObservable)
-        ));
-    }
+    let verifier = issuing.observation_verifier();
     assert!(matches!(
-        verifier.verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation),
-        Err(ProcessObservationErrorV1::PurposeMismatch)
+        verifier.verify_registration(
+            copy(),
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &scope(10)
+        ),
+        Err(ProcessObservationErrorV1::SubjectKindMismatch)
     ));
     verifier
-        .verify_observation(
-            ProcessObservationPurposeV1::SessionWriterAttachment,
-            &observation,
+        .verify_registration(
+            copy(),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(10),
         )
-        .expect("an earlier failed verification must not consume the issuer record");
+        .expect("rejected probes do not consume valid issuance");
+    assert!(matches!(
+        verifier.verify_registration(
+            copy(),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(10)
+        ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
 }
 
 #[test]
-fn r71_process_observer_rejects_stale_live_evidence() {
-    let factory = ProcessObserverFactoryV1::with_max_evidence_age(
-        CanonicalHash::from_bytes([2u8; 32]),
-        Duration::ZERO,
-    )
-    .instantiate();
+fn r71_process_observer_recovery_rejects_cross_factory_scope_and_replay() {
+    let issuing = factory();
+    let verifier = issuing.observation_verifier();
+    let subject = verifier
+        .verify_registration(
+            issuing
+                .observation_service()
+                .register_current_authority_owner(scope(11))
+                .expect("real owner registration"),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(11),
+        )
+        .expect("verified owner");
+    let observation = issuing
+        .authority_recovery_probe()
+        .observe_identity_for_authority_recovery(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(11),
+        )
+        .expect("fresh real owner observation");
+    let copy = || {
+        HostProcessRecoveryObservationV1::new(
+            observation.subject_registration_hash(),
+            observation.vitality(),
+            observation.issuance_id().to_owned(),
+            observation.observed_at_monotonic_ms(),
+        )
+    };
+    assert!(matches!(
+        factory()
+            .observation_verifier()
+            .verify_recovery_observation(
+                &subject,
+                ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                &scope(11),
+                copy()
+            ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
+    assert!(matches!(
+        verifier.verify_recovery_observation(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(12),
+            copy()
+        ),
+        Err(ProcessObservationErrorV1::ScopeMismatch)
+    ));
+    assert_eq!(
+        verifier
+            .verify_recovery_observation(
+                &subject,
+                ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                &scope(11),
+                copy()
+            )
+            .expect("rejected probes do not consume valid observation")
+            .vitality,
+        ProcessVitalityV1::Live
+    );
+    assert!(matches!(
+        verifier.verify_recovery_observation(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(11),
+            copy()
+        ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
+}
+
+#[test]
+fn r71_process_observer_rejects_forged_or_wrong_scope_registration_without_consuming_it() {
+    let factory = factory();
     let service = factory.observation_service();
     let verifier = factory.observation_verifier();
-    let observation = service
-        .observe(
-            ProcessObservationPurposeV1::StorageAdmission,
-            &std::process::id().to_string(),
-        )
-        .expect("current host must be observable");
-    thread::sleep(Duration::from_millis(1));
-
+    let registration = service
+        .register_current_authority_owner(scope(2))
+        .expect("registration");
+    let forged = HostProcessIdentityRegistrationV1::new(
+        registration.identity().clone(),
+        "forged-issuance".to_owned(),
+        registration.observed_at_monotonic_ms(),
+    );
     assert!(matches!(
-        verifier.verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation),
-        Err(ProcessObservationErrorV1::NotObservable)
+        verifier.verify_registration(
+            forged,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(2),
+        ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
+    assert!(matches!(
+        verifier.verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(3),
+        ),
+        Err(ProcessObservationErrorV1::ScopeMismatch)
     ));
 }
 
 #[test]
-fn r71_process_observer_rejects_entropy_failure_without_issuing_evidence() {
-    assert!(matches!(
-        new_live_observation_id_from_random_source(|_| Err(())),
-        Err(ProcessObservationErrorV1::NotObservable)
-    ));
+fn r71_process_observer_recovery_evidence_is_one_shot_and_live_for_the_current_owner() {
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let registration = service
+        .register_current_authority_owner(scope(4))
+        .expect("registration");
+    let subject = verifier
+        .verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(4),
+        )
+        .expect("subject");
+    let observation = probe
+        .observe_identity_for_authority_recovery(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(4),
+        )
+        .expect("re-observe current owner");
+    let verified = verifier
+        .verify_recovery_observation(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(4),
+            observation,
+        )
+        .expect("recovery evidence");
+    assert_eq!(verified.vitality, ProcessVitalityV1::Live);
+}
 
+#[cfg(unix)]
+fn spawn_short_lived_child() -> std::io::Result<std::process::Child> {
+    std::process::Command::new("sleep").arg("1").spawn()
+}
+
+#[cfg(windows)]
+fn spawn_short_lived_child() -> std::io::Result<std::process::Child> {
+    std::process::Command::new("ping")
+        .args(["127.0.0.1", "-n", "2"])
+        .spawn()
+}
+
+#[test]
+fn r71_process_observer_reports_an_owned_reaped_child_as_quiescent_not_live() {
+    let mut child = spawn_short_lived_child().expect("test child");
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let child_scope = scope(5);
+    let registration = service
+        .register_spawned_process(child_scope.clone(), child.id())
+        .expect("live owned child registration");
+    let subject = verifier
+        .verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+        )
+        .expect("owned child subject");
+    child.wait().expect("reap child");
+    let observation = probe
+        .observe_identity_for_authority_recovery(
+            &subject,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+        )
+        .expect("terminated child is a subject-bound observation");
+    let verified = verifier
+        .verify_recovery_observation(
+            &subject,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+            observation,
+        )
+        .expect("subject-bound terminal evidence");
+    assert_eq!(verified.vitality, ProcessVitalityV1::Quiescent);
+}
+
+#[test]
+fn r71_process_observer_keeps_a_real_registration_when_its_owned_child_exits_before_verify() {
+    let mut child = spawn_short_lived_child().expect("test child");
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let child_scope = scope(9);
+    let registration = service
+        .register_spawned_process(child_scope.clone(), child.id())
+        .expect("live owned child registration");
+
+    // This models the narrow post-spawn race: issuance observed a real live birth, but the
+    // owned child completed before the authority verifies and persists that registration.
+    child.wait().expect("reap owned child before verify");
+    let subject = verifier
+        .verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+        )
+        .expect("historical birth registration remains valid");
+    let observation = probe
+        .observe_identity_for_authority_recovery(
+            &subject,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+        )
+        .expect("exited subject receives fresh recovery observation");
+    let verified = verifier
+        .verify_recovery_observation(
+            &subject,
+            ProcessObservationSubjectKindV1::ManagedExecution,
+            &child_scope,
+            observation,
+        )
+        .expect("recovery evidence");
+    assert_eq!(verified.vitality, ProcessVitalityV1::Quiescent);
+}
+
+#[test]
+fn r71_process_observer_rejects_expired_registration() {
+    let factory = ProcessObserverFactoryV1::with_max_evidence_age(
+        CanonicalHash::from_bytes([2_u8; 32]),
+        Duration::ZERO,
+    )
+    .expect("factory")
+    .instantiate();
+    let registration = factory
+        .observation_service()
+        .register_current_authority_owner(scope(6))
+        .expect("registration");
+    thread::sleep(Duration::from_millis(1));
+    assert!(matches!(
+        factory.observation_verifier().verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(6),
+        ),
+        Err(ProcessObservationErrorV1::EvidenceExpired)
+    ));
+}
+
+#[test]
+fn r71_process_observer_entropy_failure_returns_typed_error_before_issuance_insert() {
     let state = Arc::new(ObserverStateV1::new(
-        CanonicalHash::from_bytes([3u8; 32]),
+        CanonicalHash::from_bytes([3_u8; 32]),
         Duration::from_secs(60),
     ));
     let service = ProcessObserverServiceV1::from_state(Arc::clone(&state));
-
     assert!(matches!(
-        service.observe_current_host_live_with_observation_id(
-            ProcessObservationPurposeV1::StorageAdmission,
-            &std::process::id().to_string(),
-            || new_live_observation_id_from_random_source(|_| Err(())),
+        service.register_process_with_id_source(
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            scope(7),
+            std::process::id(),
+            || Err(ProcessObservationErrorV1::NotObservable),
         ),
         Err(ProcessObservationErrorV1::NotObservable)
     ));
     assert!(
         state
-            .issued
+            .registrations
             .lock()
-            .expect("test-only observer issuance lock")
+            .expect("issuance lock")
             .is_empty()
     );
 }
 
 #[test]
-fn r71_process_observer_rejects_non_current_live_claim_and_terminal_pid_probe() {
+fn r71_process_observer_fails_closed_when_a_subject_birth_is_replaced() {
     let factory = factory();
     let service = factory.observation_service();
-    let non_current = std::process::id().saturating_add(1).to_string();
-
-    assert!(matches!(
-        service.observe(ProcessObservationPurposeV1::StorageAdmission, &non_current),
-        Err(ProcessObservationErrorV1::NotObservable)
-    ));
-    assert!(matches!(
-        service.observe(
-            ProcessObservationPurposeV1::TerminalProof,
-            &std::process::id().to_string(),
-        ),
-        Err(ProcessObservationErrorV1::BirthIdentityUnresolved)
-    ));
-}
-
-#[test]
-fn r71_process_observer_factory_returns_same_instance_pair() {
-    let factory = factory();
-    let verifier_a = factory.observation_verifier();
-    let verifier_b = factory.observation_verifier();
-    assert_eq!(
-        verifier_a.verifier_instance_hash(),
-        verifier_b.verifier_instance_hash()
-    );
-}
-
-#[test]
-fn r71_process_observer_rejects_evidence_from_another_factory_instance() {
-    let factory_a = factory();
-    let observation = factory_a
-        .observation_service()
-        .observe(
-            ProcessObservationPurposeV1::StorageAdmission,
-            &std::process::id().to_string(),
+    let verifier = factory.observation_verifier();
+    let registration = service
+        .register_current_authority_owner(scope(8))
+        .expect("registration");
+    let subject = verifier
+        .verify_registration(
+            registration,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &scope(8),
         )
-        .expect("current host must be observable");
-    let factory_b = factory();
-
+        .expect("subject");
+    let replaced = VerifiedHostProcessIdentityV1::from_verified_registration(
+        subject.process_id(),
+        CanonicalHash::from_bytes([0x44; 32]),
+        subject.subject_kind(),
+        subject.scope().clone(),
+        subject.registration_nonce().to_owned(),
+        subject.registration_hash(),
+        subject.registration_service_instance_hash(),
+        subject.registration_service_generation(),
+    );
     assert!(matches!(
-        factory_b
-            .observation_verifier()
-            .verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation),
-        Err(ProcessObservationErrorV1::NotObservable)
+        factory
+            .authority_recovery_probe()
+            .observe_identity_for_authority_recovery(
+                &replaced,
+                ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                &scope(8),
+            ),
+        Err(ProcessObservationErrorV1::BirthIdentityMismatch)
     ));
-
-    factory_a
-        .observation_verifier()
-        .verify_observation(ProcessObservationPurposeV1::StorageAdmission, &observation)
-        .expect("a different factory must not consume the original issuer record");
-}
-
-#[test]
-fn r71_process_observer_capability_error_is_closed() {
-    let error = CapabilityVerifyErrorV1::VerifyFailed("x".to_owned());
-    assert!(format!("{error}").contains("verify failed"));
 }

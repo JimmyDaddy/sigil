@@ -386,7 +386,7 @@ fn r71_bootstrap_metadata_missing_requires_typed_reconciliation() {
 }
 
 #[test]
-fn r71_process_inventory_cutover_is_one_time_then_missing_state_fails_closed() {
+fn r71_process_inventory_partial_or_legacy_existing_state_requires_reconciliation() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
@@ -396,6 +396,7 @@ fn r71_process_inventory_cutover_is_one_time_then_missing_state_fails_closed() {
     let _xdg_env = crate::test_env::EnvScope::set("XDG_CONFIG_HOME", &xdg_config);
     let config = dir.path().join("sigil.toml");
     write_r71_boot_config(&config);
+    // A truly fresh authority root is the sole positive initialization case.
     drop(boot_current_schema(&config, dir.path()).expect("first boot"));
 
     let bootstrap =
@@ -405,50 +406,143 @@ fn r71_process_inventory_cutover_is_one_time_then_missing_state_fails_closed() {
     let current = load_authority_config_generation(&bootstrap, &publication)
         .expect("generation")
         .expect("generation record");
-    let legacy = serde_json::json!({
-        "schema_version": 1,
-        "config_hash": current.config_hash,
-        "generation": current.generation,
-    });
-    bootstrap
-            .publish_bytes(
-                &publication,
-                sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
-                &serde_json::to_vec(&legacy).expect("legacy generation"),
-            )
-            .expect("publish legacy generation");
-    drop(publication);
-    for object in [
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement,
-        ] {
-            std::fs::remove_file(bootstrap.path(object)).expect("remove process inventory state");
-        }
-
-    drop(boot_current_schema(&config, dir.path()).expect("one-time inventory cutover"));
-    let publication = bootstrap.acquire_publication().expect("publication");
-    let migrated = load_authority_config_generation(&bootstrap, &publication)
-        .expect("generation")
-        .expect("generation record");
     assert_eq!(
-        migrated.schema_version,
+        current.schema_version,
         AUTHORITY_CONFIG_GENERATION_SCHEMA_VERSION
     );
-    assert!(migrated.process_inventory_required);
+    assert!(current.process_inventory_required);
     drop(publication);
-
-    for object in [
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement,
-        ] {
-            std::fs::remove_file(bootstrap.path(object)).expect("remove required inventory state");
-        }
+    let generation_path = bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+    );
+    let generation_before_partial_loss =
+        std::fs::read(&generation_path).expect("read current generation before partial loss");
+    // A marker/authenticator without the inventory is existing durable state, never an invitation
+    // to reseed an empty inventory or advance generation.
+    std::fs::remove_file(bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+    ))
+    .expect("remove only inventory from existing root");
     assert!(matches!(
         boot_current_schema(&config, dir.path()),
         Err(BootAuthorityErrorV1::Bootstrap(
             sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
         ))
     ));
+    assert_eq!(
+        std::fs::read(&generation_path).expect("read generation after partial loss"),
+        generation_before_partial_loss,
+        "inventory rejection must precede configuration-generation publication"
+    );
+
+    // A separate existing root models the complete V1 shape: the old snapshot but no V2
+    // requirement marker or durable authenticator. It too is a typed recovery blocker, rather
+    // than a one-time migration/re-signing path.
+    let legacy_dir = dir.path().join("legacy-inventory-fixture");
+    std::fs::create_dir(&legacy_dir).expect("legacy fixture directory");
+    let legacy_config = legacy_dir.join("sigil.toml");
+    write_r71_boot_config(&legacy_config);
+    drop(boot_current_schema(&legacy_config, &legacy_dir).expect("legacy fixture fresh boot"));
+    let legacy_bootstrap =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(
+            &legacy_config,
+        )
+        .expect("legacy fixture bootstrap store");
+    let legacy_generation_path = legacy_bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
+    );
+    let generation_before_legacy_rejection =
+        std::fs::read(&legacy_generation_path).expect("read generation before legacy mutation");
+    let publication = legacy_bootstrap.acquire_publication().expect("publication");
+    let inventory_bytes = legacy_bootstrap
+        .read_bytes(
+            &publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+        )
+        .expect("read inventory")
+        .expect("fresh inventory exists");
+    let mut legacy_inventory: serde_json::Value =
+        serde_json::from_slice(&inventory_bytes).expect("decode current inventory fixture");
+    legacy_inventory["schema_version"] = serde_json::Value::from(1_u64);
+    legacy_bootstrap
+        .publish_bytes(
+            &publication,
+            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventory,
+            &serde_json::to_vec(&legacy_inventory).expect("encode legacy inventory fixture"),
+        )
+        .expect("publish legacy inventory fixture");
+    drop(publication);
+    std::fs::remove_file(legacy_bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryRequirement,
+    ))
+    .expect("remove V2 inventory requirement from legacy fixture");
+    std::fs::remove_file(legacy_bootstrap.path(
+        sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::ProcessInventoryAuthenticator,
+    ))
+    .expect("remove V2 authenticator from legacy fixture");
+    assert!(matches!(
+        boot_current_schema(&legacy_config, &legacy_dir),
+        Err(BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+        ))
+    ));
+    assert_eq!(
+        std::fs::read(&legacy_generation_path).expect("read generation after legacy rejection"),
+        generation_before_legacy_rejection,
+        "legacy/no-key rejection must not publish a replacement generation"
+    );
+}
+
+#[test]
+fn r71_process_inventory_boot_error_mapping_preserves_corruption_and_recovery_classes() {
+    use sigil_resource_authority::AuthorityProcessInventoryErrorV1 as InventoryError;
+
+    assert!(matches!(
+        map_process_inventory_boot_error(InventoryError::AuthenticatorCorrupted),
+        BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
+        )
+    ));
+
+    for error in [
+        InventoryError::LegacySchema,
+        InventoryError::AuthenticatorMissing,
+        InventoryError::PriorOwnerStillLive,
+        InventoryError::PreparedProcessRecoveryRequired,
+    ] {
+        assert!(matches!(
+            map_process_inventory_boot_error(error),
+            BootAuthorityErrorV1::Bootstrap(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+            )
+        ));
+    }
+
+    assert!(matches!(
+        map_process_inventory_boot_error(InventoryError::Observation(
+            sigil_kernel::process_observation::ProcessObservationErrorV1::NotObservable,
+        )),
+        BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+        )
+    ));
+
+    assert!(matches!(
+        map_process_inventory_boot_error(InventoryError::InvalidBootstrapBinding),
+        BootAuthorityErrorV1::Config(_)
+    ));
+    assert!(matches!(
+        map_process_inventory_boot_error(InventoryError::AuthenticatorUnavailable),
+        BootAuthorityErrorV1::Config(_)
+    ));
+    assert_eq!(
+        map_process_inventory_boot_error(InventoryError::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::IdentityDrift,
+        )),
+        BootAuthorityErrorV1::Bootstrap(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::IdentityDrift,
+        )
+    );
 }
 
 #[test]
@@ -611,14 +705,22 @@ fn r71_bootstrap_pointer_is_outside_an_explicit_config_parent() {
 fn r71_bootstrap_ignores_config_parent_metadata_replacement() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).expect("test home");
+    let _home = crate::test_env::EnvScope::set("HOME", &home);
+    let _user_profile = crate::test_env::EnvScope::set("USERPROFILE", &home);
     let config_parent = dir.path().join("workspace");
     std::fs::create_dir_all(&config_parent).expect("config parent");
     let config = config_parent.join("sigil.toml");
-    std::fs::write(
-            &config,
-            "config_version = 2\n[workspace]\nroot = \".\"\n[agent]\nconnection = \"local-test\"\nmodel = \"test\"\n[connections.local-test]\nlabel = \"local\"\nprovider = \"custom\"\nprotocol = \"chat_completions\"\nbase_url = \"http://127.0.0.1:1\"\ncredential = { source = \"none\" }\n",
-        )
-        .expect("config");
+    let state = config_parent.join(".r71-test-state");
+    let cache = config_parent.join(".r71-test-cache");
+    // The full gate binds SIGIL_* roots globally. Keep those higher-priority values equal to this
+    // test's explicit [storage] roots so the fixture stays private under either resolution path.
+    let _state_env = crate::test_env::EnvScope::set(crate::SIGIL_STATE_HOME_ENV, &state);
+    let _cache_env = crate::test_env::EnvScope::set(crate::SIGIL_CACHE_HOME_ENV, &cache);
+    // This test rewrites only bogus metadata placed beside the config. Bind the authority
+    // journals to this fixture instead of falling back to the caller's user-local defaults.
+    write_r71_boot_config(&config);
     let first = boot_current_schema(&config, dir.path()).expect("first boot");
     let expected = first.cutover().manifest().clone();
     drop(first);

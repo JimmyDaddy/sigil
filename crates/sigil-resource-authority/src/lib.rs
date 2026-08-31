@@ -48,8 +48,9 @@ pub use lease::{
 #[cfg(feature = "test-support")]
 pub use process_inventory::InMemoryAuthorityProcessInventoryV1;
 pub use process_inventory::{
-    AuthorityManagedProcessInventoryV1, AuthorityProcessInventoryClaimV1,
-    AuthorityProcessInventoryErrorV1, AuthorityProcessInventoryPortV1,
+    AuthorityManagedProcessInventoryV1, AuthorityProcessInventoryBootstrapBindingV1,
+    AuthorityProcessInventoryClaimV1, AuthorityProcessInventoryErrorV1,
+    AuthorityProcessInventoryPortV1, AuthorityProcessSpawnRequestV1,
 };
 pub use quota::{QuotaBookV1, QuotaErrorV1, QuotaReservationV1};
 pub use spawn_protocol::{PreparedSandboxLaunchV1, SandboxBoundExecutionLeaseV1};
@@ -61,6 +62,10 @@ mod fault_journal_tests;
 #[cfg(test)]
 #[path = "tests/fault_bootstrap_tests.rs"]
 mod fault_bootstrap_tests;
+
+#[cfg(test)]
+#[path = "tests/fault_attachment_tests.rs"]
+mod fault_attachment_tests;
 
 #[cfg(test)]
 #[path = "tests/fault_recovery_tests.rs"]
@@ -101,10 +106,6 @@ mod fault_mutation_tests;
 #[cfg(test)]
 #[path = "tests/fault_catalog_tests.rs"]
 mod fault_catalog_tests;
-
-#[cfg(test)]
-#[path = "tests/fault_attachment_tests.rs"]
-mod fault_attachment_tests;
 
 #[cfg(test)]
 #[path = "tests/fault_export_tests.rs"]

@@ -41,8 +41,9 @@ pub fn authority_bootstrap_recovery_service(
         )
         .as_bytes(),
     );
-    let process_factory =
-        sigil_process_observer::ProcessObserverFactoryV1::new(verifier_hash).instantiate();
+    let process_factory = sigil_process_observer::ProcessObserverFactoryV1::new(verifier_hash)
+        .map_err(|error| error.to_string())?
+        .instantiate();
     sigil_resource_authority::AuthorityBootstrapRecoveryServiceV1::for_canonical_config_path(
         &canonical_config_path,
         process_factory,

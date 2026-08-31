@@ -56,6 +56,37 @@ struct TestPlannerV1 {
     isolation: bool,
 }
 
+/// Test-only timing seam: the command is a real owned child, but the delayed return makes the
+/// post-spawn parent-exit/descendant-pipe race deterministic without mocking inventory or birth.
+#[cfg(unix)]
+struct DelayedOwnedChildLauncherV1;
+
+#[cfg(unix)]
+impl ManagedOneShotLaunchServiceV1 for DelayedOwnedChildLauncherV1 {
+    fn launch(
+        &self,
+        request: &ManagedExecutionRequestV1,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> Result<std::process::Child, ManagedExecutionErrorV1> {
+        let Some(program) = request.argv.first() else {
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        };
+        let mut command = std::process::Command::new(program);
+        command
+            .args(request.argv.iter().skip(1))
+            .env_clear()
+            .envs(environment)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = command
+            .spawn()
+            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok(child)
+    }
+}
+
 impl ManagedExecutionPlannerV1 for TestPlannerV1 {
     fn plan_execution(
         &self,
@@ -188,6 +219,50 @@ fn service(isolation: bool, root: &std::path::Path) -> SandboxManagedExecutionSe
         )))
 }
 
+fn production_process_inventory(
+    fixture: &tempfile::TempDir,
+) -> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> {
+    let store = sigil_resource_authority::AuthorityBootstrapStoreV1::open_owned_temp_fixture(
+        fixture,
+        "e02-production-process-inventory",
+        1,
+    )
+    .expect("fresh owned temporary bootstrap store");
+    let publication = store.acquire_publication().expect("bootstrap publication");
+    let observer_factory = sigil_process_observer::ProcessObserverFactoryV1::new(
+        CanonicalHash::from_bytes([0xE2; 32]),
+    )
+    .expect("current test process birth identity")
+    .instantiate();
+    let inventory = sigil_resource_authority::AuthorityManagedProcessInventoryV1::initialize(
+        store,
+        &publication,
+        sigil_resource_authority::AuthorityProcessInventoryBootstrapBindingV1 {
+            application_composition_epoch: 1,
+            owner_execution_scope_hash: CanonicalHash::from_bytes([0x71; 32]),
+        },
+        observer_factory,
+    )
+    .expect("authenticated production inventory");
+    drop(publication);
+    Arc::new(inventory)
+}
+
+fn production_inventory_service(
+    isolation: bool,
+    fixture: &tempfile::TempDir,
+) -> SandboxManagedExecutionServiceV1 {
+    SandboxManagedExecutionServiceV1::new(
+        Arc::new(TestPlannerV1 { isolation }),
+        fixture.path().to_path_buf(),
+    )
+    .with_process_inventory(production_process_inventory(fixture))
+    .with_one_shot_launcher(Arc::new(CommandManagedOneShotLaunchServiceV1::new(
+        fixture.path().to_path_buf(),
+        OpaquePermissionSubjectRef::new("subj-1".to_owned()),
+    )))
+}
+
 fn terminal_service(
     root: &std::path::Path,
     args: Vec<OsString>,
@@ -248,6 +323,52 @@ fn r71_managed_execute_once_yields_truthful_receipt() {
     assert_eq!(
         receipt.resources.resources[0].enforcement,
         EnforcementCompletenessV1::None
+    );
+}
+
+#[test]
+fn r71_e02_production_inventory_settles_an_owned_fast_command_truthfully() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = production_inventory_service(false, &dir);
+    #[cfg(unix)]
+    let request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
+    #[cfg(windows)]
+    let request = exec_request(&["cmd", "/C", "exit 0"], false);
+    let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+        .expect("fast owned child settles through real durable inventory");
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::Exited { code: 0 }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_e02_fast_parent_with_descendant_held_pipe_returns_bounded_incomplete_capture() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = SandboxManagedExecutionServiceV1::new(
+        Arc::new(TestPlannerV1 { isolation: false }),
+        dir.path().to_path_buf(),
+    )
+    .with_process_inventory(production_process_inventory(&dir))
+    .with_one_shot_launcher(Arc::new(DelayedOwnedChildLauncherV1));
+    let started = std::time::Instant::now();
+    let receipt = futures::executor::block_on(svc.execute_once(
+        bundle("one-shot"),
+        exec_request(&["/bin/sh", "-c", "sleep 1 & exit 0"], false),
+    ))
+    .expect("reaped parent must not wait for descendant-held pipes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "post-reap capture must not wait for the descendant's one-second pipe hold"
+    );
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::Exited { code: 0 }
+    ));
+    assert!(
+        receipt.process.stdout_summary.truncated || receipt.process.stderr_summary.truncated,
+        "capture must truthfully report the inherited pipe as incomplete"
     );
 }
 

@@ -2,6 +2,45 @@ use super::*;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+fn process_inventory_factory()
+-> std::sync::Arc<dyn sigil_kernel::process_observation::HostProcessObservationFactoryV1> {
+    sigil_process_observer::ProcessObserverFactoryV1::new(canonical_bootstrap_hash(
+        b"r71-bootstrap-process-inventory-test-observer",
+    ))
+    .expect("test process observer")
+    .instantiate()
+}
+
+fn process_inventory_binding()
+-> crate::process_inventory::AuthorityProcessInventoryBootstrapBindingV1 {
+    crate::process_inventory::AuthorityProcessInventoryBootstrapBindingV1 {
+        application_composition_epoch: 1,
+        owner_execution_scope_hash: canonical_bootstrap_hash(b"r71-bootstrap-test-owner"),
+    }
+}
+
+fn initialize_process_inventory(
+    store: AuthorityBootstrapStoreV1,
+    publication: &AuthorityBootstrapPublicationGuard,
+) -> crate::process_inventory::AuthorityManagedProcessInventoryV1 {
+    crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+        store,
+        publication,
+        process_inventory_binding(),
+        process_inventory_factory(),
+    )
+    .expect("process inventory")
+}
+
+fn process_spawn_request(
+    attempt: &str,
+) -> crate::process_inventory::AuthorityProcessSpawnRequestV1 {
+    crate::process_inventory::AuthorityProcessSpawnRequestV1 {
+        attempt_id: sigil_kernel::resource::PhysicalAttemptId::new(attempt.to_owned()),
+        execution_scope_hash: canonical_bootstrap_hash(attempt.as_bytes()),
+    }
+}
+
 #[test]
 fn r71_bootstrap_resolve_rejects_missing_state_home_without_cwd_fallback() {
     let resolver = BootstrapRootResolverV1::default();
@@ -55,6 +94,28 @@ fn publish_active_epoch_for_test(namespace: &std::path::Path, epoch: u64) -> std
         .expect("active epoch pointer");
     drop(transaction);
     root
+}
+
+/// Creates a fresh active epoch through the same pointer fence that production publication uses.
+/// The returned store retains its create-new fact, allowing the inventory to create its initial
+/// durable authenticator only after the epoch is active.
+fn open_fresh_active_epoch_store_for_test(
+    namespace: &std::path::Path,
+    epoch: u64,
+) -> AuthorityBootstrapStoreV1 {
+    let epochs = namespace.join(EPOCHS_DIRECTORY_NAME);
+    ensure_owner_only_directory(&epochs).expect("epoch directory");
+    let root = epochs.join(format!("epoch-{epoch}-fresh-inventory-test"));
+    let store = AuthorityBootstrapStoreV1::open(namespace, &root, epoch).expect("fresh store");
+    assert!(store.was_created_for_this_open());
+    let recovery = AuthorityBootstrapRecoveryNamespaceV1 {
+        namespace: namespace.to_path_buf(),
+    };
+    let transaction = recovery.acquire_transaction().expect("transaction");
+    recovery
+        .publish_active_epoch(&transaction, epoch, &root)
+        .expect("active epoch pointer");
+    store
 }
 
 #[test]
@@ -118,21 +179,14 @@ fn r71_bootstrap_stale_inventory_handle_is_fenced_and_initial_fresh_remains_vali
     let temp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
     let namespace = base.join("authority-namespace");
-    let old_root = publish_active_epoch_for_test(&namespace, 2);
-    let old_store = AuthorityBootstrapStoreV1::open(&namespace, &old_root, 2).expect("store");
-    assert!(!old_store.was_created_for_this_open());
+    let old_store = open_fresh_active_epoch_store_for_test(&namespace, 2);
     let publication = old_store.acquire_publication().expect("publication");
-    let inventory = crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
-        old_store,
-        &publication,
-        true,
-    )
-    .expect("initial inventory");
+    let inventory = initialize_process_inventory(old_store, &publication);
     drop(publication);
 
     let _new_root = publish_active_epoch_for_test(&namespace, 3);
     let error = inventory
-        .prepare_spawn("stale-inventory-attempt")
+        .prepare_spawn(process_spawn_request("stale-inventory-attempt"))
         .expect_err("stale inventory must be fenced");
     assert!(matches!(
         error,
@@ -148,12 +202,7 @@ fn r71_bootstrap_stale_inventory_handle_is_fenced_and_initial_fresh_remains_vali
     let fresh_publication = fresh_store
         .acquire_publication()
         .expect("fresh publication");
-    crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
-        fresh_store,
-        &fresh_publication,
-        false,
-    )
-    .expect("fresh inventory");
+    initialize_process_inventory(fresh_store, &fresh_publication);
 }
 
 #[test]
@@ -189,36 +238,86 @@ fn spawn_short_lived_child_for_e02_test() -> std::io::Result<std::process::Child
         .spawn()
 }
 
-/// E02 integration guard: an Attached PID that has already been reaped remains unproven. The
-/// current V1 observer deliberately returns a typed terminal-proof rejection until RA supplies
-/// an authenticated birth/scope subject; this test must never turn PID absence into quiescence.
+const E02_REAPED_ATTACHED_OWNER_NAMESPACE_ENV: &str = "SIGIL_E02_REAPED_ATTACHED_OWNER_NAMESPACE";
+
+/// Builds the durable state in a separate owned process so the parent recovery probe cannot
+/// short-circuit on the bootstrap owner's liveness. The child keeps the successfully attached
+/// entry after it has reaped its direct child: recovery must re-observe that exact subject before
+/// the durable weak-native-exposure frontier refuses a fresh-epoch conclusion.
 #[test]
-fn r71_e02_reaped_attached_pid_never_proves_old_epoch_quiescence() {
+#[ignore]
+fn r71_e02_reaped_attached_owner_child_fixture() {
     use crate::process_inventory::AuthorityProcessInventoryPortV1;
 
-    let mut child = spawn_short_lived_child_for_e02_test().expect("spawn child");
-    let process_id = child.id();
+    let namespace = std::path::PathBuf::from(
+        std::env::var_os(E02_REAPED_ATTACHED_OWNER_NAMESPACE_ENV)
+            .expect("fixture namespace supplied by parent test"),
+    );
+    let root = namespace
+        .join(EPOCHS_DIRECTORY_NAME)
+        .join("epoch-1-e02-reaped-attached-owner");
+    let store =
+        AuthorityBootstrapStoreV1::open(&namespace, &root, 1).expect("owned child bootstrap store");
+    let recovery = AuthorityBootstrapRecoveryNamespaceV1 {
+        namespace: namespace.clone(),
+    };
+    let transaction = recovery
+        .acquire_transaction()
+        .expect("child recovery transaction");
+    recovery
+        .publish_active_epoch(&transaction, 1, &root)
+        .expect("publish child active root");
+    drop(transaction);
+    let publication = store.acquire_publication().expect("child publication");
+    let inventory = initialize_process_inventory(store, &publication);
+    drop(publication);
+
+    let claim = inventory
+        .prepare_spawn(process_spawn_request("e02-reaped-attached-child"))
+        .expect("prepare durable target claim");
+    let mut target = spawn_short_lived_child_for_e02_test().expect("owned target child");
+    let registration = claim
+        .register_spawned_process(target.id())
+        .expect("register owned target birth");
+    inventory
+        .attach_spawn(&claim, registration)
+        .expect("attach owned target birth");
+    target.wait().expect("reap owned target child");
+    // Deliberately do not settle the attached entry. The parent probe must see this exact
+    // reaped subject, then reject the epoch because pre-spawn native exposure remains durable.
+}
+
+fn spawn_reaped_attached_owner_child(namespace: &std::path::Path) {
+    let status =
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--ignored",
+                "--exact",
+                "bootstrap::tests::r71_e02_reaped_attached_owner_child_fixture",
+            ])
+            .env(E02_REAPED_ATTACHED_OWNER_NAMESPACE_ENV, namespace)
+            .status()
+            .expect("run owned reaped-attached owner fixture child");
+    assert!(
+        status.success(),
+        "owned reaped-attached owner fixture succeeds"
+    );
+}
+
+/// E02 integration guard: an attached owned child may be re-observed as quiescent only against
+/// its authenticated birth/scope subject, but that narrow fact still cannot prove a fresh epoch.
+/// The durable weak-native-exposure frontier must block the recovery conclusion after reaping.
+#[test]
+fn r71_e02_reaped_attached_pid_never_proves_old_epoch_quiescence() {
     let temp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
     let namespace = base.join("authority-namespace");
-    let store = AuthorityBootstrapStoreV1::open(&namespace, &namespace, 1).expect("store");
-    let publication = store.acquire_publication().expect("publication");
-    let inventory = crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
-        store,
-        &publication,
-        true,
-    )
-    .expect("inventory");
-    drop(publication);
-    let claim = inventory
-        .prepare_spawn("e02-reaped-child")
-        .expect("prepare");
-    inventory.attach_spawn(&claim, process_id).expect("attach");
-    child.wait().expect("wait and reap child");
+    spawn_reaped_attached_owner_child(&namespace);
 
     let factory = sigil_process_observer::ProcessObserverFactoryV1::new(canonical_bootstrap_hash(
         b"e02-reaped-attached-pid-test",
     ))
+    .expect("observer")
     .instantiate();
     let service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
         AuthorityBootstrapRecoveryNamespaceV1 { namespace },
@@ -226,12 +325,8 @@ fn r71_e02_reaped_attached_pid_never_proves_old_epoch_quiescence() {
     );
     let error = service
         .probe_old_epoch_quiescence(canonical_bootstrap_hash(b"e02-evidence"))
-        .expect_err("reaped PID must not prove quiescence");
-    assert!(matches!(
-        error,
-        AuthorityBootstrapRecoveryErrorV1::OldEpochStillLive(_)
-            | AuthorityBootstrapRecoveryErrorV1::NoQuiescence
-    ));
+        .expect_err("reaped attached target must not prove fresh-epoch quiescence");
+    assert_eq!(error, AuthorityBootstrapRecoveryErrorV1::NoQuiescence);
 }
 
 #[cfg(windows)]

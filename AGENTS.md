@@ -44,6 +44,7 @@ CLI 与 HTTP 只承担自动化、调试和 adapter 职责。
 - `crates/sigil-resource-authority`：managed resource identity、allocation、lease、quota、journal、owner 与 typed recovery 的唯一 authority
 - `crates/sigil-sandbox`：消费 authority-issued binding 并实现 Local/Seatbelt/Bubblewrap/Docker/Windows restricted 的 sandbox seam；不得从 cwd/env 推断权限
 - `crates/sigil-process`：跨 crate 的最小进程树 ownership 与平台 capability probe
+- `crates/sigil-process-observer`：真实 OS birth identity 的登记和观察 adapter；只产生 purpose/scope-bound 事实，RA 独占持久 subject 的认证与恢复消费，不从 PID 消失推导全树停止
 - `crates/sigil-desktop`：桌面 Rust 后端的 launcher、私有 bearer 与 typed local HTTP client；不承载 UI 或 agent loop
 - `apps/desktop`：Tauri 2 + React 桌面壳；renderer 只通过 allowlist command/event 消费收窄 DTO，不持有 bearer、路径、process 或 generic HTTP/filesystem 能力
 - `crates/sigil-mcp`：stdio MCP client 与工具适配
