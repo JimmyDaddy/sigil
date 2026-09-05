@@ -48,9 +48,12 @@ discovery 时刷新远端列表。模型目录是可选增强：无论站点是�
 | 环境变量 | CI 或已由 Shell 管理的 secret | 仅允许列表中的变量名 |
 | 无认证 | 显式回环地址的自定义端点 | `source = "none"`；带凭据的远端 HTTP 会被拒绝 |
 
-各 provider 的环境变量依次为 `SIGIL_API_KEY`、`SIGIL_OPENAI_COMPATIBLE_API_KEY`、
-`SIGIL_OPENAI_RESPONSES_API_KEY`、`SIGIL_ANTHROPIC_API_KEY` 与
-`SIGIL_GEMINI_API_KEY`。`[storage].credential_store` 可选 `file`、`auto` 或 `keyring`。默认
+各 provider 使用 canonical `SIGIL_*` 环境变量：`SIGIL_API_KEY`、
+`SIGIL_OPENAI_COMPATIBLE_API_KEY`、`SIGIL_OPENAI_RESPONSES_API_KEY`、
+`SIGIL_ANTHROPIC_API_KEY` 与 `SIGIL_GEMINI_API_KEY`。同时兼容常用 provider 别名：
+`DEEPSEEK_API_KEY`、两个 OpenAI 协议共用的 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`，以及
+`GEMINI_API_KEY` 或 `GOOGLE_API_KEY`。同时设置多个变量时 canonical `SIGIL_*` 优先；保存的
+connection 模板仍使用 canonical 名称，因此不会改变既有配置文件。`[storage].credential_store` 可选 `file`、`auto` 或 `keyring`。默认
 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`。如果该文件没有
 当前凭据，请打开 `/config` 重新输入一次 key。严格 `keyring` 模式
 才会显式使用 macOS Keychain、Windows Credential Manager 或 Linux Secret Service，并可能显示

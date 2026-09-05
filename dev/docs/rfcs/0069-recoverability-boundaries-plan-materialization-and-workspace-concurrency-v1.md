@@ -1,6 +1,8 @@
 # RFC-0069：Recoverability Boundaries, Plan Direct Execution and Workspace Concurrency V1
 
-状态：实施完成（2026-08-22；同日修订 Plan Run 为 first-class direct execution；验证证据见 R69 execution ledger）
+状态：部分实施（2026-09-01；已交付的 direct-Task/recovery 窄切片与 A2 outbox/Waiting 基础保留为实现证据；RFC 整体验收仍开放）
+
+> 2026-09-01 当前状态：原 2026-08-22 “实施完成”是历史快照，不能代表当前整体结项。当前工作区只证明部分 direct-Task/recovery 与 A2 outbox/Waiting 基础；D01 command family、D04 全量 completion/recovery、E01/E02 资源与物理前置、以及 E08 的 mixed bundle、broker/registry recovery 和普通 TUI production chain 仍未验收。原执行 ledger 与历史交付记录保留，不在本次修订中重写。
 
 > RFC-0071 implementation note (2026-08-25): R71 current-schema cutover extends the stable admission key and blocker boundary with managed resource domain/scope/detail, physical frontier bridge and authority-owned recovery evidence. Plan/task direct execution remains downstream of that typed admission; no second blocker schema or path-derived recovery proof is introduced.
 

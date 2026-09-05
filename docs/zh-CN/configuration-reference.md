@@ -43,6 +43,7 @@
 | `[model_request].request_timeout_secs` | `120` | 模型请求等待上限；单次启动可用 `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_idle_timeout_secs` | `180` | 两个流式响应事件之间的最长等待时间；可用 `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` 覆盖。 |
 | `[model_request].stream_total_timeout_secs` | 未设置 | 整个流式响应的可选时限；可用 `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` 覆盖。 |
+| `[model_request].max_output_tokens` | 未设置 / 自动 | 普通 agent run 中每个模型请求的 provider-neutral 默认输出 token 上限。必须为正整数；已知上下文窗口时还必须为输入封装和 provider framing 留出 8,192 token。未设置时保留自动行为，并在必要时收敛到可容纳输入的范围。显式的单次运行约束优先。 |
 | `[recovery.provider]` | transport `2`、partial-output `1`、延迟 `500`–`10000` ms、`jitter_ratio = 0.10`、累计 `120000` ms | 面向未来零 effect provider turn 的有界、provider-neutral 恢复策略。`max_transport_retries` 上限为 `10`，`max_partial_output_retries` 上限为 `3`；延迟值和 jitter（`0.0`–`1.0`）均受上限保护，以约束 durable retry budget。 |
 
 活动会话会保留自己的 `connection-id/model-id` 解析 route。`/model` 会在空闲时切换该 route，

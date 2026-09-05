@@ -41,6 +41,10 @@ connection = "my-connection"
 model = "my-model"
 tool_timeout_secs = 30
 
+[model_request]
+# Optional; omit for the selected provider's automatic output budget.
+max_output_tokens = 8192
+
 [appearance]
 info_rail = true
 theme = "sigil_dark"
@@ -54,6 +58,13 @@ turn to that route, and records the same route as the default for future session
 publishing fails, the panel stays open with the draft intact, shows a persistent **save failed**
 status, and focuses the related field when Sigil can identify one. Editing again clears the stale
 error so the next save attempt is unambiguous.
+
+`[model_request].max_output_tokens` is an optional provider-neutral default for ordinary agent
+runs. Omit it to keep the selected provider's automatic output budget. In TUI `/config`, **Max
+output tokens** accepts a positive integer or a `K`/`M` suffix such as `8K`; leave it empty for
+Automatic. When the selected model context is known, Sigil also reserves 8,192 tokens for the
+input envelope and provider framing; a value that leaves no such input budget is rejected before
+the file is written. An explicit per-run constraint takes precedence over this default.
 
 A connection ID identifies the saved route but is not itself a trust grant. Correcting only the
 path on the same endpoint origin can rebind a resumed session automatically. Changing origin,

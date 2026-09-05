@@ -11,6 +11,9 @@ export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
 sigil
 ```
 
+`ANTHROPIC_API_KEY` is also accepted. When both variables are present, the canonical
+`SIGIL_ANTHROPIC_API_KEY` takes precedence.
+
 ```toml
 config_version = 2
 

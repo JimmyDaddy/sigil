@@ -59,8 +59,13 @@ connection:
 | Environment | CI or an already managed shell secret | Allowlisted variable name only |
 | No authentication | Explicit loopback custom endpoints | `source = "none"`; rejected for credentialed remote HTTP |
 
-Provider environment names are `SIGIL_API_KEY`, `SIGIL_OPENAI_COMPATIBLE_API_KEY`,
-`SIGIL_OPENAI_RESPONSES_API_KEY`, `SIGIL_ANTHROPIC_API_KEY`, and `SIGIL_GEMINI_API_KEY`.
+Provider environment names use the canonical `SIGIL_*` names: `SIGIL_API_KEY`,
+`SIGIL_OPENAI_COMPATIBLE_API_KEY`, `SIGIL_OPENAI_RESPONSES_API_KEY`,
+`SIGIL_ANTHROPIC_API_KEY`, and `SIGIL_GEMINI_API_KEY`. Common provider aliases are also
+accepted: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY` (for both OpenAI protocols),
+`ANTHROPIC_API_KEY`, and `GEMINI_API_KEY` or `GOOGLE_API_KEY`. If both names are set, the
+canonical `SIGIL_*` value wins. The saved connection template remains canonical, so existing
+config files stay stable while users can reuse their usual provider environment variables.
 `[storage].credential_store` accepts `file`, `auto`, or `keyring`. The default `file` and
 non-interactive `auto` modes use only the owner-only `~/.sigil/credentials.json`. If the file does not contain the credential, reopen
 `/config` and enter the key once. Strict `keyring` mode explicitly uses macOS Keychain, Windows

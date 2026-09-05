@@ -41,6 +41,10 @@ connection = "my-connection"
 model = "my-model"
 tool_timeout_secs = 30
 
+[model_request]
+# 可选；省略后由所选 Provider 自动决定输出预算。
+max_output_tokens = 8192
+
 [appearance]
 info_rail = true
 theme = "sigil_dark"
@@ -52,6 +56,13 @@ theme = "sigil_dark"
 下一轮切换到该 route，同时把同一 route 保存为未来会话的默认值。如果字段校验或文件发布失败，
 配置面板会保留未保存草稿并持续显示 **保存失败**；能够识别具体字段时还会自动聚焦该字段。再次编辑
 会清除已经过期的错误状态，让下一次保存结果保持明确。
+
+`[model_request].max_output_tokens` 是普通 agent run 的 provider-neutral 可选默认值。省略时保留
+所选 Provider 自动决定的输出预算。在 TUI `/config` 中，**Max output tokens** 接受正整数或 `8K`、
+`1M` 这类 K/M 后缀；留空即为 Automatic。显式指定的单次运行约束优先于此默认值。
+当所选模型的上下文窗口已知时，Sigil 会额外预留 8,192 token 用于输入封装和 provider framing；
+如果输出上限会把输入预算挤没，保存前就会拒绝。留空时，provider 的自动输出上限也会自动收敛到
+仍能容纳输入的范围。
 
 Connection ID 用于标识保存的 route，但本身不等于 trust 授权。只修正同一 endpoint origin 内的路径时，
 恢复的 session 可以自动 rebind；origin、Provider 协议或账户/tenant 边界变化时，发送任何历史前都必须

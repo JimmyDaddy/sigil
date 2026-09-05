@@ -107,6 +107,8 @@ Availability and protection depend on the host, backend, profile, and action. Si
 
 Finite checks and builds run through the foreground Shell tool and produce one final result. Persistent servers and interactive programs use an explicit terminal task. Terminal tasks publish readiness, output-generation, exit, cancellation, and interruption changes to Desktop and TUI; an agent that needs to wait uses one event-driven wait instead of repeatedly reading the log. Log reads remain explicit inspection operations.
 
+Desktop presents lifecycle state separately from evidence: Loading, Running, Waiting, Paused, Blocked, Needs confirmation, Failed, Cancelled, Interrupted, and Completed each have a distinct next step. A stop request is not cancellation until a cancelled terminal state is recorded, and an uncertain execution must be reconciled before retrying. Saved-artifact availability, cleanup, and decision delivery are independent status dimensions; they do not rewrite the Task outcome. Technical identifiers and generation details remain available in the details view.
+
 Verification commands have their own declared behavior and approval needs. Configure them through [Advanced configuration](advanced-configuration.md#verification); field defaults are in [Configuration Reference](configuration-reference.md#permission).
 
 <!-- public-doc-cta: review-safety -->

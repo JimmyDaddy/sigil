@@ -322,7 +322,7 @@ sha256 = "0158b6c46b11b102bd0adc8d2af7e0d89fe13d98a05c9e89eb22783171159e9b"
 name = "ManagedExecutionContractV1"
 path = "crates/sigil-kernel/src/managed_execution.rs"
 schema_version = 1
-sha256 = "5bce1476937fdb7f2bfe852c99df54542115e7617281e45eb0c4ce8c37eba5bb"
+sha256 = "78be24d1164d5f8b4fa2b473f672a540d192d1a54062bcb89b530a4147dea1dd"
 
 [[frozen_contracts]]
 name = "BorrowedMutationContractV1"

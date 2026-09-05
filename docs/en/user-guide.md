@@ -68,7 +68,7 @@ When a run is active, ordinary input becomes a visible follow-up and the first p
 
 ## Config Panel
 
-`/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. The per-model context-window field cycles through Automatic, 64K, 128K, 256K, and 1M instead of requiring a raw number; an existing custom value remains intact until you cycle the field. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
+`/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. The per-model context-window field cycles through Automatic, 64K, 128K, 256K, and 1M instead of requiring a raw number; an existing custom value remains intact until you cycle the field. **Max output tokens** is an optional default for normal conversations: leave it Automatic or choose a preset / enter a positive value such as `8K`. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
 
 For a Streamable HTTP MCP server configured with OAuth, open its detail view and choose **Authentication**. The modal can show status, start sign-in, open or copy the authorization URL, accept a transient callback URL, refresh, sign out, or clear a retained local credential. See [MCP](mcp.md) before connecting a server.
 
@@ -130,6 +130,10 @@ Session logs stay under the per-user Sigil state directory. A plain `sigil` laun
 Only one write-capable interactive surface may attach to a session at a time. If that session is already active in another TUI or Desktop run, Sigil keeps the current shell available and offers retry, a new session, or the session library. Close or leave the original owner before retrying; never delete an attachment sidecar or force a takeover.
 
 Provider endpoint path corrections on the same trusted origin are rebound automatically when a session resumes. A changed origin, account/tenant boundary, missing connection, or older session without a proven trust binding requires one explicit route confirmation or replacement. Review and save the intended connection in `/config` (or Settings), or choose a replacement route; the same session id and portable transcript remain available while provider-private continuation state is discarded.
+
+### Provider-only safe mode when authority is damaged
+
+If startup detects a damaged or temporarily unavailable authority journal, Sigil reports an authority recovery problem instead of mislabeling it as provider failure. After confirming that the configuration itself is valid, the TUI offers **Ctrl-M provider-only safe mode**. This mode keeps only the current provider conversation in an ephemeral session; it does not read or write workspace, history, memory, cache, MCP, process, or tool state, and it never shows a fake `sigil ready` or `Thinking` state. Run `sigil doctor`, repair the authority, and restart to restore sessions, tools, approvals, and other durable features.
 
 Cancellation stops new work and waits briefly for active work to finish. **Cancelled** means cleanup completed; **Interrupted** means it could not be confirmed within the limit. Messages and results already saved remain available.
 

@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,the-authority-journal-is-corrupt-or-startup-is-blocked,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # Troubleshooting
 
@@ -32,7 +32,7 @@ Sigil has no usable provider connection, credential, or saved model route. Open 
 
 ## Sigil Cannot Find The API Key
 
-Check that the environment-variable name belongs to the selected connection and that the terminal launching Sigil inherited it. Restart Sigil after changing shell variables. For a stored credential, reopen `/config` and repair that connection. The default `file` and non-interactive `auto` modes use only owner-only `~/.sigil/credentials.json` and never query an older native-system record. If the file-backed record is missing, enter the key once in `/config`. Never put an API key in `sigil.toml` or an issue report.
+Check that the environment-variable name belongs to the selected connection and that the terminal launching Sigil inherited it. The canonical `SIGIL_*` names and the documented provider aliases are accepted; if both are set, the canonical name wins. Restart Sigil after changing shell variables. For a stored credential, reopen `/config` and repair that connection. The default `file` and non-interactive `auto` modes use only owner-only `~/.sigil/credentials.json` and never query an older native-system record. If the file-backed record is missing, enter the key once in `/config`. Never put an API key in `sigil.toml` or an issue report.
 
 ### Provider Connection Or Model Catalog Is Not Ready
 
@@ -100,6 +100,10 @@ Notifications are off by default and depend on terminal support. Enable them und
 ## A Session Needs Route Recovery
 
 Run `sigil doctor` and inspect `session:route_resume`. Endpoint path corrections on the same trusted origin are rebound automatically and do not contact the provider during startup. A changed origin or account/tenant boundary, a missing connection, or an older session without a proven trust binding requires an explicit decision. Review and save the intended connection in `/config` or Desktop Settings, select a replacement route, or start a new session. Sigil keeps the shell and portable transcript available and does not silently send history to an unconfirmed destination.
+
+## The Authority Journal Is Corrupt Or Startup Is Blocked
+
+If you see `journal record is not hash-chained to the previous record`, authority-journal integrity validation failed; this is not an API-key or provider-network error. Sigil preserves the damaged evidence and does not silently truncate or rewrite the journal. Run `sigil doctor` for the recovery details. When the configuration itself is valid, pressing Start now automatically enters a clearly marked **provider-only safe mode** (you can also use **Ctrl-M**) for temporary provider conversation instead of leaving you stranded in Setup. It does not read or write workspace, history, memory, cache, MCP, process, or tool state. Run `sigil doctor recover-authority` and restart before using normal sessions, tools, or approvals again.
 
 ## A Session Is Already Active
 

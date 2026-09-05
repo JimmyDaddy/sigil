@@ -11,6 +11,9 @@ export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
 sigil
 ```
 
+也兼容常用的 `ANTHROPIC_API_KEY`。同时设置时以 canonical 的
+`SIGIL_ANTHROPIC_API_KEY` 为准。
+
 ```toml
 config_version = 2
 

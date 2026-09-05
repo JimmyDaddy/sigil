@@ -68,7 +68,7 @@ TUI 保持相同的内容顺序，但不会伪装成浏览器排版：公式显�
 
 ## 配置面板
 
-`/config` 汇总常用的模型服务、权限、Web、记忆、上下文、代码智能、终端、外观、子智能体、技能、插件和 MCP 设置。单模型上下文窗口不再要求手填数字，而是在“自动、64K、128K、256K、1M”之间循环；已有的自定义数值会保留到用户主动切换。主题修改会立即预览；按 `Ctrl-S` 保存。精确字段和默认值统一在[配置字段参考](configuration-reference.md)维护。
+`/config` 汇总常用的模型服务、权限、Web、记忆、上下文、代码智能、终端、外观、子智能体、技能、插件和 MCP 设置。单模型上下文窗口不再要求手填数字，而是在“自动、64K、128K、256K、1M”之间循环；已有的自定义数值会保留到用户主动切换。**Max output tokens** 是普通对话的可选默认值：可保持 Automatic，或选择预设 / 输入如 `8K` 的正数值。主题修改会立即预览；按 `Ctrl-S` 保存。精确字段和默认值统一在[配置字段参考](configuration-reference.md)维护。
 
 为 Streamable HTTP MCP 服务配置 OAuth 后，打开详情并选择 **Authentication**。你可以在弹窗中查看状态、开始登录、打开或复制授权 URL、接收临时回调 URL、刷新凭据、退出登录，或清除本机保存的凭据。连接服务前请阅读 [MCP 指南](mcp.md)。
 
@@ -123,6 +123,10 @@ provider route 和 binary build 绑定；已有配置不会改变。要关闭自
 同一 session 同时只允许一个可写交互表面 attach。目标 session 已在另一个 TUI 或 Desktop run 中活动时，Sigil 会保留当前 shell，并提供重试、新建会话或返回会话库；退出原 owner 后再重试即可，不要删除 attachment sidecar 或强制接管。
 
 同一可信 origin 内的 Provider endpoint 路径修正会在恢复时自动 rebind。origin、账户/tenant 边界变化、connection 缺失，或旧 session 无法证明 trust binding 时，需要显式确认当前 route 或选择 replacement。请在 `/config`（或 Desktop 设置）检查并保存目标 connection，或选择替代 route；session ID 与可移植对话记录保持不变，旧的 provider 私有 continuation 会被丢弃。
+
+### Authority 损坏时的 provider-only safe mode
+
+如果启动时发现 authority journal 损坏或暂时不可用，Sigil 会把它标成独立的 authority 恢复问题，不会伪装成 Provider 不可用。TUI 在确认配置本身有效后提供 **Ctrl-M provider-only safe mode**：该模式只保留当前 Provider 对话，使用临时 session，不读取或写入工作区、历史、记忆、缓存、MCP、进程或工具状态，也不会显示虚假的 `sigil ready` 或 `Thinking`。需要恢复会话、工具、审批和其他持久化功能时，先运行 `sigil doctor` 并修复 authority，再重启回到普通模式。
 
 取消操作会停止接收新工作，并短暂等待活动工作结束。**Cancelled** 表示清理完成；**Interrupted** 表示在限制时间内无法确认。已经保存的消息和结果仍会保留。
 

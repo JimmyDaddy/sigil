@@ -11,6 +11,9 @@ export SIGIL_API_KEY="sk-..."
 sigil
 ```
 
+也兼容常用的 `DEEPSEEK_API_KEY`。同时设置时以 `SIGIL_API_KEY` 为准；connection 模板仍保存
+canonical 名称。
+
 ```toml
 config_version = 2
 

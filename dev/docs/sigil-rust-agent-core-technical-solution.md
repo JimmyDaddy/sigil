@@ -5,25 +5,59 @@
 > Durable Task 的 V2 execution contract、capability admission、step checkpoint 与
 > no-progress 规则见 [RFC-0066](rfcs/0066-durable-task-execution-contracts-v2.md)。
 
-> RFC-0071 final frozen snapshot (2026-08-28): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The post-freeze pending-admission, bootstrap recovery, process-inventory, delete-recovery, Windows cleanup and cross-platform portability findings were closed in the final candidate `ec5459d829e086fbb73f090dcb3201f649d99d7b`, which passed exact-SHA local full and fixed five-platform hosted qualification. The earlier qualification-candidate snapshot and all older frozen claims remain historical and are superseded by this exact qualified object.
+> RFC-0071 historical qualification snapshot (2026-08-28): Resource Authority owns managed-resource identity, lease, quota, journal and typed recovery evidence; Sandbox owns platform confinement; kernel/runtime/public surfaces consume pathless contracts and truthful requested-versus-effective enforcement. The post-freeze findings were reported closed by candidate `ec5459d829e086fbb73f090dcb3201f649d99d7b`, with exact-SHA local and fixed five-platform hosted evidence. This remains historical evidence only: the current RFC-0071 status is single-path remediation in progress, and current-schema E01/E02 implementation plus new qualification are not established by that candidate or this checkout.
 
 > RFC-0070 R70.0 baseline (2026-08-28): the post-R71 TUI migration boundary is recorded in
 > `dev/governance/r70-command-event-migration-v1.toml`. This slice does not move authority ownership or
 > split packages; it freezes the production protocol discovery set and measures the existing projection/layout/
 > render/present path before R70.1 introduces `CommittedPresentation`.
 
-> RFC-0070 current package snapshot (2026-08-28): R70.4 application ports, R70.5 public framework packages,
-> R70.6 host ownership and R70.7 preview package qualification are implemented. R70.8 has retired the public
-> compatibility paths and moved the lossless resource-recovery projection from runtime into `sigil-application`.
-> The internal host still owns the product renderer/worker implementation in this historical snapshot. Its
-> replacement must preserve the complete product contract and retire the replaced paths in the same delivery;
-> publication, release-cycle and user-validation evidence remain separate gates, not permission to retain dual paths.
+> RFC-0070 historical package snapshot (2026-08-28): R70.4 application ports, R70.5 public framework packages,
+> R70.6 host ownership and R70.7 preview package qualification were reported complete in that candidate, and
+> R70.8 recorded compatibility retirement plus the move of lossless resource-recovery projection into
+> `sigil-application`. The current directory/package topology is separately verified in §0 and §5, but this
+> historical snapshot does not establish current command settlement, real five-surface presentation, or release/user
+> qualification. Those remain independent acceptance gates; the current R70 status is remediation in progress.
 
 R70.8 compatibility note：上文的 `sigil-tui` package tree 已拆成 public framework 与内部
 `sigil-tui-host`；后者的 runner、AppState、legacy LayoutSnapshot 和 platform effects 不是 public
 framework contract。R70.8 还将 kernel recovery surface 的无状态 lossless facade 迁入
 `sigil-application`，runtime 不再发布 R71 transitional recovery module。真实发布周期与用户验证仍由
 独立 evidence gate 记录，不能由本地 package test 代替。
+
+## 0. 当前事实与验收映射（2026-09-01）
+
+本节是当前 checkout 的事实快照，不是最终结项。`已实现`只表示代码或窄门禁已经存在；只有生产调用、旧路径删除、正反例/恢复测试和真实表面或平台资格化都满足时，才可标记对应交付完成。D01–D04 是已审短协议，A2/E08 是当前集成交付边界；它们不能因设计复核或历史候选 SHA 自动关闭。
+
+| 规范条款 / 边界 | 唯一 owner | 当前实现与生产调用 | 测试 / 证据 | 当前状态 |
+| --- | --- | --- | --- | --- |
+| RFC-0062 / 代码规范：current-schema tool-result V3 | `sigil-kernel` session/artifact 与 `sigil-tools-builtin` capture | `SessionLogEntry::ToolResultV3`、`JsonlSessionStore` 的 V3 event mapping 和 `ToolResultRecordedV3` validation 是当前写入链；V2 只保留为内部旧投影/拒绝 fixture，旧 V2 event 在 store reopen 时 fail closed | [`tool_artifact.rs`](../../crates/sigil-kernel/src/session/tool_artifact.rs)、[`entry.rs`](../../crates/sigil-kernel/src/session/entry.rs)、[`store.rs`](../../crates/sigil-kernel/src/session/store.rs)；V3 bounded-capture、artifact retrieval 和 V2 rejection tests | V3 是当前 durable boundary；V2/V3 不混读、不双写。E03/E13 的全链路资格化仍未宣称完成 |
+| D01 / A2：command settlement 与同源公开 Control | kernel `Session`/`EventHandler`；runtime/application bridge 只装配 | `SessionPublicEventProjectionV1` 与 `append_session_entries_with_public_outbox` 复用同一 source/outbox append intent；当前已接入 assistant/tool/provider mixed bundle 与纯 Control transition；broker/registry recovery 和普通 TUI production chain 仍在边界外 | [`control_publication.rs`](../../crates/sigil-kernel/src/session/control_publication.rs)、[`event.rs`](../../crates/sigil-kernel/src/event.rs)、[`control_publication_tests.rs`](../../crates/sigil-kernel/src/session/tests/control_publication_tests.rs)；runtime/application tests 覆盖已接入切片 | A2 mixed-bundle kernel/runtime slice 已交付；A2/E08 整体仍开放，D01 family 表和跨五表面 settlement 尚未验收 |
+| D02：trusted presentation / E09 | `sigil-application` contract、public framework renderer 与 `sigil-tui-host` product host 各守一层 | application 只定义 transport-neutral typed contract；`sigil-tui-core`/`sigil-tui-ratatui` 保持 renderer-neutral；产品 renderer/worker 仍由内部 host 持有，不能由 projection 或 broker 冒充 authority | [`sigil-tui-framework/Cargo.toml`](../../crates/sigil-tui-framework/Cargo.toml)、[`sigil-tui-app/Cargo.toml`](../../crates/sigil-tui-app/Cargo.toml)、R70 topology/retirement checks | 设计边界已同步；真实 write/flush、trusted presentation 和完整 TUI/HTTP/Desktop presentation 仍未验收 |
+| D03 / E02：真实进程覆盖与重启观察 | `sigil-process` 提供 OS facts；`sigil-process-observer` 提供登记/观察；RA 认证 durable inventory；sandbox 负责 physical lifecycle | observer 只产生 purpose/scope-bound birth facts；RA 才消费私有认证 inventory 和 recovery frontier；runtime 不按 PID 消失或 UI 状态签发全树证明 | [`process-observer` tests](../../crates/sigil-process-observer/src/tests/lib_tests.rs)、[`process` identity](../../crates/sigil-process/src/identity.rs)、[`RFC-0071 §1.2`](rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#12-生产进程登记与重启重验切片e02-b2026-08-31) | current-owner/birth-identity 窄切片已存在；完整 E02 的 resource coverage、fresh-epoch 和受支持平台资格化仍未验收 |
+| R71 / E01：资源准入、代次和 quota | `sigil-resource-authority`；runtime 只做 authority composition | grant、lease、quota、journal、generation 和 recovery evidence 由 RA 持有；`sigil-sandbox` 只消费 authority-issued binding，不能从 cwd/env 猜权限 | [`sigil-resource-authority/Cargo.toml`](../../crates/sigil-resource-authority/Cargo.toml)、[`sigil-sandbox/Cargo.toml`](../../crates/sigil-sandbox/Cargo.toml)、R71 inventory/negative-dependency gates | E01-a 与 fence 前置保留；完整 source/admission matrix、真实 consumer 接管及新资格化仍未验收 |
+| D04 / E05：Task completion 与 exact recovery receipt | kernel recovery/completion domain owner；runtime/TUI/HTTP 只消费 typed outcome | 既有 recovery、Task/Plan 与 receipt 边界继续保留；completion 不能由 final prose、adapter error 或 exit code 猜出，`Settled`/ACK/presentation 也不等于 Task 完成 | RFC-0069 §18.5 completion definition 与 kernel recovery/task tests；D04 提议的逐 blocker/跨 child/重启全矩阵尚未形成完整生产证据 | D04 设计复核通过但未实现完成；E05 未验收 |
+| R70：public framework/application/package topology | framework family、application adapter、internal host 各自 owner | 当前目录与 package 名见下表；public framework 不导入 Sigil domain/runtime，`sigil-tui-app` 只依赖 application + public facade，host 保留产品 composition | `check-r70-package-topology.py`、`check-r70-legacy-retirement.py`、`check-r70-migration-manifest.py` 均通过 | package topology 与 legacy static checks 通过；R70 当前 command/presentation/release/user qualification 仍不等于整体结项 |
+
+### 当前 Cargo package 与职责
+
+以下名称来自当前 `cargo metadata --no-deps --format-version 1`，不是按目录名推断。`crates/sigil-tui/Cargo.toml` 的 package 是内部 `sigil-tui-host`；public facade 位于 `crates/sigil-tui-framework/Cargo.toml`，其 package 才是 `sigil-tui`。
+
+| 目录 | Cargo package | 当前职责 |
+| --- | --- | --- |
+| `crates/sigil-application` | `sigil-application` | transport-neutral command/projection/recovery contract；不持有 runtime worker、filesystem、process 或 physical authority |
+| `crates/sigil-runtime` | `sigil-runtime` | provider/tool registry、run options 与 application port 的实际 host/composition |
+| `crates/sigil-resource-authority` | `sigil-resource-authority` | managed resource identity、allocation/lease/quota/journal/generation/recovery 的唯一 authority |
+| `crates/sigil-process` | `sigil-process` | OS birth/object facts、ownership primitive 与 capability probe |
+| `crates/sigil-process-observer` | `sigil-process-observer` | 真实 birth identity 登记/观察 adapter；不取代 RA 的 durable authentication |
+| `crates/sigil-sandbox` | `sigil-sandbox` | 消费 authority binding，执行 Local/Seatbelt/Bubblewrap/Docker/Windows restricted lifecycle |
+| `crates/sigil-desktop` | `sigil-desktop` | Desktop Rust launcher、私有 bearer 与 typed local HTTP client；不持有 UI 或 agent loop |
+| `crates/sigil-tui-core` | `sigil-tui-core` | publishable、application-neutral framework primitives |
+| `crates/sigil-tui-ratatui` | `sigil-tui-ratatui` | publishable Ratatui renderer adapter |
+| `crates/sigil-tui-framework` | `sigil-tui` | publishable public TUI facade |
+| `crates/sigil-tui-app` | `sigil-tui-app` | non-publishable、薄的 Sigil application adapter |
+| `crates/sigil-tui` | `sigil-tui-host` | non-publishable internal TUI composition host |
+| `crates/sigil-http` | `sigil-http` | authenticated local HTTP/SSE adapter over the shared application/runtime service |
 
 ## 1. 背景
 
@@ -540,7 +574,7 @@ bootstrap durable activity 的 session。当前 TUI `/resume` 已执行该过滤
 不进入 resume 列表的隐藏 trust anchor，避免下次启动重新询问信任。异常退出遗留的 bootstrap-only
 stream 同样不得污染 TUI 历史列表；Desktop catalog 采用同一判定仍属于后续统一项。
 
-V2 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
+Current-schema V3 tool result 的 policy-safe bytes 写入 session JSONL sibling resource tree：
 `<session-stem>/artifacts/{staging,refs,blobs,trash}`。对外 ref 是随机、session-scoped
 `ta1_*` capability，不可反推物理路径；descriptor 记录 observed/policy-projected/persisted bytes、
 SHA-256、completeness、sensitivity、retention 和 retrieval policy。artifact 先 staging + fsync +
@@ -572,13 +606,14 @@ shell/cargo workspace check 的资源失败采用独立语义：启动重型 che
 reserve；遇到 ENOSPC 时释放后对同一 crash-safe append 重试一次，以优先落下最小 terminal /
 checkpoint 事实。
 
-上述 root-run cumulative counter 是 RFC-0059 V2 的 current baseline。RFC-0062 的 proposed V3 clean
-cutover 将其替换为四个独立 plane：harness-owned policy-safe artifact capture；per-result 8/16 KiB +
-per-assistant-tool-batch 64 KiB actual-byte initial projection；RFC-0059 current/recent/high-signal protection 与
-oldest-eligible next-epoch token aging；`read_tool_artifact` 独立 retrieval budget。新的 assistant batch 不继承
-历史 batch 的 remaining bytes；历史压力不能把 current safe non-empty result 投影为零。同一 oversized batch
-先为每个 safe non-empty result 分配 deterministic minimum preview，再按 tool-call declaration order 分配
-剩余 bytes。该段在 RFC-0062 标记 implemented 前只描述 target，不改变 V2 session schema 事实。
+上述 root-run cumulative counter 是 RFC-0059 V2 的历史兼容描述，不是当前 writer 契约。RFC-0062 V3
+已经 implemented/verified，并将其替换为四个独立 plane：harness-owned policy-safe artifact capture；
+per-result 8/16 KiB + per-assistant-tool-batch 64 KiB actual-byte initial projection；RFC-0059
+current/recent/high-signal protection 与 oldest-eligible next-epoch token aging；`read_tool_artifact`
+独立 retrieval budget。新的 assistant batch 不继承历史 batch 的 remaining bytes；历史压力不能把
+current safe non-empty result 投影为零。同一 oversized batch 先为每个 safe non-empty result 分配
+deterministic minimum preview，再按 tool-call declaration order 分配剩余 bytes。新 writer 只生成 V3
+descriptor；V2 仅作为旧格式拒绝/诊断 fixture 保留。
 
 持久化边界执行统一的 `SafePersist` 投影：user message、running-input queue、plan/task、agent mailbox/result、tool/provider stream 与 external URL 在首次写 session/control/history 前先做 secret/query/signed-carrier redaction、大小/行数限制和安全摘要。Exact prompt 只在当前进程内交给 provider、`Up/Down` history 或 queue dispatch；durable entry 不保存可反推 verifier，恢复后对 exact-only continuation fail closed 为 stale/interrupted。Query-bearing 或 signed URL 只由 session-local `WebUrlCapabilityStore` 持有，并同时绑定 session id、TTL、LRU 与 restart policy，durable projection 只保存不可反推的安全标识。
 
@@ -753,7 +788,7 @@ pub struct ToolResult {
     pub metadata: ToolResultMeta,
 }
 
-pub struct ToolResultRecordedV2 {
+pub struct ToolResultRecordedV3 {
     pub schema_version: u16,
     pub message_id: String,
     pub call_id: String,
@@ -764,6 +799,13 @@ pub struct ToolResultRecordedV2 {
     pub initial_model_view_sha256: String,
     pub capture_telemetry: ToolResultCaptureTelemetryV1,
     pub recorded_at_ms: u64,
+    pub wire_semantics: ToolResultWireSemanticsV1,
+    pub stream_layout: ToolOutputStreamLayoutV1,
+    pub capture_completeness: ToolResultCaptureCompletenessV1,
+    pub initial_availability: ToolArtifactAvailabilityStateV1,
+    pub preview_actual_bytes: u32,
+    pub capture_plan_hash: String,
+    pub artifact_hash: String,
 }
 
 pub enum ToolResultStatus {
@@ -776,10 +818,10 @@ pub enum ToolResultStatus {
 
 - `args_json` 在重组完成前应保留原始字符串形态，避免过早解析把截断问题藏起来
 - 错误分类只放在 `ToolResultStatus::Error(ToolError)` 中，不通过 metadata 或文本约定判断
-- 可能产生大输出的工具通过 `ToolContext::create_policy_safe_tool_output_sink()` 边执行边写 session-scoped immutable artifact；publish 成功后才能 append V2 descriptor
+- 可能产生大输出的工具通过 `ToolContext::create_policy_safe_tool_output_sink()` 边执行边写 session-scoped immutable artifact；publish 成功后才能 append V3 descriptor
 - provider-visible tool message 来自 `ToolModelViewV1` 的 bounded canonical JSON；JSONL 保存 descriptor、facts 和 initial model view，不保存 artifact body；普通 initial preview 同时受 tool-specific per-result cap 与 root-run 64 KiB aggregate cap，aggregate budget 只按实际 preview bytes 扣减；`read_tool_artifact` 使用自身 16 KiB per-call、8 次/64 KiB per-turn retrieval budget，不消耗也不受 initial-preview aggregate cap 阻断；独立 `ToolDisplayViewV1` 只作为 bounded 产品面 DTO 返回
-- RFC-0062 V3 target 不再使用 root-run cumulative preview counter：current assistant batch 使用独立 64 KiB actual-byte cap 和 per-result minimum preview；历史 provider context 由 token pressure、protected classes、oldest-eligible deterministic aging 与 next-epoch activation 管理；当前实现仍是上一条 V2 contract
-- `ToolResultMeta` 可承载 `exit_code`、`changed_files`、`truncated`、`bytes` 等非错误分类信息；V2 capture 将其投影为有大小上限的 `ToolResultFactsV1`
+- RFC-0062 V3 不再使用 root-run cumulative preview counter：current assistant batch 使用独立 64 KiB actual-byte cap 和 per-result minimum preview；历史 provider context 由 token pressure、protected classes、oldest-eligible deterministic aging 与 next-epoch activation 管理。
+- `ToolResultMeta` 可承载 `exit_code`、`changed_files`、`truncated`、`bytes` 等非错误分类信息；capture 将其投影为有大小上限的 `ToolResultFactsV1`
 - model/TUI/Desktop/HTTP 只接收 `ta1_*` opaque ref。正文按 byte/line/literal selector 通过 `read_tool_artifact` 或 authenticated typed page endpoint 读取，并受 per-call/per-run budget、session scope 与 full SHA-256 校验约束
 
 #### SessionLogEntry
@@ -788,14 +830,14 @@ pub enum ToolResultStatus {
 pub enum SessionLogEntry {
     User(ModelMessage),
     Assistant(ModelMessage),
-    ToolResultV2(ToolResultRecordedV2),
+    ToolResultV3(ToolResultRecordedV3),
     Control(ControlEntry),
 }
 ```
 
 这里建议把“发给模型的消息”和“只给系统自己的控制记录”区分开：
 
-- `User / Assistant / ToolResultV2.initial_model_view` 是真正可能进入 provider request 的历史
+- `User / Assistant / ToolResultV3.initial_model_view` 是真正可能进入 provider request 的历史
 - `ControlEntry` 只给 agent runtime、resume、审计和 UI 使用，不进入上游 prompt
 
 建议把 `ControlEntry` 做成 append-only 的系统控制记录，而不是临时运行时侧带：
@@ -881,7 +923,7 @@ pub struct PrefixSnapshot {
 - 它是不是被意外改了
 - 当前 session 为什么还能命中，或者为什么突然掉命中
 
-该 V2 shape 是当前唯一支持的 session format：缺少 `materialization`、仍依赖
+该 V3 shape 是当前唯一支持的 session format：缺少 `materialization`、仍依赖
 `materialized_text` 的非当前日志直接拒绝，用户可删除该 session；实现不通过提高 1 MiB event
 limit 掩盖无界 control payload。
 
@@ -1451,7 +1493,7 @@ route 同时用作 saved default 与当前 session 的后续 route，减少设�
 
 除此之外，还应加一条和成本直接相关的策略：
 
-- 大型 V2 tool result 在 current/recent/high-signal 保留窗口之外，先由 deterministic batch aging
+- 大型 V3 tool result 在 current/recent/high-signal 保留窗口之外，先由 deterministic batch aging
   切换下一个 context epoch，只保留 status/facts、hash、bounded preview 和 opaque artifact ref；
   如果以后还要精读，让模型使用 `read_tool_artifact` 的 bounded typed selector
 - cost-only aging 只在 cache-reset economics admission 通过后激活；fit-required aging 在
@@ -1459,7 +1501,7 @@ route 同时用作 saved default 与当前 session 的后续 route，减少设�
   projection 与 exact-frontier CAS，不读取整份 JSONL，也不生成 fake transcript artifact ref
 - repeated artifact page 在同一 run 内返回 `unchanged` receipt，不把相同正文再次永久写入 JSONL 或
   无限复制到 model context
-- 新 session 只追加 `ToolResultRecordedV2`；pre-V2 `tool_result_recorded` 仅作为 parser sentinel
+- 新 session 只追加 `ToolResultRecordedV3`；pre-V2 `tool_result_recorded` 仅作为 parser sentinel
   返回 `Unavailable` compatibility diagnostic，不能进入 provider/TUI projection，也不能
   生成 `DurableTranscriptEvent` fake artifact ref
 
@@ -2911,8 +2953,8 @@ normal boot 对 journal composition failure 写入 `boot-failure-evidence.json`�
 
 process inventory 的首次引入不是根据“文件不存在”永久猜测。authority config generation schema v2 持久声明 `process_inventory_required`：旧 schema v1 只允许在 bootstrap publication lock 内先发布空 snapshot 和 requirement marker，再升级 generation record；任一步 crash 都可按 v1 继续完成。schema v2 生效后，snapshot 或 marker 任一/全部缺失均作为 durable authority state loss fail closed，不得重建空 inventory。fresh-root selection 同时绑定 canonical paths 与目录 identity，operator authorize/execute 在共享 transaction 内重读 pending failure evidence和 inventory frontier，从而关闭升级、目录替换和 evidence resolution 的 TOCTOU。
 
-### R71.9q final qualification and freeze attestation（2026-08-28）
+### 历史记录：R71.9q final qualification and freeze attestation（2026-08-28）
 
 最终 qualified implementation candidate 为 `ec5459d829e086fbb73f090dcb3201f649d99d7b`，base 为 `44d043517d1893ff1043f5597aa71d31b527f16a`。该 SHA 的 macOS Seatbelt local full 为 `30/30` steps、`228/228` fault binding、`dirty=false`；fixed `r71-release-candidate` 随后完成 five-platform hosted run `33110285888`，toolchain-offline、docker-declared、windows-restricted、macos-seatbelt、linux-bubblewrap 五个 required jobs 全部 success。local evidence SHA-256 为 `659dbc125bc2cb190217dd2470d808f30eb51bc6a62c3dc04bd3ea525afb417b`；五份 hosted evidence 均绑定同一 candidate、`passed`、`228` fault cases、`dirty=false`、`bootstrap_root_isolated=true`。
 
-R71.9q 现正式为 `Implemented / Frozen`。历史失败 candidate/run 继续作为审计事实保留，不继承为资格；真实用户 bootstrap namespace 未被 qualification 删除、GC 或 rewrite。后续若修改 production code，必须以新 exact SHA 重新执行 local full 与五平台 hosted qualification。
+在该历史候选记录中，R71.9q 被标为 `Implemented / Frozen`。历史失败 candidate/run 继续作为审计事实保留，不继承为资格；真实用户 bootstrap namespace 未被 qualification 删除、GC 或 rewrite。后续 production code 已发生变化时，必须以新 exact SHA 重新执行 local full 与五平台 hosted qualification；该记录不构成当前 RFC-0071/E01/E02 结项。

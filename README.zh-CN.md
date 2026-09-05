@@ -56,7 +56,7 @@ sigil
 
 希望使用原生应用？[GitHub prerelease](https://github.com/JimmyDaddy/sigil/releases) 提供面向 Apple 芯片与 Intel Mac、已签名并完成 Apple 公证的 DMG。精确资源名和更新方式见[安装指南](docs/zh-CN/installation.md)。
 
-只有当某个 release 为自身 binary 携带 exact-route qualified manifest 时，Quick Setup 才会为匹配的新安装启用自动 Task routing 和主动只读 Explore 子智能体。其他 route、缺少 sidecar 的 release，以及所有已有配置都继续保持保守的 `manual + explicit_request_only`。这只改变编排方式，不会授予文件、Shell、网络、MCP、外部目录或 merge 权限。见[高级配置](docs/zh-CN/advanced-configuration.md#任务规划)。
+只有当某个 release 为自身 binary 携带 exact-route qualified manifest 时，Quick Setup 才会为匹配的新安装启用自动 Task routing 和主动只读 Explore 子智能体。其他 route、缺少 sidecar 的 release，以及所有已有配置都继续保持保守的手动策略。这只改变编排方式，不会授予文件、Shell、网络、MCP、外部目录或 merge 权限。见[高级配置](docs/zh-CN/advanced-configuration.md#任务规划)。
 
 ## 深入了解
 

@@ -1,4 +1,4 @@
-<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
+<!-- public-doc-role: troubleshooting; authority: symptom-to-action-authority; sections: decision-tree,quick-setup-opens-every-time,sigil-cannot-find-the-api-key,theme-colors-are-hard-to-read,the-wrong-workspace-is-being-used,a-file-tool-cannot-access-a-path,a-tool-needs-approval-in-headless-run,an-approval-was-denied-expired-or-cancelled,mouse-or-clipboard-does-not-work,attention-notification-does-not-appear,a-session-needs-route-recovery,the-authority-journal-is-corrupt-or-startup-is-blocked,a-session-is-already-active,session-restore-shows-interrupted-tools,context-usage-is-high,mcp-server-is-missing-failed-or-deferred,code-intelligence-is-not-ready,command-not-found-after-install,report-a-bug; cta: open-reference -->
 
 # 排障
 
@@ -32,7 +32,7 @@ sigil doctor
 
 ## Sigil 找不到 API 密钥
 
-确认环境变量名属于当前 connection，并且启动 Sigil 的终端能够读取它。修改 Shell 环境变量后请重启 Sigil。使用 stored credential 时，在 `/config` 中修复当前 connection。默认 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`，不会查询旧的原生系统记录。如果文件记录缺失，在 `/config` 中重新输入一次 key 即可。不要把 API key 写进 `sigil.toml` 或问题单。
+确认环境变量名属于当前 connection，并且启动 Sigil 的终端能够读取它。canonical `SIGIL_*` 名称和文档列出的 provider 别名都可以使用；同时设置时 canonical 名称优先。修改 Shell 环境变量后请重启 Sigil。使用 stored credential 时，在 `/config` 中修复当前 connection。默认 `file` 与非交互 `auto` 都只使用 owner-only 的 `~/.sigil/credentials.json`，不会查询旧的原生系统记录。如果文件记录缺失，在 `/config` 中重新输入一次 key 即可。不要把 API key 写进 `sigil.toml` 或问题单。
 
 ### Provider connection 或模型目录未就绪
 
@@ -95,6 +95,10 @@ TUI 会进入快速设置，并把最后一步明确标成**检查、替换无�
 ## 会话需要恢复 route
 
 运行 `sigil doctor` 并检查 `session:route_resume`。同一可信 origin 内的 endpoint 路径修正会自动 rebind，启动时不会联系 Provider。origin 或账户/tenant 边界变化、connection 缺失，或旧 session 无法证明 trust binding 时，需要用户作出明确决定：在 `/config` 或 Desktop 设置中检查并保存目标 connection、选择 replacement route，或新建 session。Sigil 会保持 shell 与可移植对话记录可用，不会把历史静默发送到未经确认的目的地。
+
+## Authority journal 损坏或启动被阻断
+
+如果看到 `journal record is not hash-chained to the previous record`，这是 authority journal 的完整性校验失败，不是 API key 或 Provider 网络错误。Sigil 会保留损坏证据，不自动截断或重写 journal；运行 `sigil doctor` 获取恢复信息。配置本身有效时，用户按 Start 后 TUI 会自动进入带明确标识的 **provider-only safe mode**（也可使用 **Ctrl-M** 主动进入）临时进行 Provider 对话，不会再停在 Setup 死端。该模式不读取或写入工作区、历史、记忆、缓存、MCP、进程或工具状态；运行 `sigil doctor recover-authority` 完成恢复并重启后，才恢复普通 session、工具和审批能力。
 
 ## 会话已在使用
 

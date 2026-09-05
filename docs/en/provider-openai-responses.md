@@ -11,6 +11,9 @@ export SIGIL_OPENAI_RESPONSES_API_KEY="sk-..."
 sigil
 ```
 
+`OPENAI_API_KEY` is also accepted. When both variables are present, the canonical
+`SIGIL_OPENAI_RESPONSES_API_KEY` takes precedence.
+
 ```toml
 config_version = 2
 

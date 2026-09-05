@@ -103,6 +103,8 @@ fallback = "deny"
 
 有限的检查与构建通过前台 Shell 工具执行，并只产生一个最终结果。常驻服务与交互程序必须使用明确的 terminal task。Terminal task 会主动向 Desktop 与 TUI 发布 readiness、输出 generation、退出、取消和中断变化；agent 需要等待时使用一次事件驱动 wait，不再反复读取日志。日志读取只用于明确的检查操作。
 
+Desktop 会把生命周期状态与证据分开呈现：加载中、运行中、等待中、已暂停、已阻塞、待确认、失败、已取消、已中断和已完成各自对应不同的下一步。请求停止并不等于已经取消，只有记录了 cancelled 终态后才能这样显示；执行状态不确定时，必须先对照权威状态完成 reconciliation，再允许重试。已保存产物的可用性、清理和决定交付是相互独立的状态维度，不会改写 Task 结果；技术标识和 generation 详情保留在详情视图中。
+
 验证命令有独立的行为声明和审批要求。设置见[高级配置](advanced-configuration.md#验证)，字段默认值见[配置字段参考](configuration-reference.md#权限)。
 
 <!-- public-doc-cta: review-safety -->

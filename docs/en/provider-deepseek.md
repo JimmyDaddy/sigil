@@ -11,6 +11,9 @@ export SIGIL_API_KEY="sk-..."
 sigil
 ```
 
+`DEEPSEEK_API_KEY` is also accepted. When both variables are present, `SIGIL_API_KEY` takes
+precedence; connection templates continue to use the canonical name.
+
 ```toml
 config_version = 2
 

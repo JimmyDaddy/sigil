@@ -43,6 +43,7 @@ Use [Configuration](configuration.md#storage-and-session-paths) for path choices
 | `[model_request].request_timeout_secs` | `120` | Model-request wait; `SIGIL_MODEL_REQUEST_TIMEOUT_SECS` overrides it for one launch. |
 | `[model_request].stream_idle_timeout_secs` | `180` | Maximum pause between streamed items; `SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS` overrides it. |
 | `[model_request].stream_total_timeout_secs` | unset | Optional total stream limit; `SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS` overrides it. |
+| `[model_request].max_output_tokens` | unset / automatic | Optional provider-neutral default ceiling for every request in an ordinary agent run. Must be a positive integer. When the context window is known, the value must leave 8,192 tokens for the input envelope and provider framing. Unset keeps automatic behavior, capped to the available input budget when needed. Explicit per-run constraints still take precedence. |
 | `[recovery.provider]` | transport `2`, partial-output `1`, delays `500`–`10000` ms, `jitter_ratio = 0.10`, cumulative `120000` ms | Bounded, provider-neutral recovery policy for future zero-effect provider turns. `max_transport_retries` is capped at `10`, `max_partial_output_retries` at `3`; delay values and jitter (`0.0`–`1.0`) are bounded to protect the durable retry budget. |
 
 The active session keeps its own resolved `connection-id/model-id` route. `/model` switches that

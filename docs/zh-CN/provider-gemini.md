@@ -11,6 +11,9 @@ export SIGIL_GEMINI_API_KEY="..."
 sigil
 ```
 
+也兼容 `GEMINI_API_KEY` 与 `GOOGLE_API_KEY`，两者按此顺序尝试。若设置了 canonical 的
+`SIGIL_GEMINI_API_KEY`，则它优先于两个别名。
+
 ```toml
 config_version = 2
 

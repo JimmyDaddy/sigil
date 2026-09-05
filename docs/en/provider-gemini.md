@@ -11,6 +11,9 @@ export SIGIL_GEMINI_API_KEY="..."
 sigil
 ```
 
+`GEMINI_API_KEY` and `GOOGLE_API_KEY` are also accepted, in that order. When the canonical
+`SIGIL_GEMINI_API_KEY` is set, it takes precedence over both aliases.
+
 ```toml
 config_version = 2
 
