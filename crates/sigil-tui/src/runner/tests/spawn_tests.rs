@@ -260,6 +260,41 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
 }
 
 #[test]
+fn provider_only_safe_worker_starts_without_real_workspace_access() -> Result<()> {
+    let _environment_lock = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let workspace_root = PathBuf::from("ephemeral://provider-only-test-workspace");
+    let root_config = deepseek_root_config(&workspace_root);
+
+    let spawned = super::super::spawn::spawn_agent_worker_with_start_mode_and_attachment(
+        root_config,
+        PathBuf::from("ephemeral://provider-only/sigil.toml"),
+        PathBuf::from("ephemeral://provider-only/session.jsonl"),
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+        super::super::spawn::WorkerStartMode::ProviderOnlySafe,
+        super::super::spawn::WorkerSessionRouteDirective::default(),
+        None,
+        None,
+        None,
+    )?;
+    let command_tx = spawned.command_tx;
+    let message_rx = spawned.message_rx;
+    drop(spawned.join_handle);
+
+    loop {
+        match recv_message(&message_rx)? {
+            WorkerMessage::WorkerReady => break,
+            WorkerMessage::Notice(_) => {}
+            message => anyhow::bail!("unexpected safe worker startup message: {message:?}"),
+        }
+    }
+
+    command_tx.send(WorkerCommand::Shutdown)?;
+    Ok(())
+}
+
+#[test]
 fn second_worker_for_the_same_session_reports_attachment_busy() -> Result<()> {
     let _environment_lock = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");

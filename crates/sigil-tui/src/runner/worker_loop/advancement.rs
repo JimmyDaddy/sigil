@@ -1372,7 +1372,13 @@ where
         runtime,
         request_id,
         session_scope_id,
-        Arc::clone(&state.session.attachment_lease),
+        Arc::clone(
+            state
+                .session
+                .attachment_lease
+                .as_ref()
+                .expect("artifact GC requires a session attachment"),
+        ),
         pressure.cursor,
         state.artifact_gc.result_tx.clone(),
         lifecycle,
@@ -2293,7 +2299,13 @@ where
                                 runtime,
                                 request_id,
                                 expected_session_scope_id.clone(),
-                                Arc::clone(&state.session.attachment_lease),
+                                Arc::clone(
+                                    state
+                                        .session
+                                        .attachment_lease
+                                        .as_ref()
+                                        .expect("overflow recovery requires a session attachment"),
+                                ),
                                 state.compaction.preparation_tx.clone(),
                                 move || {
                                     let preparation = (|| {
@@ -2566,7 +2578,13 @@ where
             runtime,
             request_id,
             expected_session_scope_id.clone(),
-            Arc::clone(&state.session.attachment_lease),
+            Arc::clone(
+                state
+                    .session
+                    .attachment_lease
+                    .as_ref()
+                    .expect("automatic compaction requires a session attachment"),
+            ),
             state.compaction.preparation_tx.clone(),
             move || {
                 let Some(mut session) = stable_snapshot
@@ -2906,7 +2924,13 @@ where
                 runtime,
                 request_id,
                 expected_session_scope_id.clone(),
-                Arc::clone(&state.session.attachment_lease),
+                Arc::clone(
+                    state
+                        .session
+                        .attachment_lease
+                        .as_ref()
+                        .expect("queued compaction requires a session attachment"),
+                ),
                 state.compaction.preparation_tx.clone(),
                 move || {
                     let Some(mut session) = stable_snapshot

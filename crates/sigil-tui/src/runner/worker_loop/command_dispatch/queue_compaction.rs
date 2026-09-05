@@ -241,7 +241,13 @@ where
                             runtime,
                             request_id,
                             expected_session_scope_id.clone(),
-                            std::sync::Arc::clone(&state.session.attachment_lease),
+                            std::sync::Arc::clone(
+                                state
+                                    .session
+                                    .attachment_lease
+                                    .as_ref()
+                                    .expect("durable compaction requires a session attachment"),
+                            ),
                             state.compaction.preparation_tx.clone(),
                             move || {
                                 let Some(mut session) = stable_snapshot
@@ -372,7 +378,13 @@ where
                             runtime,
                             request_id,
                             expected_session_scope_id.clone(),
-                            std::sync::Arc::clone(&state.session.attachment_lease),
+                            std::sync::Arc::clone(
+                                state
+                                    .session
+                                    .attachment_lease
+                                    .as_ref()
+                                    .expect("durable compaction requires a session attachment"),
+                            ),
                             state.compaction.preparation_tx.clone(),
                             move || {
                                 let Some(session) = stable_snapshot
@@ -508,7 +520,13 @@ where
                         runtime,
                         request_id,
                         expected_session_scope_id.clone(),
-                        std::sync::Arc::clone(&state.session.attachment_lease),
+                        std::sync::Arc::clone(
+                            state
+                                .session
+                                .attachment_lease
+                                .as_ref()
+                                .expect("durable compaction requires a session attachment"),
+                        ),
                         state.compaction.preparation_tx.clone(),
                         move || {
                             let Some(mut session) = stable_snapshot

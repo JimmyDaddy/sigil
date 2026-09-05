@@ -38,6 +38,14 @@ use sigil_kernel::ToolResult;
 use sigil_kernel::{ControlEntry, EventHandler};
 
 impl AppState {
+    pub(crate) fn worker_ready(&self) -> bool {
+        self.worker_ready
+    }
+
+    pub(crate) fn mark_worker_not_ready(&mut self) {
+        self.worker_ready = false;
+    }
+
     fn timeline_has_user_prompt(&self, prompt: &str) -> bool {
         self.timeline
             .iter()
@@ -143,8 +151,30 @@ impl AppState {
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
             WorkerMessage::WorkerReady => {
+                self.worker_ready = true;
+                if self.is_provider_only_safe_mode() {
+                    // The provider-only worker has no authority-backed session and must not
+                    // publish a normal Ready state or persist the route as a recent model.
+                    self.clear_pending_session_route_startup();
+                    self.last_notice = Some(
+                        "provider-only safe mode ready; repair authority before using tools"
+                            .to_owned(),
+                    );
+                    self.push_event("worker", "provider-only-ready");
+                    return Ok(());
+                }
+                if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {
+                    self.last_notice = None;
+                }
                 self.clear_pending_session_route_startup();
                 self.record_started_model_route();
+                if !self
+                    .timeline
+                    .iter()
+                    .any(|entry| entry.role == TimelineRole::System && entry.text == "sigil ready.")
+                {
+                    self.push_timeline(TimelineRole::System, "sigil ready.");
+                }
                 self.push_event("worker", "ready");
             }
             WorkerMessage::SessionAttachmentTransferred {
@@ -160,6 +190,7 @@ impl AppState {
                 retryable,
                 target_session,
             } => {
+                self.worker_ready = false;
                 if let Some(target) = target_session {
                     self.restore_session_view(
                         target.session_log_path,
@@ -187,6 +218,12 @@ impl AppState {
                     }
                     sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable => {
                         "provider is temporarily unavailable; retry or repair the connection"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable => {
+                        "authority is unavailable; repair authority before starting execution"
+                    }
+                    sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
+                        "authority journal is corrupted; repair authority before starting execution"
                     }
                     sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
                         "session is open in another Sigil window; close it there, then retry /resume"
@@ -1347,6 +1384,7 @@ impl AppState {
                 self.open_egress_disclosure(disclosure, receipt_tx);
             }
             WorkerMessage::RunFailed(error) => {
+                self.worker_ready = false;
                 self.clear_checkpoint_interaction();
                 self.clear_worker_run_state();
                 self.discard_worker_streaming_assistant_and_finish_reasoning();

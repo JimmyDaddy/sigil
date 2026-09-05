@@ -98,7 +98,7 @@ impl From<CrosstermKeyCode> for InputKeyCode {
     fn from(code: CrosstermKeyCode) -> Self {
         match code {
             CrosstermKeyCode::Backspace => Self::Backspace,
-            CrosstermKeyCode::Enter => Self::Enter,
+            CrosstermKeyCode::Enter | CrosstermKeyCode::Char('\r' | '\n') => Self::Enter,
             CrosstermKeyCode::Left => Self::Left,
             CrosstermKeyCode::Right => Self::Right,
             CrosstermKeyCode::Up => Self::Up,
@@ -122,7 +122,7 @@ impl From<InputKeyCode> for CrosstermKeyCode {
     fn from(code: InputKeyCode) -> Self {
         match code {
             InputKeyCode::Backspace => Self::Backspace,
-            InputKeyCode::Enter => Self::Enter,
+            InputKeyCode::Enter | InputKeyCode::Char('\r' | '\n') => Self::Enter,
             InputKeyCode::Left => Self::Left,
             InputKeyCode::Right => Self::Right,
             InputKeyCode::Up => Self::Up,

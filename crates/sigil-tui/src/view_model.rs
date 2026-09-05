@@ -968,7 +968,11 @@ fn footer_run_label(app: &AppState) -> String {
     if let Some(activity) = app.live_activity_summary() {
         return format!("{} · {}", activity.label, activity.detail);
     }
-    "ready".to_owned()
+    if !app.worker_ready() {
+        "starting".to_owned()
+    } else {
+        "ready".to_owned()
+    }
 }
 
 fn footer_hints(app: &AppState) -> String {

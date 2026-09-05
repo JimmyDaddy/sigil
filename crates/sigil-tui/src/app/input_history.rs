@@ -8,7 +8,7 @@ const INPUT_HISTORY_LIMIT: usize = 100;
 
 impl AppState {
     pub(super) fn load_input_history(&mut self) {
-        if !input_history_persistence_enabled() {
+        if self.is_provider_only_safe_mode() || !input_history_persistence_enabled() {
             return;
         }
         if let Ok(history) = read_input_history(&self.input_history_path(), INPUT_HISTORY_LIMIT) {
@@ -17,7 +17,7 @@ impl AppState {
     }
 
     pub(super) fn record_input_history(&mut self, prompt: String) {
-        if !should_record_input_history_entry(&prompt) {
+        if self.is_provider_only_safe_mode() || !should_record_input_history_entry(&prompt) {
             return;
         }
         if !push_input_history_entry(
@@ -93,7 +93,7 @@ impl AppState {
     }
 
     fn persist_input_history(&self) {
-        if !input_history_persistence_enabled() {
+        if self.is_provider_only_safe_mode() || !input_history_persistence_enabled() {
             return;
         }
         if let Some(writer) = &self.managed_history_writer {

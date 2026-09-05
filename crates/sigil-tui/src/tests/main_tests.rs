@@ -8,6 +8,7 @@ use crate::{
     runner::{WorkerCommand, WorkerCommandSender, WorkerMessage},
 };
 use anyhow::{Result, anyhow};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Terminal,
     backend::{Backend, TestBackend},
@@ -17,19 +18,23 @@ use ratatui::{
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CONFIG_VERSION_V2, CompactionConfig, ConnectionId, ControlEntry,
-    JsonlSessionStore, MemoryConfig, ModelMessage, ModelRef, PermissionConfig, RootConfig,
-    SessionConfig, SessionLogEntry, WorkspaceConfig, WorkspaceTrust, stable_workspace_id,
+    JsonlSessionStore, MemoryConfig, ModelMessage, ModelRef, PermissionConfig,
+    PublicRouteRecoveryCode, RootConfig, SessionConfig, SessionLogEntry, WorkspaceConfig,
+    WorkspaceTrust, stable_workspace_id,
 };
 
 use super::{
     AppMouseOutcome, BACKGROUND_TASK_WAKE_INTERVAL, ExternalLaunchPlatform, ExternalLaunchTarget,
     InitialSessionTarget, SPINNER_FRAME_MILLIS, TuiPanicHookGuard, WorkerRuntime, apply_key_action,
-    apply_mouse_outcome, build_initial_app, drain_worker_messages, enter_terminal_presentation,
+    apply_mouse_outcome, build_initial_app, build_initial_app_with_session, drain_worker_messages,
+    enter_provider_only_safe_mode_after_authority_failure, enter_terminal_presentation,
     external_launch_plan, finalize_terminal_presentation, flush_pending_worker_commands,
     leave_terminal_presentation, mouse_layout_snapshot, next_mouse_capture_action,
-    next_wake_deadline, process_app_action, process_app_action_with_spawner, render_timed_frame,
+    next_wake_deadline, process_app_action, process_app_action_with_spawner,
+    recover_provider_only_safe_mode_after_worker_startup_failure, render_timed_frame,
     render_tui_exit_resume_hint, restart_worker_after_session_transition,
-    restore_initial_session_from_disk,
+    restore_initial_session_from_disk, return_to_setup_after_boot_failure,
+    return_to_setup_after_boot_failure_with_draft,
 };
 use crate::presentation::PresentationSession;
 
@@ -950,6 +955,64 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 }
 
 #[test]
+fn initial_authority_journal_failure_enters_provider_only_safe_mode() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let boot_error = sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
+        sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(
+            "journal record is not hash-chained to the previous record".to_owned(),
+        ),
+    );
+
+    let (app, worker) = build_initial_app_with_session(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(anyhow::Error::new(boot_error)),
+        InitialSessionTarget::Fresh,
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(app.is_provider_only_safe_mode());
+    assert!(!app.is_setup_mode());
+    assert!(worker.is_some());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider-only safe mode started"))
+    );
+    Ok(())
+}
+
+#[test]
+fn initial_non_authority_boot_failure_stays_in_setup() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let boot_error = sigil_runtime::application_host::BootAuthorityErrorV1::Config(
+        "synthetic non-authority boot failure".to_owned(),
+    );
+
+    let (app, worker) = build_initial_app_with_session(
+        temp.path().to_path_buf(),
+        config_path,
+        Err(anyhow::Error::new(boot_error)),
+        InitialSessionTarget::Fresh,
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(app.is_setup_mode());
+    assert!(!app.is_provider_only_safe_mode());
+    assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
 fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut root_config = test_config_for_workspace(temp.path());
@@ -1299,6 +1362,319 @@ fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
                         == Some("trusted by user during quick setup")
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn authority_boot_failure_returns_to_repairable_setup_without_worker() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+    let mut worker = None;
+
+    return_to_setup_after_boot_failure(
+        &mut app,
+        &mut worker,
+        config_path,
+        "configuration saved; authority boot is unavailable: durable journal is corrupt".to_owned(),
+        Some(PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+    );
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    assert!(!app.has_pending_worker_commands());
+    assert_eq!(
+        app.last_notice(),
+        Some("configuration saved; authority boot is unavailable: durable journal is corrupt")
+    );
+    assert!(
+        app.setup_lines()
+            .iter()
+            .any(|line| line.contains("authority boot is unavailable"))
+    );
+    Ok(())
+}
+
+#[test]
+fn authority_retry_failure_keeps_the_submitted_setup_draft_and_review_row() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    let mut setup_app = AppState::from_setup(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("authority journal requires reconciliation".to_owned()),
+    );
+    let setup_draft = {
+        let setup = setup_app.setup_state_mut().expect("setup state");
+        setup.selected_field = crate::app::SetupField::Save;
+        setup.clone()
+    };
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+    let mut worker = None;
+
+    return_to_setup_after_boot_failure_with_draft(
+        &mut app,
+        &mut worker,
+        Some(setup_draft),
+        "configuration saved; authority boot is unavailable: durable journal is corrupt".to_owned(),
+        Some(PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+    );
+
+    let setup = app.setup_state().expect("setup draft restored");
+    assert_eq!(setup.selected_field, crate::app::SetupField::Save);
+    assert_eq!(setup.model, root_config.agent.model);
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn authority_boot_failure_auto_enters_provider_only_safe_mode_after_start() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut setup_app = AppState::from_setup_with_recovery(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("configuration saved; authority boot is unavailable".to_owned()),
+        Some(PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+    );
+    let setup_draft = setup_app.take_setup_state().expect("setup draft");
+    assert!(setup_draft.provider_only_safe_mode_config().is_some());
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+    let mut worker = None;
+
+    enter_provider_only_safe_mode_after_authority_failure(
+        &mut app,
+        &mut worker,
+        root_config,
+        setup_draft,
+        "configuration saved; authority boot is unavailable".to_owned(),
+        &mut |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(app.is_provider_only_safe_mode());
+    assert!(!app.is_setup_mode());
+    assert!(worker.is_some());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider-only safe mode started"))
+    );
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("sigil doctor recover-authority"))
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_only_startup_failure_restores_the_stashed_setup_draft() {
+    let config_path = PathBuf::from("sigil.toml");
+    let root_config = test_config();
+    let setup_draft = AppState::from_setup(
+        config_path.clone(),
+        PathBuf::from("."),
+        Some("authority journal requires reconciliation".to_owned()),
+    )
+    .take_setup_state()
+    .expect("setup draft");
+    let mut app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
+    let mut worker = None;
+    app.stash_provider_only_safe_mode_setup(Some(setup_draft));
+
+    recover_provider_only_safe_mode_after_worker_startup_failure(&mut app, &mut worker);
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    assert!(app.last_notice().is_some());
+}
+
+#[test]
+fn setup_ctrl_m_enters_provider_only_safe_mode_after_valid_authority_boot_failure() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("authority journal requires reconciliation".to_owned()),
+        Some(PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::StartProviderOnlySafeMode {
+        config_path: selected_config_path,
+        root_config: selected_root_config,
+    }) = action
+    else {
+        panic!("valid-config authority boot failure should expose safe mode");
+    };
+    assert_eq!(selected_config_path, config_path);
+    assert_eq!(
+        &selected_root_config.workspace.root,
+        &root_config.workspace.root
+    );
+    assert_eq!(&selected_root_config.agent.model, &root_config.agent.model);
+    assert_eq!(
+        &selected_root_config.agent.connection,
+        &root_config.agent.connection
+    );
+    assert!(app.is_setup_mode());
+
+    let mut worker = None;
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::StartProviderOnlySafeMode {
+            config_path: selected_config_path,
+            root_config: selected_root_config,
+        },
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(app.is_provider_only_safe_mode());
+    assert!(!app.is_setup_mode());
+    assert_eq!(app.run_phase(), crate::timeline::RunPhase::Idle);
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text == "sigil ready.")
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("starting provider-only safe mode; repair authority before using tools")
+    );
+    assert!(worker.is_some());
+    Ok(())
+}
+
+#[test]
+fn provider_only_worker_ready_does_not_publish_normal_ready_or_recent_model() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
+    app.set_last_notice("starting provider-only safe mode; repair authority before using tools");
+
+    app.handle_worker_message(WorkerMessage::WorkerReady)?;
+
+    assert!(app.worker_ready());
+    assert_eq!(
+        app.last_notice(),
+        Some("provider-only safe mode ready; repair authority before using tools")
+    );
+    assert!(!app.timeline.iter().any(|entry| {
+        entry.role == crate::timeline::TimelineRole::System && entry.text == "sigil ready."
+    }));
+    assert!(
+        !app.events
+            .iter()
+            .any(|event| event.label == "worker" && event.detail == "ready")
+    );
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.detail == "provider-only-ready")
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_only_safe_mode_allows_local_input_updates() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
+    let mut worker = None;
+
+    let redrawn = apply_key_action(&mut app, &mut worker, None, |_root_config, _app| {
+        Err(anyhow!("local update must not start a worker"))
+    })?;
+
+    assert!(redrawn);
+    assert!(!app.timeline.iter().any(|entry| {
+        entry
+            .text
+            .contains("Operation blocked in provider-only safe mode")
+    }));
+    assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn provider_only_safe_mode_requires_typed_authority_recovery_code() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        config_path,
+        temp.path().to_path_buf(),
+        Some("provider is temporarily unavailable".to_owned()),
+        Some(PublicRouteRecoveryCode::ProviderUnavailable),
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(!app.is_provider_only_safe_mode());
+    assert_eq!(
+        app.last_notice(),
+        Some("provider-only safe mode is available only after a valid config boot failure")
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_only_safe_mode_failure_returns_to_setup_with_the_original_draft() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let root_config = test_config_for_workspace(temp.path());
+    root_config.save(&config_path)?;
+    let mut app = AppState::from_setup(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("authority journal requires reconciliation".to_owned()),
+    );
+    app.setup_state_mut()
+        .as_mut()
+        .expect("setup state")
+        .set_model("draft-model".to_owned());
+    let mut worker = None;
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::StartProviderOnlySafeMode {
+            config_path,
+            root_config: Box::new(root_config),
+        },
+        |_root_config, _app| Err(anyhow!("provider unavailable")),
+    )?;
+
+    let setup = app.setup_state().expect("setup draft restored");
+    assert_eq!(setup.model, "draft-model");
+    assert!(app.is_setup_mode());
+    assert!(!app.is_provider_only_safe_mode());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("provider-only safe mode could not start"))
+    );
+    assert!(worker.is_none());
     Ok(())
 }
 

@@ -134,7 +134,7 @@ fn config_storage_section_shows_resolved_paths_readonly() {
 }
 
 #[test]
-fn provider_context_window_cycles_presets_without_numeric_input_modal() -> Result<()> {
+fn provider_context_window_cycles_presets_and_accepts_kilobyte_input() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     {
@@ -155,10 +155,10 @@ fn provider_context_window_cycles_presets_without_numeric_input_modal() -> Resul
 
     for (stored, displayed) in [
         ("", "automatic"),
-        ("64000", "64K"),
-        ("128000", "128K"),
-        ("256000", "256K"),
-        ("1000000", "1M"),
+        ("64K", "64K"),
+        ("128K", "128K"),
+        ("256K", "256K"),
+        ("1M", "1M"),
         ("", "automatic"),
     ] {
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -175,14 +175,15 @@ fn provider_context_window_cycles_presets_without_numeric_input_modal() -> Resul
         );
     }
 
-    let before = app
-        .config_state
-        .as_ref()
-        .expect("config state should exist")
-        .draft
-        .provider_context_window_tokens
-        .clone();
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(app.config_is_editing());
+    for character in "56K".chars() {
+        let action =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+        assert!(action.is_none());
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
     assert!(!app.config_is_editing());
     assert_eq!(
@@ -191,8 +192,73 @@ fn provider_context_window_cycles_presets_without_numeric_input_modal() -> Resul
             .expect("config state should exist")
             .draft
             .provider_context_window_tokens,
-        before
+        "256K"
     );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .provider_context_window_tokens,
+        "1M"
+    );
+    Ok(())
+}
+
+#[test]
+fn provider_max_output_tokens_renders_cycles_and_accepts_kilobyte_input() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        assert!(state.focus_field(ConfigField::ModelRequestMaxOutputTokens));
+    }
+
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("Max output tokens: automatic  [Enter cycle]")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .model_request_max_output_tokens,
+        "4K"
+    );
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("Max output tokens: 4K tokens  [Enter cycle]")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(app.config_is_editing());
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .model_request_max_output_tokens,
+        "8K"
+    );
+    assert!(!app.config_is_editing());
     Ok(())
 }
 
@@ -643,10 +709,7 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("save"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(
-        app.config_selected_field_label(),
-        Some("Stream idle timeout")
-    );
+    assert_eq!(app.config_selected_field_label(), Some("Max output tokens"));
     Ok(())
 }
 
@@ -4017,6 +4080,31 @@ fn config_invalid_save_stays_visible_focuses_the_field_and_clears_after_edit() -
     assert_eq!(
         app.config_footer_hint(),
         "status: unsaved - save before close"
+    );
+    Ok(())
+}
+
+#[test]
+fn config_invalid_max_output_tokens_save_focuses_the_output_default() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should be open");
+        state.draft.model_request_max_output_tokens = "0".to_owned();
+        state.mark_edited();
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.config_section_title(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Max output tokens"));
+    assert!(
+        app.config_save_error()
+            .is_some_and(|error| error.contains("model_request.max_output_tokens"))
     );
     Ok(())
 }

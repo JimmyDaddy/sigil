@@ -26,6 +26,13 @@ impl AppState {
     }
 
     pub(super) fn show_doctor_report(&mut self) {
+        if self.is_provider_only_safe_mode() {
+            self.last_notice = Some(
+                "provider-only safe mode blocks doctor filesystem access; repair authority first"
+                    .to_owned(),
+            );
+            return;
+        }
         let report = self.build_tui_doctor_report();
         let status = report.overall_status().as_str();
         self.last_notice = Some(format!("doctor: {status}"));

@@ -72,6 +72,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_fim_model: String,
     pub(crate) model_request_timeout_secs: String,
     pub(crate) model_request_stream_idle_timeout_secs: String,
+    pub(crate) model_request_max_output_tokens: String,
     pub(crate) permission_mode: PermissionMode,
     pub(crate) web_enabled: bool,
     pub(crate) web_network_mode: sigil_kernel::NetworkPolicy,

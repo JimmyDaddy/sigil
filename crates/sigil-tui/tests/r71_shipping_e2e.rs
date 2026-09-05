@@ -60,6 +60,7 @@ fn production_launcher_replacement_keeps_session_runtime_config() -> Result<()> 
         &config_path,
         Some(session_route),
         config_path.parent().expect("config parent"),
+        None,
     )?;
 
     assert_eq!(returned.agent.model, "session-model");

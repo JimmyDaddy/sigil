@@ -804,6 +804,13 @@ pub(in crate::runner) fn dispatch_worker_command<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    if context.state.provider_only_safe_mode && !safe_mode_command_allowed(&command) {
+        let _ = context.message_tx.send(WorkerMessage::Notice(
+            "provider-only safe mode blocks this operation; repair authority and restart for tools or durable changes"
+                .to_owned(),
+        ));
+        return WorkerCommandDispatchControl::Continue;
+    }
     context.state.defer_startup_artifact_gc = false;
     if let WorkerCommand::UpdateActiveRunPermissionMode { mode } = command {
         context.permission_mode_override.set(mode);
@@ -839,4 +846,14 @@ where
             maintenance::dispatch_maintenance_command(context, command)
         }
     }
+}
+
+fn safe_mode_command_allowed(command: &WorkerCommand) -> bool {
+    matches!(
+        command,
+        WorkerCommand::SubmitPrompt { .. }
+            | WorkerCommand::CancelRun
+            | WorkerCommand::UpdateActiveRunPermissionMode { .. }
+            | WorkerCommand::Shutdown
+    )
 }

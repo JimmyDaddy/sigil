@@ -20,15 +20,23 @@ fn setup_field_index_and_labels_cover_standard_and_custom_values() {
         SetupField::from_index(3, false),
         Some(SetupField::ContextWindow)
     );
-    assert_eq!(SetupField::from_index(4, false), Some(SetupField::Save));
-    assert_eq!(SetupField::from_index(5, false), None);
+    assert_eq!(
+        SetupField::from_index(4, false),
+        Some(SetupField::MaxOutputTokens)
+    );
+    assert_eq!(SetupField::from_index(5, false), Some(SetupField::Save));
+    assert_eq!(SetupField::from_index(6, false), None);
     assert_eq!(SetupField::from_index(1, true), Some(SetupField::Protocol));
     assert_eq!(SetupField::from_index(2, true), Some(SetupField::Endpoint));
     assert_eq!(
         SetupField::from_index(5, true),
         Some(SetupField::ContextWindow)
     );
-    assert_eq!(SetupField::from_index(6, true), Some(SetupField::Save));
+    assert_eq!(
+        SetupField::from_index(6, true),
+        Some(SetupField::MaxOutputTokens)
+    );
+    assert_eq!(SetupField::from_index(7, true), Some(SetupField::Save));
 
     assert_eq!(SetupField::Provider.label(), "provider");
     assert_eq!(SetupField::Protocol.label(), "protocol");
@@ -36,6 +44,7 @@ fn setup_field_index_and_labels_cover_standard_and_custom_values() {
     assert_eq!(SetupField::ApiKey.label(), "authentication");
     assert_eq!(SetupField::Model.label(), "model");
     assert_eq!(SetupField::ContextWindow.label(), "context window");
+    assert_eq!(SetupField::MaxOutputTokens.label(), "max output tokens");
     assert_eq!(SetupField::Save.label(), "review");
 }
 
@@ -106,6 +115,48 @@ fn setup_auth_summary_reports_staged_secure_store_without_plaintext() {
     let summary = state.auth_summary();
     assert_eq!(summary, "protected store · credential staged in memory");
     assert!(!summary.contains("secret"));
+}
+
+#[test]
+fn setup_detects_common_provider_api_key_aliases_with_canonical_precedence() {
+    let _guard = crate::test_env::lock();
+    let _canonical = EnvScope::unset("SIGIL_API_KEY");
+    let _alias = EnvScope::set("DEEPSEEK_API_KEY", "provider-key");
+
+    let state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
+
+    assert!(state.environment_detected());
+    assert_eq!(
+        state.detected_api_key_env_name().as_deref(),
+        Some("DEEPSEEK_API_KEY")
+    );
+    assert_eq!(state.credential_source, SetupCredentialSource::Environment);
+    assert!(state.auth_summary().contains("DEEPSEEK_API_KEY detected"));
+
+    drop(_alias);
+    let _canonical = EnvScope::set("SIGIL_API_KEY", "canonical-key");
+    let state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
+    assert_eq!(
+        state.detected_api_key_env_name().as_deref(),
+        Some("SIGIL_API_KEY")
+    );
+}
+
+#[test]
+fn setup_persists_the_detected_alias_instead_of_an_unset_canonical_name() {
+    let _environment_lock = crate::test_env::lock();
+    let _canonical = EnvScope::unset("SIGIL_API_KEY");
+    let _alias = EnvScope::set("DEEPSEEK_API_KEY", "provider-key");
+    let state = SetupState::new(PathBuf::from("sigil.toml"), None);
+
+    assert_eq!(
+        state.detected_api_key_env_name().as_deref(),
+        Some("DEEPSEEK_API_KEY")
+    );
+    assert_eq!(
+        state.environment_credential_name().as_deref(),
+        Some("DEEPSEEK_API_KEY")
+    );
 }
 
 #[test]

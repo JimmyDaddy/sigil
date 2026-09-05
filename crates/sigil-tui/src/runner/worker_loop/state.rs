@@ -37,9 +37,11 @@ pub(in crate::runner) struct WorkerLoopState {
     /// another session immediately after launch is never blocked on maintenance for the session
     /// they are about to abandon.
     pub(in crate::runner) defer_startup_artifact_gc: bool,
+    pub(in crate::runner) provider_only_safe_mode: bool,
 }
 
 impl WorkerLoopState {
+    #[cfg_attr(not(test), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub(in crate::runner) fn new(
         session_log_path: PathBuf,
@@ -58,6 +60,44 @@ impl WorkerLoopState {
             std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
         >,
         managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
+        provider_only_safe_mode: bool,
+    ) -> Self {
+        Self::new_with_optional_attachment(
+            session_log_path,
+            session,
+            Some(attachment_lease),
+            agent_supervisor,
+            background_agent_runs,
+            event_tx,
+            wake_coalescer,
+            terminal_lifecycle_router,
+            terminal_control,
+            scratch_control,
+            managed_storage_writer,
+            managed_artifact_store,
+            provider_only_safe_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::runner) fn new_with_optional_attachment(
+        session_log_path: PathBuf,
+        session: Option<Session>,
+        attachment_lease: Option<
+            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        >,
+        agent_supervisor: sigil_runtime::AgentSupervisor,
+        background_agent_runs: sigil_runtime::AgentToolBackgroundRuns,
+        event_tx: mpsc::Sender<WorkerEvent>,
+        wake_coalescer: WorkerWakeCoalescer,
+        terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
+        terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+        scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
+        managed_storage_writer: Option<
+            std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+        >,
+        managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
+        provider_only_safe_mode: bool,
     ) -> Self {
         let pending_agent_result_continuations =
             pending_agent_result_continuations_from_session(session.as_ref());
@@ -168,6 +208,7 @@ impl WorkerLoopState {
             approval_command_receipt_order: VecDeque::new(),
             last_observed_run_active: false,
             defer_startup_artifact_gc: true,
+            provider_only_safe_mode,
         }
     }
 
@@ -244,9 +285,12 @@ impl WorkerLoopState {
         if self.run.route_execution_owner.is_some() {
             return Ok(());
         }
-        let authority = self
-            .session
-            .attachment_lease
+        let Some(attachment) = self.session.attachment_lease.as_ref() else {
+            return Err(
+                "session route authority is unavailable in provider-only safe mode".to_owned(),
+            );
+        };
+        let authority = attachment
             .route_mutation_authority(session_scope_id)
             .map_err(|error| format!("session route authority is unavailable: {error:#}"))?;
         self.run.route_execution_owner =
@@ -334,8 +378,9 @@ pub(in crate::runner) struct McpOAuthWorkerState {
 pub(in crate::runner) struct SessionWorkerState {
     pub(in crate::runner) log_path: PathBuf,
     pub(in crate::runner) current: Option<Session>,
-    pub(in crate::runner) attachment_lease:
+    pub(in crate::runner) attachment_lease: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    >,
     pub(in crate::runner) detached_durable_controls: Vec<ControlEntry>,
     pub(in crate::runner) exact_prompts: ExactConversationPromptStore,
     pub(in crate::runner) active_projection_subscription: Option<ActiveProjectionSubscription>,

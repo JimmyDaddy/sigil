@@ -139,7 +139,25 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         objective: "first".to_owned(),
         title: None,
 
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "first".to_owned(),
+        title: None,
+
         status: TaskRunStatus::Completed,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_3")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "third".to_owned(),
+        title: None,
+
+        status: TaskRunStatus::Started,
         reason: None,
     }))?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
@@ -851,6 +869,15 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
 #[test]
 fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "already done".to_owned(),
+        title: None,
+
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -1880,6 +1907,7 @@ fn spawn_loop_with_shared_agent(
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,
                 None,
+                false,
             );
         })
         .map_err(|error| anyhow::anyhow!("failed to spawn worker loop: {error}"))?;

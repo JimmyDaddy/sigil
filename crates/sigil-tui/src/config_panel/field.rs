@@ -8,6 +8,7 @@ pub(crate) enum ConfigField {
     ProviderApiKey,
     ModelRequestTimeoutSecs,
     ModelRequestStreamIdleTimeoutSecs,
+    ModelRequestMaxOutputTokens,
     // Low-frequency provider endpoint/FIM controls remain part of the persisted
     // draft model, but the default config flow keeps them in sigil.toml.
     #[allow(dead_code)]
@@ -73,13 +74,14 @@ pub(crate) enum ConfigField {
 }
 
 impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 6] = [
+    const PROVIDER_FIELDS: [Self; 7] = [
         Self::ProviderName,
         Self::ProviderModel,
         Self::ProviderContextWindowTokens,
         Self::ProviderApiKey,
         Self::ModelRequestTimeoutSecs,
         Self::ModelRequestStreamIdleTimeoutSecs,
+        Self::ModelRequestMaxOutputTokens,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
     const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionMode];
@@ -142,6 +144,7 @@ impl ConfigField {
             Self::ProviderApiKey => "credential",
             Self::ModelRequestTimeoutSecs => "request_start_timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "stream_idle_timeout",
+            Self::ModelRequestMaxOutputTokens => "max_output_tokens",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
             Self::PermissionMode => "mode",
@@ -189,6 +192,7 @@ impl ConfigField {
             Self::ProviderApiKey => "Credential",
             Self::ModelRequestTimeoutSecs => "Request start timeout",
             Self::ModelRequestStreamIdleTimeoutSecs => "Stream idle timeout",
+            Self::ModelRequestMaxOutputTokens => "Max output tokens",
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
             Self::PermissionMode => "Mode",
@@ -248,6 +252,9 @@ impl ConfigField {
             Self::ModelRequestStreamIdleTimeoutSecs => {
                 "Seconds a streaming response may stay idle between chunks before Sigil treats it as failed."
             }
+            Self::ModelRequestMaxOutputTokens => {
+                "Optional default limit for every request in a normal conversation. Automatic preserves the provider-selected output budget."
+            }
             Self::ProviderBaseUrl => {
                 "Provider API base URL. Leave this unchanged unless you use a proxy or compatible endpoint."
             }
@@ -283,7 +290,7 @@ impl ConfigField {
                 "After portable continuity is durable, explicitly allows one extra provider-native compaction request on an exact supported route. Portable truth remains authoritative."
             }
             Self::CompactionContextWindowTokens => {
-                "Used only when provider/model metadata cannot resolve the model context window."
+                "Used only when provider/model metadata cannot resolve the model context window. Accepts a positive integer with optional K/M suffix."
             }
             Self::CodeIntelEnabled => {
                 "Registers read-only workspace symbol, definition, reference, and diagnostics tools."
@@ -355,8 +362,10 @@ impl ConfigField {
         matches!(
             self,
             Self::ProviderModel
+                | Self::ProviderContextWindowTokens
                 | Self::ModelRequestTimeoutSecs
                 | Self::ModelRequestStreamIdleTimeoutSecs
+                | Self::ModelRequestMaxOutputTokens
                 | Self::ProviderBaseUrl
                 | Self::ProviderFimModel
                 | Self::CompactionContextWindowTokens
@@ -399,6 +408,7 @@ impl ConfigField {
             | Self::TerminalNotificationsEnabled
             | Self::AppearanceInfoRail => "Enter toggle",
             Self::ProviderContextWindowTokens => "Enter cycle",
+            Self::ModelRequestMaxOutputTokens => "Enter cycle",
             Self::TerminalScrollSensitivity | Self::TerminalNotificationMinimumRunDurationMs => {
                 "Enter input"
             }

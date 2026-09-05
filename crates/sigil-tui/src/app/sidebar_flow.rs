@@ -75,6 +75,8 @@ impl AppState {
                 follow_up,
                 root_only: true,
                 draft: std::sync::Mutex::new(None),
+                published_root_config: std::sync::Mutex::new(None),
+                close_after_save: false,
             });
             Ok(Some(AppAction::PersistConfiguration { request }))
         }

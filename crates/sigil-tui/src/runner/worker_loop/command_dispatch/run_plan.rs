@@ -60,6 +60,13 @@ where
                     } else {
                         ConversationInputKind::Chat
                     };
+                    if state.provider_only_safe_mode {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "provider-only safe mode cannot queue a second prompt while a run is active"
+                                .to_owned(),
+                        ));
+                        continue;
+                    }
                     match queue_conversation_input_and_track_detached(
                         &state.session.log_path,
                         &mut state.session.current,
@@ -80,7 +87,9 @@ where
                     continue;
                 }
 
-                if let Some(current) = state.session.current.as_ref() {
+                if !state.provider_only_safe_mode
+                    && let Some(current) = state.session.current.as_ref()
+                {
                     match sigil_runtime::application_run::application_session_has_unresolved_user_input(
                         &state.session.log_path,
                         current.session_scope_id(),
@@ -111,7 +120,8 @@ where
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
 
-                let pending_session_title = if !cfg!(test)
+                let pending_session_title = if !state.provider_only_safe_mode
+                    && !cfg!(test)
                     && !plan_mode
                     && !prompt.trim().is_empty()
                     && !run_session
@@ -189,7 +199,17 @@ where
                 let task_result_tx = state.run.result_tx.clone();
                 let run_id = state.allocate_run_id();
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
-                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
+                let parent_session_ref = if state.provider_only_safe_mode {
+                    // Safe mode deliberately has no physical session path. Keep the typed
+                    // conversation binding usable for a provider-only turn without letting a
+                    // URI-like sentinel become an OS-relative file name.
+                    sigil_kernel::SessionRef::new_relative("provider-only-session.jsonl").map_err(
+                        |error| format!("failed to build provider-only session ref: {error:#}"),
+                    )
+                } else {
+                    session_ref_for_log_path(&state.session.log_path)
+                };
+                let parent_session_ref = match parent_session_ref {
                     Ok(session_ref) => session_ref,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -236,8 +256,9 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
-                if let Err(error) =
-                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                if !state.provider_only_safe_mode
+                    && let Err(error) = state
+                        .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
                 {
                     state.session.current = Some(run_session);
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));

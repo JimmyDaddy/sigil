@@ -18,9 +18,11 @@ use sigil_application::{
     ApplicationError, ApplicationPermissionMode, ApplicationPort, ApplicationProjection,
     ApplicationQueueAction, ApplicationQueueItemKind, ApplicationQueueMoveDirection,
     ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationRecoveryAction,
-    ApplicationScope, ApplicationTerminalTaskIdentity, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, McpCommand, PlanTaskCommand, RunCommand, SessionCommand,
-    SessionItemId, SessionMaintenanceOperation, UserInputCommand, VerificationCommand,
+    ApplicationScope, ApplicationTerminalTaskIdentity, AuthenticatedSubject, CommandEffectBinding,
+    CommandLifecyclePhase, CommandRecoveryBinding, ConversationCommand, HostConnectionInstanceId,
+    McpCommand, PlanTaskCommand, RunCommand, SessionCommand, SessionItemId,
+    SessionMaintenanceOperation, UncertainCommandReceipt, UserInputCommand, VerificationCommand,
+    command_fingerprint,
 };
 use sigil_kernel::ReasoningEffort;
 use sigil_tui_app::TuiApplicationAdapter;
@@ -1214,6 +1216,28 @@ struct TuiWorkerCommandExecutor {
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: sigil_application::CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let binding = CommandEffectBinding {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: fingerprint,
+            recovery: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            owner_effect_id: format!("tui-worker:{}", request.envelope.command_id),
+        };
+        Box::pin(async move {
+            binding.validate()?;
+            Ok(binding)
+        })
+    }
+
     fn dispatch(
         &self,
         request: ApplicationCommandRequest,
@@ -1818,70 +1842,88 @@ impl TuiWorkerCommandExecutor {
                     .take();
                 #[cfg(not(test))]
                 if target.root_only {
-                    target
+                    let published = match target
                         .next_base
                         .save_if_unchanged(&target.config_path, &target.expected)
-                        .map_err(|_| ApplicationError::Unavailable)?;
+                    {
+                        Ok(()) => true,
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<sigil_kernel::ConfigPublishError>(),
+                                Some(
+                                    sigil_kernel::ConfigPublishError::PublishedButDurabilityUncertain { .. }
+                                        | sigil_kernel::ConfigPublishError::PublishedButVisibilityUncertain { .. }
+                                        | sigil_kernel::ConfigPublishError::ReplacementPartiallyApplied { .. }
+                                )
+                            ) => false,
+                        Err(_) => return Err(ApplicationError::Unavailable),
+                    };
+                    if let Ok(mut published_root_config) = target.published_root_config.lock() {
+                        *published_root_config = Some(target.next_base.clone());
+                    } else {
+                        return Err(ApplicationError::Unavailable);
+                    }
+                    return local_mutation_dispatch(
+                        request,
+                        "TUI root configuration publication committed",
+                        "tui-config-save",
+                        published,
+                    );
                 } else if let Some(draft) = draft {
-                    crate::app::config_flow::persist_connection_config(
+                    let outcome = crate::app::config_flow::persist_connection_config(
                         target.expected.clone(),
                         target.next_base.clone(),
                         target.config_path.clone(),
                         draft,
                     )
                     .map_err(|_| ApplicationError::Unavailable)?;
+                    let published = matches!(
+                        outcome.publish_outcome,
+                        sigil_runtime::provider_connections::ConfigPublishOutcome::Published
+                    );
+                    if let Ok(mut published_root_config) = target.published_root_config.lock() {
+                        *published_root_config = Some(outcome.root_config);
+                    } else {
+                        return Err(ApplicationError::Unavailable);
+                    }
+                    return local_mutation_dispatch(
+                        request,
+                        "TUI configuration publication committed",
+                        "tui-config-save",
+                        published,
+                    );
                 } else {
                     return Err(ApplicationError::InvalidRequest(
                         "configuration binding was already consumed".to_owned(),
                     ));
                 }
-                return Ok(sigil_runtime::RuntimeApplicationDispatch::Settled(
-                    sigil_application::ApplicationDomainReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        frontier: sigil_application::ApplicationFrontier {
-                            schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
-                            scope: request.admission.scope.clone(),
-                            writer_generation: request.envelope.expected_frontier.writer_generation,
-                            stream_generation: 1,
-                            through_sequence: request.envelope.expected_frontier.through_sequence,
-                            durable_cursor: "configuration-save".to_owned(),
-                        },
-                        settlement: request.envelope.command.policy().settlement,
-                        summary: "configuration persisted".to_owned(),
-                        outcome: None,
-                    },
-                ));
+                #[cfg(test)]
+                return local_mutation_settled(
+                    request,
+                    "TUI configuration publication committed",
+                    "tui-config-save",
+                );
             }
             ApplicationCommand::Provider(sigil_application::ProviderCommand::SelectRoute {
                 binding,
             }) => {
-                self.provider_route_bindings
+                let route = self
+                    .provider_route_bindings
                     .lock()
                     .map_err(|_| ApplicationError::Unavailable)?
                     .get(binding)
+                    .cloned()
                     .ok_or_else(|| {
                         ApplicationError::InvalidRequest(
                             "provider route binding is not owned by this TUI connection".to_owned(),
                         )
                     })?;
-                return Ok(sigil_runtime::RuntimeApplicationDispatch::Settled(
-                    sigil_application::ApplicationDomainReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        frontier: sigil_application::ApplicationFrontier {
-                            schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
-                            scope: request.admission.scope.clone(),
-                            writer_generation: request.envelope.expected_frontier.writer_generation,
-                            stream_generation: 1,
-                            through_sequence: request.envelope.expected_frontier.through_sequence,
-                            durable_cursor: "provider-route-selection".to_owned(),
-                        },
-                        settlement: request.envelope.command.policy().settlement,
-                        summary: "session provider route selected".to_owned(),
-                        outcome: None,
-                    },
-                ));
+                let _ = route;
+                return local_mutation_settled(
+                    request,
+                    "TUI provider route selection committed",
+                    "tui-provider-route",
+                );
             }
             _ => {
                 return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
@@ -1895,13 +1937,28 @@ impl TuiWorkerCommandExecutor {
         self.worker_tx
             .send(command)
             .map_err(|_| ApplicationError::Unavailable)?;
+        // The worker command has crossed its transport boundary, but this synchronous adapter
+        // cannot observe the worker's eventual durable domain commit. Return a typed uncertainty
+        // carrying the exact owner identity so the application reservation remains recoverable;
+        // callers must never reinterpret this as a successful enqueue or fall back to a raw
+        // worker command after application admission failed.
+        let key = request
+            .admission
+            .reservation_key(&request.envelope.command_id);
         let fingerprint = sigil_application::command_fingerprint(request)?;
         Ok(sigil_runtime::RuntimeApplicationDispatch::Uncertain(
-            sigil_application::UncertainCommandReceipt {
+            UncertainCommandReceipt {
                 command_id: request.envelope.command_id.clone(),
                 command_kind: request.envelope.command.kind().to_owned(),
                 reservation_fingerprint: fingerprint,
-                recovery_binding: "tui-worker-event-reconcile".to_owned(),
+                recovery: CommandRecoveryBinding {
+                    key,
+                    phase: CommandLifecyclePhase::EffectStarted,
+                },
+                owner_recovery_binding: Some(format!(
+                    "tui-worker:{}",
+                    request.envelope.command_id.as_str()
+                )),
             },
         ))
     }
@@ -1952,6 +2009,87 @@ impl TuiWorkerCommandExecutor {
                     "MCP OAuth binding is not owned by this TUI connection".to_owned(),
                 )
             })
+    }
+}
+
+/// Produces a durable application receipt for a synchronous local mutation whose domain owner is
+/// this TUI adapter itself. Configuration publication and route selection do not enqueue a worker
+/// command, so reporting `Uncertain` here would falsely tell the caller that an already-completed
+/// operation needs reconciliation. The reservation journal indexes this exact local commit.
+fn local_mutation_settled(
+    request: &ApplicationCommandRequest,
+    summary: &str,
+    event_prefix: &str,
+) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
+    local_mutation_dispatch(request, summary, event_prefix, true)
+}
+
+fn local_mutation_dispatch(
+    request: &ApplicationCommandRequest,
+    summary: &str,
+    event_prefix: &str,
+    published: bool,
+) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
+    let fingerprint = command_fingerprint(request)?;
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-tui-local-mutation-v1\0");
+    digest.update(event_prefix.as_bytes());
+    digest.update(b"\0");
+    digest.update(request.envelope.command_id.as_str().as_bytes());
+    digest.update(b"\0");
+    digest.update(fingerprint.as_bytes());
+    let source_digest = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let source_sequence = request
+        .envelope
+        .expected_frontier
+        .through_sequence
+        .saturating_add(1)
+        .max(1);
+    let frontier = sigil_application::ApplicationFrontier {
+        schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+        scope: request.admission.scope.clone(),
+        writer_generation: request.envelope.expected_frontier.writer_generation,
+        stream_generation: 1,
+        through_sequence: source_sequence,
+        durable_cursor: format!("{event_prefix}:{source_digest}"),
+    };
+    let receipt = sigil_application::ApplicationDomainReceipt {
+        command_id: request.envelope.command_id.clone(),
+        command_kind: request.envelope.command.kind().to_owned(),
+        frontier,
+        settlement: request.envelope.command.policy().settlement,
+        summary: summary.to_owned(),
+        domain_commit: sigil_application::ApplicationDomainCommitRef {
+            source_event_id: format!("{event_prefix}:{}", request.envelope.command_id),
+            source_sequence,
+            source_digest,
+        },
+        outcome: None,
+    };
+    if published {
+        Ok(sigil_runtime::RuntimeApplicationDispatch::Settled(receipt))
+    } else {
+        Ok(sigil_runtime::RuntimeApplicationDispatch::Uncertain(
+            UncertainCommandReceipt {
+                command_id: request.envelope.command_id.clone(),
+                command_kind: request.envelope.command.kind().to_owned(),
+                reservation_fingerprint: fingerprint,
+                recovery: CommandRecoveryBinding {
+                    key: request
+                        .admission
+                        .reservation_key(&request.envelope.command_id),
+                    phase: CommandLifecyclePhase::EffectStarted,
+                },
+                owner_recovery_binding: Some(format!(
+                    "{event_prefix}:{}",
+                    request.envelope.command_id.as_str()
+                )),
+            },
+        ))
     }
 }
 

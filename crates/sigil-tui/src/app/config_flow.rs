@@ -7,6 +7,7 @@ use crate::config_panel::{
     render_config_readonly_row, render_config_value_row,
 };
 use crate::slash::SLASH_COMMANDS;
+use crate::token_units::{MAX_OUTPUT_TOKEN_PRESETS, cycle_token_preset};
 use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -33,19 +34,17 @@ use sigil_runtime::provider_connections::ConfiguredProviderCredentialStore;
 use sigil_runtime::{
     AgentProfileRegistry, ContextWindowSource, ResolvedAgentProfile,
     doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
-    provider_api_key_env_name, provider_capabilities_for_name, provider_capability_view,
+    provider_api_key_env_names, provider_capabilities_for_name, provider_capability_view,
     provider_connections::{
-        ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher,
-        save_connection_config_with_base,
+        ConnectionSaveDraft, ConnectionSaveOutcome, RootConfigPublisher, load_provider_connections,
+        resolve_default_model_route, resolve_model_route, save_connection_config_with_base,
+        validate_persisted_model_route,
     },
     resolve_context_window_tokens_with_override,
 };
 
 #[cfg(test)]
-use sigil_runtime::provider_connections::{
-    connection_semantic_fingerprint, load_provider_connections, resolve_default_model_route,
-    resolve_model_route, validate_persisted_model_route,
-};
+use sigil_runtime::provider_connections::connection_semantic_fingerprint;
 
 use super::session_lifecycle_flow::SessionRetentionMaintenancePreview;
 use super::{
@@ -826,6 +825,23 @@ impl AppState {
                             ));
                             return Ok(None);
                         }
+                        ConfigField::ModelRequestMaxOutputTokens => {
+                            let next = cycle_token_preset(
+                                &config_state.draft.model_request_max_output_tokens,
+                                &MAX_OUTPUT_TOKEN_PRESETS,
+                                false,
+                            );
+                            if config_state.draft.model_request_max_output_tokens != next {
+                                config_state.draft.model_request_max_output_tokens =
+                                    next.to_owned();
+                                config_state.mark_edited();
+                            }
+                            self.last_notice = Some(format!(
+                                "max output tokens -> {}",
+                                config_state.display_value(field)
+                            ));
+                            return Ok(None);
+                        }
                         ConfigField::PermissionMode => {
                             config_state.draft.permission_mode =
                                 cycle_permission_mode(config_state.draft.permission_mode);
@@ -1215,6 +1231,12 @@ impl AppState {
     }
 
     pub(super) fn open_config_panel(&mut self) {
+        if self.is_provider_only_safe_mode() {
+            self.last_notice = Some(
+                "provider-only safe mode blocks config changes; repair authority first".to_owned(),
+            );
+            return;
+        }
         let Some(root_config) = self.config_snapshot.as_ref().cloned() else {
             self.last_notice = Some("config is unavailable in setup mode".to_owned());
             return;
@@ -1914,6 +1936,15 @@ impl AppState {
     }
 
     fn save_config_draft(&mut self) -> Result<Option<AppAction>> {
+        self.save_config_draft_with_close_after_save(false)
+    }
+
+    fn save_config_draft_with_close_after_save(
+        &mut self,
+        close_after_save: bool,
+    ) -> Result<Option<AppAction>> {
+        #[cfg(test)]
+        let _ = close_after_save;
         let Some(is_dirty) = self.config_state.as_ref().map(|state| state.dirty) else {
             return Ok(None);
         };
@@ -1971,6 +2002,8 @@ impl AppState {
                 follow_up: super::ConfigurationSaveFollowUp::RebootRuntime,
                 root_only: false,
                 draft: std::sync::Mutex::new(Some(connection_save)),
+                published_root_config: std::sync::Mutex::new(None),
+                close_after_save,
             });
             self.last_notice = Some("saving config through application authority".to_owned());
             Ok(Some(AppAction::PersistConfiguration { request }))
@@ -2081,8 +2114,7 @@ impl AppState {
         }
     }
 
-    #[cfg(test)]
-    fn apply_saved_provider_route_to_current_session(
+    pub(crate) fn apply_saved_provider_route_to_current_session(
         &mut self,
         previous_config: &RootConfig,
         saved_config: &RootConfig,
@@ -2139,12 +2171,23 @@ impl AppState {
             .config_state
             .as_ref()
             .is_some_and(|config_state| !config_state.dirty);
-        let action = self.save_config_draft()?;
+        let action = self.save_config_draft_with_close_after_save(true)?;
+        #[cfg(test)]
         if action.is_some() || was_clean {
             self.config_state = None;
             self.last_notice = Some("saved config and closed".to_owned());
         }
+        #[cfg(not(test))]
+        if was_clean {
+            self.close_config_panel_after_save();
+        }
         Ok(action)
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn close_config_panel_after_save(&mut self) {
+        self.config_state = None;
+        self.last_notice = Some("saved config and closed".to_owned());
     }
 
     fn activate_selected_mcp_server(&mut self) -> Result<Option<AppAction>> {
@@ -2372,6 +2415,12 @@ fn apply_config_save_error_state(config_state: &mut ConfigState, message: &str) 
 
 fn config_save_error_target(message: &str) -> Option<(ConfigSection, ConfigField)> {
     let message = message.to_ascii_lowercase();
+    if message.contains("max_output_tokens") {
+        return Some((
+            ConfigSection::Provider,
+            ConfigField::ModelRequestMaxOutputTokens,
+        ));
+    }
     if message.contains("request_timeout_secs") {
         return Some((
             ConfigSection::Provider,

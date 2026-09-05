@@ -1,3 +1,4 @@
+use crate::token_units::{is_token_count_character, max_output_token_display, token_count_display};
 use sigil_kernel::{PermissionMode, VerificationAutoRunPolicy, WebSearchRoute};
 use sigil_runtime::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
 
@@ -19,6 +20,9 @@ impl ConfigState {
             ConfigField::ModelRequestTimeoutSecs => Some(&self.draft.model_request_timeout_secs),
             ConfigField::ModelRequestStreamIdleTimeoutSecs => {
                 Some(&self.draft.model_request_stream_idle_timeout_secs)
+            }
+            ConfigField::ModelRequestMaxOutputTokens => {
+                Some(&self.draft.model_request_max_output_tokens)
             }
             ConfigField::ProviderBaseUrl => Some(&self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&self.draft.provider_fim_model),
@@ -89,6 +93,9 @@ impl ConfigState {
             }
             ConfigField::ModelRequestStreamIdleTimeoutSecs => {
                 Some(&mut self.draft.model_request_stream_idle_timeout_secs)
+            }
+            ConfigField::ModelRequestMaxOutputTokens => {
+                Some(&mut self.draft.model_request_max_output_tokens)
             }
             ConfigField::ProviderBaseUrl => Some(&mut self.draft.provider_base_url),
             ConfigField::ProviderFimModel => Some(&mut self.draft.provider_fim_model),
@@ -279,25 +286,28 @@ impl ConfigState {
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
                 "provider/model metadata".to_owned()
             }
+            ConfigField::ModelRequestMaxOutputTokens => {
+                max_output_token_display(text_value, "automatic")
+            }
             ConfigField::ProviderContextWindowTokens if text_value.trim().is_empty() => {
                 "automatic".to_owned()
             }
             ConfigField::ProviderContextWindowTokens => {
                 provider_context_window_display_value(text_value)
             }
-            ConfigField::CompactionContextWindowTokens => format!("{text_value} tokens"),
+            ConfigField::CompactionContextWindowTokens => {
+                max_output_token_display(text_value, "provider/model metadata")
+            }
             _ => text_value.to_owned(),
         }
     }
 }
 
 fn provider_context_window_display_value(value: &str) -> String {
-    match value.trim() {
-        "64000" => "64K".to_owned(),
-        "128000" => "128K".to_owned(),
-        "256000" => "256K".to_owned(),
-        "1000000" => "1M".to_owned(),
-        custom => format!("custom · {custom} tokens"),
+    let display = token_count_display(value, "automatic");
+    match display.as_str() {
+        "64K" | "128K" | "256K" | "1M" => display,
+        _ => format!("custom · {display}"),
     }
 }
 
@@ -331,7 +341,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
     match field {
         ConfigField::ProviderContextWindowTokens
         | ConfigField::CompactionContextWindowTokens
-        | ConfigField::ModelRequestTimeoutSecs
+        | ConfigField::ModelRequestMaxOutputTokens => is_token_count_character(character),
+        ConfigField::ModelRequestTimeoutSecs
         | ConfigField::ModelRequestStreamIdleTimeoutSecs
         | ConfigField::TerminalScrollSensitivity
         | ConfigField::TerminalNotificationMinimumRunDurationMs

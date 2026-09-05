@@ -124,6 +124,13 @@ impl FeedbackModalState {
 
 impl AppState {
     pub(super) fn open_feedback_modal(&mut self) {
+        if self.is_provider_only_safe_mode() {
+            self.last_notice = Some(
+                "provider-only safe mode blocks feedback collection; repair authority first"
+                    .to_owned(),
+            );
+            return;
+        }
         match self.build_feedback_bundle() {
             Ok(bundle) => {
                 let report_json = bundle

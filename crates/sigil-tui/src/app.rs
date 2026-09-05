@@ -70,7 +70,7 @@ use sigil_kernel::{
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
     configured_model_context_window_tokens, effective_compaction_config_with_override,
-    resolve_sigil_paths, support::SupportBuildInfo,
+    ephemeral_sigil_paths, resolve_sigil_paths, support::SupportBuildInfo,
 };
 use uuid::Uuid;
 
@@ -602,6 +602,16 @@ pub struct AppState {
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
+    /// Keeps the editable Setup draft while provider-only safe mode is running. If the
+    /// provider-only worker cannot start, the launcher can return the user to the same repair
+    /// surface instead of leaving a dead worker with the draft discarded.
+    provider_only_safe_mode_setup: Option<SetupState>,
+    /// Non-persistent escape hatch used only while authority repair is pending. The worker
+    /// enforces the same restriction; this flag is presentation/dispatch state, not authority.
+    provider_only_safe_mode: bool,
+    /// Whether the current worker has completed startup and can accept queued commands.
+    /// Production starts false; unit-only app fixtures remain immediately usable without a worker.
+    worker_ready: bool,
     workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
@@ -899,6 +909,10 @@ pub enum AppAction {
         config_path: PathBuf,
         root_config: Box<RootConfig>,
     },
+    StartProviderOnlySafeMode {
+        config_path: PathBuf,
+        root_config: Box<RootConfig>,
+    },
     ConfigSaved {
         root_config: Box<RootConfig>,
     },
@@ -916,6 +930,10 @@ pub struct ConfigurationSaveRequest {
     pub(crate) root_only: bool,
     #[cfg(not(test))]
     pub(crate) draft: Mutex<Option<sigil_runtime::provider_connections::ConnectionSaveDraft>>,
+    #[cfg(not(test))]
+    pub(crate) published_root_config: Mutex<Option<RootConfig>>,
+    #[cfg(not(test))]
+    pub(crate) close_after_save: bool,
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -1142,16 +1160,40 @@ impl AppState {
     }
 
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
-        let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let workspace_root =
-            resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
-        let sigil_paths =
-            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-        let recent_model_refs = sigil_runtime::provider_connections::load_recent_model_refs(
-            &sigil_paths.state_root,
-            root_config,
-        );
-        let session_log_dir = sigil_paths.session_log_dir.clone();
+        Self::from_root_config_with_mode(config_path, root_config, false)
+    }
+
+    pub(crate) fn from_root_config_with_mode(
+        config_path: &Path,
+        root_config: &RootConfig,
+        provider_only_safe_mode: bool,
+    ) -> Self {
+        let (workspace_root, sigil_paths) = if provider_only_safe_mode {
+            (
+                PathBuf::from("ephemeral://provider-only"),
+                ephemeral_sigil_paths(),
+            )
+        } else {
+            let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let workspace_root =
+                resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
+            let sigil_paths =
+                resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+            (workspace_root, sigil_paths)
+        };
+        let recent_model_refs = if provider_only_safe_mode {
+            Vec::new()
+        } else {
+            sigil_runtime::provider_connections::load_recent_model_refs(
+                &sigil_paths.state_root,
+                root_config,
+            )
+        };
+        let session_log_dir = if provider_only_safe_mode {
+            PathBuf::new()
+        } else {
+            sigil_paths.session_log_dir.clone()
+        };
         let session_id = Uuid::new_v4().to_string();
         let permission_mode = root_config.permission.mode.as_str().to_owned();
         let (configured_provider_name, configured_model_name, configured_model_route) =
@@ -1179,7 +1221,9 @@ impl AppState {
         )
         .reasoning_effort
         .unwrap_or(ReasoningEffort::Max);
-        let workspace_git_status = inspect_workspace_git_status(&workspace_root);
+        let workspace_git_status = (!provider_only_safe_mode)
+            .then(|| inspect_workspace_git_status(&workspace_root))
+            .flatten();
 
         let mut app = Self {
             config_path: config_path.to_path_buf(),
@@ -1263,6 +1307,9 @@ impl AppState {
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
+            provider_only_safe_mode_setup: None,
+            provider_only_safe_mode,
+            worker_ready: cfg!(test),
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
@@ -1291,20 +1338,28 @@ impl AppState {
             terminal_height: 32,
             slash_selector_index: 0,
         };
-        app.session_log_path = app
-            .session_log_dir
-            .join(format!("session-{}.jsonl", app.session_id));
-        if let Some(path) = app.managed_session_log_path() {
-            app.session_log_path = path;
+        if provider_only_safe_mode {
+            app.session_log_path = PathBuf::from("ephemeral://provider-only");
+        } else {
+            app.session_log_path = app
+                .session_log_dir
+                .join(format!("session-{}.jsonl", app.session_id));
+            if let Some(path) = app.managed_session_log_path() {
+                app.session_log_path = path;
+            }
+            app.load_input_history();
+            app.seed_connection_inventory_offline(root_config);
+            app.refresh_memory_summary();
         }
-        app.load_input_history();
-        app.seed_connection_inventory_offline(root_config);
-        app.refresh_memory_summary();
         app.recompute_compaction_status(false);
-        app.refresh_session_history();
+        if !provider_only_safe_mode {
+            app.refresh_session_history();
+        }
         app.bootstrap();
-        app.schedule_balance_refresh();
-        app.refresh_usage_sidebar_cache();
+        if !provider_only_safe_mode {
+            app.schedule_balance_refresh();
+            app.refresh_usage_sidebar_cache();
+        }
         app
     }
 
@@ -1313,6 +1368,15 @@ impl AppState {
         workspace_root: PathBuf,
         startup_error: Option<String>,
     ) -> Self {
+        Self::from_setup_with_recovery(config_path, workspace_root, startup_error, None)
+    }
+
+    pub fn from_setup_with_recovery(
+        config_path: PathBuf,
+        workspace_root: PathBuf,
+        startup_error: Option<String>,
+        startup_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
+    ) -> Self {
         let sigil_paths = resolve_sigil_paths(
             &StorageConfig::default(),
             &SessionConfig::default(),
@@ -1320,7 +1384,10 @@ impl AppState {
         );
         let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
-        let workspace_git_status = inspect_workspace_git_status(&workspace_root);
+        // Setup/recovery must remain usable even when the durable authority or workspace
+        // filesystem is unhealthy. Git inspection is a process/filesystem side effect and is
+        // deliberately deferred until the normal application is booted.
+        let workspace_git_status = None;
         let mut app = Self {
             config_path: config_path.clone(),
             workspace_root: workspace_root.clone(),
@@ -1402,7 +1469,14 @@ impl AppState {
             recent_model_refs: Vec::new(),
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: SecretRedactor::default(),
-            setup_state: Some(SetupState::new(config_path, startup_error.clone())),
+            setup_state: Some(SetupState::new_with_recovery(
+                config_path,
+                startup_error.clone(),
+                startup_recovery_code,
+            )),
+            provider_only_safe_mode_setup: None,
+            provider_only_safe_mode: false,
+            worker_ready: cfg!(test),
             workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
@@ -1437,9 +1511,7 @@ impl AppState {
         if let Some(path) = app.managed_session_log_path() {
             app.session_log_path = path;
         }
-        app.load_input_history();
         app.bootstrap_setup();
-        app.refresh_usage_sidebar_cache();
         app
     }
 
@@ -1516,10 +1588,39 @@ impl AppState {
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
-        self.ensure_scratch_dir();
-        self.push_timeline(TimelineRole::System, "sigil ready.");
+        if !self.provider_only_safe_mode {
+            self.ensure_scratch_dir();
+        }
+        if self.provider_only_safe_mode {
+            self.push_timeline(
+                TimelineRole::Notice,
+                "provider-only safe mode active; authority repair is required for durable features",
+            );
+            self.push_timeline(
+                TimelineRole::Notice,
+                "provider-only safe mode: external tools and durable workspace state are disabled",
+            );
+        } else {
+            if !self.worker_ready {
+                self.last_notice = Some("sigil starting; waiting for agent worker".to_owned());
+            }
+            self.push_timeline(
+                if self.worker_ready {
+                    TimelineRole::System
+                } else {
+                    TimelineRole::Notice
+                },
+                if self.worker_ready {
+                    "sigil ready."
+                } else {
+                    "sigil starting; waiting for agent worker."
+                },
+            );
+        }
         self.push_event("session", format!("active {}", self.session_id));
-        self.push_event("workspace", self.workspace_root.display().to_string());
+        if !self.provider_only_safe_mode {
+            self.push_event("workspace", self.workspace_root.display().to_string());
+        }
         self.push_event(
             "model",
             format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
@@ -1540,8 +1641,13 @@ impl AppState {
             "code_intelligence",
             self.runtime.code_intelligence_status.clone(),
         );
-        self.push_event("session_log", self.session_log_path.display().to_string());
+        if !self.provider_only_safe_mode {
+            self.push_event("session_log", self.session_log_path.display().to_string());
+        }
         self.push_event("focus", self.active_pane.label());
+        if self.provider_only_safe_mode {
+            self.push_event("mode", "provider-only-safe");
+        }
         self.reset_scroll();
     }
 
@@ -1550,7 +1656,6 @@ impl AppState {
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
-        self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "quick setup");
         self.push_timeline(TimelineRole::Notice, "launch dir = workspace");
         if let Some(error) = self

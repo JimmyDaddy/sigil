@@ -337,6 +337,7 @@ impl AppState {
                 }
             }
             AppAction::SetupCompleted { .. }
+            | AppAction::StartProviderOnlySafeMode { .. }
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }

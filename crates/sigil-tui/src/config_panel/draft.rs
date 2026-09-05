@@ -2,13 +2,14 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{CodeIntelligenceConfig, RootConfig, SecretString};
 use sigil_runtime::{
     ModelRequestConfigFields, deepseek_provider_config_fields, model_request_config_fields,
-    provider_connections::materialize_root_config, set_model_request_config_fields,
-    supported_provider_name,
+    provider_connections::materialize_root_config, resolve_context_window_tokens_with_override,
+    set_model_request_config_fields, supported_provider_name,
 };
 
 use super::appearance::{first_appearance_color_group_index, first_appearance_color_token_index};
 use super::connections::{connection_drafts_from_root_config, provider_key_for_connection};
 use super::{ConfigDraft, DEEPSEEK_PROVIDER_KEY, McpServerDraft, normalize_provider_name};
+use crate::token_units::parse_optional_token_count;
 
 impl ConfigDraft {
     pub(crate) fn from_root_config(root_config: &RootConfig) -> Self {
@@ -39,6 +40,7 @@ impl ConfigDraft {
             provider_fim_model: deepseek_fields.fim_model,
             model_request_timeout_secs: model_request_fields.request_timeout_secs,
             model_request_stream_idle_timeout_secs: model_request_fields.stream_idle_timeout_secs,
+            model_request_max_output_tokens: model_request_fields.max_output_tokens,
             permission_mode: root_config.permission.mode,
             web_enabled: root_config.web.enabled,
             web_network_mode: root_config.web.network_mode,
@@ -100,6 +102,7 @@ impl ConfigDraft {
     pub(crate) fn to_base_root_config(&self) -> Result<RootConfig> {
         let provider_name = normalize_provider_name(&self.provider_name);
         supported_provider_name(provider_name)?;
+        self.parse_provider_context_window_tokens()?;
         let model = self.provider_model.trim();
         if model.is_empty() {
             bail!("model cannot be empty");
@@ -123,21 +126,9 @@ impl ConfigDraft {
             }
         }
 
-        let context_window_tokens = if self.compaction_context_window_tokens.trim().is_empty() {
-            None
-        } else {
-            let parsed = self
-                .compaction_context_window_tokens
-                .trim()
-                .parse::<u32>()
-                .map_err(|error| {
-                    anyhow!("fallback_context_window_tokens must be a positive integer: {error}")
-                })?;
-            if parsed == 0 {
-                bail!("fallback_context_window_tokens must be greater than 0");
-            }
-            Some(parsed)
-        };
+        let context_window_tokens =
+            parse_optional_token_count(&self.compaction_context_window_tokens)
+                .map_err(|error| anyhow!("fallback_context_window_tokens {error}"))?;
 
         let terminal_scroll_sensitivity = self
             .terminal_scroll_sensitivity
@@ -194,12 +185,47 @@ impl ConfigDraft {
             .map(|(index, server)| server.to_config(index))
             .collect::<Result<Vec<_>>>()?;
 
+        let max_output_tokens = parse_optional_token_count(&self.model_request_max_output_tokens)
+            .map_err(|error| anyhow!("model_request.max_output_tokens {error}"))?
+            .map_or_else(String::new, |tokens| tokens.to_string());
+        if let Some(max_output_tokens) =
+            parse_optional_token_count(&self.model_request_max_output_tokens)
+                .map_err(|error| anyhow!("model_request.max_output_tokens {error}"))?
+        {
+            let context_window = resolve_context_window_tokens_with_override(
+                provider_name,
+                model,
+                self.parse_provider_context_window_tokens()?,
+                context_window_tokens,
+            )
+            .tokens;
+            sigil_runtime::validate_output_token_budget(context_window, Some(max_output_tokens))?;
+            if let Ok((_, route)) =
+                sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+                && let Some(provider_limit) =
+                    sigil_runtime::configured_provider_maximum_output_tokens(
+                        &root_config,
+                        &route.model_ref,
+                    )
+            {
+                anyhow::ensure!(
+                    max_output_tokens <= provider_limit,
+                    "max output tokens ({max_output_tokens}) exceed the provider limit ({provider_limit}) for model {model}"
+                );
+            }
+        }
         let model_request_fields = ModelRequestConfigFields {
             request_timeout_secs: self.model_request_timeout_secs.clone(),
             stream_idle_timeout_secs: self.model_request_stream_idle_timeout_secs.clone(),
+            max_output_tokens,
         };
         set_model_request_config_fields(&mut root_config, &model_request_fields)?;
         Ok(root_config)
+    }
+
+    pub(super) fn parse_provider_context_window_tokens(&self) -> Result<Option<u32>> {
+        parse_optional_token_count(&self.provider_context_window_tokens)
+            .map_err(|error| anyhow!("model context_window_tokens {error}"))
     }
 
     pub(crate) fn code_intelligence_config(&self) -> CodeIntelligenceConfig {

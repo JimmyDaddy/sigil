@@ -37,6 +37,7 @@ pub(crate) mod slash;
 pub(crate) mod surface;
 pub(crate) mod surface_adapter;
 pub(crate) mod timeline;
+pub(crate) mod token_units;
 pub(crate) mod ui;
 pub(crate) mod view_model;
 pub(crate) mod workspace_git;

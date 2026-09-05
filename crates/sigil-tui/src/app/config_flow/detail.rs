@@ -65,9 +65,10 @@ pub(super) fn render_config_selection_details(config_state: &ConfigState) -> Vec
     ];
 
     if matches!(field, ConfigField::ProviderApiKey) {
-        let env_name = provider_api_key_env_name(&config_state.draft.provider_name)
-            .unwrap_or("unsupported provider");
-        lines.push(format!("environment option: {env_name}"));
+        let env_names = provider_api_key_env_names(&config_state.draft.provider_name)
+            .map(|names| names.join(" or "))
+            .unwrap_or_else(|| "unsupported provider".to_owned());
+        lines.push(format!("environment option: {env_names}"));
         lines.push(
             "storage: pasted API keys are saved only to the configured protected credential store"
                 .to_owned(),

@@ -809,6 +809,7 @@ fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect
         .height
         .saturating_sub(footer_height)
         .saturating_sub(footer_gap);
+    let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
         config_panel_height(&main_lines, &context_lines, panel_max_height)
     } else {

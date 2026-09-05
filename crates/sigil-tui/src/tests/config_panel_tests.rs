@@ -320,6 +320,18 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Mcp.flow_index(), Some(12));
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Provider),
+        &[
+            ConfigField::ProviderName,
+            ConfigField::ProviderModel,
+            ConfigField::ProviderContextWindowTokens,
+            ConfigField::ProviderApiKey,
+            ConfigField::ModelRequestTimeoutSecs,
+            ConfigField::ModelRequestStreamIdleTimeoutSecs,
+            ConfigField::ModelRequestMaxOutputTokens,
+        ]
+    );
+    assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Permissions),
         &[ConfigField::PermissionMode]
     );
@@ -994,7 +1006,7 @@ fn config_state_moves_fields_and_footer_boundaries() {
     assert!(state.focus_last_field());
     assert_eq!(
         state.selected_field,
-        Some(ConfigField::ModelRequestStreamIdleTimeoutSecs)
+        Some(ConfigField::ModelRequestMaxOutputTokens)
     );
     assert!(!state.footer_selected);
 
@@ -1006,7 +1018,7 @@ fn config_state_moves_fields_and_footer_boundaries() {
 fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Result<()> {
     let mut draft = ConfigDraft::from_root_config(&test_root_config());
     draft.provider_model = " deepseek-v4-pro ".to_owned();
-    draft.provider_context_window_tokens = "256000".to_owned();
+    draft.provider_context_window_tokens = "256K".to_owned();
     draft.provider_api_key = SecretString::new(" ");
     draft.provider_base_url = " https://proxy.example.test ".to_owned();
     draft.provider_beta_base_url = " https://proxy.example.test/beta ".to_owned();
@@ -1015,11 +1027,12 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     draft.provider_fim_model = " deepseek-v4-pro ".to_owned();
     draft.model_request_timeout_secs = "60".to_owned();
     draft.model_request_stream_idle_timeout_secs = "90".to_owned();
+    draft.model_request_max_output_tokens = "8K".to_owned();
     draft.permission_mode = sigil_kernel::PermissionMode::ReadOnly;
     draft.memory_enabled = true;
     draft.compaction_enabled = true;
     draft.compaction_native_carrier_enabled = true;
-    draft.compaction_context_window_tokens = "128000".to_owned();
+    draft.compaction_context_window_tokens = "128K".to_owned();
     draft.mcp_servers = vec![McpServerDraft {
         name: "test-mcp".to_owned(),
         command: "node".to_owned(),
@@ -1053,6 +1066,7 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     assert!(config.compaction.native_carrier_enabled);
     assert_eq!(config.model_request.request_timeout_secs, 60);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 90);
+    assert_eq!(config.model_request.max_output_tokens, Some(8_000));
     assert_eq!(provider.base_url, "https://proxy.example.test");
     assert_eq!(
         provider.model_context_windows.get("deepseek-v4-pro"),
@@ -1199,31 +1213,36 @@ fn config_draft_validates_provider_and_compaction_values() {
         },
         {
             let mut draft = base.clone();
-            draft.provider_context_window_tokens = "abc".to_owned();
+            draft.model_request_max_output_tokens = "0".to_owned();
             (
                 draft,
-                "model context_window_tokens must be a positive integer",
+                "model_request.max_output_tokens token count must be greater than 0",
             )
+        },
+        {
+            let mut draft = base.clone();
+            draft.provider_context_window_tokens = "abc".to_owned();
+            (draft, "model context_window_tokens invalid token count")
         },
         {
             let mut draft = base.clone();
             draft.provider_context_window_tokens = "0".to_owned();
-            (draft, "model context_window_tokens must be greater than 0")
+            (
+                draft,
+                "model context_window_tokens token count must be greater than 0",
+            )
         },
         {
             let mut draft = base.clone();
             draft.compaction_context_window_tokens = "abc".to_owned();
-            (
-                draft,
-                "fallback_context_window_tokens must be a positive integer",
-            )
+            (draft, "fallback_context_window_tokens invalid token count")
         },
         {
             let mut draft = base.clone();
             draft.compaction_context_window_tokens = "0".to_owned();
             (
                 draft,
-                "fallback_context_window_tokens must be greater than 0",
+                "fallback_context_window_tokens token count must be greater than 0",
             )
         },
         {
@@ -1360,6 +1379,10 @@ fn config_field_character_filter_matches_field_kind() {
         '7'
     ));
     assert!(config_field_accepts_char(
+        ConfigField::CompactionContextWindowTokens,
+        'K'
+    ));
+    assert!(config_field_accepts_char(
         ConfigField::TerminalScrollSensitivity,
         '7'
     ));
@@ -1398,7 +1421,7 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
     assert_eq!(state.display_value(ConfigField::MemoryWritable), "yes");
     assert_eq!(
         state.display_value(ConfigField::CompactionContextWindowTokens),
-        "64000 tokens"
+        "64K tokens"
     );
     assert_eq!(
         state.display_value(ConfigField::TerminalMouseCapture),

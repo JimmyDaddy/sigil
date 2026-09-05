@@ -2,7 +2,8 @@ use sigil_kernel::{RootConfig, TerminalKeyboardEnhancement};
 use sigil_runtime::support::SupportBuildInfo;
 
 use super::{
-    AppState, ComposerMode, EGRESS_DISCLOSURE_HEIGHT, formatting::sidebar_width_for_terminal,
+    AppState, ComposerMode, EGRESS_DISCLOSURE_HEIGHT, SetupState,
+    formatting::sidebar_width_for_terminal,
 };
 
 impl AppState {
@@ -25,6 +26,10 @@ impl AppState {
 
     pub fn last_notice(&self) -> Option<&str> {
         self.last_notice.as_deref()
+    }
+
+    pub(crate) fn set_last_notice(&mut self, notice: impl Into<String>) {
+        self.last_notice = Some(notice.into());
     }
 
     pub fn terminal_mouse_capture_enabled(&self) -> bool {
@@ -363,6 +368,36 @@ impl AppState {
 
     pub fn is_setup_mode(&self) -> bool {
         self.setup_state.is_some()
+    }
+
+    pub(crate) fn take_setup_state(&mut self) -> Option<SetupState> {
+        self.setup_state.take()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn setup_state(&self) -> Option<&SetupState> {
+        self.setup_state.as_ref()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn setup_state_mut(&mut self) -> Option<&mut SetupState> {
+        self.setup_state.as_mut()
+    }
+
+    pub(crate) fn stash_provider_only_safe_mode_setup(&mut self, setup: Option<SetupState>) {
+        self.provider_only_safe_mode_setup = setup;
+    }
+
+    pub(crate) fn take_provider_only_safe_mode_setup(&mut self) -> Option<SetupState> {
+        self.provider_only_safe_mode_setup.take()
+    }
+
+    pub(crate) fn restore_setup_state(&mut self, setup: SetupState) {
+        self.setup_state = Some(setup);
+    }
+
+    pub(crate) fn is_provider_only_safe_mode(&self) -> bool {
+        self.provider_only_safe_mode
     }
 
     pub fn is_config_mode(&self) -> bool {

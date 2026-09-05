@@ -70,6 +70,12 @@ impl AppState {
         explicit: bool,
         channel: UpdateChannel,
     ) -> bool {
+        if self.is_provider_only_safe_mode() {
+            self.record_update_notice(
+                "provider-only safe mode blocks update checks; repair authority first",
+            );
+            return false;
+        }
         if self.update_state.task_rx.is_some() {
             if explicit {
                 self.record_update_notice("an update operation is already running");
@@ -118,6 +124,12 @@ impl AppState {
     }
 
     pub(crate) fn start_update_apply(&mut self, channel: UpdateChannel) -> bool {
+        if self.is_provider_only_safe_mode() {
+            self.record_update_notice(
+                "provider-only safe mode blocks update installation; repair authority first",
+            );
+            return false;
+        }
         if self.update_state.task_rx.is_some() {
             self.record_update_notice("an update operation is already running");
             return true;

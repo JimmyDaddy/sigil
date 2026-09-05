@@ -11,7 +11,7 @@ use sigil_runtime::provider_connections::{
     PreparedCredential, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
     RootConfigPublisher, default_setup_root_config, load_provider_connections,
     materialize_root_config, provider_connection_template, save_connection_config,
-    save_connection_config_replacing_invalid,
+    save_connection_config_replacing_invalid, save_connection_config_with_base_from_snapshot,
 };
 
 use super::{
@@ -20,6 +20,11 @@ use super::{
     modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
 };
 use crate::setup::{SETUP_PROVIDER_ORDER, SetupCredentialSource};
+use crate::token_units::{
+    MAX_OUTPUT_TOKEN_PRESETS, cycle_context_window_preset, cycle_token_preset,
+    is_token_count_character, max_output_token_display, parse_optional_token_count,
+    token_count_display,
+};
 
 impl AppState {
     pub(crate) fn setup_field_line_indices(&self) -> Vec<usize> {
@@ -27,8 +32,8 @@ impl AppState {
             Some(state) if state.selected_field == SetupField::Provider => {
                 (3..3 + SETUP_PROVIDER_ORDER.len()).collect()
             }
-            Some(state) if state.is_custom() => (3..=9).collect(),
-            Some(_) => (3..=7).collect(),
+            Some(state) if state.is_custom() => (3..=10).collect(),
+            Some(_) => (3..=8).collect(),
             None => Vec::new(),
         }
     }
@@ -60,14 +65,8 @@ impl AppState {
                 String::new(),
                 "Up/Down choose · Enter continue · Ctrl-C quit".to_owned(),
             ]);
-            if let Some(error) = &state.startup_error {
-                lines.extend([
-                    String::new(),
-                    format!("load failed: {error}"),
-                    "The unreadable configuration will remain unchanged until you explicitly save this reviewed replacement."
-                        .to_owned(),
-                ]);
-            }
+            append_setup_startup_recovery_lines(&mut lines, state);
+            append_setup_save_error_lines(&mut lines, state);
             return lines;
         }
 
@@ -99,6 +98,15 @@ impl AppState {
                 Some("Enter edit"),
             ));
         }
+        let save_label = if state.save_error.is_some() {
+            "retry save and start"
+        } else if state.existing_config_repair_required() {
+            "review, replace invalid config and start"
+        } else if state.valid_config_boot_retry_required() {
+            "review, save changes and retry start"
+        } else {
+            "review, trust folder, save and start"
+        };
         lines.extend([
             render_setup_value_row(
                 SetupField::ApiKey,
@@ -118,22 +126,20 @@ impl AppState {
                 SetupField::ContextWindow,
                 state.selected_field,
                 "context window",
-                if state.context_window_tokens.trim().is_empty() {
-                    "automatic"
-                } else {
-                    state.context_window_tokens.trim()
-                },
-                Some("Enter optional token limit"),
+                &token_count_display(&state.context_window_tokens, "automatic"),
+                Some("Left/Right preset · Enter edit"),
             ),
-            render_setup_action_row(
-                SetupField::Save,
+            render_setup_value_row(
+                SetupField::MaxOutputTokens,
                 state.selected_field,
-                if state.existing_config_repair_required() {
-                    "review, replace invalid config and start"
-                } else {
-                    "review, trust folder, save and start"
-                },
+                "max output tokens",
+                &token_count_display(&state.max_output_tokens, "automatic"),
+                Some("Left/Right preset · Enter edit"),
             ),
+            render_setup_action_row(SetupField::Save, state.selected_field, save_label),
+        ]);
+        append_setup_save_error_lines(&mut lines, state);
+        lines.extend([
             String::new(),
             "[review]".to_owned(),
             format!(
@@ -146,10 +152,14 @@ impl AppState {
             format!(
                 "context window: {}",
                 if state.context_window_tokens.trim().is_empty() {
-                    "automatic (provider metadata or fallback)"
+                    "automatic (provider metadata or fallback)".to_owned()
                 } else {
-                    state.context_window_tokens.trim()
+                    token_count_display(&state.context_window_tokens, "automatic")
                 }
+            ),
+            format!(
+                "max output tokens: {}",
+                max_output_token_display(&state.max_output_tokens, "automatic")
             ),
             format!(
                 "orchestration: {} / {} ({})",
@@ -163,26 +173,48 @@ impl AppState {
         if state.credential_source == SetupCredentialSource::SecureStore {
             lines.push(format!("staged credential: {}", state.masked_api_key()));
         }
-        if let Some(error) = &state.startup_error {
-            lines.push(String::new());
-            lines.push(format!("load failed: {error}"));
-            lines.push(
-                "The unreadable configuration will remain unchanged until you explicitly save this reviewed replacement."
-                    .to_owned(),
-            );
-        }
+        append_setup_startup_recovery_lines(&mut lines, state);
 
         lines.push(String::new());
-        lines.push(
+        let mut footer =
             "Up/Down move · Enter continue · Left/Right change option · Ctrl-S save · Ctrl-C quit"
-                .to_owned(),
-        );
+                .to_owned();
+        if state.provider_only_safe_mode_config().is_some() {
+            footer.push_str(" · Ctrl-M provider-only safe mode");
+        }
+        lines.push(footer);
         lines
     }
 
     pub(super) fn handle_setup_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
+        // Some terminal/event adapters deliver the Return key as a literal CR/LF character.
+        // Normalize it at the product boundary too, so callers cannot turn the selected Save
+        // action into a silent no-op by bypassing the launcher adapter.
+        let mut key = key;
+        if key.modifiers.is_empty() && matches!(key.code, KeyCode::Char('\r' | '\n')) {
+            key.code = KeyCode::Enter;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
+            return Ok(None);
+        }
+        if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(state) = self.setup_state.as_ref()
+                && let Some(root_config) = state.provider_only_safe_mode_config()
+            {
+                self.last_notice = Some(
+                    "starting provider-only safe mode; repair authority before using tools"
+                        .to_owned(),
+                );
+                return Ok(Some(AppAction::StartProviderOnlySafeMode {
+                    config_path: state.config_path.clone(),
+                    root_config: Box::new(root_config),
+                }));
+            }
+            self.last_notice = Some(
+                "provider-only safe mode is available only after a valid config boot failure"
+                    .to_owned(),
+            );
             return Ok(None);
         }
         if self.has_modal() {
@@ -298,6 +330,40 @@ impl AppState {
                 ));
                 return Ok(None);
             }
+            KeyCode::Left | KeyCode::Right if selected_field == SetupField::ContextWindow => {
+                let state = self
+                    .setup_state
+                    .as_mut()
+                    .expect("setup state was checked before setup key handling");
+                let backwards = key.code == KeyCode::Left;
+                state.context_window_tokens =
+                    cycle_context_window_preset(&state.context_window_tokens, backwards).to_owned();
+                state.bump_revision();
+                self.last_notice = Some(format!(
+                    "context window -> {}",
+                    token_count_display(&state.context_window_tokens, "automatic")
+                ));
+                return Ok(None);
+            }
+            KeyCode::Left | KeyCode::Right if selected_field == SetupField::MaxOutputTokens => {
+                let state = self
+                    .setup_state
+                    .as_mut()
+                    .expect("setup state was checked before setup key handling");
+                let backwards = key.code == KeyCode::Left;
+                state.max_output_tokens = cycle_token_preset(
+                    &state.max_output_tokens,
+                    &MAX_OUTPUT_TOKEN_PRESETS,
+                    backwards,
+                )
+                .to_owned();
+                state.bump_revision();
+                self.last_notice = Some(format!(
+                    "max output tokens -> {}",
+                    token_count_display(&state.max_output_tokens, "automatic")
+                ));
+                return Ok(None);
+            }
             KeyCode::Enter if selected_field == SetupField::ApiKey => {
                 let Some(state) = self.setup_state.as_ref() else {
                     return Ok(None);
@@ -349,6 +415,15 @@ impl AppState {
                 self.open_text_input(TextInputTarget::SetupContextWindow, &current);
                 return Ok(None);
             }
+            KeyCode::Enter if selected_field == SetupField::MaxOutputTokens => {
+                let current = self
+                    .setup_state
+                    .as_ref()
+                    .map(|state| state.max_output_tokens.clone())
+                    .unwrap_or_default();
+                self.open_text_input(TextInputTarget::SetupMaxOutputTokens, &current);
+                return Ok(None);
+            }
             KeyCode::Backspace => return Ok(None),
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if selected_field == SetupField::ApiKey
@@ -363,8 +438,16 @@ impl AppState {
                     self.open_text_input_with_char(TextInputTarget::SetupModel, character);
                     return Ok(None);
                 }
-                if selected_field == SetupField::ContextWindow && character.is_ascii_digit() {
-                    self.open_text_input_with_char(TextInputTarget::SetupContextWindow, character);
+                if (selected_field == SetupField::ContextWindow
+                    || selected_field == SetupField::MaxOutputTokens)
+                    && is_token_count_character(character)
+                {
+                    let target = if selected_field == SetupField::ContextWindow {
+                        TextInputTarget::SetupContextWindow
+                    } else {
+                        TextInputTarget::SetupMaxOutputTokens
+                    };
+                    self.open_text_input_with_char(target, character);
                     return Ok(None);
                 }
                 if selected_field == SetupField::Endpoint {
@@ -395,12 +478,20 @@ impl AppState {
                 state.set_model(value.clone());
                 self.last_notice = Some(format!("updated model {value}"));
             }
-            SetupField::ContextWindow
-                if value.chars().all(|character| character.is_ascii_digit()) =>
-            {
-                state.context_window_tokens = value;
-                state.bump_revision();
-                self.last_notice = Some("updated context window".to_owned());
+            SetupField::ContextWindow | SetupField::MaxOutputTokens => {
+                match parse_optional_token_count(&value) {
+                    Ok(_) => {
+                        if state.selected_field == SetupField::ContextWindow {
+                            state.context_window_tokens = value;
+                        } else {
+                            state.max_output_tokens = value;
+                        }
+                        state.bump_revision();
+                        self.last_notice =
+                            Some(format!("updated {}", state.selected_field.label()));
+                    }
+                    Err(error) => self.last_notice = Some(error.to_string()),
+                }
             }
             SetupField::Endpoint if state.is_custom() => {
                 state.base_url = value;
@@ -416,7 +507,6 @@ impl AppState {
             | SetupField::Protocol
             | SetupField::Endpoint
             | SetupField::ApiKey
-            | SetupField::ContextWindow
             | SetupField::Save => {}
         }
     }
@@ -425,22 +515,26 @@ impl AppState {
         let Some(state) = &mut self.setup_state else {
             return Ok(None);
         };
+        state.save_error = None;
 
         if let Some(error) = validate_setup_state(state) {
+            state.save_error = Some(error.clone());
             self.last_notice = Some(error.clone());
             self.push_event("setup:error", error);
             return Ok(None);
         }
 
-        let (root_config, publish_outcome) = match save_setup_state(state) {
-            Ok(root_config) => root_config,
-            Err(error) => {
-                let message = format!("{error:#}");
-                self.last_notice = Some(message.clone());
-                self.push_event("setup:error", message);
-                return Ok(None);
-            }
-        };
+        let (root_config, publish_outcome, old_credential_cleanup_warning) =
+            match save_setup_state(state) {
+                Ok(root_config) => root_config,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    state.save_error = Some(message.clone());
+                    self.last_notice = Some(message.clone());
+                    self.push_event("setup:error", message);
+                    return Ok(None);
+                }
+            };
         if let ConfigPublishOutcome::PublishedVisibilityUncertain { recovery_path } =
             &publish_outcome
         {
@@ -456,33 +550,135 @@ impl AppState {
                     )
                 },
             );
+            state.save_error = Some(message.clone());
             self.last_notice = Some(message.clone());
             self.push_event("setup:error", message);
             return Ok(None);
         }
+        if publish_outcome == ConfigPublishOutcome::PublishedDurabilityUncertain {
+            // The replacement may already be visible, but the parent-directory fsync did not
+            // complete. Keep Setup active and keep the staged secret so the user can explicitly
+            // retry after the filesystem is healthy; booting here would announce success for a
+            // config that may disappear after a crash.
+            if let Ok(snapshot) = sigil_runtime::provider_connections::PersistedConfigSnapshot::load(
+                &state.config_path,
+            ) {
+                state.startup_config = Some(snapshot);
+            }
+            let message = format!(
+                "config was published but filesystem durability is uncertain; verify {} and press Enter to retry before starting",
+                state.config_path.display()
+            );
+            state.save_error = Some(message.clone());
+            self.last_notice = Some(message.clone());
+            self.push_event("setup:error", message);
+            return Ok(None);
+        }
+        let persisted_snapshot =
+            match sigil_runtime::provider_connections::PersistedConfigSnapshot::load(
+                &state.config_path,
+            ) {
+                Ok(snapshot) if snapshot.parsed().is_some() => snapshot,
+                Ok(_) => {
+                    let message = format!(
+                        "config was published but could not be reloaded as valid current-schema config; verify {} before starting",
+                        state.config_path.display()
+                    );
+                    state.save_error = Some(message.clone());
+                    self.last_notice = Some(message.clone());
+                    self.push_event("setup:error", message);
+                    return Ok(None);
+                }
+                Err(error) => {
+                    let message = format!(
+                        "config was published but could not be reloaded: {error:#}; verify {} before starting",
+                        state.config_path.display()
+                    );
+                    state.save_error = Some(message.clone());
+                    self.last_notice = Some(message.clone());
+                    self.push_event("setup:error", message);
+                    return Ok(None);
+                }
+            };
+        // Keep the exact bytes that were actually published. If a later authority phase fails,
+        // the displayed retry must use this new source as its CAS frontier rather than the
+        // pre-edit snapshot that was loaded when Setup opened.
+        state.startup_config = Some(persisted_snapshot);
         state.clear_staged_secrets();
-        self.last_notice = Some(
-            if publish_outcome == ConfigPublishOutcome::PublishedDurabilityUncertain {
-                format!(
-                    "saved config to {}; orchestration={} / {}; filesystem durability is uncertain",
-                    state.config_path.display(),
-                    root_config.task.routing_policy.as_str(),
-                    root_config.task.multi_agent_mode.as_str()
-                )
-            } else {
-                format!(
-                    "saved config to {}; orchestration={} / {}",
-                    state.config_path.display(),
-                    root_config.task.routing_policy.as_str(),
-                    root_config.task.multi_agent_mode.as_str()
-                )
-            },
+        let saved_notice = format!(
+            "saved config to {}; orchestration={} / {}",
+            state.config_path.display(),
+            root_config.task.routing_policy.as_str(),
+            root_config.task.multi_agent_mode.as_str()
         );
+        self.last_notice = Some(if old_credential_cleanup_warning {
+            format!(
+                "{saved_notice}; an unreferenced stored credential could not be cleaned up and was retained"
+            )
+        } else {
+            saved_notice
+        });
         Ok(Some(AppAction::SetupCompleted {
             config_path: state.config_path.clone(),
             root_config: Box::new(root_config),
         }))
     }
+}
+
+fn append_setup_startup_recovery_lines(lines: &mut Vec<String>, state: &SetupState) {
+    let Some(error) = &state.startup_error else {
+        return;
+    };
+    lines.push(String::new());
+    if state.valid_config_boot_retry_required() {
+        lines.push(format!(
+            "current configuration is valid; a later startup phase failed: {error}"
+        ));
+        lines.push(
+            "Review the current connection and retry start. Saving preserves the remaining current-schema config, uses the exact source snapshot, and refuses any concurrent file change."
+                .to_owned(),
+        );
+        match state.startup_recovery_code {
+            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted) => lines.push(
+                "Recovery action: run `sigil doctor recover-authority` and confirm its exact challenge; then restart Sigil. Ctrl-M remains available for provider-only chat while authority is repaired."
+                    .to_owned(),
+            ),
+            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable) => lines.push(
+                "Recovery action: repair authority with `sigil doctor recover-authority`, then restart Sigil. Ctrl-M remains available for provider-only chat while authority is repaired."
+                    .to_owned(),
+            ),
+            _ => lines.push(
+                "Run `sigil doctor` for the boot failure, then review and retry Start."
+                    .to_owned(),
+            ),
+        }
+    } else if state.existing_config_repair_required() {
+        lines.push(format!("configuration is invalid: {error}"));
+        lines.push(
+            "The invalid file remains unchanged until you explicitly save this reviewed current-schema replacement."
+                .to_owned(),
+        );
+    } else {
+        lines.push(format!(
+            "startup recovery could not capture the config source: {error}"
+        ));
+        lines.push(
+            "Restart Setup to reload the file before saving; no replacement will be published from this state."
+                .to_owned(),
+        );
+    }
+}
+
+fn append_setup_save_error_lines(lines: &mut Vec<String>, state: &SetupState) {
+    let Some(error) = &state.save_error else {
+        return;
+    };
+    lines.push(String::new());
+    lines.push(format!("Setup did not complete: {error}"));
+    lines.push(
+        "The reviewed values remain in Setup. Resolve the error, then press Enter on review or Ctrl-S to retry."
+            .to_owned(),
+    );
 }
 
 fn render_setup_value_row(
@@ -519,6 +715,12 @@ fn render_setup_action_row(field: SetupField, selected_field: SetupField, label:
 }
 
 pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
+    if state.startup_config_snapshot_missing() {
+        return Some(
+            "config changed since Provider settings were loaded; restart setup and retry"
+                .to_owned(),
+        );
+    }
     if state.model.trim().is_empty() {
         return Some("model cannot be empty".to_owned());
     }
@@ -535,7 +737,10 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
             "selected environment variable {} is not set",
             state.api_key_env_name().unwrap_or("for this provider")
         )),
-        SetupCredentialSource::SecureStore if state.api_key.expose_secret().trim().is_empty() => {
+        SetupCredentialSource::SecureStore
+            if state.api_key.expose_secret().trim().is_empty()
+                && !state.can_reuse_stored_credential() =>
+        {
             Some("enter an API key to save in the protected credential store".to_owned())
         }
         SetupCredentialSource::NoAuthentication if !state.no_authentication_allowed() => Some(
@@ -550,7 +755,31 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
 pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
     let (base, connections, default_model) = build_setup_draft(state)?;
     let mut root_config = materialize_root_config(&base, &connections, &default_model)?;
-    let _ = apply_new_install_orchestration_rollout(&mut root_config);
+    let (provider_name, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
+            .map_err(anyhow::Error::new)?;
+    sigil_runtime::validate_output_token_budget(
+        sigil_runtime::resolve_model_context_window_tokens(
+            &root_config,
+            &route.model_ref,
+            &provider_name,
+        )
+        .tokens,
+        root_config.model_request.max_output_tokens,
+    )?;
+    if let Some(provider_limit) =
+        sigil_runtime::configured_provider_maximum_output_tokens(&root_config, &route.model_ref)
+        && let Some(max_output_tokens) = root_config.model_request.max_output_tokens
+    {
+        anyhow::ensure!(
+            max_output_tokens <= provider_limit,
+            "max output tokens ({max_output_tokens}) exceed the provider limit ({provider_limit}) for model {}",
+            route.model_ref.model_id
+        );
+    }
+    if !state.valid_config_boot_retry_required() {
+        let _ = apply_new_install_orchestration_rollout(&mut root_config);
+    }
     Ok(root_config)
 }
 
@@ -572,7 +801,10 @@ fn build_setup_draft(
                 .api_key_env_name()
                 .unwrap_or("the provider credential environment variable")
         ),
-        SetupCredentialSource::SecureStore if state.api_key.expose_secret().trim().is_empty() => {
+        SetupCredentialSource::SecureStore
+            if state.api_key.expose_secret().trim().is_empty()
+                && !state.can_reuse_stored_credential() =>
+        {
             bail!(
                 "provide api_key or export {}",
                 state
@@ -586,81 +818,167 @@ fn build_setup_draft(
         _ => {}
     }
     let (family, protocol, connection_id, label) = setup_connection_identity(state)?;
-    let (mut connection, _) =
-        provider_connection_template(family, protocol, connection_id.clone(), label)?;
+    let existing_root = state
+        .startup_config
+        .as_ref()
+        .and_then(|snapshot| snapshot.parsed())
+        .cloned();
+    let mut base = existing_root
+        .clone()
+        .unwrap_or_else(default_setup_root_config);
+    let existing_loaded = existing_root.as_ref().map(load_provider_connections);
+    let mut connections = existing_loaded
+        .as_ref()
+        .map(|loaded| {
+            loaded
+                .connections
+                .iter()
+                .map(|(id, loaded)| (id.clone(), loaded.config.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut connection = if let Some(existing) = connections
+        .get(&connection_id)
+        .filter(|existing| existing.provider == family && existing.protocol == protocol)
+    {
+        existing.clone()
+    } else {
+        provider_connection_template(family, protocol, connection_id.clone(), label)?.0
+    };
     connection.base_url = state.base_url.trim().to_owned();
     connection.credential = match state.credential_source {
         SetupCredentialSource::Environment => CredentialRefConfig::Environment {
             name: state
-                .api_key_env_name()
+                .environment_credential_name()
                 .context("provider does not declare an environment credential")?
                 .to_owned(),
         },
-        // The copy-on-write save replaces this non-secret placeholder before publish.
-        SetupCredentialSource::SecureStore => connection.credential,
+        // A staged key replaces this non-secret reference during copy-on-write save. An empty
+        // value is accepted only when this exact current connection already owns a stored ref.
+        SetupCredentialSource::SecureStore => connection.credential.clone(),
         SetupCredentialSource::NoAuthentication => CredentialRefConfig::None,
     };
-    if !state.context_window_tokens.trim().is_empty() {
-        let tokens = state
-            .context_window_tokens
-            .trim()
-            .parse::<u32>()
-            .context("context window must be a positive integer")?;
-        anyhow::ensure!(tokens > 0, "context window must be greater than 0");
+    connection.model_context_windows.remove(model);
+    if let Some(tokens) = parse_optional_token_count(&state.context_window_tokens)
+        .map_err(|error| anyhow::anyhow!("context window: {error}"))?
+    {
         connection
             .model_context_windows
             .insert(model.to_owned(), tokens);
     }
     connection.validate()?;
-    let default_model = ModelRef::new(connection_id.clone(), model)?;
-    let base = default_setup_root_config();
-    Ok((
-        base,
-        BTreeMap::from([(connection_id, connection)]),
-        default_model,
-    ))
+    connections.insert(connection_id.clone(), connection);
+    let default_model = ModelRef::new(connection_id, model)?;
+    base.model_request.max_output_tokens = parse_optional_token_count(&state.max_output_tokens)
+        .map_err(|error| anyhow::anyhow!("max output tokens: {error}"))?;
+    Ok((base, connections, default_model))
 }
 
 pub(super) fn setup_connection_identity(
     state: &SetupState,
-) -> Result<(ProviderFamily, ProviderProtocol, ConnectionId, &'static str)> {
+) -> Result<(ProviderFamily, ProviderProtocol, ConnectionId, String)> {
+    if let Some(root_config) = state
+        .startup_config
+        .as_ref()
+        .and_then(|snapshot| snapshot.parsed())
+    {
+        let loaded = load_provider_connections(root_config);
+        if let Some(model_ref) = loaded.default_model.as_ref()
+            && let Some(existing) = loaded.connections.get(&model_ref.connection_id)
+            && setup_state_matches_connection(state, &existing.config)
+        {
+            return Ok((
+                existing.config.provider,
+                existing.config.protocol,
+                existing.config.id.clone(),
+                existing.config.label.clone(),
+            ));
+        }
+    }
+
     let (family, protocol, id, label) = match state.provider_name.as_str() {
         "deepseek" => (
             ProviderFamily::DeepSeek,
             ProviderProtocol::DeepSeek,
             "deepseek-default",
-            "DeepSeek",
+            "DeepSeek".to_owned(),
         ),
         "openai_responses" => (
             ProviderFamily::OpenAi,
             ProviderProtocol::OpenAiResponses,
             "openai-default",
-            "OpenAI",
+            "OpenAI".to_owned(),
         ),
         "anthropic" => (
             ProviderFamily::Anthropic,
             ProviderProtocol::AnthropicMessages,
             "anthropic-default",
-            "Anthropic",
+            "Anthropic".to_owned(),
         ),
         "gemini" => (
             ProviderFamily::Gemini,
             ProviderProtocol::GeminiGenerateContent,
             "gemini-default",
-            "Google Gemini",
+            "Google Gemini".to_owned(),
         ),
         "openai_compat" => (
             ProviderFamily::Custom,
             state.protocol,
             "custom-default",
-            "Custom endpoint",
+            "Custom endpoint".to_owned(),
         ),
         _ => bail!("unsupported setup provider"),
     };
-    Ok((family, protocol, ConnectionId::new(id)?, label))
+    Ok((
+        family,
+        protocol,
+        available_setup_connection_id(state, id)?,
+        label,
+    ))
 }
 
-fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutcome)> {
+fn setup_state_matches_connection(
+    state: &SetupState,
+    connection: &ProviderConnectionConfig,
+) -> bool {
+    let provider_matches = match state.provider_name.as_str() {
+        "deepseek" => connection.provider == ProviderFamily::DeepSeek,
+        "openai_responses" => connection.provider == ProviderFamily::OpenAi,
+        "anthropic" => connection.provider == ProviderFamily::Anthropic,
+        "gemini" => connection.provider == ProviderFamily::Gemini,
+        "openai_compat" => matches!(
+            connection.provider,
+            ProviderFamily::Custom | ProviderFamily::OpenAi
+        ),
+        _ => false,
+    };
+    provider_matches && connection.protocol == state.protocol
+}
+
+fn available_setup_connection_id(state: &SetupState, base: &str) -> Result<ConnectionId> {
+    let Some(root_config) = state
+        .startup_config
+        .as_ref()
+        .and_then(|snapshot| snapshot.parsed())
+    else {
+        return ConnectionId::new(base).map_err(Into::into);
+    };
+    let loaded = load_provider_connections(root_config);
+    let base_id = ConnectionId::new(base)?;
+    if !loaded.connections.contains_key(&base_id) {
+        return Ok(base_id);
+    }
+    for suffix in 2_u32.. {
+        let candidate = format!("{base}-{suffix}");
+        let candidate = ConnectionId::new(candidate)?;
+        if !loaded.connections.contains_key(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("u32 connection suffix space exhausted")
+}
+
+fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutcome, bool)> {
     let root_config = build_setup_root_config(state)?;
     let loaded = load_provider_connections(&root_config);
     anyhow::ensure!(
@@ -682,7 +1000,9 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
         .into_iter()
         .map(|(id, loaded)| (id, loaded.config))
         .collect();
-    let credential_updates = if state.credential_source == SetupCredentialSource::SecureStore {
+    let credential_updates = if state.credential_source == SetupCredentialSource::SecureStore
+        && !state.api_key.expose_secret().trim().is_empty()
+    {
         vec![ConnectionCredentialUpdate {
             connection_id,
             prepared: PreparedCredential::api_key(
@@ -701,6 +1021,7 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
     let persisted = persisted_root_config(&root_config);
     let config_path = state.config_path.clone();
     let replace_invalid = state.existing_config_repair_required();
+    let startup_config = state.startup_config.clone();
     let outcome = std::thread::Builder::new()
         .name("sigil-setup-save".to_owned())
         .spawn(move || {
@@ -714,7 +1035,20 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
             #[cfg(test)]
             let credential_store = TestSetupCredentialStore::default();
             let outcome = if replace_invalid {
+                let startup_config = startup_config
+                    .as_ref()
+                    .context("invalid config source snapshot is unavailable")?;
                 runtime.block_on(save_connection_config_replacing_invalid(
+                    &persisted,
+                    startup_config,
+                    &config_path,
+                    save_draft,
+                    &credential_store,
+                    &RootConfigPublisher,
+                ))
+            } else if let Some(startup_config) = startup_config.as_ref() {
+                runtime.block_on(save_connection_config_with_base_from_snapshot(
+                    startup_config,
                     &persisted,
                     &config_path,
                     save_draft,
@@ -740,7 +1074,11 @@ fn save_setup_state(state: &SetupState) -> Result<(RootConfig, ConfigPublishOutc
     if outcome.publish_outcome == ConfigPublishOutcome::PublishedDurabilityUncertain {
         tracing::warn!("setup config was published but directory durability is uncertain");
     }
-    Ok((outcome.root_config, outcome.publish_outcome))
+    Ok((
+        outcome.root_config,
+        outcome.publish_outcome,
+        outcome.old_credential_cleanup_warning,
+    ))
 }
 
 #[cfg(test)]

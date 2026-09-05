@@ -677,6 +677,7 @@ async fn run_app(
                 app.handle_worker_message(WorkerMessage::RunFailed(
                     "agent worker disconnected".to_owned(),
                 ))?;
+                recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
                 needs_render = true;
             }
             WakeEvent::BackgroundPanic(report) => anyhow::bail!(report),
@@ -749,7 +750,14 @@ where
             }
             let may_change_state = key.may_change_state();
             let action = app.handle_key_event(key.to_crossterm())?;
-            let break_batch = matches!(action, Some(AppAction::TrustWorkspace));
+            let break_batch = matches!(
+                action,
+                Some(
+                    AppAction::TrustWorkspace
+                        | AppAction::SetupCompleted { .. }
+                        | AppAction::StartProviderOnlySafeMode { .. },
+                )
+            );
             let damage = apply_key_action_with_host(
                 app,
                 worker,
@@ -762,9 +770,10 @@ where
                 spawn_worker,
                 host_effects,
             )?;
-            // Trust installs the worker and application port synchronously, while the first
-            // application projection is committed on the next owner-loop iteration. Stop this
-            // input batch so buffered prompt bytes cannot race that initial frontier.
+            // Trust and setup completion install the worker and application port synchronously,
+            // while the first application projection is committed on the next owner-loop
+            // iteration. Stop this input batch so buffered terminal bytes cannot race that
+            // initial frontier.
             Ok((break_batch, damage))
         }
         InputEvent::Key(_) => Ok((false, Damage::NONE)),
@@ -945,7 +954,35 @@ where
         }
         Err(error) => {
             let startup_error = config_path.exists().then(|| error.to_string());
-            AppState::from_setup(config_path.clone(), cwd, startup_error)
+            // Setup captures the exact source once and classifies it independently from this boot
+            // error. Authority/bootstrap failures must not be mistaken for malformed TOML.
+            let mut app = AppState::from_setup_with_recovery(
+                config_path,
+                cwd,
+                startup_error,
+                startup_recovery_code_from_error(&error),
+            );
+            // A valid config plus an authority-only boot failure must not strand the user in the
+            // repair form. Enter the existing provider-only surface automatically after this
+            // explicit launch attempt; it has no authority, filesystem, process, or durable
+            // session capabilities and therefore cannot turn a failed boot into a false Ready.
+            if let Some(setup_draft) = app.setup_state().cloned()
+                && setup_draft.startup_recovery_code.is_some()
+                && let Some(root_config) = setup_draft.provider_only_safe_mode_config()
+            {
+                let setup_draft = app
+                    .take_setup_state()
+                    .expect("setup draft was checked before taking it");
+                enter_provider_only_safe_mode_after_authority_failure(
+                    &mut app,
+                    &mut worker,
+                    root_config,
+                    setup_draft,
+                    error.to_string(),
+                    &mut spawn_worker_fn,
+                )?;
+            }
+            app
         }
     };
     Ok((app, worker))
@@ -958,12 +995,40 @@ pub fn install_current_boot_transaction(
     config_path: &Path,
     session_route: Option<sigil_kernel::ResolvedModelRoute>,
     launch_cwd: &Path,
+    expected_config: Option<&RootConfig>,
 ) -> Result<RootConfig> {
+    let transaction = boot_current_transaction(config_path, launch_cwd, expected_config)?;
+    install_published_boot_transaction(app, transaction, session_route)
+}
+
+#[cfg(not(test))]
+fn boot_current_transaction(
+    config_path: &Path,
+    launch_cwd: &Path,
+    expected_config: Option<&RootConfig>,
+) -> Result<sigil_runtime::application_host::RuntimeCurrentBootTransactionV1> {
     // Authority composition always loads and validates the persisted configuration itself. The
-    // optional route is a narrow session overlay used only to derive the worker configuration;
-    // it can never select workspace/storage/execution authority roots.
-    let transaction = sigil_runtime::application_host::boot_current_schema(config_path, launch_cwd)
-        .map_err(anyhow::Error::new)?;
+    // optional expected snapshot is used only to reject a changed setup submission; it can never
+    // select workspace/storage/execution authority roots.
+    match expected_config {
+        Some(expected) => {
+            sigil_runtime::application_host::boot_current_schema_with_expected_config(
+                config_path,
+                launch_cwd,
+                expected,
+            )
+        }
+        None => sigil_runtime::application_host::boot_current_schema(config_path, launch_cwd),
+    }
+    .map_err(anyhow::Error::new)
+}
+
+#[cfg(not(test))]
+fn install_published_boot_transaction(
+    app: &mut AppState,
+    transaction: sigil_runtime::application_host::RuntimeCurrentBootTransactionV1,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
+) -> Result<RootConfig> {
     let persisted_config = transaction.config().clone();
     let session_config = session_route
         .as_ref()
@@ -980,12 +1045,30 @@ pub fn install_current_boot_transaction(
     Ok(session_config)
 }
 
+#[cfg(not(test))]
+fn install_setup_boot_transaction(
+    app: &mut AppState,
+    config_path: &Path,
+    expected_config: &RootConfig,
+    session_route: Option<sigil_kernel::ResolvedModelRoute>,
+    launch_cwd: &Path,
+) -> Result<RootConfig> {
+    // Keep the setup surface intact until the runtime has completed the authority transaction.
+    // A failed journal/bootstrap must therefore return to the existing draft instead of leaving
+    // a partially initialized normal AppState behind.
+    let transaction = boot_current_transaction(config_path, launch_cwd, Some(expected_config))?;
+    let persisted_config = transaction.config().clone();
+    *app = AppState::from_root_config(config_path, &persisted_config);
+    install_published_boot_transaction(app, transaction, session_route)
+}
+
 #[cfg(test)]
 fn install_current_boot_transaction(
     app: &mut AppState,
     _config_path: &Path,
     session_route: Option<sigil_kernel::ResolvedModelRoute>,
     _launch_cwd: &Path,
+    _expected_config: Option<&RootConfig>,
 ) -> Result<RootConfig> {
     // Unit action tests inject a worker factory and intentionally exercise only action ordering;
     // the shipping launcher uses the production implementation above.
@@ -1072,25 +1155,85 @@ where
         } => {
             let support_build_info = app.support_build_info().clone();
             let update_build_info = app.update_build_info().clone();
+            let setup_notice = app.last_notice().map(str::to_owned);
+            let setup_draft = app.setup_state().cloned();
             let root_config = *root_config;
-            *app = AppState::from_root_config(&config_path, &root_config);
-            app.set_support_build_info(support_build_info);
-            app.set_update_build_info(update_build_info);
-            let root_config = match install_current_boot_transaction(
-                app,
-                &config_path,
-                app.current_session_route(),
-                &std::env::current_dir()?,
-            ) {
+            let safe_mode_root_config = root_config.clone();
+            let session_route = app.current_session_route();
+            let launch_cwd = std::env::current_dir()?;
+            let boot_result = {
+                #[cfg(not(test))]
+                {
+                    install_setup_boot_transaction(
+                        app,
+                        &config_path,
+                        &root_config,
+                        session_route,
+                        &launch_cwd,
+                    )
+                }
+                #[cfg(test)]
+                {
+                    // Unit action tests exercise ordering with the injected test boot stub; the
+                    // shipping path above keeps authority boot ahead of normal AppState creation.
+                    *app = AppState::from_root_config(&config_path, &root_config);
+                    install_current_boot_transaction(
+                        app,
+                        &config_path,
+                        session_route,
+                        &launch_cwd,
+                        Some(&root_config),
+                    )
+                }
+            };
+            let root_config = match boot_result {
                 Ok(root_config) => root_config,
                 Err(error) => {
-                    report_worker_unavailable(
-                        app,
-                        &format!("setup completed but authority boot is unavailable: {error:#}"),
-                    )?;
+                    let startup_error =
+                        format!("configuration saved; authority boot is unavailable: {error:#}");
+                    if let Some(setup_draft) = setup_draft {
+                        let recovery_code = startup_recovery_code_from_error(&error);
+                        let mut post_failure_draft = setup_draft.clone();
+                        post_failure_draft.startup_error = Some(startup_error.clone());
+                        post_failure_draft.startup_recovery_code = recovery_code;
+                        if post_failure_draft
+                            .provider_only_safe_mode_config()
+                            .is_some()
+                        {
+                            enter_provider_only_safe_mode_after_authority_failure(
+                                app,
+                                worker,
+                                safe_mode_root_config,
+                                post_failure_draft,
+                                startup_error,
+                                &mut spawn_worker_fn,
+                            )?;
+                        } else {
+                            return_to_setup_after_boot_failure_with_draft(
+                                app,
+                                worker,
+                                Some(setup_draft),
+                                startup_error,
+                                recovery_code,
+                            );
+                        }
+                    } else {
+                        return_to_setup_after_boot_failure(
+                            app,
+                            worker,
+                            config_path,
+                            startup_error,
+                            startup_recovery_code_from_error(&error),
+                        );
+                    }
                     return Ok(());
                 }
             };
+            app.set_support_build_info(support_build_info);
+            app.set_update_build_info(update_build_info);
+            if let Some(setup_notice) = setup_notice {
+                app.set_last_notice(setup_notice);
+            }
             if let Err(error) =
                 app.ensure_current_workspace_trust_decision("trusted by user during quick setup")
             {
@@ -1103,6 +1246,33 @@ where
                     app,
                     &format!("setup completed; agent runtime remains unavailable: {error:#}"),
                 )?,
+            }
+        }
+        AppAction::StartProviderOnlySafeMode {
+            config_path,
+            root_config,
+        } => {
+            let safe_mode_notice =
+                "starting provider-only safe mode; repair authority before using tools";
+            let support_build_info = app.support_build_info().clone();
+            let update_build_info = app.update_build_info().clone();
+            let setup_draft = app.take_setup_state();
+            shutdown_and_join_worker(worker);
+            *app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
+            app.set_support_build_info(support_build_info);
+            app.set_update_build_info(update_build_info);
+            app.set_last_notice(safe_mode_notice);
+            app.stash_provider_only_safe_mode_setup(setup_draft);
+            match spawn_worker_fn(*root_config, app) {
+                Ok(runtime) => *worker = Some(runtime),
+                Err(error) => {
+                    let message = format!("provider-only safe mode could not start: {error:#}");
+                    if let Some(setup_draft) = app.take_provider_only_safe_mode_setup() {
+                        return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
+                    } else {
+                        report_worker_unavailable(app, &message)?;
+                    }
+                }
             }
         }
         AppAction::TrustWorkspace => {
@@ -1151,14 +1321,41 @@ where
             );
             report_application_receipt(app, &receipt)?;
             if settled {
-                app.apply_persisted_config_snapshot(&request.next_base);
+                #[cfg(not(test))]
+                let published_root_config = request
+                    .published_root_config
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("published config result lock poisoned"))?
+                    .take()
+                    .unwrap_or_else(|| request.next_base.clone());
+                #[cfg(test)]
+                let published_root_config = request.next_base.clone();
+                app.apply_persisted_config_snapshot(&published_root_config);
+                if !request.root_only
+                    && let Err(error) = app.apply_saved_provider_route_to_current_session(
+                        &request.expected,
+                        &published_root_config,
+                    )
+                {
+                    report_worker_unavailable(
+                        app,
+                        &format!(
+                            "configuration was published but the selected session route could not be applied: {error:#}"
+                        ),
+                    )?;
+                    return Ok(());
+                }
+                #[cfg(not(test))]
+                if request.close_after_save {
+                    app.close_config_panel_after_save();
+                }
                 match request.follow_up {
                     crate::app::ConfigurationSaveFollowUp::RebootRuntime => {
                         return process_app_action_with_spawner_and_host(
                             app,
                             worker,
                             AppAction::ConfigSaved {
-                                root_config: Box::new(request.next_base.clone()),
+                                root_config: Box::new(published_root_config),
                             },
                             spawn_worker_fn,
                             host_effects,
@@ -1174,7 +1371,7 @@ where
                         );
                     }
                     crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel => {
-                        app.apply_saved_default_model(request.next_base.clone());
+                        app.apply_saved_default_model(published_root_config);
                         return Ok(());
                     }
                 }
@@ -1186,6 +1383,7 @@ where
             };
             let config_path = app.config_path.clone();
             let launch_cwd = std::env::current_dir()?;
+            let safe_mode_root_config = app.root_config_snapshot().cloned();
             shutdown_and_join_worker(worker);
             #[cfg(not(test))]
             app.clear_boot_authority();
@@ -1194,13 +1392,44 @@ where
                 &config_path,
                 Some(session_route),
                 &launch_cwd,
+                None,
             ) {
                 Ok(config) => config,
                 Err(error) => {
-                    report_worker_unavailable(
+                    let startup_error =
+                        format!("configuration saved but authority reboot failed: {error:#}");
+                    let recovery_code = startup_recovery_code_from_error(&error);
+                    if let (Some(root_config), Some(recovery_code)) =
+                        (safe_mode_root_config, recovery_code)
+                    {
+                        let setup_draft = AppState::from_setup_with_recovery(
+                            config_path.clone(),
+                            app.workspace_root.clone(),
+                            Some(startup_error.clone()),
+                            Some(recovery_code),
+                        )
+                        .take_setup_state();
+                        if let Some(setup_draft) = setup_draft
+                            && setup_draft.provider_only_safe_mode_config().is_some()
+                        {
+                            enter_provider_only_safe_mode_after_authority_failure(
+                                app,
+                                worker,
+                                root_config,
+                                setup_draft,
+                                startup_error,
+                                &mut spawn_worker_fn,
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                    return_to_setup_after_boot_failure(
                         app,
-                        &format!("configuration saved but authority reboot failed: {error:#}"),
-                    )?;
+                        worker,
+                        config_path,
+                        startup_error,
+                        recovery_code,
+                    );
                     return Ok(());
                 }
             };
@@ -1275,6 +1504,8 @@ where
                     follow_up: crate::app::ConfigurationSaveFollowUp::ApplyPersistedDefaultModel,
                     root_only: true,
                     draft: std::sync::Mutex::new(None),
+                    published_root_config: std::sync::Mutex::new(None),
+                    close_after_save: false,
                 });
                 let receipt = match try_execute_application_action(
                     app,
@@ -1624,43 +1855,6 @@ where
                             &mut spawn_worker_fn,
                         )?;
                     }
-                    Err(_error)
-                        if matches!(
-                            action,
-                            AppAction::ApprovalDecision { .. }
-                                | AppAction::ContinueTask { .. }
-                                | AppAction::PauseTask { .. }
-                        ) =>
-                    {
-                        // These controls are first surfaced by the worker event stream. The application
-                        // projection may still be one frontier behind after a fresh resume, so do not
-                        // turn a temporarily missing projection binding into a deadlocked approval or
-                        // task recovery action. The worker command carries the exact durable identity
-                        // and remains the lossless fallback until the application port catches up.
-                        let command = app.into_worker_command(action);
-                        send_worker_command_with_restart(
-                            app,
-                            worker,
-                            command,
-                            &mut spawn_worker_fn,
-                        )?;
-                    }
-                    Err(error)
-                        if application_action_has_lossless_worker_fallback(&action, &error) =>
-                    {
-                        // After resume the worker can be ready before the application projection client
-                        // has reconnected. These submissions carry the same durable session identity
-                        // through the worker command path and are safe to admit exactly once; waiting
-                        // for the projection would otherwise discard a user prompt while the UI reports
-                        // an unavailable session. Other application errors remain fail-closed above.
-                        let command = app.into_worker_command(action);
-                        send_worker_command_with_restart(
-                            app,
-                            worker,
-                            command,
-                            &mut spawn_worker_fn,
-                        )?;
-                    }
                     Err(error) => {
                         report_worker_unavailable(
                             app,
@@ -1691,7 +1885,10 @@ fn try_execute_application_action(
                     }
                     _ => None,
                 };
-                runtime.application.try_execute_action(
+                let Some(application) = runtime.application.as_ref() else {
+                    return Ok(None);
+                };
+                application.try_execute_action(
                     action,
                     app.active_conversation_queue_target().as_ref(),
                     attachment_recovery_binding,
@@ -1708,43 +1905,15 @@ fn try_execute_application_action(
     }
 }
 
-fn application_action_has_lossless_worker_fallback(
-    action: &AppAction,
-    error: &anyhow::Error,
-) -> bool {
-    let application_error = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<sigil_application::ApplicationError>());
-    let Some(application_error) = application_error else {
-        return false;
-    };
-    match action {
-        AppAction::SubmitPrompt(_)
-        | AppAction::SubmitPromptWithAttachments { .. }
-        | AppAction::SubmitPlanPrompt(_)
-        | AppAction::CreateTaskFromPlan { .. } => {
-            matches!(
-                application_error,
-                sigil_application::ApplicationError::Unavailable
-            )
-        }
-        AppAction::CancelRun => match application_error {
-            sigil_application::ApplicationError::Unavailable => true,
-            sigil_application::ApplicationError::InvalidRequest(message) => {
-                message == "cannot cancel without an active application run binding"
-            }
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
 #[cfg(not(test))]
 async fn refresh_application_projection(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
 ) -> bool {
-    let Some(application) = worker.as_ref().map(|runtime| &runtime.application) else {
+    let Some(application) = worker
+        .as_ref()
+        .and_then(|runtime| runtime.application.as_ref())
+    else {
         return false;
     };
     match application.refresh().await {
@@ -1799,6 +1968,12 @@ fn report_application_receipt(
         sigil_application::ApplicationCommandReceipt::Uncertain(_) => {
             "application command dispatched; waiting for durable outcome"
         }
+        sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_) => {
+            "application command was confirmed to have no effect"
+        }
+        sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
+            "safety stop requested; durable cancellation is not yet recorded"
+        }
     };
     app.handle_worker_message(WorkerMessage::Notice(notice.to_owned()))
 }
@@ -1847,6 +2022,161 @@ fn process_host_request<H: HostEffects>(
         }
     }
     Ok(())
+}
+
+/// Starts the existing provider-only worker after an explicit launch attempt hit an authority
+/// blocker. The setup draft remains stashed so a later authority repair can return to the same
+/// values, while the normal authority-backed surface remains unavailable and clearly marked.
+fn enter_provider_only_safe_mode_after_authority_failure<F>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    root_config: RootConfig,
+    mut setup_draft: crate::setup::SetupState,
+    startup_error: String,
+    spawn_worker_fn: &mut F,
+) -> Result<()>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    let recovery_code = setup_draft
+        .startup_recovery_code
+        .unwrap_or(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable);
+    let config_path = setup_draft.config_path.clone();
+    let support_build_info = app.support_build_info().clone();
+    let update_build_info = app.update_build_info().clone();
+    setup_draft.startup_error = Some(startup_error);
+    setup_draft.startup_recovery_code = Some(recovery_code);
+    setup_draft.save_error = None;
+    shutdown_and_join_worker(worker);
+    *app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
+    app.set_support_build_info(support_build_info);
+    app.set_update_build_info(update_build_info);
+    app.set_last_notice(match recovery_code {
+        sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
+            "authority journal is corrupted; provider-only safe mode started. Run `sigil doctor recover-authority`, then restart to restore tools and durable sessions"
+        }
+        _ => {
+            "authority boot is unavailable; provider-only safe mode started. Repair authority, then restart to restore tools and durable sessions"
+        }
+    });
+    app.stash_provider_only_safe_mode_setup(Some(setup_draft));
+    match spawn_worker_fn(root_config, app) {
+        Ok(runtime) => *worker = Some(runtime),
+        Err(error) => {
+            let message = format!("provider-only safe mode could not start: {error:#}");
+            if let Some(setup_draft) = app.take_provider_only_safe_mode_setup() {
+                return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
+            } else {
+                report_worker_unavailable(app, &message)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the product to the only state that can repair a failed authority boot. A failed
+/// composition is not a provider outage: there is no worker or authority-backed session to
+/// recover, so keeping the normal composer mounted would create a false-ready UI and queue
+/// commands that cannot ever be delivered.
+fn return_to_setup_after_boot_failure(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    _config_path: PathBuf,
+    startup_error: String,
+    startup_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
+) {
+    return_to_setup_after_boot_failure_with_draft(
+        app,
+        worker,
+        None,
+        startup_error,
+        startup_recovery_code,
+    );
+}
+
+fn return_to_setup_after_boot_failure_with_draft(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    mut setup_draft: Option<crate::setup::SetupState>,
+    startup_error: String,
+    startup_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
+) {
+    let support_build_info = app.support_build_info().clone();
+    let update_build_info = app.update_build_info().clone();
+    let workspace_root = app.workspace_root.clone();
+    shutdown_and_join_worker(worker);
+    let config_path = setup_draft
+        .as_ref()
+        .map(|draft| draft.config_path.clone())
+        .unwrap_or_else(|| app.config_path.clone());
+    *app = AppState::from_setup_with_recovery(
+        config_path,
+        workspace_root,
+        Some(startup_error.clone()),
+        startup_recovery_code,
+    );
+    if let Some(draft) = setup_draft.as_mut() {
+        draft.startup_error = Some(startup_error);
+        draft.startup_recovery_code = startup_recovery_code;
+        draft.save_error = None;
+    }
+    if let Some(draft) = setup_draft {
+        // Keep the values and selected review row that the user just submitted. A failed
+        // authority retry must be recoverable in place, not silently reset to the Provider row.
+        app.restore_setup_state(draft);
+    }
+    app.set_support_build_info(support_build_info);
+    app.set_update_build_info(update_build_info);
+}
+
+fn return_to_setup_after_safe_mode_failure(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    mut setup_draft: crate::setup::SetupState,
+    startup_error: String,
+) {
+    let support_build_info = app.support_build_info().clone();
+    let update_build_info = app.update_build_info().clone();
+    let workspace_root = app.workspace_root.clone();
+    let config_path = setup_draft.config_path.clone();
+    let recovery_code = setup_draft.startup_recovery_code.or(Some(
+        sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable,
+    ));
+    shutdown_and_join_worker(worker);
+    setup_draft.startup_error = Some(startup_error.clone());
+    setup_draft.startup_recovery_code = recovery_code;
+    setup_draft.save_error = Some(startup_error.clone());
+    *app = AppState::from_setup_with_recovery(
+        config_path,
+        workspace_root,
+        Some(startup_error),
+        recovery_code,
+    );
+    // Replace the freshly reconstructed defaults with the exact in-memory draft, including a
+    // staged protected credential that must never be forced back through disk after a failed boot.
+    app.restore_setup_state(setup_draft);
+    app.set_support_build_info(support_build_info);
+    app.set_update_build_info(update_build_info);
+}
+
+fn startup_recovery_code_from_error(
+    error: &anyhow::Error,
+) -> Option<sigil_kernel::PublicRouteRecoveryCode> {
+    let boot_error = error.chain().find_map(|cause| {
+        cause.downcast_ref::<sigil_runtime::application_host::BootAuthorityErrorV1>()
+    })?;
+    match boot_error {
+        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
+            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
+            | sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_),
+        ) => Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(_)
+        | sigil_runtime::application_host::BootAuthorityErrorV1::Cutover(_)
+        | sigil_runtime::application_host::BootAuthorityErrorV1::Bootstrap(_) => {
+            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable)
+        }
+        sigil_runtime::application_host::BootAuthorityErrorV1::Config(_) => None,
+    }
 }
 
 fn apply_worker_startup_recovery(
@@ -1921,6 +2251,7 @@ fn drain_worker_messages_inner(
     }
     if startup_failed {
         shutdown_and_join_worker(worker);
+        recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
     }
     Ok(dirty | app.flush_timeline_render_batch())
 }
@@ -1960,6 +2291,7 @@ fn apply_received_worker_message(
     app.flush_timeline_render_batch();
     if startup_failed {
         shutdown_and_join_worker(worker);
+        recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
     }
     Ok(true)
 }
@@ -2002,6 +2334,7 @@ where
     if !app.take_worker_rebind_required() {
         return Ok(false);
     }
+    app.mark_worker_not_ready();
     shutdown_and_join_worker(worker);
     let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         report_worker_unavailable(
@@ -2115,7 +2448,15 @@ where
 }
 
 fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
+    // A failed send/restart can happen after the composer optimistically entered Thinking. Clear
+    // that optimistic state before presenting recovery; a dead worker must never leave a stuck
+    // spinner or make a provider-only diagnostic look like an active turn.
+    app.mark_worker_not_ready();
+    app.clear_worker_run_state();
     app.handle_worker_message(WorkerMessage::Notice(message.to_owned()))?;
+    if app.is_provider_only_safe_mode() {
+        return Ok(());
+    }
     app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
         code: sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable,
         actions: vec![
@@ -2128,6 +2469,22 @@ fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
         retryable: true,
         target_session: None,
     })
+}
+
+fn recover_provider_only_safe_mode_after_worker_startup_failure(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) {
+    if !app.is_provider_only_safe_mode() {
+        return;
+    }
+    let Some(setup_draft) = app.take_provider_only_safe_mode_setup() else {
+        return;
+    };
+    let message = app.last_notice().map(str::to_owned).unwrap_or_else(|| {
+        "provider-only safe mode worker stopped before becoming ready".to_owned()
+    });
+    return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
 }
 
 fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
@@ -2237,6 +2594,19 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
     H: HostEffects,
 {
+    if app.is_provider_only_safe_mode()
+        && !matches!(effect, EventEffect::Ignored | EventEffect::LocalUpdate(_))
+        && !provider_only_safe_effect_allowed(&effect)
+    {
+        app.set_last_notice(
+            "provider-only safe mode blocks this operation; repair authority before using it",
+        );
+        app.handle_worker_message(WorkerMessage::Notice(
+            "Operation blocked in provider-only safe mode; repair authority and restart."
+                .to_owned(),
+        ))?;
+        return Ok(Damage::INPUT);
+    }
     match effect {
         EventEffect::Ignored => Ok(Damage::NONE),
         EventEffect::LocalUpdate(damage) => Ok(damage),
@@ -2255,6 +2625,17 @@ where
             Ok(Damage::HOST_EFFECT)
         }
     }
+}
+
+fn provider_only_safe_effect_allowed(effect: &EventEffect) -> bool {
+    matches!(
+        effect,
+        EventEffect::OpaqueAction(
+            AppAction::SubmitPrompt(_)
+                | AppAction::CancelRun
+                | AppAction::UpdateActiveRunPermissionMode { .. }
+        )
+    )
 }
 
 fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
@@ -2309,7 +2690,7 @@ fn shell_quote(value: &str) -> String {
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
     #[cfg(not(test))]
-    application: application_bridge::TuiApplicationSession,
+    application: Option<application_bridge::TuiApplicationSession>,
     #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
@@ -2354,12 +2735,17 @@ impl WorkerMessageInbox {
 
 #[cfg(not(test))]
 fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime> {
-    let spawned = runner::spawn_agent_worker_with_route_directive_and_attachment(
+    let spawned = runner::spawn_agent_worker_with_start_mode_and_attachment(
         root_config,
         app.config_path.clone(),
         app.session_log_path.clone(),
         app.workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
+        if app.is_provider_only_safe_mode() {
+            runner::WorkerStartMode::ProviderOnlySafe
+        } else {
+            runner::WorkerStartMode::AuthorityBacked
+        },
         runner::WorkerSessionRouteDirective {
             recovery_confirmation: app
                 .pending_session_route_confirmation_binding()
@@ -2370,17 +2756,23 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         app.boot_cutover().cloned(),
         app.worker_session_attachment(),
     )?;
-    let application = match application_bridge::build_for_worker(
-        app,
-        spawned.command_tx.clone(),
-        app.runtime.reasoning_effort.clone(),
-    ) {
-        Ok(application) => application,
-        Err(error) => {
-            let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
-            let _ = spawned.join_handle.join();
-            return Err(error.context("failed to attach TUI application port"));
-        }
+    let application = if app.is_provider_only_safe_mode() {
+        None
+    } else {
+        Some(
+            match application_bridge::build_for_worker(
+                app,
+                spawned.command_tx.clone(),
+                app.runtime.reasoning_effort.clone(),
+            ) {
+                Ok(application) => application,
+                Err(error) => {
+                    let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
+                    let _ = spawned.join_handle.join();
+                    return Err(error.context("failed to attach TUI application port"));
+                }
+            },
+        )
     };
     Ok(WorkerRuntime {
         worker_tx: spawned.command_tx,

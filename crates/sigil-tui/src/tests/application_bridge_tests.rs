@@ -260,6 +260,10 @@ async fn tui_projection_commit_precedes_the_exact_durable_public_outbox_ack() ->
         &state_root,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x61; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
@@ -325,6 +329,10 @@ fn tui_application_session_replays_uncertain_input_without_reenqueuing_the_worke
         &state_root,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x61; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
@@ -374,6 +382,11 @@ fn tui_application_session_replays_uncertain_input_without_reenqueuing_the_worke
     let ApplicationCommandReceipt::Uncertain(original) = first else {
         panic!("first managed application reservation must be uncertain");
     };
+    assert_eq!(
+        original.owner_recovery_binding.as_deref(),
+        Some("tui-worker:managed-plan-review-recovery-command"),
+        "an asynchronous worker enqueue must retain the exact owner recovery identity"
+    );
     assert!(matches!(
         worker_rx.recv_timeout(Duration::from_secs(1))?,
         WorkerCommand::SubmitUserInputDecision {

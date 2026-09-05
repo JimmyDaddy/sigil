@@ -24,7 +24,6 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
     lines.push(render_config_hint_row(
         "Enter cycles Automatic / 64K / 128K / 256K / 1M",
     ));
-    lines.push(String::new());
     lines.push("[route status]".to_owned());
     lines.push(render_config_readonly_row(
         "Selected route",
@@ -58,6 +57,23 @@ pub(super) fn render_section(lines: &mut Vec<String>, config_state: &ConfigState
     lines.push(render_config_readonly_row(
         "Endpoint",
         "private endpoint hidden · edit in advanced config",
+    ));
+    lines.push(String::new());
+    lines.push("[request defaults]".to_owned());
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::ModelRequestTimeoutSecs,
+    ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::ModelRequestStreamIdleTimeoutSecs,
+    ));
+    lines.push(render_config_value_row(
+        config_state,
+        ConfigField::ModelRequestMaxOutputTokens,
+    ));
+    lines.push(render_config_hint_row(
+        "Max output: Enter cycles Automatic / 4K / 8K / 16K / 32K / 64K / 128K / 256K",
     ));
     lines.push(String::new());
     lines.push("[advanced]".to_owned());

@@ -21,6 +21,7 @@ impl AppState {
             && !self.has_modal()
             && !self.is_setup_mode()
             && !self.is_config_mode()
+            && !self.is_provider_only_safe_mode()
             && !self.approval.has_actionable_pending()
             && self.composer.queue_edit_target.is_none()
     }
@@ -147,7 +148,7 @@ impl AppState {
         true
     }
 
-    fn show_image_attachment_notice(&mut self, notice: impl Into<String>) {
+    pub(super) fn show_image_attachment_notice(&mut self, notice: impl Into<String>) {
         let notice = notice.into();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);

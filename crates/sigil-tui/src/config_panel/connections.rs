@@ -190,7 +190,7 @@ impl ConfigDraft {
     fn capture_selected_model_context_window(&mut self) -> Result<()> {
         let model = self.provider_model.trim().to_owned();
         ModelRef::new(self.selected_connection_id.clone(), model.clone())?;
-        let tokens = parse_model_context_window_tokens(&self.provider_context_window_tokens)?;
+        let tokens = self.parse_provider_context_window_tokens()?;
         let selected = self
             .connection_drafts
             .get_mut(&self.selected_connection_id)
@@ -437,21 +437,6 @@ impl ConfigDraft {
         load_deepseek_options(self, &selected.config.options);
         Ok(())
     }
-}
-
-fn parse_model_context_window_tokens(value: &str) -> Result<Option<u32>> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let tokens = value
-        .parse::<u32>()
-        .context("model context_window_tokens must be a positive integer")?;
-    anyhow::ensure!(
-        tokens > 0,
-        "model context_window_tokens must be greater than 0"
-    );
-    Ok(Some(tokens))
 }
 
 fn add_provider_choice(provider_name: &str, label: &str) -> ConnectionPickerChoice {

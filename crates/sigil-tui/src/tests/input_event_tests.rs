@@ -22,6 +22,24 @@ fn crossterm_key_is_normalized_without_leaking_key_event_to_the_dispatch_contrac
 }
 
 #[test]
+fn carriage_return_and_line_feed_are_normalized_to_enter_at_the_input_boundary() {
+    for character in ['\r', '\n'] {
+        let event = InputEvent::from(Event::Key(KeyEvent::new(
+            KeyCode::Char(character),
+            KeyModifiers::NONE,
+        )));
+        assert!(matches!(
+            event,
+            InputEvent::Key(InputKeyEvent {
+                code: InputKeyCode::Enter,
+                ..
+            })
+        ));
+        assert_eq!(KeyCode::from(InputKeyCode::Char(character)), KeyCode::Enter);
+    }
+}
+
+#[test]
 fn unsupported_keys_are_ignored_and_focus_is_explicit() {
     assert!(
         !InputKeyEvent {

@@ -1,16 +1,8 @@
 use super::*;
-
-const PROVIDER_CONTEXT_WINDOW_PRESETS: [&str; 5] = ["", "64000", "128000", "256000", "1000000"];
+use crate::token_units::{cycle_context_window_preset, parse_optional_token_count};
 
 pub(super) fn cycle_provider_context_window(value: &str) -> &'static str {
-    let current = value.trim();
-    let Some(index) = PROVIDER_CONTEXT_WINDOW_PRESETS
-        .iter()
-        .position(|preset| *preset == current)
-    else {
-        return PROVIDER_CONTEXT_WINDOW_PRESETS[0];
-    };
-    PROVIDER_CONTEXT_WINDOW_PRESETS[(index + 1) % PROVIDER_CONTEXT_WINDOW_PRESETS.len()]
+    cycle_context_window_preset(value, false)
 }
 
 #[cfg(test)]
@@ -31,20 +23,14 @@ pub(super) fn cycle_code_intel_startup(startup: CodeIntelStartup) -> CodeIntelSt
 }
 
 pub(super) fn render_effective_context_window(config_state: &ConfigState) -> String {
-    let fallback_tokens = config_state
-        .draft
-        .compaction_context_window_tokens
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|tokens| *tokens > 0);
-    let model_tokens = config_state
-        .draft
-        .provider_context_window_tokens
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|tokens| *tokens > 0);
+    let fallback_tokens =
+        parse_optional_token_count(&config_state.draft.compaction_context_window_tokens)
+            .ok()
+            .flatten();
+    let model_tokens =
+        parse_optional_token_count(&config_state.draft.provider_context_window_tokens)
+            .ok()
+            .flatten();
     let resolved = resolve_context_window_tokens_with_override(
         &config_state.draft.provider_name,
         config_state.draft.provider_model.trim(),

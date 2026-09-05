@@ -281,9 +281,9 @@ where
     };
 
     let route_attachment = target_attachment
-        .as_ref()
-        .map(Arc::as_ref)
-        .unwrap_or_else(|| state.session.attachment_lease.as_ref());
+        .as_deref()
+        .or(state.session.attachment_lease.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("session attachment is unavailable"))?;
     let mut session = match load_routed_session_with_runtime_attachments(
         root_config,
         &session_log_path,
@@ -502,7 +502,7 @@ where
         drop(previous);
     }
     if let Some(target_attachment) = target_attachment {
-        state.session.attachment_lease = target_attachment;
+        state.session.attachment_lease = Some(target_attachment);
     }
     let _binding = state.wake_coalescer.switch_session_scope(
         state
@@ -543,6 +543,12 @@ where
         model_name,
         entries,
         recovered_plan_review_input,
-        session_attachment: Arc::clone(&state.session.attachment_lease),
+        session_attachment: Arc::clone(
+            state
+                .session
+                .attachment_lease
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("session attachment is unavailable"))?,
+        ),
     })
 }

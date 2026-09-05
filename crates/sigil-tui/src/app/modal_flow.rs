@@ -4,7 +4,7 @@ use sigil_runtime::{
     DEFAULT_SETUP_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse,
     McpNormalizedFormFieldKind, ProviderConfigFields, ProviderStatusConfig,
     default_provider_config_fields, normalize_mcp_form_message, normalize_mcp_form_schema,
-    normalize_provider_name, provider_api_key_env_name,
+    normalize_provider_name, provider_api_key_env_names,
     provider_connections::{
         ModelCatalogEntry as ConnectionModelCatalogEntry,
         ModelCatalogRequest as ConnectionModelCatalogRequest,
@@ -26,6 +26,7 @@ use crate::config_panel::{
 };
 use crate::runner::WorkerCommand;
 use crate::slash::SLASH_COMMANDS;
+use crate::token_units::{is_token_count_character, parse_optional_token_count};
 
 const MODEL_CATALOG_VIEW_FRESH_TTL: Duration = Duration::from_secs(10 * 60);
 const MODEL_CATALOG_VIEW_LIMIT: usize = 64;
@@ -206,6 +207,7 @@ pub(super) enum TextInputTarget {
     SetupModel,
     SetupEndpoint,
     SetupContextWindow,
+    SetupMaxOutputTokens,
     ConfigManualModel,
     ConfigField(ConfigField),
     SkillArguments,
@@ -218,6 +220,7 @@ impl TextInputTarget {
             Self::SetupModel => "Model ID",
             Self::SetupEndpoint => "Custom Endpoint",
             Self::SetupContextWindow => "Context Window",
+            Self::SetupMaxOutputTokens => "Max Output Tokens",
             Self::ConfigManualModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
             Self::SkillArguments => "Use Skill",
@@ -234,6 +237,9 @@ impl TextInputTarget {
             Self::SetupContextWindow => {
                 "Optional exact token limit for this model. Leave empty to use automatic metadata or fallback."
             }
+            Self::SetupMaxOutputTokens => {
+                "Optional output cap for each model request. Leave empty to use the provider default."
+            }
             Self::ConfigManualModel => {
                 "Custom model id admitted by the verified connection catalog."
             }
@@ -249,7 +255,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel | Self::ConfigManualModel => "model",
             Self::SetupEndpoint => "endpoint",
-            Self::SetupContextWindow => "tokens",
+            Self::SetupContextWindow | Self::SetupMaxOutputTokens => "tokens",
             Self::ConfigField(_) => "value",
             Self::SkillArguments => "instructions",
             Self::ToolArtifactSearch => "literal",
@@ -258,7 +264,10 @@ impl TextInputTarget {
 
     fn config_key(self) -> Option<&'static str> {
         match self {
-            Self::SetupModel | Self::SetupEndpoint | Self::SetupContextWindow => None,
+            Self::SetupModel
+            | Self::SetupEndpoint
+            | Self::SetupContextWindow
+            | Self::SetupMaxOutputTokens => None,
             Self::ConfigManualModel => Some(ConfigField::ProviderModel.label()),
             Self::ConfigField(field) => Some(field.label()),
             Self::SkillArguments | Self::ToolArtifactSearch => None,
@@ -1166,24 +1175,36 @@ impl AppState {
     }
 
     fn secret_input_summary(&self, target: SecretInputTarget) -> String {
-        let provider_name = match target {
+        let env_names = match target {
             SecretInputTarget::SetupApiKey => self
                 .setup_state
                 .as_ref()
-                .map(|state| state.provider_name.as_str()),
+                .map(|state| state.api_key_env_names())
+                .or_else(|| {
+                    self.config_snapshot.as_ref().and_then(|config| {
+                        provider_api_key_env_names(&config.agent.runtime_provider)
+                    })
+                }),
             SecretInputTarget::ConfigProviderApiKey => self
                 .config_state
                 .as_ref()
-                .map(|state| state.draft.provider_name.as_str())
+                .and_then(|state| provider_api_key_env_names(&state.draft.provider_name))
                 .or_else(|| {
-                    self.config_snapshot
-                        .as_ref()
-                        .map(|config| config.agent.runtime_provider.as_str())
+                    self.config_snapshot.as_ref().and_then(|config| {
+                        provider_api_key_env_names(&config.agent.runtime_provider)
+                    })
                 }),
+        };
+        let env_name = env_names
+            .and_then(|names| names.first().copied())
+            .unwrap_or("provider API key env");
+        let mut summary = target.summary(env_name);
+        if let Some(names) = env_names
+            && names.len() > 1
+        {
+            summary.push_str(&format!(" Also accepts: {}.", names[1..].join(" or ")));
         }
-        .unwrap_or(DEFAULT_SETUP_PROVIDER_KEY);
-        let env_name = provider_api_key_env_name(provider_name).unwrap_or("provider API key env");
-        target.summary(env_name)
+        summary
     }
 
     pub(super) fn open_text_input(&mut self, target: TextInputTarget, current: &str) {
@@ -1727,10 +1748,33 @@ impl AppState {
                 }
                 TextInputTarget::SetupContextWindow => {
                     if let Some(state) = self.setup_state.as_mut() {
-                        state.context_window_tokens = value;
-                        state.bump_revision();
+                        match parse_optional_token_count(&value) {
+                            Ok(_) => {
+                                state.context_window_tokens = value;
+                                state.bump_revision();
+                            }
+                            Err(error) => {
+                                self.last_notice = Some(error.to_string());
+                                return;
+                            }
+                        }
                     }
                     self.last_notice = Some("updated context window".to_owned());
+                }
+                TextInputTarget::SetupMaxOutputTokens => {
+                    if let Some(state) = self.setup_state.as_mut() {
+                        match parse_optional_token_count(&value) {
+                            Ok(_) => {
+                                state.max_output_tokens = value;
+                                state.bump_revision();
+                            }
+                            Err(error) => {
+                                self.last_notice = Some(error.to_string());
+                                return;
+                            }
+                        }
+                    }
+                    self.last_notice = Some("updated max output tokens".to_owned());
                 }
                 TextInputTarget::ConfigManualModel => {
                     if let Some(state) = self.config_state.as_mut() {
@@ -1818,7 +1862,9 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
         TextInputTarget::SetupModel
         | TextInputTarget::SetupEndpoint
         | TextInputTarget::ConfigManualModel => !character.is_control(),
-        TextInputTarget::SetupContextWindow => character.is_ascii_digit(),
+        TextInputTarget::SetupContextWindow | TextInputTarget::SetupMaxOutputTokens => {
+            is_token_count_character(character)
+        }
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
         TextInputTarget::SkillArguments | TextInputTarget::ToolArtifactSearch => {
             !character.is_control()

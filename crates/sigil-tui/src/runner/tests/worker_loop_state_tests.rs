@@ -82,6 +82,7 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
         None,
         None,
         None,
+        false,
     );
 
     assert_eq!(state.session.log_path, session_log_path);
@@ -497,6 +498,7 @@ fn session_transition_rebuilds_session_scoped_worker_state() -> Result<()> {
         None,
         None,
         None,
+        false,
     );
     let queue_id = ConversationInputQueueId::new("queue_1")?;
     state
@@ -669,6 +671,7 @@ fn session_transition_joins_in_flight_maintenance_instead_of_rejecting() -> Resu
         None,
         None,
         None,
+        false,
     );
     let session_scope_id = state
         .session
@@ -689,7 +692,13 @@ fn session_transition_joins_in_flight_maintenance_instead_of_rejecting() -> Resu
             &runtime,
             state.compaction.next_request_id,
             session_scope_id,
-            Arc::clone(&state.session.attachment_lease),
+            Arc::clone(
+                state
+                    .session
+                    .attachment_lease
+                    .as_ref()
+                    .expect("maintenance compaction test requires a session attachment"),
+            ),
             WorkerEventPayloadSender::compaction(event_tx),
             move || {
                 let _ = release_rx.recv();
@@ -778,6 +787,7 @@ fn assert_fork_transition_resets_session_state(kind: SessionTransitionKind) -> R
         None,
         None,
         None,
+        false,
     );
     let queue_id = ConversationInputQueueId::new("fork_queue")?;
     state
@@ -913,6 +923,7 @@ allowed_tools = ["grep"]
         None,
         None,
         None,
+        false,
     );
     let (message_tx, _message_rx) = std::sync::mpsc::channel();
 

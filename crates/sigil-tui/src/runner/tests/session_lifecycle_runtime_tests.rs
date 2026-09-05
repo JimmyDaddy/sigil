@@ -66,6 +66,10 @@ fn managed_worker_lifecycle_service_uses_authority_namespace() -> Result<()> {
         &paths.state_root,
         &execution_temp_root,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),

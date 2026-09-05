@@ -14,7 +14,7 @@ impl AppState {
         self.push_phase_marker(phase_marker.into());
     }
 
-    pub(super) fn clear_worker_run_state(&mut self) {
+    pub(crate) fn clear_worker_run_state(&mut self) {
         self.runtime.is_busy = false;
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.mcp_progress = None;

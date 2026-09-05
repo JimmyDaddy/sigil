@@ -2,26 +2,30 @@ use super::super::setup_flow::{build_setup_root_config, validate_setup_state};
 use super::*;
 use crate::setup::SetupCredentialSource;
 use crate::setup::SetupState;
-use sigil_kernel::{MultiAgentMode, TaskRoutingPolicy};
+use sigil_kernel::{MultiAgentMode, PermissionMode, TaskRoutingPolicy};
 use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 
 #[test]
-fn setup_lines_include_startup_error_and_missing_auth_summary() {
+fn setup_lines_include_invalid_config_error_and_missing_auth_summary() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    std::fs::write(&config_path, "this = [is malformed")?;
     let app = AppState::from_setup(
-        Path::new("sigil.toml").to_path_buf(),
-        Path::new(".").to_path_buf(),
+        config_path,
+        temp.path().to_path_buf(),
         Some("config load failed".to_owned()),
     );
 
     let lines = app.setup_lines().join("\n");
 
-    assert!(lines.contains("load failed: config load failed"));
-    assert!(lines.contains("explicitly save this reviewed replacement"));
+    assert!(lines.contains("configuration is invalid: config load failed"));
+    assert!(lines.contains("explicitly save this reviewed current-schema replacement"));
     assert!(lines.contains("> DeepSeek"));
     assert!(lines.contains("SIGIL_API_KEY not set"));
     assert_eq!(app.last_notice(), Some("config load failed"));
+    Ok(())
 }
 
 #[test]
@@ -71,6 +75,7 @@ fn setup_lines_render_selected_actions_for_model_api_key_and_save() {
     assert!(lines.contains("> [review, trust folder, save and start]"));
     assert!(lines.contains("orchestration: manual / explicit_request_only"));
     assert!(lines.contains("current session: starts with this route"));
+    assert!(lines.contains("max output tokens: automatic"));
 }
 
 #[test]
@@ -79,6 +84,11 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
     let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
     let temp = tempdir()?;
     let config_path = temp.path().join("config").join("sigil.toml");
+    std::fs::create_dir_all(
+        config_path
+            .parent()
+            .expect("config path should have a parent"),
+    )?;
     let mut app = AppState::from_setup(config_path.clone(), temp.path().to_path_buf(), None);
     app.setup_state
         .as_mut()
@@ -107,6 +117,203 @@ fn setup_ctrl_s_saves_and_starts_without_a_separate_trust_toggle() -> Result<()>
     );
     assert!(saved_path.exists());
     assert!(!std::fs::read_to_string(saved_path)?.contains("test-key"));
+    let setup = app
+        .setup_state
+        .as_ref()
+        .expect("setup state should remain available");
+    assert_eq!(
+        setup
+            .startup_config
+            .as_ref()
+            .and_then(|snapshot| snapshot.parsed())
+            .map(|config| config.config_version),
+        Some(sigil_kernel::CONFIG_VERSION_V2)
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_enter_on_replacement_action_saves_and_starts() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("sigil.toml");
+    std::fs::create_dir_all(
+        config_path
+            .parent()
+            .expect("config path should have a parent"),
+    )?;
+    std::fs::write(&config_path, "this = [is malformed")?;
+    let mut app = AppState::from_setup(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("invalid TOML".to_owned()),
+    );
+    let state = app.setup_state.as_mut().expect("setup state should exist");
+    state.credential_source = SetupCredentialSource::Environment;
+    state.selected_field = SetupField::Save;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    let persisted = std::fs::read_to_string(&config_path)?;
+    assert!(persisted.contains("config_version = 2"));
+    assert!(!persisted.contains("this = [is malformed"));
+    Ok(())
+}
+
+#[test]
+fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _sigil_api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", " ");
+    let _deepseek_api_key = crate::test_env::EnvScope::set("DEEPSEEK_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut existing = test_config();
+    existing.permission.mode = PermissionMode::ReadOnly;
+    existing.model_request.max_output_tokens = Some(8_000);
+    existing.connections.insert(
+        "local-secondary".to_owned(),
+        serde_json::json!({
+            "label": "Local secondary",
+            "provider": "custom",
+            "protocol": "chat_completions",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "credential": { "source": "none" }
+        }),
+    );
+    existing
+        .connections
+        .get_mut("deepseek-default")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("default connection object")
+        .insert(
+            "model_context_windows".to_owned(),
+            serde_json::json!({ "deepseek-v4-flash": 128000 }),
+        );
+    existing.save(&config_path)?;
+    let mut app = AppState::from_setup_with_recovery(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("authority journal requires reconciliation".to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+    );
+    let state = app.setup_state.as_mut().expect("setup state should exist");
+    assert_eq!(state.provider_name, "deepseek");
+    assert_eq!(state.model, "deepseek-v4-flash");
+    assert_eq!(state.context_window_tokens, "128000");
+    assert_eq!(state.max_output_tokens, "8000");
+    state.selected_field = SetupField::Save;
+    let setup_lines = app.setup_lines().join("\n");
+    assert!(setup_lines.contains("current configuration is valid"));
+    assert!(setup_lines.contains("sigil doctor recover-authority"));
+
+    let action =
+        app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::SetupCompleted { .. })));
+    let saved = sigil_kernel::RootConfig::load_persisted(&config_path)?;
+    assert_eq!(saved.permission.mode, PermissionMode::ReadOnly);
+    assert_eq!(saved.model_request.max_output_tokens, Some(8_000));
+    assert!(saved.connections.contains_key("local-secondary"));
+    assert_eq!(
+        saved.connections["deepseek-default"]["credential"]["name"],
+        "SIGIL_API_KEY"
+    );
+    assert_eq!(
+        saved.connections["deepseek-default"]["model_context_windows"]["deepseek-v4-flash"],
+        128_000
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_exact_cas_failure_stays_visible_and_retryable() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config().save(&config_path)?;
+    let mut app = AppState::from_setup(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some("authority journal requires reconciliation".to_owned()),
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup state")
+        .selected_field = SetupField::Save;
+    let concurrently_changed = format!(
+        "{}\n# concurrent edit\n",
+        std::fs::read_to_string(&config_path)?
+    );
+    std::fs::write(&config_path, &concurrently_changed)?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.is_setup_mode());
+    let lines = app.setup_lines().join("\n");
+    assert!(lines.contains("Setup did not complete:"));
+    assert!(lines.contains("config changed since Provider settings were loaded"));
+    assert!(lines.contains("press Enter on review or Ctrl-S to retry"));
+    assert_eq!(std::fs::read_to_string(config_path)?, concurrently_changed);
+    Ok(())
+}
+
+#[test]
+fn setup_write_failure_stays_visible_and_retryable() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let blocked_parent = temp.path().join("config-parent-is-a-file");
+    std::fs::write(&blocked_parent, b"not a directory")?;
+    let config_path = blocked_parent.join("sigil.toml");
+    let mut app = AppState::from_setup(config_path, temp.path().to_path_buf(), None);
+    app.setup_state
+        .as_mut()
+        .expect("setup state")
+        .selected_field = SetupField::Save;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.is_setup_mode());
+    let lines = app.setup_lines().join("\n");
+    assert!(lines.contains("Setup did not complete:"));
+    assert!(lines.contains("config update transaction lock failed"));
+    assert!(lines.contains("press Enter on review or Ctrl-S to retry"));
+    Ok(())
+}
+
+#[test]
+fn setup_token_fields_accept_units_and_common_presets() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("sigil.toml");
+    let mut app = AppState::from_setup(config_path, temp.path().to_path_buf(), None);
+    {
+        let state = app.setup_state.as_mut().expect("setup state should exist");
+        state.credential_source = SetupCredentialSource::Environment;
+        state.selected_field = SetupField::ContextWindow;
+    }
+    for character in "256K".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    {
+        let state = app.setup_state.as_ref().expect("setup state should exist");
+        assert_eq!(state.context_window_tokens, "256K");
+    }
+    {
+        let state = app.setup_state.as_mut().expect("setup state should exist");
+        state.selected_field = SetupField::MaxOutputTokens;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    let state = app.setup_state.as_ref().expect("setup state should exist");
+    assert_eq!(state.max_output_tokens, "4K");
     Ok(())
 }
 
@@ -496,6 +703,42 @@ fn setup_builder_rejects_an_invalid_optional_context_window() {
 }
 
 #[test]
+fn setup_builder_rejects_output_budget_that_consumes_the_context_window() {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
+    let temp = tempdir().expect("tempdir");
+    let mut app = AppState::from_setup(
+        temp.path().join("config").join("sigil.toml"),
+        temp.path().to_path_buf(),
+        None,
+    );
+    let state = app.setup_state.as_mut().expect("setup state");
+    state.credential_source = SetupCredentialSource::Environment;
+    state.context_window_tokens = "256K".to_owned();
+    state.max_output_tokens = "256K".to_owned();
+
+    let error = validate_setup_state(state).expect("budget must be rejected");
+    assert!(error.contains("leave insufficient input budget"));
+}
+
+#[test]
+fn setup_builder_rejects_output_budget_above_the_known_provider_limit() {
+    let _env_guard = crate::test_env::lock();
+    let _api_key = crate::test_env::EnvScope::set("GEMINI_API_KEY", "test-key");
+    let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
+    state.provider_name = "gemini".to_owned();
+    state.model = "gemini-2.5-pro".to_owned();
+    state.context_window_tokens = "1M".to_owned();
+    state.max_output_tokens = "256K".to_owned();
+    state.credential_source = SetupCredentialSource::Environment;
+
+    let error = build_setup_root_config(&state)
+        .expect_err("the setup flow must reject a provider-impossible output cap");
+
+    assert!(error.to_string().contains("provider limit"));
+}
+
+#[test]
 fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _api_key = crate::test_env::EnvScope::unset("SIGIL_API_KEY");
@@ -512,7 +755,7 @@ fn setup_screen_switches_provider_and_opens_inline_field_modals() -> Result<()> 
     assert!(setup_lines.contains("Set up a model connection"));
     assert!(setup_lines.contains("> DeepSeek"));
     assert!(setup_lines.contains("SIGIL_API_KEY not set"));
-    assert!(setup_lines.contains("load failed: invalid existing config"));
+    assert!(setup_lines.contains("startup recovery could not capture the config source"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("provider -> OpenAI"));

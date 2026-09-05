@@ -133,6 +133,10 @@ fn r71_tui_managed_leaves_reroute_session_and_history_round_trip() -> Result<()>
             &state,
             &exec,
             manifest_hash,
+            sigil_kernel::resource::AuthorityGeneration {
+                epoch: 1,
+                instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+            },
             planner,
             &[Ch::SessionLog, Ch::InputHistory],
         )?,

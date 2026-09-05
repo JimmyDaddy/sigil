@@ -116,6 +116,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
         .height
         .saturating_sub(footer_height)
         .saturating_sub(footer_gap);
+    let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
         config_panel_height(&main_lines, &context_lines, panel_max_height)
     } else {
@@ -234,6 +235,7 @@ pub(super) fn render_config_surface(frame: &mut Frame, surface: &SurfaceModel) {
         .height
         .saturating_sub(footer_height)
         .saturating_sub(footer_gap);
+    let panel_max_height = panel_max_height.saturating_sub(u16::from(show_context_panel));
     let panel_height = if show_context_panel {
         config_panel_height(&main_lines, &context_lines, panel_max_height)
     } else {
@@ -769,7 +771,8 @@ fn render_config_panel(
         .iter()
         .enumerate()
         .filter_map(|(index, line)| {
-            (line.starts_with("> ") || line.starts_with("selected:")).then_some(index)
+            ((line.starts_with("> ") && line.contains(':')) || line.starts_with("selected:"))
+                .then_some(index)
         })
         .collect::<Vec<_>>();
     let block = config_block_with_palette("Config", palette.config_primary, panel_bg, palette);

@@ -1145,11 +1145,24 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
     let interaction_mode = options.interaction_mode;
     let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
         agent_supervisor,
-        Agent::new(planner_provider, planner_registry),
-        Agent::new(executor_provider, executor_registry),
-        Agent::new(subagent_read_provider, subagent_read_registry),
-        Agent::new(subagent_write_provider, subagent_write_registry),
-        Agent::new(synthesis_provider, ToolRegistry::new()),
+        sigil_runtime::configured_agent(root_config, planner_provider, planner_registry)
+            .map_err(|error| format!("{error:#}"))?,
+        sigil_runtime::configured_agent(root_config, executor_provider, executor_registry)
+            .map_err(|error| format!("{error:#}"))?,
+        sigil_runtime::configured_agent(
+            root_config,
+            subagent_read_provider,
+            subagent_read_registry,
+        )
+        .map_err(|error| format!("{error:#}"))?,
+        sigil_runtime::configured_agent(
+            root_config,
+            subagent_write_provider,
+            subagent_write_registry,
+        )
+        .map_err(|error| format!("{error:#}"))?,
+        sigil_runtime::configured_agent(root_config, synthesis_provider, ToolRegistry::new())
+            .map_err(|error| format!("{error:#}"))?,
     )
     .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
         &root_config.task,

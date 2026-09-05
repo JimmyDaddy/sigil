@@ -858,6 +858,15 @@ fn task_sidebar_separates_review_advisory_from_system_verify() {
             objective: "Review then verify".to_owned(),
             title: None,
 
+            status: TaskRunStatus::Started,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Review then verify".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Completed,
             reason: None,
         })),

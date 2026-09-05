@@ -1,10 +1,14 @@
 use std::{collections::BTreeMap, env, fmt, path::PathBuf};
 
-use sigil_kernel::SecretString;
+use sigil_kernel::{PublicRouteRecoveryCode, SecretString};
 use sigil_runtime::{
     DEFAULT_SETUP_PROVIDER_KEY, NewInstallOrchestrationRolloutDecision, default_provider_model,
-    new_install_orchestration_rollout_decision, provider_api_key_env_name,
-    provider_connections::ProviderProtocol,
+    new_install_orchestration_rollout_decision,
+    new_install_orchestration_rollout_decision_for_config, provider_api_key_env_names,
+    provider_connections::{
+        CredentialRefConfig, PersistedConfigSnapshot, ProviderFamily, ProviderProtocol,
+        configured_environment_credential_available, load_provider_connections,
+    },
 };
 
 pub(crate) const SETUP_PROVIDER_ORDER: [&str; 5] = [
@@ -23,24 +27,27 @@ pub(crate) enum SetupField {
     ApiKey,
     Model,
     ContextWindow,
+    MaxOutputTokens,
     Save,
 }
 
 impl SetupField {
-    const STANDARD_ORDER: [Self; 5] = [
+    const STANDARD_ORDER: [Self; 6] = [
         Self::Provider,
         Self::ApiKey,
         Self::Model,
         Self::ContextWindow,
+        Self::MaxOutputTokens,
         Self::Save,
     ];
-    const CUSTOM_ORDER: [Self; 7] = [
+    const CUSTOM_ORDER: [Self; 8] = [
         Self::Provider,
         Self::Protocol,
         Self::Endpoint,
         Self::ApiKey,
         Self::Model,
         Self::ContextWindow,
+        Self::MaxOutputTokens,
         Self::Save,
     ];
 
@@ -86,6 +93,7 @@ impl SetupField {
             Self::ApiKey => "authentication",
             Self::Model => "model",
             Self::ContextWindow => "context window",
+            Self::MaxOutputTokens => "max output tokens",
             Self::Save => "review",
         }
     }
@@ -127,10 +135,16 @@ pub(crate) struct SetupState {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) context_window_tokens: String,
+    pub(crate) max_output_tokens: String,
     pub(crate) credential_source: SetupCredentialSource,
     pub(crate) api_key: SecretString,
     pub(crate) draft_revision: u64,
     pub(crate) startup_error: Option<String>,
+    pub(crate) startup_recovery_code: Option<PublicRouteRecoveryCode>,
+    pub(crate) save_error: Option<String>,
+    /// The exact source observed before setup opened. Its parsed state distinguishes malformed
+    /// config from a valid-config boot failure, and its redacted bytes form the save-time CAS.
+    pub(crate) startup_config: Option<PersistedConfigSnapshot>,
     pub(crate) orchestration_rollout: NewInstallOrchestrationRolloutDecision,
     provider_drafts: BTreeMap<String, SetupProviderDraft>,
 }
@@ -146,10 +160,14 @@ impl fmt::Debug for SetupState {
             .field("base_url", &"[redacted endpoint]")
             .field("model", &self.model)
             .field("context_window_tokens", &self.context_window_tokens)
+            .field("max_output_tokens", &self.max_output_tokens)
             .field("credential_source", &self.credential_source)
             .field("api_key", &"[redacted]")
             .field("draft_revision", &self.draft_revision)
             .field("startup_error", &self.startup_error)
+            .field("startup_recovery_code", &self.startup_recovery_code)
+            .field("save_error_present", &self.save_error.is_some())
+            .field("startup_config_present", &self.startup_config.is_some())
             .field("orchestration_rollout", &self.orchestration_rollout)
             .field("provider_draft_count", &self.provider_drafts.len())
             .finish()
@@ -157,20 +175,53 @@ impl fmt::Debug for SetupState {
 }
 
 impl SetupState {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(config_path: PathBuf, startup_error: Option<String>) -> Self {
-        let provider_name = DEFAULT_SETUP_PROVIDER_KEY.to_owned();
-        let protocol = ProviderProtocol::DeepSeek;
-        let base_url = default_endpoint(&provider_name, protocol).to_owned();
-        let credential_source = default_credential_source(&provider_name);
-        let model = default_provider_model(&provider_name)
+        Self::new_with_recovery(config_path, startup_error, None)
+    }
+
+    pub(crate) fn new_with_recovery(
+        config_path: PathBuf,
+        startup_error: Option<String>,
+        startup_recovery_code: Option<PublicRouteRecoveryCode>,
+    ) -> Self {
+        let startup_config = startup_error
+            .as_ref()
+            .and_then(|_| PersistedConfigSnapshot::load(&config_path).ok());
+        let mut provider_name = DEFAULT_SETUP_PROVIDER_KEY.to_owned();
+        let mut protocol = ProviderProtocol::DeepSeek;
+        let mut base_url = default_endpoint(&provider_name, protocol).to_owned();
+        let mut credential_source = default_credential_source(&provider_name);
+        let mut model = default_provider_model(&provider_name)
             .expect("default setup provider must have a default model");
-        let orchestration_rollout =
+        let mut context_window_tokens = String::new();
+        let mut max_output_tokens = String::new();
+        let mut orchestration_rollout =
             new_install_orchestration_rollout_decision(&provider_name, &model);
+        if let Some(root_config) = startup_config
+            .as_ref()
+            .and_then(PersistedConfigSnapshot::parsed)
+            && let Some(existing) = existing_setup_values(root_config)
+        {
+            provider_name = existing.provider_name;
+            protocol = existing.protocol;
+            base_url = existing.base_url;
+            credential_source = existing.credential_source;
+            model = existing.model;
+            context_window_tokens = existing.context_window_tokens;
+            max_output_tokens = root_config
+                .model_request
+                .max_output_tokens
+                .map_or_else(String::new, |tokens| tokens.to_string());
+            orchestration_rollout =
+                new_install_orchestration_rollout_decision_for_config(root_config);
+        }
         Self {
             config_path,
             selected_field: SetupField::Provider,
             model,
-            context_window_tokens: String::new(),
+            context_window_tokens,
+            max_output_tokens,
             api_key: SecretString::default(),
             draft_revision: 0,
             provider_name,
@@ -178,6 +229,9 @@ impl SetupState {
             base_url,
             credential_source,
             startup_error,
+            startup_recovery_code,
+            save_error: None,
+            startup_config,
             orchestration_rollout,
             provider_drafts: BTreeMap::new(),
         }
@@ -185,6 +239,35 @@ impl SetupState {
 
     pub(crate) fn is_custom(&self) -> bool {
         self.provider_name == "openai_compat"
+    }
+
+    /// Safe mode is only valid when the persisted config parsed successfully and a later boot
+    /// phase failed. It must never mask malformed or missing configuration.
+    pub(crate) fn provider_only_safe_mode_config(&self) -> Option<sigil_kernel::RootConfig> {
+        if !self.valid_config_boot_retry_required()
+            || !matches!(
+                self.startup_recovery_code,
+                Some(
+                    PublicRouteRecoveryCode::AuthorityUnavailable
+                        | PublicRouteRecoveryCode::AuthorityJournalCorrupted
+                )
+            )
+            || env::var_os("SSL_CERT_FILE").is_some()
+        {
+            return None;
+        }
+        let root_config = self.startup_config.as_ref()?.parsed()?.clone();
+        let loaded = load_provider_connections(&root_config);
+        let model_ref = loaded.default_model.as_ref()?;
+        let connection = loaded.connections.get(&model_ref.connection_id)?;
+        match &connection.config.credential {
+            CredentialRefConfig::Environment { name } => {
+                configured_environment_credential_available(&connection.config, name)
+                    .then_some(root_config)
+            }
+            CredentialRefConfig::None => Some(root_config),
+            CredentialRefConfig::Stored { .. } => None,
+        }
     }
 
     pub(crate) fn cycle_provider(&mut self) {
@@ -261,27 +344,24 @@ impl SetupState {
     #[must_use]
     pub(crate) fn provider_choice_auth_summary(provider_name: &str) -> String {
         if provider_name == "openai_compat" {
-            return match provider_api_key_env_name(provider_name) {
-                Some(name)
-                    if env::var(name)
-                        .ok()
-                        .is_some_and(|value| !value.trim().is_empty()) =>
-                {
-                    format!("{name} detected · loopback no-auth available")
-                }
-                Some(name) => format!("API key ({name}) or loopback no-auth"),
+            return match provider_api_key_env_names(provider_name) {
+                Some(names) if detected_environment_name(names).is_some() => format!(
+                    "{} detected · loopback no-auth available",
+                    detected_environment_name(names).expect("detected environment name")
+                ),
+                Some(names) => format!(
+                    "API key ({}) or loopback no-auth",
+                    format_environment_names(names)
+                ),
                 None => "API key or loopback no-auth".to_owned(),
             };
         }
-        match provider_api_key_env_name(provider_name) {
-            Some(name)
-                if env::var(name)
-                    .ok()
-                    .is_some_and(|value| !value.trim().is_empty()) =>
-            {
-                format!("{name} detected")
-            }
-            Some(name) => format!("API key · {name} not set"),
+        match provider_api_key_env_names(provider_name) {
+            Some(names) if detected_environment_name(names).is_some() => format!(
+                "{} detected",
+                detected_environment_name(names).expect("detected environment name")
+            ),
+            Some(names) => format!("API key · {}", missing_environment_names(names)),
             None => "authentication required".to_owned(),
         }
     }
@@ -296,7 +376,7 @@ impl SetupState {
         };
         self.base_url = default_endpoint(&self.provider_name, self.protocol).to_owned();
         self.api_key.clear();
-        self.credential_source = default_credential_source_for_env(self.api_key_env_name());
+        self.credential_source = default_credential_source_for_env(self.api_key_env_names());
         self.bump_revision();
     }
 
@@ -316,20 +396,57 @@ impl SetupState {
         self.bump_revision();
     }
 
-    pub(crate) fn api_key_env_name(&self) -> Option<&'static str> {
+    pub(crate) fn api_key_env_names(&self) -> &'static [&'static str] {
         match self.protocol {
             ProviderProtocol::OpenAiResponses if self.is_custom() => {
-                Some("SIGIL_OPENAI_RESPONSES_API_KEY")
+                provider_api_key_env_names("openai_responses").unwrap_or(&[])
             }
-            ProviderProtocol::OpenAiChatCompletions => Some("SIGIL_OPENAI_COMPATIBLE_API_KEY"),
-            _ => provider_api_key_env_name(&self.provider_name),
+            ProviderProtocol::OpenAiChatCompletions => {
+                provider_api_key_env_names("openai_compat").unwrap_or(&[])
+            }
+            _ => provider_api_key_env_names(&self.provider_name).unwrap_or(&[]),
         }
     }
 
+    pub(crate) fn api_key_env_name(&self) -> Option<&'static str> {
+        self.api_key_env_names().first().copied()
+    }
+
     pub(crate) fn environment_detected(&self) -> bool {
-        self.api_key_env_name()
-            .and_then(|name| env::var(name).ok())
-            .is_some_and(|value| !value.trim().is_empty())
+        self.detected_api_key_env_name().is_some()
+    }
+
+    pub(crate) fn detected_api_key_env_name(&self) -> Option<String> {
+        if let Some(CredentialRefConfig::Environment { name }) = self.reusable_existing_credential()
+        {
+            if self.api_key_env_name() == Some(name.as_str()) {
+                return detected_environment_name(self.api_key_env_names()).map(str::to_owned);
+            }
+            return env::var(&name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|_| name);
+        }
+        detected_environment_name(self.api_key_env_names()).map(str::to_owned)
+    }
+
+    pub(crate) fn environment_credential_name(&self) -> Option<String> {
+        match self.reusable_existing_credential() {
+            Some(CredentialRefConfig::Environment { name }) => Some(name),
+            // Persist the exact detected source. A setup that was validated through
+            // `DEEPSEEK_API_KEY` must not silently write `SIGIL_API_KEY` and only fail on the
+            // first provider request.
+            _ => self
+                .detected_api_key_env_name()
+                .or_else(|| self.api_key_env_name().map(str::to_owned)),
+        }
+    }
+
+    pub(crate) fn can_reuse_stored_credential(&self) -> bool {
+        matches!(
+            self.reusable_existing_credential(),
+            Some(CredentialRefConfig::Stored { .. })
+        )
     }
 
     pub(crate) fn no_authentication_allowed(&self) -> bool {
@@ -352,15 +469,26 @@ impl SetupState {
 
     pub(crate) fn auth_summary(&self) -> String {
         match self.credential_source {
-            SetupCredentialSource::Environment => match self.api_key_env_name() {
-                Some(name) if self.environment_detected() => format!("environment {name} detected"),
-                Some(name) => format!("environment {name} missing"),
-                None => "environment unavailable".to_owned(),
-            },
+            SetupCredentialSource::Environment => {
+                if let Some(name) = self.detected_api_key_env_name() {
+                    format!("environment {name} detected")
+                } else if self.api_key_env_name().is_some() {
+                    format!(
+                        "environment {}",
+                        missing_environment_names(self.api_key_env_names())
+                    )
+                } else {
+                    "environment unavailable".to_owned()
+                }
+            }
             SetupCredentialSource::SecureStore
                 if self.api_key.expose_secret().trim().is_empty() =>
             {
-                "protected store · key required".to_owned()
+                if self.can_reuse_stored_credential() {
+                    "protected store · existing credential reference".to_owned()
+                } else {
+                    "protected store · key required".to_owned()
+                }
             }
             SetupCredentialSource::SecureStore => {
                 "protected store · credential staged in memory".to_owned()
@@ -406,8 +534,14 @@ impl SetupState {
     }
 
     pub(crate) fn refresh_orchestration_rollout(&mut self) {
-        self.orchestration_rollout =
-            new_install_orchestration_rollout_decision(&self.provider_name, &self.model);
+        self.orchestration_rollout = self
+            .startup_config
+            .as_ref()
+            .and_then(PersistedConfigSnapshot::parsed)
+            .map(new_install_orchestration_rollout_decision_for_config)
+            .unwrap_or_else(|| {
+                new_install_orchestration_rollout_decision(&self.provider_name, &self.model)
+            });
     }
 
     pub(crate) fn clear_staged_secrets(&mut self) {
@@ -419,7 +553,96 @@ impl SetupState {
 
     pub(crate) fn existing_config_repair_required(&self) -> bool {
         self.startup_error.is_some()
+            && self
+                .startup_config
+                .as_ref()
+                .is_some_and(PersistedConfigSnapshot::is_invalid)
     }
+
+    pub(crate) fn valid_config_boot_retry_required(&self) -> bool {
+        self.startup_error.is_some()
+            && self
+                .startup_config
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.parsed().is_some())
+    }
+
+    pub(crate) fn startup_config_snapshot_missing(&self) -> bool {
+        self.startup_error.is_some() && self.startup_config.is_none()
+    }
+
+    fn reusable_existing_credential(&self) -> Option<CredentialRefConfig> {
+        let root_config = self.startup_config.as_ref()?.parsed()?;
+        let loaded = load_provider_connections(root_config);
+        let model_ref = loaded.default_model.as_ref()?;
+        let connection = loaded.connections.get(&model_ref.connection_id)?;
+        setup_identity_matches(
+            &self.provider_name,
+            self.protocol,
+            connection.config.provider,
+            connection.config.protocol,
+        )
+        .then(|| connection.config.credential.clone())
+    }
+}
+
+struct ExistingSetupValues {
+    provider_name: String,
+    protocol: ProviderProtocol,
+    base_url: String,
+    model: String,
+    context_window_tokens: String,
+    credential_source: SetupCredentialSource,
+}
+
+fn existing_setup_values(root_config: &sigil_kernel::RootConfig) -> Option<ExistingSetupValues> {
+    let loaded = load_provider_connections(root_config);
+    let model_ref = loaded.default_model.as_ref()?;
+    let connection = loaded.connections.get(&model_ref.connection_id)?;
+    let provider_name =
+        setup_provider_name(connection.config.provider, connection.config.protocol)?;
+    let credential_source = match &connection.config.credential {
+        CredentialRefConfig::Environment { .. } => SetupCredentialSource::Environment,
+        CredentialRefConfig::Stored { .. } => SetupCredentialSource::SecureStore,
+        CredentialRefConfig::None => SetupCredentialSource::NoAuthentication,
+    };
+    Some(ExistingSetupValues {
+        provider_name: provider_name.to_owned(),
+        protocol: connection.config.protocol,
+        base_url: connection.config.base_url.clone(),
+        model: model_ref.model_id.clone(),
+        context_window_tokens: connection
+            .config
+            .model_context_windows
+            .get(&model_ref.model_id)
+            .map_or_else(String::new, u32::to_string),
+        credential_source,
+    })
+}
+
+fn setup_provider_name(family: ProviderFamily, protocol: ProviderProtocol) -> Option<&'static str> {
+    match (family, protocol) {
+        (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => Some("deepseek"),
+        (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses) => Some("openai_responses"),
+        (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => Some("anthropic"),
+        (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => Some("gemini"),
+        (
+            ProviderFamily::Custom | ProviderFamily::OpenAi,
+            ProviderProtocol::OpenAiChatCompletions,
+        )
+        | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => Some("openai_compat"),
+        _ => None,
+    }
+}
+
+fn setup_identity_matches(
+    provider_name: &str,
+    protocol: ProviderProtocol,
+    family: ProviderFamily,
+    existing_protocol: ProviderProtocol,
+) -> bool {
+    setup_provider_name(family, existing_protocol) == Some(provider_name)
+        && protocol == existing_protocol
 }
 
 fn default_protocol(provider_name: &str) -> ProviderProtocol {
@@ -448,17 +671,40 @@ fn default_endpoint(provider_name: &str, protocol: ProviderProtocol) -> &'static
 }
 
 fn default_credential_source(provider_name: &str) -> SetupCredentialSource {
-    default_credential_source_for_env(provider_api_key_env_name(provider_name))
+    default_credential_source_for_env(provider_api_key_env_names(provider_name).unwrap_or(&[]))
 }
 
-fn default_credential_source_for_env(env_name: Option<&str>) -> SetupCredentialSource {
-    if env_name
-        .and_then(|name| env::var(name).ok())
-        .is_some_and(|value| !value.trim().is_empty())
-    {
+fn default_credential_source_for_env(env_names: &'static [&'static str]) -> SetupCredentialSource {
+    if detected_environment_name(env_names).is_some() {
         SetupCredentialSource::Environment
     } else {
         SetupCredentialSource::SecureStore
+    }
+}
+
+fn detected_environment_name(names: &'static [&'static str]) -> Option<&'static str> {
+    names.iter().copied().find(|name| {
+        env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
+fn format_environment_names(names: &[&str]) -> String {
+    names.join(" or ")
+}
+
+fn missing_environment_names(names: &[&str]) -> String {
+    let Some((canonical, aliases)) = names.split_first() else {
+        return "unavailable".to_owned();
+    };
+    if aliases.is_empty() {
+        format!("{canonical} not set")
+    } else {
+        format!(
+            "{canonical} not set (aliases: {})",
+            format_environment_names(aliases)
+        )
     }
 }
 
