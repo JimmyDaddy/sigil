@@ -2300,6 +2300,10 @@ timeout_ms = 5000
             &state,
             &execution_temp,
             sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
+            sigil_kernel::resource::AuthorityGeneration {
+                epoch: 1,
+                instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+            },
             planner.clone() as Arc<dyn ManagedExecutionPlannerV1>,
             &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
         )
@@ -2454,6 +2458,10 @@ timeout_ms = 15000
             &state,
             &execution_temp,
             sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
+            sigil_kernel::resource::AuthorityGeneration {
+                epoch: 1,
+                instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+            },
             planner as Arc<dyn ManagedExecutionPlannerV1>,
             &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
         )

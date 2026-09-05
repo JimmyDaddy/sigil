@@ -4,9 +4,12 @@ use sigil_kernel::{
     ProviderTurnRecoveryTerminalDispositionV1, ProviderTurnRecoveryTerminalError,
     RunCancellationOwner, RunCancellationTarget, Session, SessionLogEntry, SessionRef,
     TaskContinuationControlKind, TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1,
-    TaskDirectExecutionAttemptV1, TaskId, TaskParticipantAttemptStatus, TaskPauseRequest,
-    TaskPlanEntry, TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepStatus, project_conversation_prompt_for_persistence,
+    TaskDirectExecutionAttemptV1, TaskId, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPauseRequest, TaskPlanEntry,
+    TaskPlanStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    project_conversation_prompt_for_persistence, task_participant_attempt_id,
+    task_participant_session_ref,
 };
 
 use super::{
@@ -51,6 +54,14 @@ fn direct_task_accepts_exact_typed_follow_up_guidance() -> Result<()> {
 fn shared_task_continuation_resolves_exact_or_latest_non_terminal_task() -> Result<()> {
     let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
     let mut session = Session::new("provider", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task-1")?,
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "objective task-1".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
     for (id, status) in [
         ("task-1", TaskRunStatus::Completed),
         ("task-2", TaskRunStatus::Paused),
@@ -379,6 +390,119 @@ fn shared_task_stop_transition_closes_steps_before_task_in_one_writer_batch() ->
 }
 
 #[test]
+fn shared_task_cancellation_closes_dag_descendants_and_started_participants() -> Result<()> {
+    let task_id = TaskId::new("task-stop-cancel")?;
+    let cancelled_step = TaskStepId::new("cancelled")?;
+    let dependent_step = TaskStepId::new("dependent")?;
+    let participant_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&dependent_step),
+        1,
+    )?;
+    let step = |step_id: TaskStepId, depends_on: Vec<TaskStepId>| TaskStepSpec {
+        title: step_id.as_str().to_owned(),
+        display_name: None,
+        detail: None,
+        step_id,
+        role: AgentRole::SubagentRead,
+        depends_on,
+        intent_refs: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: None,
+    };
+    let mut session = Session::new("provider", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "cancel a durable DAG".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![
+                step(cancelled_step.clone(), Vec::new()),
+                step(dependent_step.clone(), vec![cancelled_step.clone()]),
+            ],
+            reason: None,
+        }),
+        ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: cancelled_step,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Cancelled,
+            title: Some("cancelled".to_owned()),
+            summary: None,
+            reason: Some("user cancellation".to_owned()),
+        }),
+        ControlEntry::TaskParticipantAttempt(TaskParticipantAttemptEntry {
+            attempt_id: participant_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Step,
+            ordinal: 1,
+            plan_version: Some(1),
+            step_id: Some(dependent_step.clone()),
+            role: AgentRole::SubagentRead,
+            child_session_ref: task_participant_session_ref(&task_id, &participant_id)?,
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        }),
+    ])?;
+
+    let mut handler = NoopEventHandler;
+    let appended = append_task_stop_state(
+        &mut session,
+        &mut handler,
+        Some(&task_id),
+        TaskStopDisposition::Cancelled,
+        "user requested cancellation",
+    )?
+    .expect("exact running task should append its cancellation closure");
+
+    assert!(appended.controls().iter().any(|control| {
+        matches!(
+            control,
+            ControlEntry::TaskStep(TaskStepEntry {
+                step_id,
+                status: TaskStepStatus::Cancelled,
+                ..
+            }) if step_id == &dependent_step
+        )
+    }));
+    assert!(appended.controls().iter().any(|control| {
+        matches!(
+            control,
+            ControlEntry::TaskParticipantAttempt(TaskParticipantAttemptEntry {
+                attempt_id,
+                status: TaskParticipantAttemptStatus::Cancelled,
+                ..
+            }) if attempt_id == &participant_id
+        )
+    }));
+    let projection = session.task_state_projection();
+    let task = projection.tasks.get(&task_id).expect("cancelled task");
+    assert_eq!(task.status, TaskRunStatus::Cancelled);
+    assert_eq!(
+        task.steps.get(&(1, dependent_step)).map(|step| step.status),
+        Some(TaskStepStatus::Cancelled)
+    );
+    assert_eq!(
+        task.participant_attempts
+            .get(&participant_id)
+            .map(|attempt| attempt.status),
+        Some(TaskParticipantAttemptStatus::Cancelled)
+    );
+    Ok(())
+}
+
+#[test]
 fn failed_shared_task_execution_closes_started_task_once() -> Result<()> {
     let task_id = TaskId::new("task-1")?;
     let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
@@ -528,5 +652,56 @@ fn successful_shared_task_execution_claims_natural_root_terminal() -> Result<()>
     assert_eq!(status, TaskRunStatus::Completed);
     assert!(cancellation.is_naturally_finalized());
     assert!(session.entries().is_empty());
+    Ok(())
+}
+
+#[test]
+fn root_finalizer_downgrades_incomplete_direct_completion_to_paused() -> Result<()> {
+    let task_id = TaskId::new("task-direct-incomplete")?;
+    let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
+    let objective = "complete only after the direct attempt closes";
+    let admission = TaskDirectExecutionAdmittedV1::planner_fallback(
+        task_id.clone(),
+        objective,
+        "planner-attempt-incomplete",
+        1,
+    );
+    let attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+    let mut session = Session::new("provider", "model");
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
+        ControlEntry::TaskDirectExecutionAttemptV1(attempt),
+    ])?;
+    let cancellation = RunCancellationOwner::new().handle();
+
+    let status = finalize_task_root(
+        &mut session,
+        &task_id,
+        &parent_session_ref,
+        objective,
+        &cancellation,
+        Ok(TaskRunStatus::Completed),
+    )?;
+
+    assert_eq!(status, TaskRunStatus::Paused);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("direct task remains resumable");
+    assert_eq!(task.status, TaskRunStatus::Paused);
+    assert_eq!(
+        task.reason.as_deref(),
+        Some("task completion blocked: unfinished_direct_execution")
+    );
     Ok(())
 }

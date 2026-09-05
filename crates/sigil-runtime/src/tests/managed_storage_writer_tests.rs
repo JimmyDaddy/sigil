@@ -38,6 +38,11 @@ fn r71_sw_physical_frontier_distinguishes_snapshots_from_jsonl() {
 }
 
 fn session_log_grant() -> StorageAdmissionGrantV1 {
+    let cutover_manifest_hash = hash(10);
+    let source = sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+        cutover_manifest_hash,
+        application_generation: 1,
+    };
     StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new("g-writer-slog".to_owned()),
         admission_hash: hash(1),
@@ -45,7 +50,9 @@ fn session_log_grant() -> StorageAdmissionGrantV1 {
         purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
         purpose_hash: hash(2),
         source_class: sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
-        source_binding_hash: hash(10),
+        source_binding_hash: sigil_resource_authority::storage::admission_source_binding_hash(
+            &source,
+        ),
         namespace_hash: super::writer_namespace_hash("session-log"),
         journal_scope: ResourceJournalScopeV1::Application,
         journal_scope_hash: hash(4),

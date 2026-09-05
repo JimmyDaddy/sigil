@@ -51,9 +51,18 @@ impl OpenAiCompatibleProvider {
         config: OpenAiCompatibleProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
+        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+    }
+
+    /// Builds an exact provider with a caller-owned HTTP client.
+    pub fn new_exact_with_client(
+        config: OpenAiCompatibleProviderConfig,
+        timeouts: ModelRequestTimeouts,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         Ok(Self {
             timeouts,
-            client: build_http_client()?,
+            client,
             capabilities: openai_compatible_capabilities(),
             config,
         })

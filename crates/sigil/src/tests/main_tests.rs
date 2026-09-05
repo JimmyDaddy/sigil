@@ -675,6 +675,23 @@ fn text_cli_renders_route_recovery_without_private_binding_material() {
 }
 
 #[test]
+fn text_cli_renders_authority_journal_recovery_without_provider_fallback() {
+    let output = super::render_public_run_event(PublicRunEventKind::RouteRecoveryRequired {
+        code: sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted,
+        actions: vec![sigil_kernel::PublicRouteRecoveryAction::RepairAuthority],
+        recovery_binding: "opaque-authority-recovery-binding".to_owned(),
+        retryable: false,
+    });
+
+    assert_eq!(
+        output.stderr,
+        "[recovery] the authority journal is corrupted and must be repaired\n"
+    );
+    assert!(!output.stderr.contains("provider"));
+    assert!(!output.stderr.contains("opaque-authority-recovery-binding"));
+}
+
+#[test]
 fn text_cli_renders_partial_output_discard_without_content_or_attempt_identity() {
     let output =
         super::render_public_run_event(PublicRunEventKind::ProviderTurnPartialOutputDiscarded {
@@ -1784,7 +1801,7 @@ async fn run_json_classifies_missing_config_without_leaking_raw_source() -> Resu
     assert_eq!(record["error"]["code"], "configuration_invalid");
     assert_eq!(
         record["error"]["message"],
-        "application boot failed before the run started"
+        "application configuration is invalid"
     );
     assert!(!String::from_utf8(stdout)?.contains("missing.toml"));
     Ok(())

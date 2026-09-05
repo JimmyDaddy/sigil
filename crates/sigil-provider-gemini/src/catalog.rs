@@ -6,6 +6,19 @@ pub const BUNDLED_GEMINI_MODELS: [(&str, &str, bool); 2] = [
     ("gemini-2.5-flash", "Gemini 2.5 Flash", false),
 ];
 
+/// Trusted output-token ceiling for the bundled Gemini 2.5 generation models.
+pub fn gemini_maximum_output_tokens(model_name: &str) -> Option<u32> {
+    let model_name = model_name
+        .trim()
+        .strip_prefix("models/")
+        .unwrap_or(model_name.trim());
+    matches!(
+        model_name,
+        "gemini-2.5-pro" | "gemini-2.5-flash" | "gemini-2.5-flash-lite"
+    )
+    .then_some(65_536)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeminiCatalogModel {
     pub id: String,

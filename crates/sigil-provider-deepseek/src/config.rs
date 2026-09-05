@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::ReasoningEffort;
 
 pub const SIGIL_API_KEY_ENV: &str = "SIGIL_API_KEY";
+pub const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+pub const SIGIL_API_KEY_ENV_NAMES: &[&str] = &[SIGIL_API_KEY_ENV, DEEPSEEK_API_KEY_ENV];
 pub const SIGIL_BASE_URL_ENV: &str = "SIGIL_BASE_URL";
 pub const SIGIL_BETA_BASE_URL_ENV: &str = "SIGIL_BETA_BASE_URL";
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
@@ -84,7 +86,7 @@ impl DeepSeekProviderConfig {
         if let Some(value) = read_env_strict_tools_mode(SIGIL_STRICT_TOOLS_MODE_ENV)? {
             resolved.strict_tools_mode = value;
         }
-        if let Some(value) = read_env_string(SIGIL_API_KEY_ENV) {
+        if let Some(value) = read_env_string_from(SIGIL_API_KEY_ENV_NAMES) {
             resolved.api_key = Some(value);
         }
 
@@ -195,6 +197,10 @@ fn read_env_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn read_env_string_from(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| read_env_string(name))
 }
 
 fn read_env_strict_tools_mode(name: &str) -> Result<Option<StrictToolsMode>> {

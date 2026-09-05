@@ -4,6 +4,9 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 pub const SIGIL_ANTHROPIC_API_KEY_ENV: &str = "SIGIL_ANTHROPIC_API_KEY";
+pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+pub const SIGIL_ANTHROPIC_API_KEY_ENV_NAMES: &[&str] =
+    &[SIGIL_ANTHROPIC_API_KEY_ENV, ANTHROPIC_API_KEY_ENV];
 pub const SIGIL_ANTHROPIC_BASE_URL_ENV: &str = "SIGIL_ANTHROPIC_BASE_URL";
 pub const SIGIL_ANTHROPIC_VERSION_ENV: &str = "SIGIL_ANTHROPIC_VERSION";
 pub const SIGIL_ANTHROPIC_MAX_TOKENS_ENV: &str = "SIGIL_ANTHROPIC_MAX_TOKENS";
@@ -64,7 +67,7 @@ impl AnthropicProviderConfig {
         if let Some(value) = read_env_u32(SIGIL_ANTHROPIC_MAX_TOKENS_ENV)? {
             resolved.max_tokens = value;
         }
-        if let Some(value) = read_env_string(SIGIL_ANTHROPIC_API_KEY_ENV) {
+        if let Some(value) = read_env_string_from(SIGIL_ANTHROPIC_API_KEY_ENV_NAMES) {
             resolved.api_key = Some(value);
         }
 
@@ -106,6 +109,10 @@ fn read_env_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn read_env_string_from(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| read_env_string(name))
 }
 
 fn read_env_u32(name: &str) -> Result<Option<u32>> {

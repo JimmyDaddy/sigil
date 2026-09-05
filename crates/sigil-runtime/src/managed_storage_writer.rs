@@ -38,6 +38,78 @@ pub enum StorageWriterChannelV1 {
     AdapterIdempotencyLedger,
 }
 
+/// Composition-sealed storage admission context. Runtime writers cannot choose a source or
+/// generation per call: both are fixed when the authority composition is assembled.
+#[derive(Debug, Clone)]
+pub(crate) struct ManagedStorageAdmissionContextV1 {
+    source: Option<sigil_kernel::managed_storage::StorageAdmissionSourceV1>,
+}
+
+impl ManagedStorageAdmissionContextV1 {
+    #[allow(dead_code)]
+    pub(crate) fn application_cutover_root(
+        cutover_manifest_hash: CanonicalHash,
+        application_generation: u64,
+    ) -> Result<Self, ManagedStorageWriterErrorV1> {
+        if application_generation == 0
+            || !cutover_manifest_hash
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(ManagedStorageWriterErrorV1::AdmissionFailed(
+                "storage admission context is incomplete".to_owned(),
+            ));
+        }
+        Ok(Self {
+            source: Some(
+                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+                    cutover_manifest_hash,
+                    application_generation,
+                },
+            ),
+        })
+    }
+
+    #[cfg(not(test))]
+    fn unavailable() -> Self {
+        Self { source: None }
+    }
+
+    fn request(
+        &self,
+        semantic_owner: ManagedStorageSemanticOwnerV1,
+        capability_family: ManagedStorageCapabilityFamilyV1,
+    ) -> Result<
+        sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1,
+        ManagedStorageWriterErrorV1,
+    > {
+        let source = self.source.clone().ok_or_else(|| {
+            ManagedStorageWriterErrorV1::AdmissionFailed(
+                "managed storage writer has no current cutover admission context".to_owned(),
+            )
+        })?;
+        Ok(
+            sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
+                semantic_owner,
+                capability_family,
+                purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
+                source,
+                owner_scope: ResourceOwnerScopeV1::Application,
+                journal_scope: ResourceJournalScopeV1::Application,
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+fn legacy_test_admission_context(
+    cutover_manifest_hash: CanonicalHash,
+) -> ManagedStorageAdmissionContextV1 {
+    ManagedStorageAdmissionContextV1::application_cutover_root(cutover_manifest_hash, 1)
+        .expect("fixed unit-test admission context is complete")
+}
+
 impl StorageWriterChannelV1 {
     /// Closed channel -> (semantic owner, capability family, leaf).
     pub const fn mapping(
@@ -233,7 +305,7 @@ impl std::fmt::Debug for ManagedExistingSessionLogMutationLeaseV1 {
 pub struct ManagedStorageWriterAdapterV1 {
     service: std::sync::Arc<dyn ManagedStorageServiceV1>,
     state_anchor: PathBuf,
-    cutover_manifest_hash: CanonicalHash,
+    admission_context: ManagedStorageAdmissionContextV1,
     /// Real kernel capability broker (production): writer batches use broker-issued storage
     /// namespaces (production grant ns), never the kernel startup-probe marker.
     storage_issuer:
@@ -262,12 +334,16 @@ impl ManagedStorageWriterAdapterV1 {
     pub fn new(
         service: std::sync::Arc<dyn ManagedStorageServiceV1>,
         state_anchor: PathBuf,
-        cutover_manifest_hash: CanonicalHash,
+        _cutover_manifest_hash: CanonicalHash,
     ) -> Self {
+        #[cfg(test)]
+        let admission_context = legacy_test_admission_context(_cutover_manifest_hash);
+        #[cfg(not(test))]
+        let admission_context = ManagedStorageAdmissionContextV1::unavailable();
         Self {
             service,
             state_anchor,
-            cutover_manifest_hash,
+            admission_context,
             storage_issuer: None,
             artifact_retire_authority: None,
         }
@@ -279,13 +355,33 @@ impl ManagedStorageWriterAdapterV1 {
     pub fn with_storage_issuer(
         service: std::sync::Arc<dyn ManagedStorageServiceV1>,
         state_anchor: PathBuf,
-        cutover_manifest_hash: CanonicalHash,
+        _cutover_manifest_hash: CanonicalHash,
+        storage_issuer: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
+    ) -> Self {
+        #[cfg(test)]
+        let admission_context = legacy_test_admission_context(_cutover_manifest_hash);
+        #[cfg(not(test))]
+        let admission_context = ManagedStorageAdmissionContextV1::unavailable();
+        Self::with_storage_issuer_and_admission_context(
+            service,
+            state_anchor,
+            admission_context,
+            storage_issuer,
+        )
+    }
+
+    /// Production constructor. The boot transaction supplies the exact current application
+    /// generation; no writer can replay a request from a previous composition.
+    pub(crate) fn with_storage_issuer_and_admission_context(
+        service: std::sync::Arc<dyn ManagedStorageServiceV1>,
+        state_anchor: PathBuf,
+        admission_context: ManagedStorageAdmissionContextV1,
         storage_issuer: std::sync::Arc<sigil_kernel::capability_issuer::KernelCapabilityBrokerV1>,
     ) -> Self {
         Self {
             service,
             state_anchor,
-            cutover_manifest_hash,
+            admission_context,
             storage_issuer: Some(storage_issuer),
             artifact_retire_authority: None,
         }
@@ -426,9 +522,9 @@ impl ManagedStorageWriterAdapterV1 {
         })
     }
 
-    /// Performs the common pre-admission physical checks and authority admission for both narrow
-    /// existing-only SessionLog capabilities. No caller may get a read or mutation wrapper until
-    /// all original namespace objects are present and private.
+    /// Verifies an existing-only SessionLog evidence chain and asks RA to admit its continuation.
+    /// The read-only marker inspection is not a creation or repair path; RA revalidates the
+    /// exact current grant before it opens the old namespace lock.
     fn admit_existing_session_log(
         &self,
         key: &str,
@@ -462,18 +558,9 @@ impl ManagedStorageWriterAdapterV1 {
                 )
             }
         };
-        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
-            semantic_owner,
-            capability_family,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            source:
-                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-                    cutover_manifest_hash: self.cutover_manifest_hash,
-                    application_generation: 1,
-                },
-            owner_scope: ResourceOwnerScopeV1::Application,
-            journal_scope: ResourceJournalScopeV1::Application,
-        };
+        let request = self
+            .admission_context
+            .request(semantic_owner, capability_family)?;
         let handle = self
             .service
             .admit_existing_namespace(request, capability, original)
@@ -542,31 +629,6 @@ impl ManagedStorageWriterAdapterV1 {
         }
         let (_, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?.join(key);
-        if let Some(parent) = path.parent() {
-            reject_existing_reparse_components(parent)?;
-        }
-        std::fs::create_dir_all(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        reject_reparse_components(&path, false)?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
-            return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-            let flushed = std::fs::symlink_metadata(&path)
-                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-            if flushed.permissions().mode() & 0o077 != 0 {
-                return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
-            }
-        }
-        #[cfg(windows)]
-        sigil_kernel::secure_private_path_permissions(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         let capability = match &self.storage_issuer {
             Some(broker) => {
                 // The grant binds the authority-declared channel root. The logical key is
@@ -585,22 +647,14 @@ impl ManagedStorageWriterAdapterV1 {
                 )
             }
         };
-        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
-            semantic_owner,
-            capability_family,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            source:
-                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-                    cutover_manifest_hash: self.cutover_manifest_hash,
-                    application_generation: 1,
-                },
-            owner_scope: ResourceOwnerScopeV1::Application,
-            journal_scope: ResourceJournalScopeV1::Application,
-        };
+        let request = self
+            .admission_context
+            .request(semantic_owner, capability_family)?;
         let handle = self
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.prepare_admitted_namespace(&path)?;
         self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
@@ -616,43 +670,9 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         let (semantic_owner, capability_family, leaf) = channel.mapping();
         let path = self.leaf_path(leaf)?;
-        if let Some(parent) = path.parent() {
-            reject_existing_reparse_components(parent)?;
-        }
-        std::fs::create_dir_all(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        reject_reparse_components(&path, false)?;
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
-            return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-            let flushed = std::fs::symlink_metadata(&path)
-                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-            if flushed.permissions().mode() & 0o077 != 0 {
-                return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
-            }
-        }
-        #[cfg(windows)]
-        sigil_kernel::secure_private_path_permissions(&path)
-            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
-        let request = sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1 {
-            semantic_owner,
-            capability_family,
-            purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-            source:
-                sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-                    cutover_manifest_hash: self.cutover_manifest_hash,
-                    application_generation: 1,
-                },
-            owner_scope: ResourceOwnerScopeV1::Application,
-            journal_scope: ResourceJournalScopeV1::Application,
-        };
+        let request = self
+            .admission_context
+            .request(semantic_owner, capability_family)?;
         let capability = match &self.storage_issuer {
             Some(broker) => {
                 let mut leaf_ns = [0x6au8; 32];
@@ -678,12 +698,45 @@ impl ManagedStorageWriterAdapterV1 {
             .service
             .admit_namespace(request, capability)
             .map_err(|error| ManagedStorageWriterErrorV1::AdmissionFailed(error.to_string()))?;
+        self.prepare_admitted_namespace(&path)?;
         self.write_admission_marker(&path, &handle)?;
         Ok(ManagedStorageWriterLeaseV1 {
             handle,
             path,
             channel,
         })
+    }
+
+    /// Performs the first physical mutation only after RA has consumed the exact current
+    /// admission. A failed preparation intentionally does not walk, chmod, or delete any old
+    /// root; its durable pending admission is reconciled fail-closed on the next boot.
+    fn prepare_admitted_namespace(&self, path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
+        if let Some(parent) = path.parent() {
+            reject_existing_reparse_components(parent)?;
+        }
+        std::fs::create_dir_all(path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        reject_reparse_components(path, false)?;
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        if !is_safe_physical_metadata(&metadata) || !metadata.is_dir() {
+            return Err(ManagedStorageWriterErrorV1::LeafIsSymlink);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            let flushed = std::fs::symlink_metadata(path)
+                .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+            if flushed.permissions().mode() & 0o077 != 0 {
+                return Err(ManagedStorageWriterErrorV1::LeafNotOwnerOnly);
+            }
+        }
+        #[cfg(windows)]
+        sigil_kernel::secure_private_path_permissions(path)
+            .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+        Ok(())
     }
 
     /// Appends one record to the admitted namespace leaf (0600 JSONL) and returns it; the
@@ -693,7 +746,12 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedStorageWriterLeaseV1,
         record: &[u8],
     ) -> Result<(), ManagedStorageWriterErrorV1> {
+        self.service
+            .validate_namespace_write(&lease.handle)
+            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
         let _namespace_lock = open_namespace_lock(&lease.path)?;
+        // The admission can be invalidated between the first check and lock acquisition by a
+        // cutover/reconciliation. Revalidate while the physical mutation frontier is held.
         self.service
             .validate_namespace_write(&lease.handle)
             .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))?;
@@ -1404,9 +1462,29 @@ pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmi
 pub fn memory_grants_with_context(
     seed: u8,
     authority_generation: sigil_kernel::resource::AuthorityGeneration,
-    source_binding_hash: CanonicalHash,
+    cutover_manifest_hash: CanonicalHash,
+) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
+    memory_grants_with_application_generation(
+        seed,
+        authority_generation,
+        cutover_manifest_hash,
+        authority_generation.epoch,
+    )
+}
+
+pub fn memory_grants_with_application_generation(
+    seed: u8,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    cutover_manifest_hash: CanonicalHash,
+    application_generation: u64,
 ) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
     use sigil_kernel::resource::MemoryScopeClassV1;
+    let source = sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+        cutover_manifest_hash,
+        application_generation,
+    };
+    let source_binding_hash =
+        sigil_resource_authority::storage::admission_source_binding_hash(&source);
     let project = grant_for_owner(
         StorageWriterChannelV1::DurableMemory,
         sigil_kernel::resource::ManagedStorageSemanticOwnerV1::DurableMemory(
@@ -1452,9 +1530,31 @@ pub fn grant_for_channel_with_context(
     channel: StorageWriterChannelV1,
     seed: u8,
     authority_generation: sigil_kernel::resource::AuthorityGeneration,
-    source_binding_hash: CanonicalHash,
+    cutover_manifest_hash: CanonicalHash,
+) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+    grant_for_channel_with_application_generation(
+        channel,
+        seed,
+        authority_generation,
+        cutover_manifest_hash,
+        authority_generation.epoch,
+    )
+}
+
+pub fn grant_for_channel_with_application_generation(
+    channel: StorageWriterChannelV1,
+    seed: u8,
+    authority_generation: sigil_kernel::resource::AuthorityGeneration,
+    cutover_manifest_hash: CanonicalHash,
+    application_generation: u64,
 ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
     let (semantic_owner, _, _) = channel.mapping();
+    let source = sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+        cutover_manifest_hash,
+        application_generation,
+    };
+    let source_binding_hash =
+        sigil_resource_authority::storage::admission_source_binding_hash(&source);
     grant_for_owner(
         channel,
         semantic_owner,

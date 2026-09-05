@@ -7,6 +7,14 @@ pub const BUNDLED_OPENAI_RESPONSES_MODELS: [(&str, &str, bool); 3] = [
     ("gpt-4.1", "GPT-4.1", false),
 ];
 
+/// Trusted output-token ceiling for the pinned GPT-4.1 model snapshot.
+///
+/// Unknown and custom deployment ids remain unverified rather than being assigned a limit by
+/// model-name prefix.
+pub fn openai_responses_maximum_output_tokens(model_name: &str) -> Option<u32> {
+    matches!(model_name.trim(), "gpt-4.1" | "gpt-4.1-2025-04-14").then_some(32_768)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiModelAdmission {
     KnownGeneration,

@@ -4,6 +4,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const OPENAI_RESPONSES_API_KEY_ENV: &str = "SIGIL_OPENAI_RESPONSES_API_KEY";
+pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+pub const OPENAI_RESPONSES_API_KEY_ENV_NAMES: &[&str] =
+    &[OPENAI_RESPONSES_API_KEY_ENV, OPENAI_API_KEY_ENV];
 pub const OPENAI_RESPONSES_BASE_URL_ENV: &str = "SIGIL_OPENAI_RESPONSES_BASE_URL";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -52,7 +55,7 @@ impl OpenAiResponsesProviderConfig {
         if let Some(value) = read_env_string(OPENAI_RESPONSES_BASE_URL_ENV) {
             resolved.base_url = value;
         }
-        if let Some(value) = read_env_string(OPENAI_RESPONSES_API_KEY_ENV) {
+        if let Some(value) = read_env_string_from(OPENAI_RESPONSES_API_KEY_ENV_NAMES) {
             resolved.api_key = Some(value);
         }
         Ok(resolved)
@@ -84,6 +87,10 @@ fn read_env_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn read_env_string_from(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| read_env_string(name))
 }
 
 #[cfg(test)]

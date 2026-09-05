@@ -33,6 +33,7 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
     let provider = {
         let _guard = crate::test_env::lock();
         let _scope = EnvScope::set(OPENAI_RESPONSES_API_KEY_ENV, " ");
+        let _alias_scope = EnvScope::set("OPENAI_API_KEY", " ");
         OpenAiResponsesProvider::new(
             OpenAiResponsesProviderConfig::default(),
             ModelRequestTimeouts::default(),

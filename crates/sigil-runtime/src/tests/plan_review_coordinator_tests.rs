@@ -52,6 +52,10 @@ fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> 
         &state,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
             crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
@@ -97,6 +101,10 @@ fn child_resource_fixture(
         &state,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
             crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
@@ -240,6 +248,10 @@ fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> 
         &state,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x91; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
             crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
@@ -1227,6 +1239,10 @@ where
         &authority_state,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x8a; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
             crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),

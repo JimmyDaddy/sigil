@@ -56,37 +56,6 @@ struct TestPlannerV1 {
     isolation: bool,
 }
 
-/// Test-only timing seam: the command is a real owned child, but the delayed return makes the
-/// post-spawn parent-exit/descendant-pipe race deterministic without mocking inventory or birth.
-#[cfg(unix)]
-struct DelayedOwnedChildLauncherV1;
-
-#[cfg(unix)]
-impl ManagedOneShotLaunchServiceV1 for DelayedOwnedChildLauncherV1 {
-    fn launch(
-        &self,
-        request: &ManagedExecutionRequestV1,
-        environment: &std::collections::BTreeMap<String, String>,
-    ) -> Result<std::process::Child, ManagedExecutionErrorV1> {
-        let Some(program) = request.argv.first() else {
-            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
-        };
-        let mut command = std::process::Command::new(program);
-        command
-            .args(request.argv.iter().skip(1))
-            .env_clear()
-            .envs(environment)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let child = command
-            .spawn()
-            .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        Ok(child)
-    }
-}
-
 impl ManagedExecutionPlannerV1 for TestPlannerV1 {
     fn plan_execution(
         &self,
@@ -344,32 +313,54 @@ fn r71_e02_production_inventory_settles_an_owned_fast_command_truthfully() {
 
 #[cfg(unix)]
 #[test]
-fn r71_e02_fast_parent_with_descendant_held_pipe_returns_bounded_incomplete_capture() {
+fn r71_e03_fast_parent_with_background_child_is_cleaned_before_success_receipt() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let svc = SandboxManagedExecutionServiceV1::new(
-        Arc::new(TestPlannerV1 { isolation: false }),
-        dir.path().to_path_buf(),
-    )
-    .with_process_inventory(production_process_inventory(&dir))
-    .with_one_shot_launcher(Arc::new(DelayedOwnedChildLauncherV1));
+    let background_pid_path = dir.path().join("background.pid");
+    let svc = production_inventory_service(false, &dir);
     let started = std::time::Instant::now();
-    let receipt = futures::executor::block_on(svc.execute_once(
-        bundle("one-shot"),
-        exec_request(&["/bin/sh", "-c", "sleep 1 & exit 0"], false),
-    ))
-    .expect("reaped parent must not wait for descendant-held pipes");
+    let receipt = futures::executor::block_on(
+        svc.execute_once(
+            bundle("one-shot"),
+            exec_request(
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "sleep 30 & child=$!; printf '%s\\n' \"$child\" > \"$1\"; sleep 0.2; exit 0",
+                    "sigil-managed-background-child",
+                    background_pid_path
+                        .to_str()
+                        .expect("temporary path is valid UTF-8"),
+                ],
+                false,
+            ),
+        ),
+    )
+    .expect("owned background child must be cleaned before a success receipt");
     assert!(
         started.elapsed() < std::time::Duration::from_millis(900),
-        "post-reap capture must not wait for the descendant's one-second pipe hold"
+        "group cleanup must stay bounded"
     );
     assert!(matches!(
         receipt.process.termination,
         ProcessTerminationV1::Exited { code: 0 }
     ));
-    assert!(
-        receipt.process.stdout_summary.truncated || receipt.process.stderr_summary.truncated,
-        "capture must truthfully report the inherited pipe as incomplete"
-    );
+    let background_pid = std::fs::read_to_string(&background_pid_path)
+        .expect("background child PID")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric background child PID");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match sigil_process::observe_process_identity(background_pid) {
+            Err(sigil_process::ProcessIdentityObservationErrorV1::Absent)
+            | Err(sigil_process::ProcessIdentityObservationErrorV1::NotLive(_)) => break,
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(_) => panic!("background child {background_pid} survived a success receipt"),
+            Err(error) => panic!("background child observation failed: {error}"),
+        }
+    }
 }
 
 #[test]
@@ -422,6 +413,77 @@ fn r71_managed_output_cap_truncates_truthfully() {
     assert!(receipt.process.stdout_summary.truncated);
     assert_eq!(receipt.process.stdout_summary.observed_bytes, 100);
     assert_eq!(receipt.process.stdout_summary.retained_bytes, 10);
+}
+
+#[test]
+fn r71_managed_maximum_runtime_bound_does_not_overflow_deadline_math() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = service(false, dir.path());
+    #[cfg(unix)]
+    let mut request = exec_request(&["/bin/sh", "-c", "exit 0"], false);
+    #[cfg(windows)]
+    let mut request = exec_request(&["cmd", "/C", "exit 0"], false);
+    request.limits.max_runtime_ms = u64::MAX;
+    let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+        .expect("a bounded request must not panic while deriving its deadline");
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::Exited { code: 0 }
+    ));
+}
+
+#[test]
+fn r71_output_observation_count_saturates_instead_of_wrapping() {
+    let mut state = CapState {
+        retained: Vec::new(),
+        observed: u64::MAX - 1,
+        cap: 0,
+    };
+    state.push(&[1, 2]);
+    assert_eq!(state.observed, u64::MAX);
+    assert!(state.summary().truncated);
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_managed_dual_drain_starts_deadline_before_output_and_stops_tree_on_timeout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = service(false, dir.path());
+    let mut request = exec_request(&["/bin/sh", "-c", "yes >&2"], false);
+    request.limits.max_runtime_ms = 100;
+    let started = std::time::Instant::now();
+    let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+        .expect("timeout must produce an owned termination receipt");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::TimedOut
+    ));
+    assert!(receipt.process.stderr_summary.observed_bytes > 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_managed_cancellation_reaches_one_shot_owner_before_deadline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = service(false, dir.path());
+    let owner = sigil_kernel::RunCancellationOwner::new();
+    let cancellation = owner.handle();
+    let cancel_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(owner.request_cancel());
+    });
+    let receipt = futures::executor::block_on(svc.execute_once_with_cancellation(
+        bundle("one-shot"),
+        exec_request(&["/bin/sh", "-c", "sleep 30"], false),
+        Some(cancellation),
+    ))
+    .expect("cancellation must produce an owned terminal receipt");
+    cancel_thread.join().expect("cancel thread");
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::Cancelled
+    ));
 }
 
 #[test]

@@ -9,14 +9,14 @@ use crate::{
     MAX_DURABLE_PERMISSION_MATCHES, MAX_DURABLE_PERMISSION_REASONS,
     MAX_DURABLE_PERMISSION_TEXT_BYTES, MAX_DURABLE_TOOL_EXECUTION_DETAILS_BYTES,
     MAX_DURABLE_TOOL_EXECUTION_PATHS, MAX_DURABLE_TOOL_EXECUTION_RECEIPT_IDS,
-    PreparedToolAuditBinding, RunEvent, Session, SessionLogEntry,
-    TOOL_APPROVAL_AUDIT_SCHEMA_VERSION, TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION,
-    TOOL_PERMISSION_DECISION_SCHEMA_VERSION, TerminalTaskEntry, ToolApprovalAllowSource,
-    ToolApprovalAuditAction, ToolApprovalDecisionReceiptV2, ToolApprovalEntry,
-    ToolApprovalSessionGrantEntry, ToolApprovalSessionGrantExpiry, ToolApprovalTerminalStatusV2,
-    ToolApprovalUserDecision, ToolEgressAudit, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPermissionDecisionV2Entry, ToolPermissionPlanV2, ToolPreview,
-    ToolResult, ToolResultMeta, ToolResultStatus, ToolSubjectAudit,
+    PreparedToolAuditBinding, Session, SessionLogEntry, TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
+    TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, TOOL_PERMISSION_DECISION_SCHEMA_VERSION,
+    TerminalTaskEntry, ToolApprovalAllowSource, ToolApprovalAuditAction,
+    ToolApprovalDecisionReceiptV2, ToolApprovalEntry, ToolApprovalSessionGrantEntry,
+    ToolApprovalSessionGrantExpiry, ToolApprovalTerminalStatusV2, ToolApprovalUserDecision,
+    ToolEgressAudit, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPermissionDecisionV2Entry, ToolPermissionPlanV2, ToolPreview, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolSubjectAudit,
     event::EventHandler,
     permission::{
         PermissionDecision, tool_approval_session_grant_available_for_plan,
@@ -856,13 +856,16 @@ pub(super) fn append_tool_control_entries_from_result(
     result: &mut ToolResult,
 ) -> Result<()> {
     let mut bundled_receipts = Vec::new();
+    let mut public_controls = Vec::new();
     for control in std::mem::take(&mut result.control_entries) {
         if matches!(control, ControlEntry::ToolArtifactRead(_)) {
             bundled_receipts.push(control);
             continue;
         }
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+        public_controls.push(control);
+    }
+    if !public_controls.is_empty() {
+        handler.commit_controls(session, public_controls)?;
     }
     result.control_entries = bundled_receipts;
     Ok(())

@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeMap,
     fmt,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -97,20 +98,51 @@ enum DurableRunCancellationRecord {
     Finalized(RunCancellationFinalizedEntry),
 }
 
-/// Cloneable durable cancellation recorder backed by the session's linear writer.
+#[derive(Debug, Default)]
+struct InMemoryCancellationState {
+    records: BTreeMap<String, DurableRunCancellationRecord>,
+}
+
+/// Cloneable cancellation recorder backed by the session's linear writer, or by a process-local
+/// state for provider-only safe sessions that deliberately have no durable store.
 #[derive(Debug, Clone)]
 pub struct RunCancellationRecorder {
-    store: JsonlSessionStore,
+    backend: RunCancellationRecorderBackend,
+}
+
+#[derive(Debug, Clone)]
+enum RunCancellationRecorderBackend {
+    Durable(JsonlSessionStore),
+    InMemory(Arc<Mutex<InMemoryCancellationState>>),
 }
 
 impl RunCancellationRecorder {
     pub(crate) fn new(store: JsonlSessionStore) -> Self {
-        Self { store }
+        Self {
+            backend: RunCancellationRecorderBackend::Durable(store),
+        }
+    }
+
+    /// Creates a process-local recorder for an in-memory provider-only session.
+    ///
+    /// Safe sessions must retain cancellation's ordering and idempotency semantics while
+    /// intentionally avoiding JSONL, locks, and authority side effects. The records disappear
+    /// with the process and are never presented as durable session history.
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self {
+            backend: RunCancellationRecorderBackend::InMemory(Arc::new(Mutex::new(
+                InMemoryCancellationState::default(),
+            ))),
+        }
     }
 
     pub fn append_requested(&self, entry: &RunCancellationRequestedEntry) -> Result<bool> {
+        let RunCancellationRecorderBackend::Durable(store) = &self.backend else {
+            return self.append_in_memory_requested(entry);
+        };
         let entry = entry.clone();
-        self.store.append_event_if(
+        store.append_event_if(
             DurableEventType::RunStatusChanged,
             EventClass::Critical,
             serde_json::to_value(DurableRunCancellationRecord::Requested(entry.clone()))?,
@@ -135,8 +167,11 @@ impl RunCancellationRecorder {
     }
 
     pub fn append_finalized(&self, entry: &RunCancellationFinalizedEntry) -> Result<bool> {
+        let RunCancellationRecorderBackend::Durable(store) = &self.backend else {
+            return self.append_in_memory_finalized(entry);
+        };
         let entry = entry.clone();
-        self.store.append_event_if(
+        store.append_event_if(
             DurableEventType::RunFinalized,
             EventClass::Critical,
             serde_json::to_value(DurableRunCancellationRecord::Finalized(entry.clone()))?,
@@ -156,6 +191,51 @@ impl RunCancellationRecorder {
                 }))
             },
         )
+    }
+
+    fn append_in_memory_requested(&self, entry: &RunCancellationRequestedEntry) -> Result<bool> {
+        let RunCancellationRecorderBackend::InMemory(state) = &self.backend else {
+            unreachable!("durable cancellation recorder uses the JSONL path");
+        };
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("in-memory cancellation recorder lock poisoned"))?;
+        if let Some(DurableRunCancellationRecord::Requested(existing)) =
+            state.records.get(&entry.request_id)
+        {
+            if existing.run_scope_id != entry.run_scope_id {
+                anyhow::bail!("cancellation request id is reused across run scopes");
+            }
+            return Ok(false);
+        }
+        state.records.insert(
+            entry.request_id.clone(),
+            DurableRunCancellationRecord::Requested(entry.clone()),
+        );
+        Ok(true)
+    }
+
+    fn append_in_memory_finalized(&self, entry: &RunCancellationFinalizedEntry) -> Result<bool> {
+        let RunCancellationRecorderBackend::InMemory(state) = &self.backend else {
+            unreachable!("durable cancellation recorder uses the JSONL path");
+        };
+        let mut state = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("in-memory cancellation recorder lock poisoned"))?;
+        match state.records.get(&entry.request_id) {
+            Some(DurableRunCancellationRecord::Requested(request)) => {
+                if request.run_scope_id != entry.run_scope_id {
+                    anyhow::bail!("cancellation terminal scope does not match its request");
+                }
+            }
+            Some(DurableRunCancellationRecord::Finalized(_)) => return Ok(false),
+            None => anyhow::bail!("cancellation terminal requires a matching durable request"),
+        }
+        state.records.insert(
+            entry.request_id.clone(),
+            DurableRunCancellationRecord::Finalized(entry.clone()),
+        );
+        Ok(true)
     }
 }
 

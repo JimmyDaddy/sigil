@@ -15,9 +15,11 @@ use futures::future::BoxFuture;
 use sigil_application::{
     ApplicationCommandReceipt, ApplicationCommandRequest, ApplicationDomainReceipt,
     ApplicationError, ApplicationInFlightReceipt, ApplicationPort, CommandConflict,
+    CommandEffectBinding, CommandLifecyclePhase, CommandNoEffectProof, CommandRecoveryBinding,
     CommandRejection, CommandReservationKey, OpenProjectionRequest, PageCancellationReceipt,
     PageRequestId, ProjectionDeliveryAck, ProjectionPage, ProjectionPageRequest,
-    ProjectionSnapshot, UncertainCommandReceipt, command_fingerprint,
+    ProjectionSnapshot, SafetyStopDisposition, SafetyStopRequestedButUnrecorded,
+    UncertainCommandReceipt, command_fingerprint,
 };
 
 /// Runtime query source for the bounded application projection.
@@ -41,7 +43,16 @@ pub trait RuntimeApplicationProjectionSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeApplicationDispatch {
     Settled(ApplicationDomainReceipt),
+    /// The domain owner has proven that no physical effect crossed its first boundary.
+    ConfirmedNoEffect {
+        rejection: CommandRejection,
+        proof: CommandNoEffectProof,
+    },
+    /// Legacy executors may still report a rejection, but it is not a no-effect proof. The
+    /// application service records it as uncertain unless the owner uses `ConfirmedNoEffect`.
     Rejected(CommandRejection),
+    /// The host crossed a boundary whose domain outcome cannot be proved from this dispatch.
+    /// The application service supplies the only typed recovery binding from the reservation key.
     Uncertain(UncertainCommandReceipt),
 }
 
@@ -50,10 +61,30 @@ pub enum RuntimeApplicationDispatch {
 /// The service reserves the command before calling this trait.  An executor error is therefore
 /// converted to an `Uncertain` receipt instead of being treated as proof that no effect happened.
 pub trait RuntimeApplicationCommandExecutor: Send + Sync {
+    /// Asks the concrete domain owner to durably bind the command before any physical effect.
+    /// Implementations must return an error when they cannot prove such a binding; there is no
+    /// default or process-local fallback.
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>>;
+
     fn dispatch(
         &self,
         request: ApplicationCommandRequest,
     ) -> BoxFuture<'static, Result<RuntimeApplicationDispatch, ApplicationError>>;
+
+    /// Requests an emergency close of the exact owner's forward gate when the reservation
+    /// ledger is unavailable. This is deliberately separate from normal dispatch: a successful
+    /// enqueue or a generic dispatch result does not prove that the gate is closed.
+    fn request_safety_stop(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<SafetyStopDisposition, ApplicationError>> {
+        Box::pin(async { Ok(SafetyStopDisposition::Uncertain) })
+    }
 }
 
 /// Runtime owner for application projection delivery acknowledgements.
@@ -69,7 +100,7 @@ pub trait RuntimeApplicationDeliveryAcker: Send + Sync {
 pub enum RuntimeApplicationReservationAdmission {
     Reserved,
     InFlight(ApplicationInFlightReceipt),
-    Existing(ApplicationCommandReceipt),
+    Existing(Box<ApplicationCommandReceipt>),
     Conflict(CommandConflict),
 }
 
@@ -86,6 +117,41 @@ pub trait RuntimeApplicationReservationStore: Send + Sync {
         &self,
         key: CommandReservationKey,
         fingerprint: String,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>>;
+
+    /// Persists an owner-issued effect binding before a physical owner crosses its first effect
+    /// boundary. T03/T05 own the concrete binding/receipt producer; this application service
+    /// only carries the typed lifecycle transition.
+    fn mark_effect_started(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        binding: CommandEffectBinding,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>>;
+
+    /// Records that the executor supplied an exact domain commit reference. The reservation
+    /// journal remains a replay index and must not become a second domain commit authority.
+    fn mark_domain_committed(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        receipt: ApplicationDomainReceipt,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>>;
+
+    /// Makes an explicit no-effect proof durable without changing it into a successful command.
+    fn mark_confirmed_no_effect(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        proof: CommandNoEffectProof,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>>;
+
+    /// Records an outcome that must be reconciled. Recovery never re-dispatches this state.
+    fn mark_uncertain(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        receipt: UncertainCommandReceipt,
     ) -> BoxFuture<'static, Result<(), ApplicationError>>;
 
     fn settle(
@@ -147,13 +213,16 @@ impl RuntimeApplicationService {
 
     fn uncertain_receipt(
         request: &ApplicationCommandRequest,
+        key: CommandReservationKey,
         fingerprint: String,
+        phase: CommandLifecyclePhase,
     ) -> ApplicationCommandReceipt {
         ApplicationCommandReceipt::Uncertain(UncertainCommandReceipt {
             command_id: request.envelope.command_id.clone(),
             command_kind: request.envelope.command.kind().to_owned(),
             reservation_fingerprint: fingerprint,
-            recovery_binding: "application-command-reconcile".to_owned(),
+            recovery: CommandRecoveryBinding { key, phase },
+            owner_recovery_binding: None,
         })
     }
 
@@ -161,15 +230,57 @@ impl RuntimeApplicationService {
         request: &ApplicationCommandRequest,
         receipt: ApplicationDomainReceipt,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let key = request
+            .admission
+            .reservation_key(&request.envelope.command_id);
         if receipt.command_id != request.envelope.command_id
             || receipt.command_kind != request.envelope.command.kind()
             || receipt.frontier.scope != request.admission.scope
+            || receipt.settlement != request.envelope.command.policy().settlement
         {
             return Err(ApplicationError::CorruptProjection(
                 "runtime command receipt does not match its admitted request".to_owned(),
             ));
         }
+        receipt.validate_for(&key)?;
         Ok(ApplicationCommandReceipt::Settled(receipt))
+    }
+
+    fn exact_fail_safe_stop(request: &ApplicationCommandRequest) -> bool {
+        matches!(
+            &request.envelope.command,
+            sigil_application::ApplicationCommand::Run(
+                sigil_application::RunCommand::CancelTerminalTask { .. }
+            )
+        )
+    }
+
+    async fn persist_uncertain_after_dispatch(
+        reservations: &Arc<dyn RuntimeApplicationReservationStore>,
+        request: &ApplicationCommandRequest,
+        key: CommandReservationKey,
+        fingerprint: String,
+        phase: CommandLifecyclePhase,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let receipt =
+            match Self::uncertain_receipt(request, key.clone(), fingerprint.clone(), phase) {
+                ApplicationCommandReceipt::Uncertain(receipt) => receipt,
+                _ => unreachable!("uncertain_receipt always returns an uncertain receipt"),
+            };
+        reservations
+            .mark_uncertain(key.clone(), fingerprint.clone(), receipt.clone())
+            .await?;
+        // The uncertainty record is the durable owner fact. Settlement is only an idempotent
+        // replay index; a failure here must not turn the already-recorded uncertainty into a
+        // successful command.
+        let _ = reservations
+            .settle(
+                key,
+                fingerprint,
+                ApplicationCommandReceipt::Uncertain(receipt.clone()),
+            )
+            .await;
+        Ok(ApplicationCommandReceipt::Uncertain(receipt))
     }
 }
 
@@ -281,16 +392,43 @@ impl ApplicationPort for RuntimeApplicationService {
             let key = request
                 .admission
                 .reservation_key(&request.envelope.command_id);
-            let admission = reservations
+            let admission = match reservations
                 .reserve(key.clone(), fingerprint.clone(), request.clone())
-                .await?;
+                .await
+            {
+                Ok(admission) => admission,
+                Err(error) if Self::exact_fail_safe_stop(&request) => {
+                    // A durable command receipt cannot be claimed while the ledger is corrupt,
+                    // but an already authenticated exact root must still close its forward gate
+                    // through its real owner. This lane never admits a new forward effect, and
+                    // a normal dispatch result is not evidence that the gate was closed.
+                    match executor.request_safety_stop(request.clone()).await {
+                        Ok(SafetyStopDisposition::ForwardGateClosed) => {
+                            return Ok(
+                                ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(
+                                    SafetyStopRequestedButUnrecorded {
+                                        command_id: request.envelope.command_id.clone(),
+                                        command_kind: request.envelope.command.kind().to_owned(),
+                                        reason: error.to_string(),
+                                    },
+                                ),
+                            );
+                        }
+                        Ok(SafetyStopDisposition::Uncertain) => {
+                            return Err(ApplicationError::Unavailable);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             match admission {
                 RuntimeApplicationReservationAdmission::Reserved => {}
                 RuntimeApplicationReservationAdmission::InFlight(receipt) => {
                     return Ok(ApplicationCommandReceipt::InFlight(receipt));
                 }
                 RuntimeApplicationReservationAdmission::Existing(receipt) => {
-                    return Ok(match receipt {
+                    return Ok(match *receipt {
                         ApplicationCommandReceipt::Settled(domain) => {
                             ApplicationCommandReceipt::Replayed(domain)
                         }
@@ -305,51 +443,147 @@ impl ApplicationPort for RuntimeApplicationService {
                 }
             }
 
-            if let Err(error) = reservations
+            reservations
                 .mark_dispatch_started(key.clone(), fingerprint.clone())
+                .await?;
+            let effect_binding = match executor
+                .bind_effect(request.clone(), key.clone(), fingerprint.clone())
                 .await
             {
-                // The reservation is already durable, but dispatch has not been admitted. If
-                // the marker write raced a storage fault, retain an explicit uncertain terminal
-                // instead of leaving an unrepairable Reserved row that every retry reports as
-                // InFlight forever. A failed settlement keeps the original error and the
-                // durable reservation remains fail-closed for operator reconciliation.
-                let uncertain = Self::uncertain_receipt(&request, fingerprint.clone());
-                if reservations
-                    .settle(key, fingerprint, uncertain.clone())
-                    .await
-                    .is_ok()
-                {
-                    return Ok(uncertain);
+                Ok(binding) => binding,
+                Err(_) => {
+                    return Self::persist_uncertain_after_dispatch(
+                        &reservations,
+                        &request,
+                        key,
+                        fingerprint,
+                        CommandLifecyclePhase::DispatchStarted,
+                    )
+                    .await;
                 }
-                return Err(error);
+            };
+            if effect_binding.validate().is_err() {
+                return Self::persist_uncertain_after_dispatch(
+                    &reservations,
+                    &request,
+                    key,
+                    fingerprint,
+                    CommandLifecyclePhase::DispatchStarted,
+                )
+                .await;
             }
+            if effect_binding.recovery.key != key
+                || effect_binding.reservation_fingerprint != fingerprint
+            {
+                return Self::persist_uncertain_after_dispatch(
+                    &reservations,
+                    &request,
+                    key,
+                    fingerprint,
+                    CommandLifecyclePhase::DispatchStarted,
+                )
+                .await;
+            }
+            reservations
+                .mark_effect_started(key.clone(), fingerprint.clone(), effect_binding)
+                .await?;
 
             let outcome = match executor.dispatch(request.clone()).await {
                 Ok(RuntimeApplicationDispatch::Settled(receipt)) => {
                     match Self::validate_settled_receipt(&request, receipt) {
                         Ok(receipt) => receipt,
-                        Err(_) => Self::uncertain_receipt(&request, fingerprint.clone()),
+                        Err(_) => Self::uncertain_receipt(
+                            &request,
+                            key.clone(),
+                            fingerprint.clone(),
+                            CommandLifecyclePhase::EffectStarted,
+                        ),
                     }
                 }
-                Ok(RuntimeApplicationDispatch::Rejected(rejection)) => {
-                    ApplicationCommandReceipt::Rejected(rejection)
+                Ok(RuntimeApplicationDispatch::ConfirmedNoEffect { rejection, proof }) => {
+                    proof.validate()?;
+                    if proof.source.key != key || proof.reservation_fingerprint != fingerprint {
+                        return Err(ApplicationError::ScopeMismatch);
+                    }
+                    reservations
+                        .mark_confirmed_no_effect(key.clone(), fingerprint.clone(), proof.clone())
+                        .await?;
+                    let rejection = ApplicationCommandReceipt::Rejected(rejection);
+                    if reservations
+                        .settle(key, fingerprint, rejection.clone())
+                        .await
+                        .is_err()
+                    {
+                        return Ok(ApplicationCommandReceipt::ConfirmedNoEffect(proof));
+                    }
+                    return Ok(rejection);
                 }
+                // A bare rejection has no owner-issued proof that it remained pre-effect. Keep
+                // it in the same recovery lane as an executor transport failure.
+                Ok(RuntimeApplicationDispatch::Rejected(_)) | Err(_) => Self::uncertain_receipt(
+                    &request,
+                    key.clone(),
+                    fingerprint.clone(),
+                    CommandLifecyclePhase::EffectStarted,
+                ),
                 Ok(RuntimeApplicationDispatch::Uncertain(receipt)) => {
-                    ApplicationCommandReceipt::Uncertain(receipt)
+                    if receipt.validate().is_err()
+                        || receipt.recovery.key != key
+                        || receipt.reservation_fingerprint != fingerprint
+                        || receipt.recovery.phase != CommandLifecyclePhase::EffectStarted
+                    {
+                        Self::uncertain_receipt(
+                            &request,
+                            key.clone(),
+                            fingerprint.clone(),
+                            CommandLifecyclePhase::EffectStarted,
+                        )
+                    } else {
+                        ApplicationCommandReceipt::Uncertain(receipt)
+                    }
                 }
-                Err(_) => Self::uncertain_receipt(&request, fingerprint.clone()),
             };
 
-            if reservations
-                .settle(key, fingerprint, outcome.clone())
-                .await
-                .is_err()
-            {
-                return Ok(Self::uncertain_receipt(
-                    &request,
-                    command_fingerprint(&request)?,
-                ));
+            match &outcome {
+                ApplicationCommandReceipt::Settled(receipt) => {
+                    reservations
+                        .mark_domain_committed(key.clone(), fingerprint.clone(), receipt.clone())
+                        .await?;
+                    if reservations
+                        .settle(key.clone(), fingerprint.clone(), outcome.clone())
+                        .await
+                        .is_err()
+                    {
+                        // The domain receipt is already verified and durable. The application
+                        // settlement append is only a replay index, so surface the true terminal
+                        // and let the next same-key request replay it without another dispatch.
+                        return Ok(outcome.clone());
+                    }
+                }
+                ApplicationCommandReceipt::Uncertain(receipt) => {
+                    reservations
+                        .mark_uncertain(key.clone(), fingerprint.clone(), receipt.clone())
+                        .await?;
+                    if reservations
+                        .settle(
+                            key,
+                            fingerprint,
+                            ApplicationCommandReceipt::Uncertain(receipt.clone()),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        // `mark_uncertain` is already durable, so returning its typed receipt is
+                        // truthful and fail-closed even if the replay index finalization races a
+                        // later storage fault.
+                        return Ok(ApplicationCommandReceipt::Uncertain(receipt.clone()));
+                    }
+                }
+                _ => {
+                    return Err(ApplicationError::CorruptProjection(
+                        "runtime dispatch produced an unsupported command receipt".to_owned(),
+                    ));
+                }
             }
             Ok(outcome)
         })

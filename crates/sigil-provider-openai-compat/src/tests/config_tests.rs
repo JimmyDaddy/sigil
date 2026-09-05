@@ -22,7 +22,7 @@ fn default_for_model_overrides_only_model() {
 }
 
 #[test]
-fn resolved_config_uses_sigil_specific_env() -> Result<()> {
+fn resolved_config_prefers_sigil_specific_env_over_openai_alias() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (
@@ -48,7 +48,7 @@ fn resolved_config_uses_sigil_specific_env() -> Result<()> {
 }
 
 #[test]
-fn resolved_config_ignores_openai_api_key_and_skips_blank_env() -> Result<()> {
+fn resolved_config_uses_openai_api_key_alias_when_sigil_env_is_blank() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
@@ -58,7 +58,7 @@ fn resolved_config_ignores_openai_api_key_and_skips_blank_env() -> Result<()> {
     let resolved = OpenAiCompatibleProviderConfig::default_for_model("config-model").resolved()?;
 
     assert_eq!(resolved.model, "config-model");
-    assert_eq!(resolved.api_key, None);
+    assert_eq!(resolved.api_key.as_deref(), Some("openai-key"));
     Ok(())
 }
 

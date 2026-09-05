@@ -38,9 +38,10 @@ pub use compaction_token_profile::{
     default_deepseek_v4_flash_tokenizer_url, download_default_deepseek_v4_flash_tokenizer,
 };
 pub use config::{
-    DeepSeekProviderConfig, DeepSeekProviderProfile, DeepSeekProviderQuirkProfile,
-    SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV,
-    SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
+    DEEPSEEK_API_KEY_ENV, DeepSeekProviderConfig, DeepSeekProviderProfile,
+    DeepSeekProviderQuirkProfile, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV,
+    SIGIL_API_KEY_ENV_NAMES, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV,
+    SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
 };
 pub use fim::DeepSeekFimCompletionRequest;
 pub use prefix::DeepSeekPrefixCompletionRequest;

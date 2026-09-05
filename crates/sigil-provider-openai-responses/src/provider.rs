@@ -70,9 +70,18 @@ impl OpenAiResponsesProvider {
         config: OpenAiResponsesProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
+        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+    }
+
+    /// Builds an exact provider with a caller-owned HTTP client.
+    pub fn new_exact_with_client(
+        config: OpenAiResponsesProviderConfig,
+        timeouts: ModelRequestTimeouts,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         Ok(Self {
             timeouts,
-            client: build_http_client()?,
+            client,
             capabilities: openai_responses_capabilities(),
             config,
         })
@@ -311,7 +320,7 @@ impl OpenAiResponsesProvider {
     }
 }
 
-fn is_official_openai_base_url(base_url: &str) -> bool {
+pub fn is_official_openai_base_url(base_url: &str) -> bool {
     base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
@@ -327,6 +336,12 @@ impl Provider for OpenAiResponsesProvider {
 
     fn context_capabilities(&self, _model_name: &str) -> ProviderContextCapabilities {
         openai_responses_context_capabilities(self.uses_official_openai_endpoint())
+    }
+
+    fn maximum_output_tokens(&self, model_name: &str) -> Option<u32> {
+        self.uses_official_openai_endpoint()
+            .then(|| crate::openai_responses_maximum_output_tokens(model_name))
+            .flatten()
     }
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {

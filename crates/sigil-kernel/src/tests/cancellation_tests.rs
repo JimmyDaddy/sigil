@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use super::{
-    RunCancellationFinalizedEntry, RunCancellationOwner, RunCancellationRequestedEntry,
-    RunCancellationTarget, RunCancellationTerminalOutcome, RunEffectClass, RunEffectKind,
-    RunQuiescenceOutcome, append_run_cancellation_finalized, append_run_cancellation_requested,
-    reconcile_unfinished_run_cancellations,
+    RunCancellationFinalizedEntry, RunCancellationOwner, RunCancellationRecorder,
+    RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome,
+    RunEffectClass, RunEffectKind, RunQuiescenceOutcome, append_run_cancellation_finalized,
+    append_run_cancellation_requested, reconcile_unfinished_run_cancellations,
 };
 
 #[tokio::test]
@@ -181,6 +181,76 @@ fn durable_cancellation_terminal_is_exactly_once() -> anyhow::Result<()> {
         &mut session,
         &final_entry
     )?);
+    Ok(())
+}
+
+#[test]
+fn in_memory_cancellation_recorder_is_idempotent_and_scope_bound() -> anyhow::Result<()> {
+    let recorder = RunCancellationRecorder::in_memory();
+    let request = RunCancellationRequestedEntry {
+        request_id: "cancel-memory".to_owned(),
+        run_scope_id: "run-memory".to_owned(),
+        target: RunCancellationTarget::Run,
+        reason: "user request".to_owned(),
+        requested_at_ms: 10,
+        quiescence_deadline_ms: 20,
+    };
+    let shared_recorder = recorder.clone();
+    assert!(recorder.append_requested(&request)?);
+    assert!(!shared_recorder.append_requested(&request)?);
+
+    let cross_scope_request = RunCancellationRequestedEntry {
+        run_scope_id: "run-other".to_owned(),
+        ..request.clone()
+    };
+    let error = recorder
+        .append_requested(&cross_scope_request)
+        .expect_err("request id reuse across scopes must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cancellation request id is reused across run scopes")
+    );
+
+    let finalized = RunCancellationFinalizedEntry {
+        request_id: request.request_id.clone(),
+        run_scope_id: request.run_scope_id.clone(),
+        outcome: RunCancellationTerminalOutcome::Cancelled,
+        cleanup_complete: true,
+        active_effects: 0,
+        active_tasks: 0,
+        reason: "quiescence confirmed".to_owned(),
+        finalized_at_ms: 30,
+    };
+    assert!(recorder.append_finalized(&finalized)?);
+    assert!(!shared_recorder.append_finalized(&finalized)?);
+
+    let missing_request_recorder = RunCancellationRecorder::in_memory();
+    let error = missing_request_recorder
+        .append_finalized(&finalized)
+        .expect_err("finalization without a request must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cancellation terminal requires a matching durable request")
+    );
+
+    let cross_scope_recorder = RunCancellationRecorder::in_memory();
+    assert!(cross_scope_recorder.append_requested(&request)?);
+    let cross_scope_finalized = RunCancellationFinalizedEntry {
+        run_scope_id: "run-other".to_owned(),
+        ..finalized.clone()
+    };
+    let error = cross_scope_recorder
+        .append_finalized(&cross_scope_finalized)
+        .expect_err("terminal scope mismatch must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("cancellation terminal scope does not match its request")
+    );
+    assert!(cross_scope_recorder.append_finalized(&finalized)?);
+
     Ok(())
 }
 

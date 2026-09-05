@@ -54,6 +54,31 @@ pub async fn build_provider_with_credentials(
     .await
 }
 
+/// Returns a static provider limit without resolving credentials or constructing an HTTP client.
+/// Setup uses this side-effect-free probe before publishing a new configuration.
+pub fn configured_provider_maximum_output_tokens(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+) -> Option<u32> {
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    let connection = loaded.connections.get(&model_ref.connection_id)?;
+    match connection.config.provider {
+        crate::provider_connections::ProviderFamily::OpenAi
+            if sigil_provider_openai_responses::is_official_openai_base_url(
+                &connection.config.base_url,
+            ) =>
+        {
+            sigil_provider_openai_responses::openai_responses_maximum_output_tokens(
+                &model_ref.model_id,
+            )
+        }
+        crate::provider_connections::ProviderFamily::Gemini => {
+            sigil_provider_gemini::gemini_maximum_output_tokens(&model_ref.model_id)
+        }
+        _ => None,
+    }
+}
+
 /// Builds the provider for one exact compound model identity.
 ///
 /// This is the session-resume and fresh-session seam: a changed saved default cannot silently
@@ -76,6 +101,48 @@ pub async fn build_provider_for_model_ref_async(
     .await
 }
 
+/// Builds an exact provider for provider-only recovery without opening any configured
+/// credential store or caller-supplied CA bundle. This path is intentionally limited to
+/// environment and no-auth connections; a stored credential cannot be recovered without a
+/// physical credential-store read and must be repaired through the normal durable setup flow.
+pub async fn build_provider_for_model_ref_from_environment_async(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+) -> Result<Box<dyn Provider>> {
+    anyhow::ensure!(
+        std::env::var_os("SSL_CERT_FILE").is_none(),
+        "provider-only safe mode cannot read SSL_CERT_FILE; unset it or repair authority first"
+    );
+    let loaded = crate::provider_connections::load_provider_connections(root_config);
+    let connection = loaded
+        .connections
+        .get(&model_ref.connection_id)
+        .ok_or_else(|| anyhow!("connection_not_found"))?;
+    anyhow::ensure!(
+        matches!(
+            &connection.credential,
+            crate::provider_connections::LoadedCredentialRef::Config(
+                crate::provider_connections::CredentialRefConfig::Environment { .. }
+                    | crate::provider_connections::CredentialRefConfig::None
+            )
+        ),
+        "provider-only safe mode requires an environment or no-auth credential; repair the stored credential through Setup"
+    );
+    let client = reqwest::Client::builder()
+        .build()
+        .context("failed to build provider-only safe HTTP client")?;
+    let credential_store = EnvironmentOnlyCredentialStore;
+    let environment = crate::provider_connections::ProcessCredentialEnvironment;
+    build_provider_for_model_ref_with_credentials_and_client(
+        root_config,
+        model_ref,
+        &credential_store,
+        &environment,
+        Some(client),
+    )
+    .await
+}
+
 /// Synchronous compatibility wrapper for exact-route owners already running on a blocking thread.
 pub fn build_provider_for_model_ref(
     root_config: &RootConfig,
@@ -94,6 +161,23 @@ pub async fn build_provider_for_model_ref_with_credentials(
     model_ref: &sigil_kernel::ModelRef,
     credential_store: &dyn crate::provider_connections::ProviderCredentialStore,
     environment: &dyn crate::provider_connections::CredentialEnvironment,
+) -> Result<Box<dyn Provider>> {
+    build_provider_for_model_ref_with_credentials_and_client(
+        root_config,
+        model_ref,
+        credential_store,
+        environment,
+        None,
+    )
+    .await
+}
+
+async fn build_provider_for_model_ref_with_credentials_and_client(
+    root_config: &RootConfig,
+    model_ref: &sigil_kernel::ModelRef,
+    credential_store: &dyn crate::provider_connections::ProviderCredentialStore,
+    environment: &dyn crate::provider_connections::CredentialEnvironment,
+    client: Option<reqwest::Client>,
 ) -> Result<Box<dyn Provider>> {
     use crate::provider_connections::{
         ConfigMode, ProviderFamily, ProviderProtocol, load_provider_connections,
@@ -152,38 +236,92 @@ pub async fn build_provider_for_model_ref_with_credentials(
             let mut config: DeepSeekProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
-            Ok(Box::new(DeepSeekProvider::new_exact(config, timeouts)?))
+            Ok(Box::new(match client {
+                Some(client) => DeepSeekProvider::new_exact_with_client(config, timeouts, client)?,
+                None => DeepSeekProvider::new_exact(config, timeouts)?,
+            }))
         }
         (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses)
         | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => {
             let mut config: OpenAiResponsesProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
-            Ok(Box::new(OpenAiResponsesProvider::new_exact(
-                config, timeouts,
-            )?))
+            Ok(Box::new(match client {
+                Some(client) => {
+                    OpenAiResponsesProvider::new_exact_with_client(config, timeouts, client)?
+                }
+                None => OpenAiResponsesProvider::new_exact(config, timeouts)?,
+            }))
         }
         (ProviderFamily::Custom, ProviderProtocol::OpenAiChatCompletions) => {
             let mut config: OpenAiCompatibleProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
-            Ok(Box::new(OpenAiCompatibleProvider::new_exact(
-                config, timeouts,
-            )?))
+            Ok(Box::new(match client {
+                Some(client) => {
+                    OpenAiCompatibleProvider::new_exact_with_client(config, timeouts, client)?
+                }
+                None => OpenAiCompatibleProvider::new_exact(config, timeouts)?,
+            }))
         }
         (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => {
             let mut config: AnthropicProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
-            Ok(Box::new(AnthropicProvider::new_exact(config, timeouts)?))
+            Ok(Box::new(match client {
+                Some(client) => AnthropicProvider::new_exact_with_client(config, timeouts, client)?,
+                None => AnthropicProvider::new_exact(config, timeouts)?,
+            }))
         }
         (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => {
             let mut config: GeminiProviderConfig =
                 exact_connection_provider_config(&connection.config, api_key)?;
             config.model = model_ref.model_id.clone();
-            Ok(Box::new(GeminiProvider::new_exact(config, timeouts)?))
+            Ok(Box::new(match client {
+                Some(client) => GeminiProvider::new_exact_with_client(config, timeouts, client)?,
+                None => GeminiProvider::new_exact(config, timeouts)?,
+            }))
         }
         _ => Err(anyhow!("unsupported provider connection protocol")),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EnvironmentOnlyCredentialStore;
+
+#[async_trait::async_trait]
+impl crate::provider_connections::ProviderCredentialStore for EnvironmentOnlyCredentialStore {
+    async fn load(
+        &self,
+        _credential_id: &crate::provider_connections::CredentialId,
+    ) -> Result<
+        Option<crate::provider_connections::ProviderCredentialRecord>,
+        crate::provider_connections::ProviderCredentialError,
+    > {
+        Err(crate::provider_connections::ProviderCredentialError::new(
+            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
+            "provider-only safe mode does not access a credential store",
+        ))
+    }
+
+    async fn store(
+        &self,
+        _record: &crate::provider_connections::ProviderCredentialRecord,
+    ) -> Result<(), crate::provider_connections::ProviderCredentialError> {
+        Err(crate::provider_connections::ProviderCredentialError::new(
+            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
+            "provider-only safe mode does not access a credential store",
+        ))
+    }
+
+    async fn delete(
+        &self,
+        _credential_id: &crate::provider_connections::CredentialId,
+    ) -> Result<bool, crate::provider_connections::ProviderCredentialError> {
+        Err(crate::provider_connections::ProviderCredentialError::new(
+            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
+            "provider-only safe mode does not access a credential store",
+        ))
     }
 }
 
@@ -737,10 +875,10 @@ pub fn resolve_deepseek_api_key_with_session(
     _config: &DeepSeekProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    if let Some(value) = read_secret_env(SIGIL_API_KEY_ENV) {
+    if let Some((name, value)) = read_secret_env_from(SIGIL_API_KEY_ENV_NAMES) {
         return Some(SecretResolution {
             value,
-            source: SecretSource::Environment(SIGIL_API_KEY_ENV),
+            source: SecretSource::Environment(name),
         });
     }
     if let Some(value) = session_value
@@ -767,10 +905,10 @@ pub fn resolve_openai_compat_api_key_with_session(
     _config: &OpenAiCompatibleProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    if let Some(value) = read_secret_env(OPENAI_COMPATIBLE_API_KEY_ENV) {
+    if let Some((name, value)) = read_secret_env_from(OPENAI_COMPATIBLE_API_KEY_ENV_NAMES) {
         return Some(SecretResolution {
             value,
-            source: SecretSource::Environment(OPENAI_COMPATIBLE_API_KEY_ENV),
+            source: SecretSource::Environment(name),
         });
     }
     if let Some(value) = session_value
@@ -797,10 +935,10 @@ pub fn resolve_openai_responses_api_key_with_session(
     _config: &OpenAiResponsesProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    if let Some(value) = read_secret_env(OPENAI_RESPONSES_API_KEY_ENV) {
+    if let Some((name, value)) = read_secret_env_from(OPENAI_RESPONSES_API_KEY_ENV_NAMES) {
         return Some(SecretResolution {
             value,
-            source: SecretSource::Environment(OPENAI_RESPONSES_API_KEY_ENV),
+            source: SecretSource::Environment(name),
         });
     }
     if let Some(value) = session_value
@@ -825,10 +963,10 @@ pub fn resolve_anthropic_api_key_with_session(
     _config: &AnthropicProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    if let Some(value) = read_secret_env(SIGIL_ANTHROPIC_API_KEY_ENV) {
+    if let Some((name, value)) = read_secret_env_from(SIGIL_ANTHROPIC_API_KEY_ENV_NAMES) {
         return Some(SecretResolution {
             value,
-            source: SecretSource::Environment(SIGIL_ANTHROPIC_API_KEY_ENV),
+            source: SecretSource::Environment(name),
         });
     }
     if let Some(value) = session_value
@@ -853,10 +991,10 @@ pub fn resolve_gemini_api_key_with_session(
     _config: &GeminiProviderConfig,
     session_value: Option<&str>,
 ) -> Option<SecretResolution> {
-    if let Some(value) = read_secret_env(SIGIL_GEMINI_API_KEY_ENV) {
+    if let Some((name, value)) = read_secret_env_from(SIGIL_GEMINI_API_KEY_ENV_NAMES) {
         return Some(SecretResolution {
             value,
-            source: SecretSource::Environment(SIGIL_GEMINI_API_KEY_ENV),
+            source: SecretSource::Environment(name),
         });
     }
     if let Some(value) = session_value
@@ -878,22 +1016,38 @@ pub fn secret_redactor_for_root_config(root_config: &RootConfig) -> SecretRedact
     for connection in connections.connections.values() {
         if let crate::provider_connections::CredentialRefConfig::Environment { name } =
             &connection.config.credential
-            && let Ok(value) = std::env::var(name)
         {
-            let value = value.trim();
-            if !value.is_empty() {
-                redactor.add_secret(value);
+            let allowed = crate::provider_connections::allowed_environment_names(
+                connection.config.provider,
+                connection.config.protocol,
+            );
+            if allowed.first().copied() == Some(name.as_str()) {
+                for candidate in allowed {
+                    if let Ok(value) = std::env::var(candidate) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            redactor.add_secret(value);
+                        }
+                    }
+                }
+            } else if let Ok(value) = std::env::var(name) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    redactor.add_secret(value);
+                }
             }
         }
     }
     redactor
 }
 
-fn read_secret_env(name: &'static str) -> Option<String> {
-    env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+fn read_secret_env_from(names: &'static [&'static str]) -> Option<(&'static str, String)> {
+    names.iter().copied().find_map(|name| {
+        env::var(name)
+            .ok()
+            .map(|value| (name, value.trim().to_owned()))
+            .filter(|(_, value)| !value.is_empty())
+    })
 }
 
 #[must_use]

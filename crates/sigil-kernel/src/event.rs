@@ -1472,6 +1472,8 @@ pub enum PublicRouteRecoveryCode {
     ModelRouteNotConfigured,
     ConnectionConfigInvalid,
     ProviderUnavailable,
+    AuthorityUnavailable,
+    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -1482,6 +1484,7 @@ pub enum PublicRouteRecoveryCode {
 pub enum PublicRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
+    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -2014,6 +2017,128 @@ pub trait EventHandler {
             self.handle(RunEvent::Control(control))?;
         }
         Ok(events)
+    }
+
+    /// Commits provider-visible session entries and their explicit public projections before
+    /// delivering those projections. Application bridges override this boundary to include the
+    /// source entries and public outbox records in one append intent; private child handlers keep
+    /// their own session and only receive the already-committed live projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation, durable append, or a downstream consumer fails.
+    fn commit_session_publications(
+        &mut self,
+        session: &mut crate::Session,
+        entries: Vec<crate::SessionLogEntry>,
+        publications: Vec<crate::session::SessionPublicEventProjectionV1>,
+    ) -> Result<Vec<StoredEvent>> {
+        session.validate_session_publication_bundle(&entries, &publications)?;
+        let events = session.append_session_entries(entries.clone())?;
+        let publication_indices = publications
+            .iter()
+            .map(|publication| publication.source_entry_index())
+            .collect::<std::collections::BTreeSet<_>>();
+        for (index, entry) in entries.into_iter().enumerate() {
+            if publication_indices.contains(&index) {
+                continue;
+            }
+            if let crate::SessionLogEntry::Control(control) = entry {
+                self.handle(RunEvent::Control(control))?;
+            }
+        }
+        for publication in publications {
+            self.handle(publication.into_run_event())?;
+        }
+        Ok(events)
+    }
+
+    /// Prepares the public handling policy for one durable provider-attempt output control.
+    ///
+    /// The default event path remains live-only. Public application bridges return a typed
+    /// intent so the provider-attempt source and its public outbox entry can share the same
+    /// conditional writer transaction; they may also return a private intent to suppress a
+    /// provider-private control from the public stream.
+    fn prepare_provider_output_publication(
+        &mut self,
+        _session: &crate::Session,
+        _control: &ControlEntry,
+    ) -> Result<Option<ProviderOutputPublicationIntentV1>> {
+        Ok(None)
+    }
+
+    /// Completes delivery after the provider output source (and any public outbox entry) is
+    /// durable. The default handler has no durable publication intent and preserves its existing
+    /// live event behavior.
+    fn complete_provider_output_publication(
+        &mut self,
+        intent: Option<ProviderOutputPublicationIntentV1>,
+        committed: Vec<crate::PublicEventOutboxEntryV1>,
+        event: RunEvent,
+    ) -> Result<()> {
+        if intent.is_some() || !committed.is_empty() {
+            bail!("provider output publication intent requires an owning event bridge");
+        }
+        self.handle(event)
+    }
+}
+
+/// Bridge-owned publication intent for one provider-attempt output source.
+///
+/// Fields are private so only the durable session writer can consume the run/sequence binding.
+/// A private intent explicitly suppresses live generic-Control projection.
+#[derive(Debug, Clone)]
+pub struct ProviderOutputPublicationIntentV1 {
+    run_id: Option<String>,
+    next_sequence: Option<u64>,
+    projection: Option<crate::session::SessionPublicEventProjectionV1>,
+}
+
+impl ProviderOutputPublicationIntentV1 {
+    /// Creates an explicit durable public projection for one provider output source.
+    pub fn public(
+        run_id: impl Into<String>,
+        next_sequence: u64,
+        projection: crate::session::SessionPublicEventProjectionV1,
+    ) -> Result<Self> {
+        let run_id = run_id.into();
+        if run_id.trim().is_empty() || next_sequence == 0 {
+            bail!("provider output publication requires an active run sequence");
+        }
+        Ok(Self {
+            run_id: Some(run_id),
+            next_sequence: Some(next_sequence),
+            projection: Some(projection),
+        })
+    }
+
+    /// Marks one provider output source as durable but intentionally private.
+    #[must_use]
+    pub const fn private() -> Self {
+        Self {
+            run_id: None,
+            next_sequence: None,
+            projection: None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.projection.is_some()
+    }
+
+    pub(crate) fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+
+    pub(crate) const fn next_sequence(&self) -> Option<u64> {
+        self.next_sequence
+    }
+
+    pub(crate) const fn projection(
+        &self,
+    ) -> Option<&crate::session::SessionPublicEventProjectionV1> {
+        self.projection.as_ref()
     }
 }
 

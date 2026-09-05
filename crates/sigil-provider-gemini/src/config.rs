@@ -4,6 +4,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub const SIGIL_GEMINI_API_KEY_ENV: &str = "SIGIL_GEMINI_API_KEY";
+pub const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
+pub const GOOGLE_API_KEY_ENV: &str = "GOOGLE_API_KEY";
+pub const SIGIL_GEMINI_API_KEY_ENV_NAMES: &[&str] = &[
+    SIGIL_GEMINI_API_KEY_ENV,
+    GEMINI_API_KEY_ENV,
+    GOOGLE_API_KEY_ENV,
+];
 pub const SIGIL_GEMINI_BASE_URL_ENV: &str = "SIGIL_GEMINI_BASE_URL";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -47,7 +54,7 @@ impl GeminiProviderConfig {
         if let Some(value) = read_env_string(SIGIL_GEMINI_BASE_URL_ENV) {
             resolved.base_url = value;
         }
-        if let Some(value) = read_env_string(SIGIL_GEMINI_API_KEY_ENV) {
+        if let Some(value) = read_env_string_from(SIGIL_GEMINI_API_KEY_ENV_NAMES) {
             resolved.api_key = Some(value);
         }
 
@@ -78,6 +85,10 @@ fn read_env_string(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+fn read_env_string_from(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| read_env_string(name))
 }
 
 #[cfg(test)]

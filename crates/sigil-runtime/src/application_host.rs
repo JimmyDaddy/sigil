@@ -19,6 +19,18 @@ pub fn boot_current_schema(
     crate::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
 }
 
+pub fn boot_current_schema_with_expected_config(
+    config_path: &std::path::Path,
+    launch_cwd: &std::path::Path,
+    expected: &sigil_kernel::RootConfig,
+) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
+    crate::r71_authority_composition::boot_current_schema_with_expected_config(
+        config_path,
+        launch_cwd,
+        expected,
+    )
+}
+
 pub fn attach_boot_authority_to_services(
     services: crate::application_run::ApplicationRunServices,
     config_path: &std::path::Path,

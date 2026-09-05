@@ -436,9 +436,12 @@ impl HttpSessionRunRegistry {
         let binding = self
             .driver
             .bind_session(&id, request.model_ref.as_ref())
-            .map_err(|error| HttpRegistryError::SessionBindingRejected {
-                session_id: id.clone(),
-                message: error.message,
+            .map_err(|error| match error.route_recovery {
+                Some(recovery) => HttpRegistryError::SessionRunRecoveryRequired { recovery },
+                None => HttpRegistryError::SessionBindingRejected {
+                    session_id: id.clone(),
+                    message: error.message,
+                },
             })?;
         validate_session_binding(&id, &binding)?;
         let route_transition = binding.route_transition.clone();
@@ -1490,7 +1493,9 @@ impl HttpSessionRunRegistry {
                 });
             }
             sigil_application::ApplicationCommandReceipt::Uncertain(_)
-            | sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => {
+            | sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_)
+            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::ConversationRecoveryUnavailable);
             }
         };
@@ -1755,14 +1760,26 @@ impl HttpSessionRunRegistry {
                 ),
             )
             .map_err(application_registry_error)?;
-        let replayed = match receipt {
-            sigil_application::ApplicationCommandReceipt::Uncertain(_) => false,
-            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(_) => true,
+        let (owner_generation, replayed) = match &receipt {
+            sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
+                parse_application_queue_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application conversation queue",
+                )?)?,
+                false,
+            ),
+            sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
+                parse_application_queue_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application conversation queue",
+                )?)?,
+                true,
+            ),
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application conversation queue",
                     run_id: session_id.to_owned(),
-                    message: rejection.reason,
+                    message: rejection.reason.clone(),
                 });
             }
             sigil_application::ApplicationCommandReceipt::PayloadConflict(_) => {
@@ -1781,16 +1798,26 @@ impl HttpSessionRunRegistry {
                 });
             }
             sigil_application::ApplicationCommandReceipt::Settled(_)
-            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+            | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application conversation queue",
                     run_id: session_id.to_owned(),
-                    message: "application conversation queue returned an invalid settled receipt"
-                        .to_owned(),
+                    message: "application queue returned an invalid terminal receipt".to_owned(),
                 });
             }
         };
         let queue = self.conversation_queue(session_id)?;
+        if owner_generation != queue.generation.0 {
+            return Err(HttpRegistryError::DriverRejected {
+                operation: "application conversation queue",
+                run_id: session_id.to_owned(),
+                message:
+                    "application queue recovery generation does not match current durable truth"
+                        .to_owned(),
+            });
+        }
         Ok(HttpConversationQueueCommandReceipt {
             command_id: command.command_id,
             client_id: command.client_id,
@@ -2633,31 +2660,17 @@ impl HttpSessionRunRegistry {
             .map_err(application_registry_error)?;
         let (run_id, replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
-                receipt
-                    .recovery_binding
-                    .strip_prefix("http-run-start:")
-                    .ok_or_else(|| {
-                        application_registry_error(
-                            sigil_application::ApplicationError::CorruptProjection(
-                                "HTTP run-start recovery binding is malformed".to_owned(),
-                            ),
-                        )
-                    })?
-                    .to_owned(),
+                parse_application_run_start_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application run start",
+                )?)?,
                 false,
             ),
             sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
-                receipt
-                    .recovery_binding
-                    .strip_prefix("http-run-start:")
-                    .ok_or_else(|| {
-                        application_registry_error(
-                            sigil_application::ApplicationError::CorruptProjection(
-                                "HTTP run-start recovery binding is malformed".to_owned(),
-                            ),
-                        )
-                    })?
-                    .to_owned(),
+                parse_application_run_start_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application run start",
+                )?)?,
                 true,
             ),
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
@@ -2682,11 +2695,14 @@ impl HttpSessionRunRegistry {
                 });
             }
             sigil_application::ApplicationCommandReceipt::Settled(_)
-            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+            | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application run start",
                     run_id: session_id.to_owned(),
-                    message: "application run start returned an invalid settled receipt".to_owned(),
+                    message: "application run start returned an invalid terminal receipt"
+                        .to_owned(),
                 });
             }
         };
@@ -3281,6 +3297,14 @@ impl HttpSessionRunRegistry {
                     replayed,
                 })
             }
+            sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
+                Err(HttpRegistryError::DriverRejected {
+                    operation: "application cancel",
+                    run_id: run_id.to_owned(),
+                    message: "application cancellation was not durably settled".to_owned(),
+                })
+            }
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
                 Err(HttpRegistryError::DriverRejected {
                     operation: "application cancel",
@@ -3592,11 +3616,17 @@ impl HttpSessionRunRegistry {
             .map_err(application_registry_error)?;
         let (continuation_run_id, replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
-                parse_application_user_input_recovery(&receipt.recovery_binding, request_id)?,
+                parse_application_user_input_recovery(
+                    application_owner_recovery_binding(receipt, "application user input decision")?,
+                    request_id,
+                )?,
                 false,
             ),
             sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
-                parse_application_user_input_recovery(&receipt.recovery_binding, request_id)?,
+                parse_application_user_input_recovery(
+                    application_owner_recovery_binding(receipt, "application user input decision")?,
+                    request_id,
+                )?,
                 true,
             ),
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
@@ -3621,11 +3651,13 @@ impl HttpSessionRunRegistry {
                 });
             }
             sigil_application::ApplicationCommandReceipt::Settled(_)
-            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+            | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application user input decision",
                     run_id: session_id.to_owned(),
-                    message: "application user input returned an invalid settled receipt"
+                    message: "application user input returned an invalid terminal receipt"
                         .to_owned(),
                 });
             }
@@ -4204,11 +4236,17 @@ impl HttpSessionRunRegistry {
             .map_err(application_registry_error)?;
         let ((route_state, registry_revision), replayed) = match &receipt {
             sigil_application::ApplicationCommandReceipt::Uncertain(receipt) => (
-                parse_application_approval_recovery(&receipt.recovery_binding)?,
+                parse_application_approval_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application approval",
+                )?)?,
                 false,
             ),
             sigil_application::ApplicationCommandReceipt::ReplayedUncertain(receipt) => (
-                parse_application_approval_recovery(&receipt.recovery_binding)?,
+                parse_application_approval_recovery(application_owner_recovery_binding(
+                    receipt,
+                    "application approval",
+                )?)?,
                 true,
             ),
             sigil_application::ApplicationCommandReceipt::Rejected(rejection) => {
@@ -4230,11 +4268,13 @@ impl HttpSessionRunRegistry {
                 });
             }
             sigil_application::ApplicationCommandReceipt::Settled(_)
-            | sigil_application::ApplicationCommandReceipt::Replayed(_) => {
+            | sigil_application::ApplicationCommandReceipt::Replayed(_)
+            | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+            | sigil_application::ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_) => {
                 return Err(HttpRegistryError::DriverRejected {
                     operation: "application approval",
                     run_id: run_id.to_owned(),
-                    message: "application approval returned an invalid settled receipt".to_owned(),
+                    message: "application approval returned an invalid terminal receipt".to_owned(),
                 });
             }
         };
@@ -6133,6 +6173,56 @@ struct HttpApprovalRouteOutcome {
     decision: HttpApprovalDecisionRecord,
     route_state: HttpApprovalRouteState,
     registry_revision: u64,
+}
+
+fn application_owner_recovery_binding<'a>(
+    receipt: &'a sigil_application::UncertainCommandReceipt,
+    operation: &'static str,
+) -> Result<&'a str, HttpRegistryError> {
+    receipt
+        .owner_recovery_binding
+        .as_deref()
+        .filter(|binding| !binding.is_empty())
+        .ok_or_else(|| HttpRegistryError::DriverRejected {
+            operation,
+            run_id: "application".to_owned(),
+            message: "application uncertainty has no owner recovery binding".to_owned(),
+        })
+}
+
+fn parse_application_run_start_recovery(binding: &str) -> Result<String, HttpRegistryError> {
+    let Some(run_id) = binding.strip_prefix("http-run-start:") else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application run start",
+            run_id: "application".to_owned(),
+            message: "HTTP run-start recovery binding is malformed".to_owned(),
+        });
+    };
+    if run_id.is_empty() || run_id.len() > 256 || run_id.chars().any(char::is_control) {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application run start",
+            run_id: "application".to_owned(),
+            message: "HTTP run-start recovery binding is invalid".to_owned(),
+        });
+    }
+    Ok(run_id.to_owned())
+}
+
+fn parse_application_queue_recovery(binding: &str) -> Result<String, HttpRegistryError> {
+    let Some(encoded_generation) = binding.strip_prefix("http-queue:") else {
+        return Err(HttpRegistryError::DriverRejected {
+            operation: "application conversation queue",
+            run_id: "application".to_owned(),
+            message: "HTTP queue recovery binding is malformed".to_owned(),
+        });
+    };
+    decode_hex_binding_component(encoded_generation).ok_or_else(|| {
+        HttpRegistryError::DriverRejected {
+            operation: "application conversation queue",
+            run_id: "application".to_owned(),
+            message: "HTTP queue recovery generation is invalid".to_owned(),
+        }
+    })
 }
 
 fn parse_application_approval_recovery(

@@ -720,6 +720,8 @@ pub struct HttpRunDriverError {
     pub message: String,
     /// Stable adapter classification used for typed public recovery responses.
     pub kind: HttpRunDriverErrorKind,
+    /// Structured route recovery preserved across the driver-to-registry boundary.
+    pub route_recovery: Option<HttpSessionRouteRecoveryView>,
 }
 
 /// Narrow typed classes for driver rejections that callers can safely recover from.
@@ -813,6 +815,7 @@ impl HttpRunDriverError {
         Self {
             message: message.into(),
             kind: HttpRunDriverErrorKind::General,
+            route_recovery: None,
         }
     }
 
@@ -822,6 +825,14 @@ impl HttpRunDriverError {
         Self {
             message: message.into(),
             kind: HttpRunDriverErrorKind::StaleUserInput,
+            route_recovery: None,
         }
+    }
+
+    /// Attaches a secret-free recovery view without changing the stable error message.
+    #[must_use]
+    pub fn with_route_recovery(mut self, recovery: HttpSessionRouteRecoveryView) -> Self {
+        self.route_recovery = Some(recovery);
+        self
     }
 }

@@ -172,6 +172,10 @@ fn storage_grant(
     owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
     family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1,
 ) -> sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
+    let source = sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+        cutover_manifest_hash: CanonicalHash::from_bytes([0xd2; 32]),
+        application_generation: 1,
+    };
     sigil_kernel::managed_storage::StorageAdmissionGrantV1 {
         grant_id: sigil_kernel::resource::OpaqueStorageGrantId::new(grant_id.to_owned()),
         admission_hash: CanonicalHash::from_bytes([0x31; 32]),
@@ -179,7 +183,9 @@ fn storage_grant(
         purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
         purpose_hash: CanonicalHash::from_bytes([0x32; 32]),
         source_class: sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
-        source_binding_hash: CanonicalHash::from_bytes([0x39; 32]),
+        source_binding_hash: sigil_resource_authority::storage::admission_source_binding_hash(
+            &source,
+        ),
         namespace_hash: {
             let mut ns = [0x33u8; 32];
             for (index, byte) in grant_id.bytes().take(16).enumerate() {
@@ -708,6 +714,10 @@ fn r71_full_composition_gate() {
             &exec,
             &config_snapshot,
             CanonicalHash::from_bytes([0x55; 32]),
+            AuthorityGeneration {
+                epoch: 1,
+                instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+            },
             planner,
             &[
                 Ch::SessionLog,

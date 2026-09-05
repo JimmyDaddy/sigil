@@ -564,6 +564,75 @@ impl Session {
         self.append(SessionLogEntry::Assistant(message))
     }
 
+    /// Appends an ordered provider-visible bundle without a public outbox. Public application
+    /// bridges use `append_session_entries_with_public_outbox`; this fallback keeps private child
+    /// sessions on their own store and preserves their filtering boundary.
+    pub fn append_session_entries(
+        &mut self,
+        entries: Vec<SessionLogEntry>,
+    ) -> Result<Vec<StoredEvent>> {
+        if entries.is_empty() {
+            bail!("session entry append batch must not be empty");
+        }
+        entries.iter().try_for_each(|entry| match entry {
+            SessionLogEntry::ToolResultV3(result) => result.validate(),
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => snapshot.validate(),
+            SessionLogEntry::Control(control) => control.validate_durable_contract(),
+            SessionLogEntry::User(_) | SessionLogEntry::Assistant(_) => Ok(()),
+        })?;
+        if entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(_))
+            )
+        }) {
+            bail!("conversation input promotion requires its dedicated critical append API");
+        }
+        let events = self
+            .store
+            .as_ref()
+            .map(|store| store.append_session_entry_events(&entries))
+            .transpose()?
+            .unwrap_or_default();
+        self.bind_tool_artifacts_after_append(&entries, &events);
+        self.entries.extend(entries);
+        self.advance_durable_session_entry_count(&events);
+        Ok(events)
+    }
+
+    pub(super) fn bind_tool_artifacts_after_append(
+        &self,
+        entries: &[SessionLogEntry],
+        events: &[StoredEvent],
+    ) {
+        for (entry, event) in entries.iter().zip(events) {
+            let SessionLogEntry::ToolResultV3(result) = entry else {
+                continue;
+            };
+            let Some(artifact_ref) = result
+                .artifact
+                .descriptor()
+                .map(|descriptor| descriptor.artifact_ref.clone())
+            else {
+                continue;
+            };
+            if let Err(error) = self
+                .tool_artifact_store()
+                .ok_or_else(|| anyhow::anyhow!("tool artifact store is unavailable"))
+                .and_then(|store| store.bind_source_event(&artifact_ref, &event.event_id))
+            {
+                // The `.event` binding is a rebuildable fork/GC cache. Retrieval authorization
+                // comes only from the active durable pressure projection, so failure here cannot
+                // broaden read authority or invalidate the committed descriptor.
+                tracing::warn!(
+                    artifact_ref = %artifact_ref.artifact_id,
+                    error = %error,
+                    "failed to bind tool artifact to its durable descriptor event"
+                );
+            }
+        }
+    }
+
     fn append_runtime_context_snapshot_v2(
         &mut self,
         snapshot: RuntimeContextSnapshotV2,
@@ -653,40 +722,12 @@ impl Session {
         result: ToolResultRecordedV3,
         controls: Vec<ControlEntry>,
     ) -> Result<()> {
+        self.validate_tool_result_bundle(&result, &controls)?;
         result.validate()?;
         let artifact_ref = result
             .artifact
             .descriptor()
             .map(|descriptor| descriptor.artifact_ref.clone());
-        let message = result.model_message()?;
-        for control in &controls {
-            match control {
-                ControlEntry::WebUrlCapabilityDescriptor(descriptor) => {
-                    if descriptor.session_scope_id != self.session_scope_id {
-                        bail!("web URL capability descriptor belongs to a different session scope");
-                    }
-                    if descriptor.durable_entry_id != message.id {
-                        bail!("web URL capability descriptor belongs to a different tool result");
-                    }
-                    descriptor.validate()?;
-                }
-                ControlEntry::ExternalProvenance(provenance) => {
-                    if provenance.session_scope_id != self.session_scope_id {
-                        bail!("external provenance belongs to a different session scope");
-                    }
-                    provenance.validate_against_message(&message)?;
-                }
-                ControlEntry::ToolArtifactRead(receipt) => {
-                    receipt.validate()?;
-                    if result.tool_name != "read_tool_artifact" || receipt.call_id != result.call_id
-                    {
-                        bail!("tool artifact read receipt belongs to a different tool result");
-                    }
-                }
-                _ => bail!("tool result bundle contains an unsupported control entry"),
-            }
-        }
-
         let mut entries = Vec::with_capacity(controls.len() + 1);
         entries.push(SessionLogEntry::ToolResultV3(result));
         entries.extend(controls.into_iter().map(SessionLogEntry::Control));
@@ -714,6 +755,43 @@ impl Session {
                 );
             }
             self.advance_durable_session_entry_count(&events);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_tool_result_bundle(
+        &self,
+        result: &ToolResultRecordedV3,
+        controls: &[ControlEntry],
+    ) -> Result<()> {
+        result.validate()?;
+        let message = result.model_message()?;
+        for control in controls {
+            match control {
+                ControlEntry::WebUrlCapabilityDescriptor(descriptor) => {
+                    if descriptor.session_scope_id != self.session_scope_id {
+                        bail!("web URL capability descriptor belongs to a different session scope");
+                    }
+                    if descriptor.durable_entry_id != message.id {
+                        bail!("web URL capability descriptor belongs to a different tool result");
+                    }
+                    descriptor.validate()?;
+                }
+                ControlEntry::ExternalProvenance(provenance) => {
+                    if provenance.session_scope_id != self.session_scope_id {
+                        bail!("external provenance belongs to a different session scope");
+                    }
+                    provenance.validate_against_message(&message)?;
+                }
+                ControlEntry::ToolArtifactRead(receipt) => {
+                    receipt.validate()?;
+                    if result.tool_name != "read_tool_artifact" || receipt.call_id != result.call_id
+                    {
+                        bail!("tool artifact read receipt belongs to a different tool result");
+                    }
+                }
+                _ => bail!("tool result bundle contains an unsupported control entry"),
+            }
         }
         Ok(())
     }
@@ -1755,14 +1833,19 @@ impl Session {
     }
 
     /// Returns the session-backed recorder used by a root cancellation owner.
+    ///
+    /// In-memory sessions receive a process-local recorder. This keeps cancellation's
+    /// idempotency/order guarantees available to provider-only safe mode without silently
+    /// creating a JSONL store or any filesystem side effect.
     pub fn run_cancellation_recorder(
         &self,
     ) -> std::result::Result<crate::RunCancellationRecorder, DurableAuditError> {
-        let store = self
+        Ok(self
             .store
             .as_ref()
-            .ok_or(DurableAuditError::MissingDurableStore)?;
-        Ok(crate::RunCancellationRecorder::new(store.clone()))
+            .map_or_else(crate::RunCancellationRecorder::in_memory, |store| {
+                crate::RunCancellationRecorder::new(store.clone())
+            }))
     }
 
     /// Returns the store-backed recorder for adapter-owned foreground run lifecycle boundaries.

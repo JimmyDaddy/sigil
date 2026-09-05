@@ -7,10 +7,17 @@
 use std::process::Command;
 
 mod identity;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod reaper;
 
 pub use identity::{
     ProcessIdentityObservationErrorV1, ProcessIdentityV1, observe_current_process_identity,
     observe_process_identity,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use reaper::{
+    BoundedNativeCleanupReceiptV1, NonConsumingChildTerminalObservationV1, OwnedChildLifecycleV1,
+    OwnedChildReaperErrorV1, UnixOwnedChildReaperV1,
 };
 
 /// Configures a child command to become the root of an owned process tree.

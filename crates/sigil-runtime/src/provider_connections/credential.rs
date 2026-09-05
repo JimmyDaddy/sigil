@@ -262,12 +262,13 @@ pub async fn resolve_connection_credential(
 ) -> Result<ResolvedCredential, ProviderCredentialError> {
     match loaded_ref {
         LoadedCredentialRef::Config(CredentialRefConfig::Environment { name }) => {
-            let secret = environment.read(name).ok_or_else(|| {
-                ProviderCredentialError::new(
-                    ProviderCredentialErrorCode::CredentialMissing,
-                    "credential environment value is missing",
-                )
-            })?;
+            let secret = read_configured_environment_credential(connection, name, environment)
+                .ok_or_else(|| {
+                    ProviderCredentialError::new(
+                        ProviderCredentialErrorCode::CredentialMissing,
+                        "credential environment value is missing",
+                    )
+                })?;
             Ok(ResolvedCredential {
                 secret: Some(secret),
                 source: ResolvedCredentialSource::Environment,
@@ -301,6 +302,30 @@ pub async fn resolve_connection_credential(
             source: ResolvedCredentialSource::None,
             generation_id: None,
         }),
+    }
+}
+
+/// Reads a configured environment credential. References persisted with the canonical Sigil
+/// name also fall back to the provider's standard aliases; an explicitly configured alias stays
+/// exact so a user can intentionally select one environment source.
+pub(crate) fn read_configured_environment_credential(
+    connection: &ProviderConnectionConfig,
+    name: &str,
+    environment: &dyn CredentialEnvironment,
+) -> Option<SecretString> {
+    if let Some(secret) = environment.read(name) {
+        return Some(secret);
+    }
+
+    let aliases =
+        super::config::allowed_environment_names(connection.provider, connection.protocol);
+    if aliases.first().copied() == Some(name) {
+        aliases
+            .iter()
+            .skip(1)
+            .find_map(|alias| environment.read(alias))
+    } else {
+        None
     }
 }
 

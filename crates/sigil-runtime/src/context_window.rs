@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use sigil_kernel::{
-    AdaptiveTailPolicyV3, CompactionConfig, ModelRef, RootConfig, Session, V2CompactionPreview,
+    AdaptiveTailPolicyV3, CompactionConfig, ModelRef, Provider, RootConfig, Session,
+    V2CompactionPreview,
 };
 use sigil_provider_deepseek::deepseek_context_window_tokens;
 
@@ -16,6 +17,84 @@ pub enum ContextWindowSource {
 pub struct ResolvedContextWindow {
     pub tokens: Option<u32>,
     pub source: ContextWindowSource,
+}
+
+/// Tokens kept available for the request envelope and provider-side framing when an explicit
+/// output cap is configured. A request with `input + max_output == context` is not actually
+/// sendable: the provider still needs room for message framing, tool metadata, and tokenizer
+/// rounding. Keep this shared by every setup/runtime adapter so validation cannot drift.
+pub const REQUEST_INPUT_SAFETY_BUFFER_TOKENS: u32 = 8_192;
+
+/// Validates an explicit output cap against the resolved model context window.
+///
+/// An unknown context remains valid here because custom providers may only expose it at request
+/// time. Once a context is known, the output cap must leave a non-empty input budget plus the
+/// shared safety buffer. This catches configurations that would otherwise save successfully and
+/// fail on the first prompt.
+pub fn validate_output_token_budget(
+    context_window_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
+) -> Result<()> {
+    let (Some(context_window_tokens), Some(max_output_tokens)) =
+        (context_window_tokens, max_output_tokens)
+    else {
+        return Ok(());
+    };
+    let required_context = max_output_tokens
+        .checked_add(REQUEST_INPUT_SAFETY_BUFFER_TOKENS)
+        .context("output token reservation overflowed")?;
+    let minimum_context = required_context
+        .checked_add(1)
+        .context("context window minimum overflowed")?;
+    if required_context >= context_window_tokens {
+        anyhow::bail!(
+            "max output tokens ({max_output_tokens}) leave insufficient input budget in the effective context window ({context_window_tokens}); configure at least {minimum_context} context tokens"
+        );
+    }
+    Ok(())
+}
+
+/// Rejects a configured output cap that exceeds the exact provider model's known hard limit.
+/// Unknown limits remain allowed so compatible/custom providers are not incorrectly constrained.
+pub fn validate_provider_output_token_budget(
+    provider: &dyn Provider,
+    model_name: &str,
+    max_output_tokens: Option<u32>,
+) -> Result<()> {
+    let (Some(max_output_tokens), Some(provider_limit)) = (
+        max_output_tokens,
+        provider.maximum_output_tokens(model_name),
+    ) else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        max_output_tokens <= provider_limit,
+        "max output tokens ({max_output_tokens}) exceed the provider limit ({provider_limit}) for model {model_name}"
+    );
+    Ok(())
+}
+
+/// Chooses an automatic provider default that still leaves the shared request safety buffer.
+/// Explicit user values are validated separately; this helper is for the blank/automatic field so
+/// a provider default cannot make a small configured context fail on the first request.
+pub fn resolve_automatic_output_token_budget(
+    context_window_tokens: Option<u32>,
+    provider_default_tokens: Option<u32>,
+) -> Result<Option<u32>> {
+    let Some(provider_default_tokens) = provider_default_tokens else {
+        return Ok(None);
+    };
+    let Some(context_window_tokens) = context_window_tokens else {
+        return Ok(Some(provider_default_tokens));
+    };
+    let safe_output_limit = context_window_tokens
+        .checked_sub(REQUEST_INPUT_SAFETY_BUFFER_TOKENS)
+        .context("effective context window leaves no input budget")?;
+    anyhow::ensure!(
+        safe_output_limit > 0,
+        "effective context window ({context_window_tokens}) leaves no input budget after the request safety buffer"
+    );
+    Ok(Some(provider_default_tokens.min(safe_output_limit)))
 }
 
 #[must_use]
@@ -176,7 +255,7 @@ pub fn compaction_preview_for_strategy(
     };
     let exact_fit_limit_tokens = u64::from(context_window)
         .checked_sub(u64::from(target_output))
-        .and_then(|tokens| tokens.checked_sub(8_192))
+        .and_then(|tokens| tokens.checked_sub(u64::from(REQUEST_INPUT_SAFETY_BUFFER_TOKENS)))
         .filter(|tokens| *tokens > 0)
         .context("adaptive compaction reservations exhaust the context window")?;
     session.adaptive_compaction_preview(AdaptiveTailPolicyV3::default(), exact_fit_limit_tokens)

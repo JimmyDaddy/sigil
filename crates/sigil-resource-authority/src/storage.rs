@@ -1196,7 +1196,8 @@ fn handle_matches_record(
     handle: &ManagedStorageNamespaceHandleV1,
     record: &StorageAdmissionRecordV1,
 ) -> bool {
-    if record.namespace_hash != handle.namespace_hash
+    if record.handle_id != handle.handle_id.as_str()
+        || record.namespace_hash != handle.namespace_hash
         || record.grant.capability_family != handle.capability_family
     {
         return false;
@@ -1243,6 +1244,28 @@ fn physical_record_count(
 }
 
 impl AuthorityManagedStorageServiceV1 {
+    /// Validates the complete, closed admission grant before the authority consumes it for a
+    /// durable effect. A deserialized grant, stale generation, or source-only lookalike is not
+    /// a capability: it must also be the exact current registration for this authority epoch.
+    fn validate_current_admission_record(
+        &self,
+        record: &StorageAdmissionRecordV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        validate_closed_admission_grant(
+            &record.grant,
+            &record.request,
+            self.authority_generation,
+            record.handle_id.starts_with("handle-probe-storage-"),
+        )?;
+        let Some(current) = self.table.grants.get(record.grant.grant_id.as_str()) else {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        };
+        if current != &record.grant {
+            return Err(ManagedStorageErrorV1::CapabilityMismatch);
+        }
+        Ok(())
+    }
+
     fn current_grant_for_request(
         &self,
         request: &ManagedStorageAdmissionRequestV1,
@@ -1270,6 +1293,7 @@ impl AuthorityManagedStorageServiceV1 {
         if matches.next().is_some() {
             return Err(ManagedStorageErrorV1::FamilyMismatch);
         }
+        validate_closed_admission_grant(&grant, request, self.authority_generation, probe)?;
         Ok(grant)
     }
 
@@ -1326,9 +1350,13 @@ impl AuthorityManagedStorageServiceV1 {
             historical
         };
 
+        // A continuation is not a migration path. The historical marker may be read only when
+        // it is evidence for the exact grant currently registered by this authority generation.
+        // In particular, a changed source binding, manifest, or generation must never turn an
+        // old namespace into a capability for the new arena.
         if historical.grant.authority_generation != self.authority_generation
             || !request_matches_grant(&historical.request, &historical.grant)
-            || !source_bound_grant_rollover_compatible(&current, &historical.grant)
+            || historical.grant != current
         {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
@@ -1441,8 +1469,6 @@ impl AuthorityManagedStorageServiceV1 {
             };
             if binding.family() != request.capability_family
                 || binding.namespace_hash() != grant.namespace_hash
-                || !request_matches_grant(&request, &grant)
-                || grant.authority_generation != self.authority_generation
             {
                 return Err(ManagedStorageErrorV1::CapabilityMismatch);
             }
@@ -1574,6 +1600,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
         drop(admitted);
+        self.validate_current_admission_record(&record)?;
         self.assert_current_continuation_write_admission(&record)
     }
 
@@ -1612,6 +1639,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         if !handle_matches_record(handle, &record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
+        self.validate_current_admission_record(&record)?;
         let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
         self.reconcile_quota(&owner_key, &record.grant.quota_profile, bytes, entries)
     }
@@ -1630,12 +1658,16 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         capability: ValidatedStorageAdmissionCapabilityV1,
         original: ManagedStorageExistingNamespaceBindingV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1> {
+        // Validate the current source/owner/purpose/scope/generation chain before opening or
+        // locking the old namespace. Historical bytes are evidence only, never a fallback
+        // authority for a new admission.
+        let current_grant = self.current_grant_for_request(&request, false)?;
         let directory = self.verify_existing_namespace_continuation(&request, &original)?;
         // The authenticated original marker is checked again while its existing-only lock is
         // held, and the new admission is appended before that lock is released.
         let locator = StorageAdmissionRecordV1 {
             handle_id: original.original_handle_id.as_str().to_owned(),
-            grant: self.current_grant_for_request(&request, false)?,
+            grant: current_grant,
             request: request.clone(),
             namespace_hash: original.original_namespace_hash,
             admission_sequence: original.original_admission.admission_sequence,
@@ -1663,6 +1695,7 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         if !handle_matches_record(&handle, &record) {
             return Err(ManagedStorageErrorV1::CapabilityMismatch);
         }
+        self.validate_current_admission_record(&record)?;
         let physical_binding = if handle
             .handle_id
             .as_str()
@@ -1799,19 +1832,14 @@ fn rehydrate_storage_state(
                 "journal admission references unregistered grant {grant_id}"
             )));
         };
-        let request_matches_historical_grant = admission.request.semantic_owner
-            == admission.grant.semantic_owner
-            && admission.request.capability_family == admission.grant.capability_family
-            && admission.request.purpose == admission.grant.purpose
-            && admission.request.owner_scope == admission.grant.owner_scope
-            && admission.request.journal_scope == admission.grant.journal_scope
-            && admission.request.source.source_class() == admission.grant.source_class
-            && source_binding_hash(&admission.request.source)
-                == admission.grant.source_binding_hash;
-        if (!source_bound_grant_rollover_compatible(registered, &admission.grant)
-            && registered != &admission.grant)
-            || admission.grant.authority_generation != authority_generation
-            || !request_matches_historical_grant
+        if registered != &admission.grant
+            || validate_closed_admission_grant(
+                &admission.grant,
+                &admission.request,
+                authority_generation,
+                false,
+            )
+            .is_err()
         {
             return Err(JournalErrorV1::Corrupt(format!(
                 "journal admission grant binding mismatch for {grant_id}"
@@ -1843,16 +1871,6 @@ fn rehydrate_storage_state(
     Ok(())
 }
 
-fn source_bound_grant_rollover_compatible(
-    current: &StorageAdmissionGrantV1,
-    historical: &StorageAdmissionGrantV1,
-) -> bool {
-    let mut normalized = current.clone();
-    normalized.source_binding_hash = historical.source_binding_hash;
-    normalized.grant_hash = historical.grant_hash;
-    normalized == *historical
-}
-
 fn request_matches_grant(
     request: &ManagedStorageAdmissionRequestV1,
     grant: &StorageAdmissionGrantV1,
@@ -1866,16 +1884,91 @@ fn request_matches_grant(
         && source_binding_hash(&request.source) == grant.source_binding_hash
 }
 
+/// A startup probe is deliberately not an authenticated owner admission. It must still select
+/// exactly one current semantic grant and the exact current source/generation binding, but its
+/// synthetic probe owner is allowed to differ from the production owner scope. This keeps probe
+/// namespaces isolated without weakening any production admission check.
+fn request_matches_probe_grant(
+    request: &ManagedStorageAdmissionRequestV1,
+    grant: &StorageAdmissionGrantV1,
+) -> bool {
+    request.semantic_owner == grant.semantic_owner
+        && request.capability_family == grant.capability_family
+        && request.purpose == grant.purpose
+        && request.journal_scope == grant.journal_scope
+        && request.source.source_class() == grant.source_class
+        && source_binding_hash(&request.source) == grant.source_binding_hash
+}
+
+/// Canonical source binding used by both the authority and its runtime composition seam.
+///
+/// In particular, the application generation is part of an ApplicationCutoverRoot binding;
+/// accepting the manifest hash alone would allow a stale writer from an older composition to
+/// replay into the current authority generation.
+pub fn admission_source_binding_hash(
+    source: &sigil_kernel::managed_storage::StorageAdmissionSourceV1,
+) -> CanonicalHash {
+    hash_debug(source)
+}
+
 fn source_binding_hash(
     source: &sigil_kernel::managed_storage::StorageAdmissionSourceV1,
 ) -> CanonicalHash {
-    match source {
-        sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-            cutover_manifest_hash,
-            ..
-        } => *cutover_manifest_hash,
-        _ => hash_debug(source),
+    admission_source_binding_hash(source)
+}
+
+fn hash_is_nonzero(value: CanonicalHash) -> bool {
+    value.as_bytes().iter().any(|byte| *byte != 0)
+}
+
+/// Validates every binding that makes a storage admission closed. This is deliberately kept in
+/// the Resource Authority rather than reconstructed by writers: callers may present only the
+/// typed request and a kernel broker capability, while RA verifies authority/generation and the
+/// durable grant fields before quota, journal, namespace, lock, or file effects occur.
+fn validate_closed_admission_grant(
+    grant: &StorageAdmissionGrantV1,
+    request: &ManagedStorageAdmissionRequestV1,
+    authority_generation: AuthorityGeneration,
+    probe: bool,
+) -> Result<(), ManagedStorageErrorV1> {
+    let opaque_ids_present = !grant.grant_id.as_str().is_empty()
+        && !grant.resource_ref.resource_id.as_str().is_empty()
+        && !grant.semantic_schema.as_str().is_empty();
+    let hashes_present = [
+        grant.admission_hash,
+        grant.purpose_hash,
+        grant.source_binding_hash,
+        grant.namespace_hash,
+        grant.journal_scope_hash,
+        grant.resource_binding_digest,
+        grant.physical_binding_hash,
+        grant.quota_profile.profile_hash,
+        grant.authority_generation.instance_hash,
+        grant.grant_hash,
+    ]
+    .into_iter()
+    .all(hash_is_nonzero);
+    let request_matches = if probe {
+        request_matches_probe_grant(request, grant)
+    } else {
+        request_matches_grant(request, grant)
+    };
+    let shape_matches = grant.resource_ref.kind == grant.resource_kind
+        && grant.resource_ref.owner_scope == grant.owner_scope
+        && grant.resource_ref.journal_scope == grant.journal_scope
+        && grant.resource_ref.generation != 0
+        && grant.authority_generation.epoch != 0
+        && grant.journal_admission_sequence != 0
+        && grant.quota_profile.max_open_holders != 0
+        && request_matches;
+    if !opaque_ids_present
+        || !hashes_present
+        || !shape_matches
+        || grant.authority_generation != authority_generation
+    {
+        return Err(ManagedStorageErrorV1::CapabilityMismatch);
     }
+    Ok(())
 }
 
 fn quota_workspace_cap(table: &AuthorityStorageGrantTableV1) -> u64 {

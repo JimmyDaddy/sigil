@@ -902,6 +902,33 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
     assert!(persisted.contains("262144"));
     assert!(!persisted.contains("api_key"));
 
+    let restarted = manager
+        .restart(&opened.id)
+        .await
+        .expect("saved provider setup should reload the workspace server");
+    assert_eq!(restarted.id, opened.id);
+    let reloaded_client = manager
+        .client(&restarted.id)
+        .expect("restarted workspace should expose a typed client");
+    let reloaded_inventory = reloaded_client
+        .provider_connections()
+        .await
+        .expect("restarted server should load the saved provider configuration");
+    assert_eq!(
+        reloaded_inventory
+            .default_model
+            .as_ref()
+            .map(|model| model.model_id.as_str()),
+        Some("local-first-run-coder")
+    );
+    reloaded_client
+        .create_session(sigil_desktop::DesktopSessionCreateRequest {
+            label: Some("after provider setup".to_owned()),
+            model_ref: None,
+        })
+        .await
+        .expect("restarted server should admit the first durable session");
+
     let report = manager
         .close(&opened.id)
         .await

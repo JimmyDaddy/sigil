@@ -1,5 +1,11 @@
 use std::{sync::Arc, thread, time::Duration};
 
+use sigil_kernel::process_observation::{
+    HostProcessRecoveryFacetV1, ProcessCoverageEffectiveV1, ProcessCoverageRequirementV1,
+    ProcessRecoveryCoverageEvidenceV1, ProcessRecoveryFacetRequestV1,
+    ProcessRecoveryPhysicalObjectV1, ProcessRecoveryPurposeV1,
+};
+
 use super::*;
 
 fn scope(seed: u8) -> ProcessObservationScopeV1 {
@@ -224,6 +230,240 @@ fn r71_process_observer_recovery_evidence_is_one_shot_and_live_for_the_current_o
         )
         .expect("recovery evidence");
     assert_eq!(verified.vitality, ProcessVitalityV1::Live);
+}
+
+#[test]
+fn r71_process_observer_recovery_facet_binds_exact_frontier_and_coverage() {
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let owner_scope = scope(13);
+    let subject = verifier
+        .verify_registration(
+            service
+                .register_current_authority_owner(owner_scope.clone())
+                .expect("real owner registration"),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+        )
+        .expect("verified real owner");
+    let request = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::OwnerClaimRecovery,
+        physical_object: ProcessRecoveryPhysicalObjectV1::Owner,
+        required_coverage: ProcessCoverageRequirementV1::BoundedNativeAllowed,
+        effective_coverage: ProcessCoverageEffectiveV1::BoundedNative,
+        authority_frontier: CanonicalHash::from_bytes([0x13; 32]),
+    };
+    let facet = probe
+        .observe_recovery_facet_for_authority(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+            request.clone(),
+        )
+        .expect("real owner facet");
+    let copy = || {
+        HostProcessRecoveryFacetV1::new(
+            facet.subject_registration_hash(),
+            facet.request().clone(),
+            facet.vitality(),
+            facet.issuance_id().to_owned(),
+            facet.observed_at_monotonic_ms(),
+            facet.expires_at_monotonic_ms(),
+        )
+    };
+    let wrong_frontier = ProcessRecoveryFacetRequestV1 {
+        authority_frontier: CanonicalHash::from_bytes([0x14; 32]),
+        ..request.clone()
+    };
+    assert!(matches!(
+        verifier.verify_recovery_facet(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+            &wrong_frontier,
+            copy(),
+        ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
+    let verified = verifier
+        .verify_recovery_facet(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+            &request,
+            copy(),
+        )
+        .expect("wrong-frontier rejection must not consume the exact facet");
+    assert_eq!(verified.request(), &request);
+    assert_eq!(verified.vitality(), ProcessVitalityV1::Live);
+    assert_eq!(
+        verified.effective_coverage(),
+        ProcessCoverageEffectiveV1::BoundedNative
+    );
+    assert!(matches!(
+        verifier.verify_recovery_facet(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+            &request,
+            copy(),
+        ),
+        Err(ProcessObservationErrorV1::VerifierInstanceDrift)
+    ));
+
+    let malformed_strong_request = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::ContainedTreeQuiescence,
+        physical_object: ProcessRecoveryPhysicalObjectV1::ContainedTree {
+            containment_binding: CanonicalHash::from_bytes([0x15; 32]),
+        },
+        required_coverage: ProcessCoverageRequirementV1::ContainedTreeRequired,
+        effective_coverage: ProcessCoverageEffectiveV1::BoundedNative,
+        authority_frontier: CanonicalHash::from_bytes([0x16; 32]),
+    };
+    assert!(matches!(
+        probe.observe_recovery_facet_for_authority(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+            malformed_strong_request,
+        ),
+        Err(ProcessObservationErrorV1::MalformedRecoveryFacet)
+    ));
+}
+
+#[test]
+fn r71_process_observer_rejects_caller_claimed_strong_coverage_without_observed_proof() {
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let owner_scope = scope(14);
+    let subject = verifier
+        .verify_registration(
+            service
+                .register_current_authority_owner(owner_scope.clone())
+                .expect("real owner registration"),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &owner_scope,
+        )
+        .expect("verified real owner");
+
+    let contained_tree_claim = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::ContainedTreeQuiescence,
+        physical_object: ProcessRecoveryPhysicalObjectV1::ContainedTree {
+            containment_binding: CanonicalHash::from_bytes([0x31; 32]),
+        },
+        required_coverage: ProcessCoverageRequirementV1::ContainedTreeRequired,
+        effective_coverage: ProcessCoverageEffectiveV1::ContainedTree,
+        authority_frontier: CanonicalHash::from_bytes([0x32; 32]),
+    };
+    let old_epoch_claim = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::OldEpochQuiescence,
+        physical_object: ProcessRecoveryPhysicalObjectV1::OldEpoch {
+            inventory_snapshot_hash: CanonicalHash::from_bytes([0x33; 32]),
+        },
+        required_coverage: ProcessCoverageRequirementV1::ContainedTreeRequired,
+        effective_coverage: ProcessCoverageEffectiveV1::ContainedTree,
+        authority_frontier: CanonicalHash::from_bytes([0x34; 32]),
+    };
+
+    // Both requests have a valid caller shape. They are rejected because this observer has only
+    // re-observed the leader; it has not observed a closed member set or complete old epoch.
+    assert!(contained_tree_claim.is_well_formed());
+    assert!(old_epoch_claim.is_well_formed());
+    let leader_evidence = ProcessRecoveryCoverageEvidenceV1::leader(subject.registration_hash());
+    assert!(!leader_evidence.proves(&contained_tree_claim));
+    assert!(!leader_evidence.proves(&old_epoch_claim));
+
+    for forged_claim in [contained_tree_claim, old_epoch_claim] {
+        assert!(matches!(
+            probe.observe_recovery_facet_for_authority(
+                &subject,
+                ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+                &owner_scope,
+                forged_claim,
+            ),
+            Err(ProcessObservationErrorV1::StrongCoverageEvidenceUnavailable)
+        ));
+    }
+}
+
+#[test]
+fn r71_process_observer_requires_exact_registered_member_binding_and_nonzero_physical_bindings() {
+    let factory = factory();
+    let service = factory.observation_service();
+    let verifier = factory.observation_verifier();
+    let probe = factory.authority_recovery_probe();
+    let member_scope = scope(15);
+    let subject = verifier
+        .verify_registration(
+            service
+                .register_current_authority_owner(member_scope.clone())
+                .expect("real owner registration"),
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &member_scope,
+        )
+        .expect("verified real owner");
+    let matching_member_request = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::RegisteredMemberSettlement,
+        physical_object: ProcessRecoveryPhysicalObjectV1::RegisteredMember {
+            member_binding: subject.registration_hash(),
+        },
+        required_coverage: ProcessCoverageRequirementV1::BoundedNativeAllowed,
+        effective_coverage: ProcessCoverageEffectiveV1::BoundedNative,
+        authority_frontier: CanonicalHash::from_bytes([0x41; 32]),
+    };
+    let leader_evidence = ProcessRecoveryCoverageEvidenceV1::leader(subject.registration_hash());
+    assert!(matching_member_request.is_well_formed());
+    assert!(leader_evidence.proves(&matching_member_request));
+
+    let mismatched_member_request = ProcessRecoveryFacetRequestV1 {
+        physical_object: ProcessRecoveryPhysicalObjectV1::RegisteredMember {
+            member_binding: CanonicalHash::from_bytes([0x42; 32]),
+        },
+        ..matching_member_request.clone()
+    };
+    assert!(mismatched_member_request.is_well_formed());
+    assert!(!leader_evidence.proves(&mismatched_member_request));
+    assert!(matches!(
+        probe.observe_recovery_facet_for_authority(
+            &subject,
+            ProcessObservationSubjectKindV1::AuthorityBootstrapOwner,
+            &member_scope,
+            mismatched_member_request,
+        ),
+        Err(ProcessObservationErrorV1::StrongCoverageEvidenceUnavailable)
+    ));
+
+    let zero_member_binding = ProcessRecoveryFacetRequestV1 {
+        physical_object: ProcessRecoveryPhysicalObjectV1::RegisteredMember {
+            member_binding: CanonicalHash::from_bytes([0; 32]),
+        },
+        ..matching_member_request
+    };
+    let zero_containment_binding = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::ContainedTreeQuiescence,
+        physical_object: ProcessRecoveryPhysicalObjectV1::ContainedTree {
+            containment_binding: CanonicalHash::from_bytes([0; 32]),
+        },
+        required_coverage: ProcessCoverageRequirementV1::ContainedTreeRequired,
+        effective_coverage: ProcessCoverageEffectiveV1::ContainedTree,
+        authority_frontier: CanonicalHash::from_bytes([0x43; 32]),
+    };
+    let zero_epoch_snapshot = ProcessRecoveryFacetRequestV1 {
+        purpose: ProcessRecoveryPurposeV1::OldEpochQuiescence,
+        physical_object: ProcessRecoveryPhysicalObjectV1::OldEpoch {
+            inventory_snapshot_hash: CanonicalHash::from_bytes([0; 32]),
+        },
+        required_coverage: ProcessCoverageRequirementV1::ContainedTreeRequired,
+        effective_coverage: ProcessCoverageEffectiveV1::ContainedTree,
+        authority_frontier: CanonicalHash::from_bytes([0x44; 32]),
+    };
+    assert!(!zero_member_binding.is_well_formed());
+    assert!(!zero_containment_binding.is_well_formed());
+    assert!(!zero_epoch_snapshot.is_well_formed());
 }
 
 #[cfg(unix)]

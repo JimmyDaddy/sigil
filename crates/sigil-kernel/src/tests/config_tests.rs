@@ -372,6 +372,7 @@ fn model_request_config_has_user_visible_defaults() {
     assert_eq!(config.request_timeout_secs, 120);
     assert_eq!(config.stream_idle_timeout_secs, 180);
     assert_eq!(config.stream_total_timeout_secs, None);
+    assert_eq!(config.max_output_tokens, None);
     assert_eq!(timeouts.request_timeout, Duration::from_secs(120));
     assert_eq!(timeouts.stream_idle_timeout, Duration::from_secs(180));
     assert_eq!(timeouts.stream_total_timeout, None);
@@ -390,6 +391,7 @@ model = "deepseek-v4-pro"
 request_timeout_secs = 7
 stream_idle_timeout_secs = 11
 stream_total_timeout_secs = 17
+max_output_tokens = 8192
 
 [recovery.provider]
 max_transport_retries = 4
@@ -409,6 +411,7 @@ max_cumulative_delay_ms = 400
     assert_eq!(config.model_request.request_timeout_secs, 7);
     assert_eq!(config.model_request.stream_idle_timeout_secs, 11);
     assert_eq!(config.model_request.stream_total_timeout_secs, Some(17));
+    assert_eq!(config.model_request.max_output_tokens, Some(8192));
     assert_eq!(
         config
             .model_request
@@ -430,6 +433,7 @@ max_cumulative_delay_ms = 400
         std::fs::read_to_string(&persisted_path).expect("persisted config should be readable");
     assert!(persisted.contains("[recovery.provider]"));
     assert!(!persisted.contains("[model_request.provider_turn_recovery]"));
+    assert!(persisted.contains("max_output_tokens = 8192"));
     let reloaded = RootConfig::load_persisted(&persisted_path)
         .expect("persisted recovery config should reload");
     assert_eq!(
@@ -503,6 +507,28 @@ fn model_request_config_rejects_zero_values_when_resolved() {
             .expect_err("zero timeout should fail resolution");
         assert!(error.to_string().contains("must be greater than 0"));
     }
+}
+
+#[test]
+fn root_config_rejects_zero_model_request_max_output_tokens() {
+    let error = RootConfig::parse_persisted(
+        r#"
+config_version = 2
+
+[agent]
+connection = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_request]
+max_output_tokens = 0
+"#,
+    )
+    .expect_err("zero output-token defaults must be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "model_request.max_output_tokens must be greater than 0"
+    );
 }
 
 #[test]

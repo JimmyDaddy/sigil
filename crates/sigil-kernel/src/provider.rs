@@ -1261,6 +1261,15 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Returns the provider's hard maximum output-token limit for one exact model, when known.
+    ///
+    /// This is distinct from [`Self::default_max_output_tokens`]: the default is a product
+    /// policy, while this limit is a provider contract used to reject an impossible setup before
+    /// the first request is sent. `None` means the route has no trusted static limit.
+    fn maximum_output_tokens(&self, _model_name: &str) -> Option<u32> {
+        None
+    }
+
     /// Returns trusted, exact-model pricing evidence for usage accounting.
     ///
     /// Unknown or compatible routes return `None`; callers must never treat absence as zero cost.

@@ -437,6 +437,10 @@ pub enum ManagedFileAccessErrorV1 {
         operation_id: String,
         binding_hash: CanonicalHash,
     },
+    #[error("managed file delete journal is corrupted: {0}")]
+    JournalCorrupted(String),
+    #[error("managed file delete journal is unavailable: {0}")]
+    JournalUnavailable(String),
     #[error("managed file physical execution failed: {0}")]
     PhysicalExecutionFailed(String),
 }

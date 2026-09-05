@@ -16,9 +16,11 @@ use sigil_kernel::{
     process_observation::{
         HostProcessIdentityRecoveryProbeV1, HostProcessIdentityRegistrationV1,
         HostProcessObservationFactoryV1, HostProcessObservationServiceV1,
-        HostProcessObservationVerifierV1, HostProcessRecoveryObservationV1,
-        ProcessObservationErrorV1, ProcessObservationScopeV1, ProcessObservationSubjectKindV1,
-        ProcessVitalityV1, VerifiedHostProcessIdentityV1, VerifiedHostProcessRecoveryObservationV1,
+        HostProcessObservationVerifierV1, HostProcessRecoveryFacetV1,
+        HostProcessRecoveryObservationV1, ProcessObservationErrorV1, ProcessObservationScopeV1,
+        ProcessObservationSubjectKindV1, ProcessRecoveryCoverageEvidenceV1,
+        ProcessRecoveryFacetRequestV1, ProcessVitalityV1, VerifiedHostProcessIdentityV1,
+        VerifiedHostProcessRecoveryFacetV1, VerifiedHostProcessRecoveryObservationV1,
     },
     resource::CanonicalHash,
 };
@@ -50,12 +52,24 @@ struct IssuedRecoveryObservationV1 {
     issued_at: Instant,
 }
 
+#[derive(Clone)]
+struct IssuedRecoveryFacetV1 {
+    subject_registration_hash: CanonicalHash,
+    request: ProcessRecoveryFacetRequestV1,
+    coverage_evidence: ProcessRecoveryCoverageEvidenceV1,
+    vitality: ProcessVitalityV1,
+    observed_at_monotonic_ms: u64,
+    expires_at_monotonic_ms: u64,
+    issued_at: Instant,
+}
+
 struct ObserverStateV1 {
     service_instance_hash: CanonicalHash,
     started_at: Instant,
     max_evidence_age: Duration,
     registrations: Mutex<BTreeMap<String, IssuedRegistrationV1>>,
     recovery_observations: Mutex<BTreeMap<String, IssuedRecoveryObservationV1>>,
+    recovery_facets: Mutex<BTreeMap<String, IssuedRecoveryFacetV1>>,
 }
 
 impl ObserverStateV1 {
@@ -66,6 +80,7 @@ impl ObserverStateV1 {
             max_evidence_age,
             registrations: Mutex::new(BTreeMap::new()),
             recovery_observations: Mutex::new(BTreeMap::new()),
+            recovery_facets: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -224,22 +239,7 @@ impl ProcessObserverServiceV1 {
                 ProcessObservationErrorV1::ScopeMismatch
             });
         }
-        let vitality = match observe_process_identity(subject.process_id()) {
-            Ok(identity) => {
-                if CanonicalHash::from_bytes(identity.birth_identity_fingerprint())
-                    != subject.birth_identity_hash()
-                {
-                    return Err(ProcessObservationErrorV1::BirthIdentityMismatch);
-                }
-                ProcessVitalityV1::Live
-            }
-            Err(ProcessIdentityObservationErrorV1::Absent)
-            | Err(ProcessIdentityObservationErrorV1::NotLive(_)) => ProcessVitalityV1::Quiescent,
-            Err(
-                ProcessIdentityObservationErrorV1::InvalidProcessId
-                | ProcessIdentityObservationErrorV1::NotObservable(_),
-            ) => return Err(ProcessObservationErrorV1::NotObservable),
-        };
+        let vitality = self.observe_subject_vitality(subject)?;
         let issuance_id = new_observation_id()?;
         let observed_at_monotonic_ms = self.state.observed_at_monotonic_ms();
         let mut observations = self
@@ -265,6 +265,96 @@ impl ProcessObserverServiceV1 {
             vitality,
             issuance_id,
             observed_at_monotonic_ms,
+        ))
+    }
+
+    fn observe_subject_vitality(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+    ) -> Result<ProcessVitalityV1, ProcessObservationErrorV1> {
+        match observe_process_identity(subject.process_id()) {
+            Ok(identity) => {
+                if CanonicalHash::from_bytes(identity.birth_identity_fingerprint())
+                    != subject.birth_identity_hash()
+                {
+                    return Err(ProcessObservationErrorV1::BirthIdentityMismatch);
+                }
+                Ok(ProcessVitalityV1::Live)
+            }
+            Err(ProcessIdentityObservationErrorV1::Absent)
+            | Err(ProcessIdentityObservationErrorV1::NotLive(_)) => {
+                Ok(ProcessVitalityV1::Quiescent)
+            }
+            Err(
+                ProcessIdentityObservationErrorV1::InvalidProcessId
+                | ProcessIdentityObservationErrorV1::NotObservable(_),
+            ) => Err(ProcessObservationErrorV1::NotObservable),
+        }
+    }
+
+    fn observe_recovery_facet(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        request: ProcessRecoveryFacetRequestV1,
+    ) -> Result<HostProcessRecoveryFacetV1, ProcessObservationErrorV1> {
+        if !expected_scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
+        }
+        if !request.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedRecoveryFacet);
+        }
+        if !subject.has_exact_binding(expected_kind, expected_scope) {
+            return Err(if subject.subject_kind() != expected_kind {
+                ProcessObservationErrorV1::SubjectKindMismatch
+            } else {
+                ProcessObservationErrorV1::ScopeMismatch
+            });
+        }
+        // This generic OS observer can re-observe exactly one birth identity. It cannot enumerate
+        // a non-escapable backend's closed membership or an old authority epoch, so it must never
+        // let the caller's `effective_coverage` field upgrade that leader observation.
+        let coverage_evidence =
+            ProcessRecoveryCoverageEvidenceV1::leader(subject.registration_hash());
+        if !coverage_evidence.proves(&request) {
+            return Err(ProcessObservationErrorV1::StrongCoverageEvidenceUnavailable);
+        }
+        let vitality = self.observe_subject_vitality(subject)?;
+        let issuance_id = new_observation_id()?;
+        let observed_at_monotonic_ms = self.state.observed_at_monotonic_ms();
+        let max_evidence_age_ms =
+            u64::try_from(self.state.max_evidence_age.as_millis()).unwrap_or(u64::MAX);
+        let expires_at_monotonic_ms = observed_at_monotonic_ms.saturating_add(max_evidence_age_ms);
+        let mut facets = self
+            .state
+            .recovery_facets
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?;
+        facets.retain(|_, issued| issued.issued_at.elapsed() <= self.state.max_evidence_age);
+        if facets.len() >= MAX_PENDING_OBSERVATIONS {
+            return Err(ProcessObservationErrorV1::NotObservable);
+        }
+        facets.insert(
+            issuance_id.clone(),
+            IssuedRecoveryFacetV1 {
+                subject_registration_hash: subject.registration_hash(),
+                request: request.clone(),
+                coverage_evidence,
+                vitality,
+                observed_at_monotonic_ms,
+                expires_at_monotonic_ms,
+                issued_at: Instant::now(),
+            },
+        );
+        Ok(HostProcessRecoveryFacetV1::new_with_coverage_evidence(
+            subject.registration_hash(),
+            request,
+            ProcessRecoveryCoverageEvidenceV1::leader(subject.registration_hash()),
+            vitality,
+            issuance_id,
+            observed_at_monotonic_ms,
+            expires_at_monotonic_ms,
         ))
     }
 
@@ -321,6 +411,79 @@ impl ProcessObserverServiceV1 {
             ),
         })
     }
+
+    fn verify_recovery_facet(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        expected_request: &ProcessRecoveryFacetRequestV1,
+        facet: HostProcessRecoveryFacetV1,
+    ) -> Result<VerifiedHostProcessRecoveryFacetV1, ProcessObservationErrorV1> {
+        if !expected_scope.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedScope);
+        }
+        if !expected_request.is_well_formed() {
+            return Err(ProcessObservationErrorV1::MalformedRecoveryFacet);
+        }
+        if !subject.has_exact_binding(expected_kind, expected_scope) {
+            return Err(if subject.subject_kind() != expected_kind {
+                ProcessObservationErrorV1::SubjectKindMismatch
+            } else {
+                ProcessObservationErrorV1::ScopeMismatch
+            });
+        }
+        let issued = self
+            .state
+            .recovery_facets
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?
+            .get(facet.issuance_id())
+            .cloned()
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
+        if issued.issued_at.elapsed() > self.state.max_evidence_age {
+            return Err(ProcessObservationErrorV1::EvidenceExpired);
+        }
+        if !issued.coverage_evidence.proves(&issued.request) {
+            return Err(ProcessObservationErrorV1::StrongCoverageEvidenceUnavailable);
+        }
+        if facet.subject_registration_hash() != subject.registration_hash()
+            || facet.subject_registration_hash() != issued.subject_registration_hash
+            || facet.request() != expected_request
+            || facet.request() != &issued.request
+            || facet.coverage_evidence() != &issued.coverage_evidence
+            || facet.vitality() != issued.vitality
+            || facet.observed_at_monotonic_ms() != issued.observed_at_monotonic_ms
+            || facet.expires_at_monotonic_ms() != issued.expires_at_monotonic_ms
+        {
+            return Err(ProcessObservationErrorV1::VerifierInstanceDrift);
+        }
+        self.state
+            .recovery_facets
+            .lock()
+            .map_err(|_| ProcessObservationErrorV1::NotObservable)?
+            .remove(facet.issuance_id())
+            .ok_or(ProcessObservationErrorV1::VerifierInstanceDrift)?;
+        let verified_observation_hash = recovery_facet_hash(
+            subject,
+            &issued.request,
+            &issued.coverage_evidence,
+            issued.vitality,
+            issued.observed_at_monotonic_ms,
+            issued.expires_at_monotonic_ms,
+            self.state.service_instance_hash,
+        );
+        Ok(
+            VerifiedHostProcessRecoveryFacetV1::from_verified_with_coverage_evidence(
+                issued.request.clone(),
+                issued.coverage_evidence,
+                issued.vitality,
+                self.state.service_instance_hash,
+                SERVICE_GENERATION,
+                verified_observation_hash,
+            ),
+        )
+    }
 }
 
 impl HostProcessObservationServiceV1 for ProcessObserverServiceV1 {
@@ -357,6 +520,16 @@ impl HostProcessIdentityRecoveryProbeV1 for ProcessObserverServiceV1 {
     ) -> Result<HostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
         self.observe_for_recovery(subject, expected_kind, expected_scope)
     }
+
+    fn observe_recovery_facet_for_authority(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        request: ProcessRecoveryFacetRequestV1,
+    ) -> Result<HostProcessRecoveryFacetV1, ProcessObservationErrorV1> {
+        self.observe_recovery_facet(subject, expected_kind, expected_scope, request)
+    }
 }
 
 impl HostProcessObservationVerifierV1 for ProcessObserverServiceV1 {
@@ -385,6 +558,23 @@ impl HostProcessObservationVerifierV1 for ProcessObserverServiceV1 {
         observation: HostProcessRecoveryObservationV1,
     ) -> Result<VerifiedHostProcessRecoveryObservationV1, ProcessObservationErrorV1> {
         self.verify_recovery_observation(subject, expected_kind, expected_scope, observation)
+    }
+
+    fn verify_recovery_facet(
+        &self,
+        subject: &VerifiedHostProcessIdentityV1,
+        expected_kind: ProcessObservationSubjectKindV1,
+        expected_scope: &ProcessObservationScopeV1,
+        expected_request: &ProcessRecoveryFacetRequestV1,
+        facet: HostProcessRecoveryFacetV1,
+    ) -> Result<VerifiedHostProcessRecoveryFacetV1, ProcessObservationErrorV1> {
+        self.verify_recovery_facet(
+            subject,
+            expected_kind,
+            expected_scope,
+            expected_request,
+            facet,
+        )
     }
 }
 
@@ -508,6 +698,96 @@ fn recovery_observation_hash(
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
+fn recovery_facet_hash(
+    subject: &VerifiedHostProcessIdentityV1,
+    request: &ProcessRecoveryFacetRequestV1,
+    coverage_evidence: &ProcessRecoveryCoverageEvidenceV1,
+    vitality: ProcessVitalityV1,
+    observed_at_monotonic_ms: u64,
+    expires_at_monotonic_ms: u64,
+    verifier_instance_hash: CanonicalHash,
+) -> CanonicalHash {
+    let mut hasher = Sha256::new();
+    hasher.update(RECOVERY_DOMAIN);
+    hasher.update(b"facet-v2\0");
+    hasher.update(subject.registration_hash().as_bytes());
+    update_recovery_facet_request(&mut hasher, request);
+    update_recovery_coverage_evidence(&mut hasher, coverage_evidence);
+    hasher.update([vitality_discriminant(vitality)]);
+    hasher.update(observed_at_monotonic_ms.to_be_bytes());
+    hasher.update(expires_at_monotonic_ms.to_be_bytes());
+    hasher.update(verifier_instance_hash.as_bytes());
+    hasher.update(SERVICE_GENERATION.to_be_bytes());
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn update_recovery_coverage_evidence(
+    hasher: &mut Sha256,
+    coverage_evidence: &ProcessRecoveryCoverageEvidenceV1,
+) {
+    match coverage_evidence {
+        ProcessRecoveryCoverageEvidenceV1::Leader {
+            leader_registration_hash,
+        } => {
+            hasher.update([1]);
+            hasher.update(leader_registration_hash.as_bytes());
+        }
+        ProcessRecoveryCoverageEvidenceV1::ObservedClosedMemberSet {
+            containment_binding,
+            observed_member_set_hash,
+            authority_frontier,
+        } => {
+            hasher.update([2]);
+            hasher.update(containment_binding.as_bytes());
+            hasher.update(observed_member_set_hash.as_bytes());
+            hasher.update(authority_frontier.as_bytes());
+        }
+        ProcessRecoveryCoverageEvidenceV1::ObservedOldEpoch {
+            inventory_snapshot_hash,
+            observed_member_set_hash,
+            authority_frontier,
+        } => {
+            hasher.update([3]);
+            hasher.update(inventory_snapshot_hash.as_bytes());
+            hasher.update(observed_member_set_hash.as_bytes());
+            hasher.update(authority_frontier.as_bytes());
+        }
+    }
+}
+
+fn update_recovery_facet_request(hasher: &mut Sha256, request: &ProcessRecoveryFacetRequestV1) {
+    hasher.update([recovery_purpose_discriminant(request.purpose)]);
+    hasher.update([coverage_requirement_discriminant(request.required_coverage)]);
+    hasher.update([coverage_effective_discriminant(request.effective_coverage)]);
+    hasher.update(request.authority_frontier.as_bytes());
+    match &request.physical_object {
+        sigil_kernel::process_observation::ProcessRecoveryPhysicalObjectV1::Owner => {
+            hasher.update([1]);
+        }
+        sigil_kernel::process_observation::ProcessRecoveryPhysicalObjectV1::DirectChildLeader => {
+            hasher.update([2]);
+        }
+        sigil_kernel::process_observation::ProcessRecoveryPhysicalObjectV1::RegisteredMember {
+            member_binding,
+        } => {
+            hasher.update([3]);
+            hasher.update(member_binding.as_bytes());
+        }
+        sigil_kernel::process_observation::ProcessRecoveryPhysicalObjectV1::ContainedTree {
+            containment_binding,
+        } => {
+            hasher.update([4]);
+            hasher.update(containment_binding.as_bytes());
+        }
+        sigil_kernel::process_observation::ProcessRecoveryPhysicalObjectV1::OldEpoch {
+            inventory_snapshot_hash,
+        } => {
+            hasher.update([5]);
+            hasher.update(inventory_snapshot_hash.as_bytes());
+        }
+    }
+}
+
 fn subject_kind_discriminant(subject_kind: ProcessObservationSubjectKindV1) -> u8 {
     match subject_kind {
         ProcessObservationSubjectKindV1::AuthorityBootstrapOwner => 1,
@@ -519,6 +799,38 @@ fn vitality_discriminant(vitality: ProcessVitalityV1) -> u8 {
     match vitality {
         ProcessVitalityV1::Live => 1,
         ProcessVitalityV1::Quiescent => 2,
+    }
+}
+
+fn recovery_purpose_discriminant(
+    purpose: sigil_kernel::process_observation::ProcessRecoveryPurposeV1,
+) -> u8 {
+    match purpose {
+        sigil_kernel::process_observation::ProcessRecoveryPurposeV1::OwnerClaimRecovery => 1,
+        sigil_kernel::process_observation::ProcessRecoveryPurposeV1::DirectChildSettlement => 2,
+        sigil_kernel::process_observation::ProcessRecoveryPurposeV1::RegisteredMemberSettlement => {
+            3
+        }
+        sigil_kernel::process_observation::ProcessRecoveryPurposeV1::ContainedTreeQuiescence => 4,
+        sigil_kernel::process_observation::ProcessRecoveryPurposeV1::OldEpochQuiescence => 5,
+    }
+}
+
+fn coverage_requirement_discriminant(
+    requirement: sigil_kernel::process_observation::ProcessCoverageRequirementV1,
+) -> u8 {
+    match requirement {
+        sigil_kernel::process_observation::ProcessCoverageRequirementV1::BoundedNativeAllowed => 1,
+        sigil_kernel::process_observation::ProcessCoverageRequirementV1::ContainedTreeRequired => 2,
+    }
+}
+
+fn coverage_effective_discriminant(
+    coverage: sigil_kernel::process_observation::ProcessCoverageEffectiveV1,
+) -> u8 {
+    match coverage {
+        sigil_kernel::process_observation::ProcessCoverageEffectiveV1::BoundedNative => 1,
+        sigil_kernel::process_observation::ProcessCoverageEffectiveV1::ContainedTree => 2,
     }
 }
 

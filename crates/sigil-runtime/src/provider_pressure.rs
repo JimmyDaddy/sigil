@@ -555,6 +555,7 @@ pub(crate) fn wrap_task_agent_provider(
     pressure: TaskProviderPressure,
     consumer: TaskProviderRouteConsumer,
 ) -> Agent<Box<dyn Provider>> {
+    let default_max_output_tokens = agent.default_max_output_tokens();
     let (provider, tools, recovery_policy): (
         Box<dyn Provider>,
         ToolRegistry,
@@ -568,6 +569,7 @@ pub(crate) fn wrap_task_agent_provider(
         }) as Box<dyn Provider>,
         tools,
     )
+    .with_default_max_output_tokens(default_max_output_tokens)
     .with_provider_turn_recovery_policy(recovery_policy)
     .expect("agent recovery policy was validated before provider-pressure wrapping")
 }

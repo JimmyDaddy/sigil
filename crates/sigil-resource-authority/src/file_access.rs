@@ -140,11 +140,21 @@ impl AuthorityManagedFileAccessServiceV1 {
             journal_instance_hash,
             header_hash: file_delete_header_hash(&arena_root, &journal_path),
         };
-        let journal = ResourceJournalFileV1::open(journal_path, header).map_err(|error| {
-            ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "file-delete journal open failed: {error}"
-            ))
-        })?;
+        let journal =
+            ResourceJournalFileV1::open(journal_path, header).map_err(|error| match error {
+                error @ (crate::journal::JournalErrorV1::PreconditionMismatch
+                | crate::journal::JournalErrorV1::HashChainBroken
+                | crate::journal::JournalErrorV1::InstanceMismatch
+                | crate::journal::JournalErrorV1::FirstRecordNotBootstrapBound
+                | crate::journal::JournalErrorV1::Corrupt(_)) => {
+                    ManagedFileAccessErrorV1::JournalCorrupted(error.to_string())
+                }
+                error @ (crate::journal::JournalErrorV1::JournalFull
+                | crate::journal::JournalErrorV1::Filesystem(_)
+                | crate::journal::JournalErrorV1::DurabilityUncertain(_)) => {
+                    ManagedFileAccessErrorV1::JournalUnavailable(error.to_string())
+                }
+            })?;
         Ok(Self {
             registry,
             consumed: Mutex::new(BTreeSet::new()),

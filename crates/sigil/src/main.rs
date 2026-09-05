@@ -233,11 +233,11 @@ enum DoctorOutput {
 
 #[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
 enum DoctorCommand {
-    /// Recover a failed authority journal into fresh storage roots configured in sigil.toml.
+    /// Recover a failed authority journal into fresh storage roots and activate them in sigil.toml.
     ///
-    /// The configured state, cache, and scratch roots must already be distinct, empty,
-    /// owner-only directories. The command prints an operation-bound challenge and changes
-    /// authority epoch only after that exact challenge is typed back.
+    /// The command preserves the previous roots and journal as evidence, creates fresh
+    /// owner-only roots when the configured roots are not usable, and changes the authority
+    /// epoch only after its operation-bound challenge is typed back exactly.
     RecoverAuthority,
 }
 
@@ -1346,7 +1346,10 @@ fn attach_boot_cutover(
     services: ApplicationRunServices,
     config_path: &Path,
     launch_cwd: &Path,
-) -> Result<ApplicationRunServices> {
+) -> std::result::Result<
+    ApplicationRunServices,
+    sigil_runtime::application_host::BootAuthorityErrorV1,
+> {
     // RFC-0071 R71.6: one-call boot attach (epoch + authority composition) shared by every
     // surface; CLI surfaces never re-implement the decision or the composition.
     sigil_runtime::application_host::attach_boot_authority_to_services(
@@ -1354,7 +1357,6 @@ fn attach_boot_cutover(
         config_path,
         launch_cwd,
     )
-    .map_err(anyhow::Error::new)
 }
 
 async fn run_command(
@@ -1538,21 +1540,12 @@ where
         launch_cwd,
     ) {
         Ok(services) => services,
-        Err(_error) => {
-            // Machine protocol: a boot guard failure is a closed ConfigurationInvalid before
-            // any run starts; the message never leaks raw config paths.
-            let error = MachineError {
-                code: MachineErrorCode::ConfigurationInvalid,
-                message: "application boot failed before the run started".to_owned(),
-                retryable: false,
-                allowed_actions: vec![],
-                recovery_binding: None,
-            };
-            return write_machine_terminal(
-                writer,
-                MachineRecord::error(error),
-                MachineExitCode::InvalidInput,
-            );
+        Err(error) => {
+            // Keep boot-authority classification intact at the machine boundary. In particular,
+            // a broken journal is repairable authority state, not malformed provider config.
+            let error = machine_error_from_boot_authority(&error);
+            let exit_code = MachineExitCode::for_error(error.code);
+            return write_machine_terminal(writer, MachineRecord::error(error), exit_code);
         }
     };
     let mut preparation = Box::pin(prepare_application_run(request, &services));
@@ -1716,6 +1709,12 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
         ApplicationRunPrepareErrorClass::ProviderUnavailable => {
             MachineErrorCode::ProviderUnavailable
         }
+        ApplicationRunPrepareErrorClass::AuthorityUnavailable => {
+            MachineErrorCode::AuthorityUnavailable
+        }
+        ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => {
+            MachineErrorCode::AuthorityJournalCorrupted
+        }
         ApplicationRunPrepareErrorClass::ModelRouteNotConfigured => {
             MachineErrorCode::ModelRouteNotConfigured
         }
@@ -1774,6 +1773,18 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
                 Action::BackToSessionLibrary,
             ],
         ),
+        ApplicationRunPrepareErrorClass::AuthorityUnavailable => (
+            true,
+            vec![
+                Action::RepairAuthority,
+                Action::StartNewSession,
+                Action::BackToSessionLibrary,
+            ],
+        ),
+        ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => (
+            false,
+            vec![Action::RepairAuthority, Action::BackToSessionLibrary],
+        ),
         ApplicationRunPrepareErrorClass::SessionAlreadyActive => (
             true,
             vec![
@@ -1797,6 +1808,45 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
     MachineError::new(code, error.to_string(), retryable)
         .with_allowed_actions(allowed_actions)
         .with_recovery_binding(error.recovery_binding())
+}
+
+fn machine_error_from_boot_authority(
+    error: &sigil_runtime::application_host::BootAuthorityErrorV1,
+) -> MachineError {
+    use sigil_kernel::PublicRouteRecoveryAction as Action;
+    use sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1;
+
+    let journal_corrupted = matches!(
+        error,
+        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
+            RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
+                | RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_)
+        )
+    );
+    let (code, retryable, actions, message) = if journal_corrupted {
+        (
+            MachineErrorCode::AuthorityJournalCorrupted,
+            false,
+            vec![Action::RepairAuthority, Action::BackToSessionLibrary],
+            "the authority journal is corrupted; repair authority before retrying",
+        )
+    } else {
+        match error {
+            sigil_runtime::application_host::BootAuthorityErrorV1::Config(_) => (
+                MachineErrorCode::ConfigurationInvalid,
+                false,
+                vec![Action::RepairConnection, Action::BackToSessionLibrary],
+                "application configuration is invalid",
+            ),
+            _ => (
+                MachineErrorCode::AuthorityUnavailable,
+                true,
+                vec![Action::RepairAuthority, Action::BackToSessionLibrary],
+                "the authority plane is unavailable; repair authority before retrying",
+            ),
+        }
+    };
+    MachineError::new(code, message, retryable).with_allowed_actions(actions)
 }
 
 fn write_machine_terminal<W>(
@@ -2077,6 +2127,12 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
                 }
                 sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable => {
                     "the provider is temporarily unavailable"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable => {
+                    "the authority plane is unavailable and must be repaired"
+                }
+                sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
+                    "the authority journal is corrupted and must be repaired"
                 }
                 sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
                     "the session is already active in another surface"

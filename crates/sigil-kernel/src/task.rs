@@ -638,6 +638,86 @@ impl TaskBlockerV1 {
     }
 }
 
+/// A terminal fact that is about to replace one currently-started participant during root
+/// completion evaluation.
+///
+/// The evaluator consumes this only as an in-memory candidate. Callers must still append the
+/// matching durable attempt terminal before they append a Task root terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRootTerminalCandidateV1 {
+    DirectExecution {
+        attempt_id: String,
+        status: TaskParticipantAttemptStatus,
+    },
+    Participant {
+        attempt_id: TaskParticipantAttemptId,
+        status: TaskParticipantAttemptStatus,
+    },
+}
+
+/// Typed reason why a requested Task root completion cannot be accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskRootCompletionBlockerV1 {
+    ActiveBlocker,
+    FailedDependency,
+    BlockedDependency,
+    CancelledDependency,
+    UnfinishedStep,
+    UnfinishedParticipant,
+    UnfinishedDirectExecution,
+}
+
+impl TaskRootCompletionBlockerV1 {
+    #[must_use]
+    pub fn reason_code(self) -> &'static str {
+        match self {
+            Self::ActiveBlocker => "active_task_blocker",
+            Self::FailedDependency => "failed_dependency",
+            Self::BlockedDependency => "blocked_dependency",
+            Self::CancelledDependency => "cancelled_dependency",
+            Self::UnfinishedStep => "unfinished_task_step",
+            Self::UnfinishedParticipant => "unfinished_task_participant",
+            Self::UnfinishedDirectExecution => "unfinished_direct_execution",
+        }
+    }
+}
+
+/// Durable-only evaluation of a proposed Task root terminal.
+///
+/// `Completed` is accepted only when the active exact blocker is closed and the selected direct
+/// execution or DAG has no unfinished participant or step. For a cancelled root, the evaluator
+/// also returns the complete set of non-completed current-plan steps that must receive a
+/// cancellation terminal before the root closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRootTerminalEvaluationV1 {
+    pub requested_status: TaskRunStatus,
+    pub effective_status: TaskRunStatus,
+    pub active_blocker: Option<TaskBlockerV1>,
+    /// Descendants of failed, blocked, or interrupted dependencies that cannot continue.
+    pub blocked_dependency_steps: Vec<TaskStepId>,
+    /// Descendants of a cancelled dependency that must not remain runnable.
+    pub cancelled_dependency_steps: Vec<TaskStepId>,
+    /// Every current-plan step that a root cancellation must close.
+    pub cancellation_closure: Vec<TaskStepId>,
+    pub unfinished_steps: Vec<TaskStepId>,
+    pub unfinished_participants: Vec<TaskParticipantAttemptId>,
+    pub unfinished_direct_attempts: Vec<String>,
+    pub completion_blockers: Vec<TaskRootCompletionBlockerV1>,
+}
+
+impl TaskRootTerminalEvaluationV1 {
+    #[must_use]
+    pub fn allows_completed(&self) -> bool {
+        self.requested_status == TaskRunStatus::Completed
+            && self.effective_status == TaskRunStatus::Completed
+    }
+
+    #[must_use]
+    pub fn primary_completion_blocker(&self) -> Option<TaskRootCompletionBlockerV1> {
+        self.completion_blockers.first().copied()
+    }
+}
+
 /// Stable blocker reason codes (RFC-0067 10.3).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -3244,16 +3324,32 @@ impl TaskStateProjection {
 
     fn apply_run(&mut self, entry: &TaskRunEntry) {
         let task_is_new = !self.tasks.contains_key(&entry.task_id);
+        if task_is_new && entry.status == TaskRunStatus::Completed {
+            // A current-schema completion is a verdict over an existing direct/DAG authority.
+            // Never let a standalone terminal record manufacture both the Task and its success.
+            return;
+        }
         self.record_task_replay(
             &entry.task_id,
             task_is_new && entry.status == TaskRunStatus::Started,
         );
+        let completion_allowed = entry.status != TaskRunStatus::Completed
+            || self
+                .evaluate_root_terminal(&entry.task_id, TaskRunStatus::Completed, None)
+                .is_some_and(|evaluation| evaluation.allows_completed());
         let task = self
             .tasks
             .entry(entry.task_id.clone())
             .or_insert_with(|| TaskRunProjection::from_run(entry));
         if task.status.is_final() && entry.status != task.status {
             task.duplicate_terminal_entries += usize::from(entry.status.is_terminal());
+            return;
+        }
+        if !completion_allowed {
+            // Keep the malformed durable claim observable in the append-only log, but never let
+            // it manufacture a projected Completed state. The runtime root finalizer appends the
+            // resumable terminal selected by the same evaluator.
+            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
             return;
         }
         task.objective = entry.objective.clone();
@@ -3561,6 +3657,23 @@ impl TaskStateProjection {
     /// Returns the latest unresolved blocker for one Task, if any.
     pub fn active_blocker(&self, task_id: &TaskId) -> Option<&TaskBlockerV1> {
         self.active_blockers.get(task_id)
+    }
+
+    /// Evaluates a root terminal against the current durable projection.
+    #[must_use]
+    pub fn evaluate_root_terminal(
+        &self,
+        task_id: &TaskId,
+        requested_status: TaskRunStatus,
+        candidate: Option<&TaskRootTerminalCandidateV1>,
+    ) -> Option<TaskRootTerminalEvaluationV1> {
+        self.tasks.get(task_id).map(|task| {
+            task.evaluate_root_terminal(
+                self.active_blockers.get(task_id),
+                requested_status,
+                candidate,
+            )
+        })
     }
 
     /// Derives the RFC-0067 execution phase from durable facts only.
@@ -4061,6 +4174,244 @@ impl TaskRunProjection {
             ))
             .map(String::as_str)
     }
+
+    /// Evaluates a proposed root terminal from durable Task facts only.
+    ///
+    /// A direct Task needs its latest direct attempt to be completed. A DAG Task needs every
+    /// current-plan step completed, no active participant, and no unresolved blocker. Older
+    /// terminal attempts remain audit history and do not poison a later successful retry.
+    #[must_use]
+    pub fn evaluate_root_terminal(
+        &self,
+        active_blocker: Option<&TaskBlockerV1>,
+        requested_status: TaskRunStatus,
+        candidate: Option<&TaskRootTerminalCandidateV1>,
+    ) -> TaskRootTerminalEvaluationV1 {
+        let active_blocker = active_blocker
+            .filter(|blocker| !blocker.is_resolved())
+            .cloned();
+        let mut blocked_dependency_steps = BTreeSet::new();
+        let mut cancelled_dependency_steps = BTreeSet::new();
+        let mut cancellation_closure = BTreeSet::new();
+        let mut unfinished_steps = BTreeSet::new();
+        let mut unfinished_participants = BTreeSet::new();
+        let mut unfinished_direct_attempts = BTreeSet::new();
+        let mut completion_blockers = Vec::new();
+
+        let selected_plan = self
+            .latest_plan_version
+            .and_then(|version| self.plans.get(&version))
+            .filter(|plan| plan.status == TaskPlanStatus::Accepted);
+        let has_direct_authority = self.direct_execution_admission.is_some();
+        let has_dag_authority = selected_plan.is_some();
+
+        if let Some(blocker) = active_blocker.as_ref()
+            && !blocker.is_resolved()
+        {
+            completion_blockers.push(TaskRootCompletionBlockerV1::ActiveBlocker);
+        }
+
+        if has_direct_authority {
+            let latest_attempt = self
+                .direct_execution_attempts
+                .values()
+                .max_by_key(|attempt| attempt.ordinal);
+            let latest_status = latest_attempt
+                .map(|attempt| direct_attempt_status_with_candidate(attempt, candidate));
+            if latest_status != Some(TaskParticipantAttemptStatus::Completed) {
+                if let Some(attempt) = latest_attempt {
+                    unfinished_direct_attempts.insert(attempt.attempt_id.clone());
+                } else {
+                    unfinished_direct_attempts.insert("direct_execution_not_started".to_owned());
+                }
+            }
+            for attempt in self.direct_execution_attempts.values() {
+                if direct_attempt_status_with_candidate(attempt, candidate)
+                    == TaskParticipantAttemptStatus::Started
+                {
+                    unfinished_direct_attempts.insert(attempt.attempt_id.clone());
+                }
+            }
+            if !unfinished_direct_attempts.is_empty() {
+                completion_blockers.push(TaskRootCompletionBlockerV1::UnfinishedDirectExecution);
+            }
+        }
+
+        if let Some(plan) = selected_plan {
+            let mut blocking_roots = BTreeSet::new();
+            let mut cancelled_roots = BTreeSet::new();
+            for step in &plan.steps {
+                let status = self
+                    .steps
+                    .get(&(plan.plan_version, step.step_id.clone()))
+                    .map(|projection| projection.status);
+                match status {
+                    Some(TaskStepStatus::Completed) => {}
+                    Some(TaskStepStatus::Failed) => {
+                        blocking_roots.insert(step.step_id.clone());
+                        completion_blockers.push(TaskRootCompletionBlockerV1::FailedDependency);
+                    }
+                    Some(TaskStepStatus::Blocked | TaskStepStatus::Interrupted) => {
+                        blocking_roots.insert(step.step_id.clone());
+                        completion_blockers.push(TaskRootCompletionBlockerV1::BlockedDependency);
+                    }
+                    Some(TaskStepStatus::Cancelled) => {
+                        cancelled_roots.insert(step.step_id.clone());
+                        completion_blockers.push(TaskRootCompletionBlockerV1::CancelledDependency);
+                    }
+                    Some(
+                        TaskStepStatus::Pending
+                        | TaskStepStatus::Running
+                        | TaskStepStatus::Superseded,
+                    )
+                    | None => {
+                        unfinished_steps.insert(step.step_id.clone());
+                    }
+                }
+            }
+            blocked_dependency_steps = task_dependency_descendants(
+                &plan.steps,
+                &blocking_roots,
+                &self.steps,
+                plan.plan_version,
+            );
+            cancelled_dependency_steps = task_dependency_descendants(
+                &plan.steps,
+                &cancelled_roots,
+                &self.steps,
+                plan.plan_version,
+            );
+            if !blocked_dependency_steps.is_empty() {
+                completion_blockers.push(TaskRootCompletionBlockerV1::BlockedDependency);
+            }
+            if !unfinished_steps.is_empty() {
+                completion_blockers.push(TaskRootCompletionBlockerV1::UnfinishedStep);
+            }
+            if requested_status == TaskRunStatus::Cancelled {
+                for step in &plan.steps {
+                    let status = self
+                        .steps
+                        .get(&(plan.plan_version, step.step_id.clone()))
+                        .map(|projection| projection.status);
+                    if !matches!(
+                        status,
+                        Some(
+                            TaskStepStatus::Completed
+                                | TaskStepStatus::Superseded
+                                | TaskStepStatus::Cancelled
+                        )
+                    ) {
+                        cancellation_closure.insert(step.step_id.clone());
+                    }
+                }
+            }
+        }
+
+        for attempt in self.participant_attempts.values() {
+            if participant_attempt_status_with_candidate(attempt, candidate)
+                == TaskParticipantAttemptStatus::Started
+            {
+                unfinished_participants.insert(attempt.attempt_id.clone());
+            }
+        }
+        if !unfinished_participants.is_empty() {
+            completion_blockers.push(TaskRootCompletionBlockerV1::UnfinishedParticipant);
+        }
+
+        completion_blockers.sort_by_key(|blocker| blocker.reason_code());
+        completion_blockers.dedup();
+
+        let effective_status = if requested_status == TaskRunStatus::Completed
+            && (has_direct_authority || has_dag_authority)
+            && !completion_blockers.is_empty()
+        {
+            // A completion claim never infers that a failed or cancelled dependency was an
+            // intentional root terminal. Keep the Task resumable until the exact authority
+            // resolves its blocker or explicitly requests cancellation.
+            TaskRunStatus::Paused
+        } else {
+            requested_status
+        };
+
+        TaskRootTerminalEvaluationV1 {
+            requested_status,
+            effective_status,
+            active_blocker,
+            blocked_dependency_steps: blocked_dependency_steps.into_iter().collect(),
+            cancelled_dependency_steps: cancelled_dependency_steps.into_iter().collect(),
+            cancellation_closure: cancellation_closure.into_iter().collect(),
+            unfinished_steps: unfinished_steps.into_iter().collect(),
+            unfinished_participants: unfinished_participants.into_iter().collect(),
+            unfinished_direct_attempts: unfinished_direct_attempts.into_iter().collect(),
+            completion_blockers,
+        }
+    }
+}
+
+fn direct_attempt_status_with_candidate(
+    attempt: &crate::TaskDirectExecutionAttemptV1,
+    candidate: Option<&TaskRootTerminalCandidateV1>,
+) -> TaskParticipantAttemptStatus {
+    match candidate {
+        Some(TaskRootTerminalCandidateV1::DirectExecution { attempt_id, status })
+            if attempt.attempt_id == *attempt_id =>
+        {
+            *status
+        }
+        _ => attempt.status,
+    }
+}
+
+fn participant_attempt_status_with_candidate(
+    attempt: &TaskParticipantAttemptEntry,
+    candidate: Option<&TaskRootTerminalCandidateV1>,
+) -> TaskParticipantAttemptStatus {
+    match candidate {
+        Some(TaskRootTerminalCandidateV1::Participant { attempt_id, status })
+            if attempt.attempt_id == *attempt_id =>
+        {
+            *status
+        }
+        _ => attempt.status,
+    }
+}
+
+fn task_dependency_descendants(
+    steps: &[TaskStepSpec],
+    roots: &BTreeSet<TaskStepId>,
+    statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+    plan_version: u32,
+) -> BTreeSet<TaskStepId> {
+    let mut closure = roots.clone();
+    loop {
+        let mut changed = false;
+        for step in steps {
+            if closure.contains(&step.step_id)
+                || !step
+                    .depends_on
+                    .iter()
+                    .any(|dependency| closure.contains(dependency))
+                || statuses
+                    .get(&(plan_version, step.step_id.clone()))
+                    .is_some_and(|projection| {
+                        matches!(
+                            projection.status,
+                            TaskStepStatus::Completed | TaskStepStatus::Superseded
+                        )
+                    })
+            {
+                continue;
+            }
+            changed |= closure.insert(step.step_id.clone());
+        }
+        if !changed {
+            break;
+        }
+    }
+    for root in roots {
+        closure.remove(root);
+    }
+    closure
 }
 
 fn supersede_plan_steps(

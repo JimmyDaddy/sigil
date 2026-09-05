@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use sigil_kernel::{ConfigPublishError, ConfigUpdateLockGuard, ConnectionId, ModelRef, RootConfig};
+use zeroize::Zeroizing;
 
 use super::credential::keyed_secret_match;
 use super::{
@@ -91,6 +92,58 @@ pub struct ConnectionSaveOutcome {
     pub old_credential_cleanup_warning: bool,
 }
 
+/// One exact persisted config source captured before an interactive edit starts.
+///
+/// A malformed source may still contain secret material, so its bytes are zeroized on drop and
+/// never exposed through `Debug`. Provider-settings recovery uses this snapshot to distinguish a
+/// malformed config from a valid config whose later boot phase failed, and to perform an exact
+/// byte-for-byte compare-and-swap while holding the cross-process update lock.
+#[derive(Clone)]
+pub struct PersistedConfigSnapshot {
+    source: Zeroizing<Vec<u8>>,
+    parsed: Option<RootConfig>,
+}
+
+impl std::fmt::Debug for PersistedConfigSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PersistedConfigSnapshot")
+            .field("source", &"[redacted config source]")
+            .field("source_len", &self.source.len())
+            .field("parsed", &self.parsed.is_some())
+            .finish()
+    }
+}
+
+impl PersistedConfigSnapshot {
+    /// Captures the exact current source bytes and parses the persisted view when possible.
+    pub fn load(path: &Path) -> Result<Self> {
+        let source = Zeroizing::new(fs::read(path)?);
+        let parsed = std::str::from_utf8(&source)
+            .ok()
+            .and_then(|raw| RootConfig::parse_persisted(raw).ok())
+            .filter(|root_config| {
+                let loaded = load_provider_connections(root_config);
+                loaded.mode == ConfigMode::V2 && loaded.issues.is_empty()
+            });
+        Ok(Self { source, parsed })
+    }
+
+    #[must_use]
+    pub fn parsed(&self) -> Option<&RootConfig> {
+        self.parsed.as_ref()
+    }
+
+    #[must_use]
+    pub fn is_invalid(&self) -> bool {
+        self.parsed.is_none()
+    }
+
+    fn matches_source(&self, source: &[u8]) -> bool {
+        self.source.as_slice() == source
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectionSaveError {
     #[error("config update transaction lock failed")]
@@ -156,6 +209,11 @@ pub async fn save_connection_config_with_base(
 ) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
     let transaction_lock = ConfigUpdateLockGuard::acquire(path)
         .map_err(|source| ConnectionSaveError::TransactionLock { source })?;
+    let compare_and_swap = if path.exists() {
+        ConnectionCompareAndSwap::Parsed
+    } else {
+        ConnectionCompareAndSwap::Missing
+    };
     save_connection_config_with_guard(
         current,
         next_base,
@@ -164,7 +222,38 @@ pub async fn save_connection_config_with_base(
         credential_store,
         publisher,
         &transaction_lock,
-        ConnectionCompareAndSwap::Parsed,
+        compare_and_swap,
+    )
+    .await
+}
+
+/// Saves a connection draft only while the exact source captured by `current` is still live.
+///
+/// This is the recovery path for a config that parsed successfully but whose later boot phase
+/// failed. It deliberately compares source bytes rather than normalized TOML so comments,
+/// formatting changes, and any concurrent rewrite all invalidate the editor snapshot.
+pub async fn save_connection_config_with_base_from_snapshot(
+    current: &PersistedConfigSnapshot,
+    next_base: &RootConfig,
+    path: &Path,
+    draft: ConnectionSaveDraft,
+    credential_store: &dyn ProviderCredentialStore,
+    publisher: &dyn ProviderConfigPublisher,
+) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
+    let parsed = current
+        .parsed()
+        .ok_or(ConnectionSaveError::CurrentConfigInvalid)?;
+    let transaction_lock = ConfigUpdateLockGuard::acquire(path)
+        .map_err(|source| ConnectionSaveError::TransactionLock { source })?;
+    save_connection_config_with_guard(
+        parsed,
+        next_base,
+        path,
+        draft,
+        credential_store,
+        publisher,
+        &transaction_lock,
+        ConnectionCompareAndSwap::ExactSource(current),
     )
     .await
 }
@@ -176,11 +265,15 @@ pub async fn save_connection_config_with_base(
 /// repaired valid configuration is never overwritten.
 pub async fn save_connection_config_replacing_invalid(
     replacement_base: &RootConfig,
+    invalid: &PersistedConfigSnapshot,
     path: &Path,
     draft: ConnectionSaveDraft,
     credential_store: &dyn ProviderCredentialStore,
     publisher: &dyn ProviderConfigPublisher,
 ) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
+    if !invalid.is_invalid() {
+        return Err(ConnectionSaveError::ConcurrentModification);
+    }
     let transaction_lock = ConfigUpdateLockGuard::acquire(path)
         .map_err(|source| ConnectionSaveError::TransactionLock { source })?;
     save_connection_config_with_guard(
@@ -191,15 +284,16 @@ pub async fn save_connection_config_replacing_invalid(
         credential_store,
         publisher,
         &transaction_lock,
-        ConnectionCompareAndSwap::Invalid,
+        ConnectionCompareAndSwap::ExactSource(invalid),
     )
     .await
 }
 
 #[derive(Clone, Copy)]
-enum ConnectionCompareAndSwap {
+enum ConnectionCompareAndSwap<'a> {
     Parsed,
-    Invalid,
+    Missing,
+    ExactSource(&'a PersistedConfigSnapshot),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,32 +305,9 @@ async fn save_connection_config_with_guard(
     credential_store: &dyn ProviderCredentialStore,
     publisher: &dyn ProviderConfigPublisher,
     transaction_lock: &ConfigUpdateLockGuard,
-    compare_and_swap: ConnectionCompareAndSwap,
+    compare_and_swap: ConnectionCompareAndSwap<'_>,
 ) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
-    if path.exists() {
-        match compare_and_swap {
-            ConnectionCompareAndSwap::Parsed => {
-                let live = RootConfig::load_persisted(path)
-                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
-                let expected = toml::to_string(current)
-                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
-                let actual = toml::to_string(&live)
-                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
-                if expected != actual {
-                    return Err(ConnectionSaveError::ConcurrentModification);
-                }
-            }
-            ConnectionCompareAndSwap::Invalid => {
-                let live = fs::read_to_string(path)
-                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
-                if RootConfig::parse_persisted(&live).is_ok() {
-                    return Err(ConnectionSaveError::ConcurrentModification);
-                }
-            }
-        }
-    } else if matches!(compare_and_swap, ConnectionCompareAndSwap::Invalid) {
-        return Err(ConnectionSaveError::ConcurrentModification);
-    }
+    verify_connection_config_snapshot(current, path, compare_and_swap)?;
     let current_loaded = load_provider_connections(current);
     if current_loaded.mode != ConfigMode::V2 || !current_loaded.issues.is_empty() {
         return Err(ConnectionSaveError::CurrentConfigInvalid);
@@ -324,6 +395,21 @@ async fn save_connection_config_with_guard(
         }
     };
 
+    // Credential writes are deliberately performed before config publication so a failed
+    // credential backend cannot leave a config pointing at an unverified record. Re-check the
+    // source immediately before publication as well: an external editor may not participate in
+    // our lock, and must never be overwritten after the first check and the awaited I/O above.
+    if let Err(error) = verify_connection_config_snapshot(current, path, compare_and_swap) {
+        let orphaned_credential =
+            rollback_created_credentials(credential_store, &created_ids).await;
+        return Err(ConnectionSaveError::ConfigNotPublished {
+            source: anyhow::anyhow!(
+                "config changed or became invalid while credentials were being prepared: {error}"
+            ),
+            orphaned_credential,
+        });
+    }
+
     let publish_outcome = match publisher.publish(path, &next, transaction_lock) {
         Ok(outcome) => outcome,
         Err(source) => {
@@ -363,6 +449,40 @@ async fn save_connection_config_with_guard(
         publish_outcome,
         old_credential_cleanup_warning,
     })
+}
+
+fn verify_connection_config_snapshot(
+    current: &RootConfig,
+    path: &Path,
+    compare_and_swap: ConnectionCompareAndSwap<'_>,
+) -> Result<(), ConnectionSaveError> {
+    if path.exists() {
+        match compare_and_swap {
+            ConnectionCompareAndSwap::Missing => {
+                return Err(ConnectionSaveError::ConcurrentModification);
+            }
+            ConnectionCompareAndSwap::Parsed => {
+                let live = RootConfig::load_persisted(path)
+                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
+                let expected = toml::to_string(current)
+                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
+                let actual = toml::to_string(&live)
+                    .map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
+                if expected != actual {
+                    return Err(ConnectionSaveError::ConcurrentModification);
+                }
+            }
+            ConnectionCompareAndSwap::ExactSource(expected) => {
+                let live = fs::read(path).map_err(|_| ConnectionSaveError::CurrentConfigInvalid)?;
+                if !expected.matches_source(&live) {
+                    return Err(ConnectionSaveError::ConcurrentModification);
+                }
+            }
+        }
+    } else if !matches!(compare_and_swap, ConnectionCompareAndSwap::Missing) {
+        return Err(ConnectionSaveError::ConcurrentModification);
+    }
+    Ok(())
 }
 
 async fn rollback_created_credentials(

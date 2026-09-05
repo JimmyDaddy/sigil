@@ -81,6 +81,8 @@ pub enum CutoverErrorV1 {
     LegacySessionUnavailable,
     #[error("current-schema authority composition is unavailable")]
     AuthorityUnavailable,
+    #[error("current-schema authority journal is corrupted")]
+    AuthorityJournalCorrupted,
 }
 
 /// Schema version for the renderer-neutral cutover status shared by all product surfaces.

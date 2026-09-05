@@ -173,6 +173,44 @@ fn r71_bootstrap_stale_handle_fence_rejects_before_old_root_hardening() {
 }
 
 #[test]
+fn r71_bootstrap_is_the_unique_stable_authority_instance_identity_producer() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let base = std::fs::canonicalize(temp.path()).expect("canonical tempdir");
+    let namespace = base.join("authority-instance-namespace");
+    let old_root = publish_active_epoch_for_test(&namespace, 2);
+    let old_store = AuthorityBootstrapStoreV1::open(&namespace, &old_root, 2).expect("old store");
+    let old_guard = old_store.acquire_publication().expect("old publication");
+    let old_identity = old_store
+        .authority_instance_hash(&old_guard)
+        .expect("old authority identity");
+    drop(old_guard);
+    drop(old_store);
+
+    let reopened = AuthorityBootstrapStoreV1::open(&namespace, &old_root, 2).expect("reopen");
+    let reopened_guard = reopened
+        .acquire_publication()
+        .expect("reopened publication");
+    assert_eq!(
+        reopened
+            .authority_instance_hash(&reopened_guard)
+            .expect("stable authority identity"),
+        old_identity
+    );
+    drop(reopened_guard);
+    drop(reopened);
+
+    let new_root = publish_active_epoch_for_test(&namespace, 3);
+    let new_store = AuthorityBootstrapStoreV1::open(&namespace, &new_root, 3).expect("new store");
+    let new_guard = new_store.acquire_publication().expect("new publication");
+    assert_ne!(
+        new_store
+            .authority_instance_hash(&new_guard)
+            .expect("new authority identity"),
+        old_identity
+    );
+}
+
+#[test]
 fn r71_bootstrap_stale_inventory_handle_is_fenced_and_initial_fresh_remains_valid() {
     use crate::process_inventory::AuthorityProcessInventoryPortV1;
 

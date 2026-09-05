@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 
 use crate::{
     TransientMessageOverlay,
-    event::{EventHandler, RunEvent},
+    event::EventHandler,
     provider::{AssistantMessageKind, ModelMessage, ProviderContinuationState, ToolCall},
     session::{ControlEntry, Session},
     tool::{ToolCategory, ToolRegistry},
@@ -32,10 +32,13 @@ where
     );
     let (assistant_message, exact_overlay) =
         crate::project_message_for_persistence(exact_assistant_message)?;
-    let assistant_message_id = assistant_message.id.clone();
-    session.append_assistant_message(assistant_message.clone())?;
-    handler.handle(RunEvent::AssistantMessage(assistant_message))?;
-    save_continuation_states(session, handler, pending_states, &assistant_message_id)?;
+    append_assistant_message_bundle(
+        session,
+        handler,
+        assistant_message,
+        pending_states,
+        Vec::new(),
+    )?;
     Ok(exact_overlay)
 }
 
@@ -71,28 +74,25 @@ where
             }
         }
     }
-    if let Err(error) = session.append_assistant_message(assistant_message.clone()) {
+    let mut controls = Vec::with_capacity(url_capability_registrations.len());
+    for registration in &url_capability_registrations {
+        let descriptor = registration.durable_descriptor(session.session_scope_id());
+        descriptor.validate()?;
+        controls.push(ControlEntry::WebUrlCapabilityDescriptor(descriptor));
+    }
+    if let Err(error) = append_assistant_message_bundle(
+        session,
+        handler,
+        assistant_message,
+        pending_states,
+        controls,
+    ) {
         if !url_capability_registrations.is_empty()
             && let Some(registrar) = registrar.as_ref()
         {
             let _ = registrar.rollback_message(&final_message_id);
         }
         return Err(error);
-    }
-    handler.handle(RunEvent::AssistantMessage(assistant_message))?;
-    for registration in &url_capability_registrations {
-        let descriptor = registration.durable_descriptor(session.session_scope_id());
-        descriptor.validate()?;
-        let control = ControlEntry::WebUrlCapabilityDescriptor(descriptor);
-        if let Err(error) = session.append_control(control.clone()) {
-            if !url_capability_registrations.is_empty()
-                && let Some(registrar) = registrar.as_ref()
-            {
-                let _ = registrar.rollback_message(&final_message_id);
-            }
-            return Err(error);
-        }
-        handler.handle(RunEvent::Control(control))?;
     }
     if !url_capability_registrations.is_empty()
         && let Some(registrar) = registrar.as_ref()
@@ -106,30 +106,39 @@ where
             None => "failed to commit hosted URL capabilities".to_owned(),
         }));
     }
-    save_continuation_states(session, handler, pending_states, &final_message_id)?;
     Ok(final_message_id)
 }
 
-pub(super) fn save_continuation_states<H>(
+pub(super) fn append_assistant_message_bundle<H>(
     session: &mut Session,
     handler: &mut H,
+    assistant_message: ModelMessage,
     mut pending_states: Vec<ProviderContinuationState>,
-    message_id: &str,
-) -> Result<()>
+    controls: Vec<ControlEntry>,
+) -> Result<String>
 where
     H: EventHandler,
 {
+    let message_id = assistant_message.id.clone();
     for state in &mut pending_states {
         if state.message_id.is_none() {
-            state.message_id = Some(message_id.to_owned());
+            state.message_id = Some(message_id.clone());
         }
     }
+    let mut entries = Vec::with_capacity(1 + controls.len() + pending_states.len());
+    let mut publications = Vec::with_capacity(1);
+    entries.push(crate::SessionLogEntry::Assistant(assistant_message.clone()));
+    publications.push(
+        crate::session::SessionPublicEventProjectionV1::assistant_message(0, assistant_message),
+    );
+    entries.extend(controls.into_iter().map(crate::SessionLogEntry::Control));
     for state in pending_states {
-        let control = ControlEntry::ContinuationStateSaved(state);
-        session.append_control(control.clone())?;
-        handler.handle(RunEvent::Control(control))?;
+        entries.push(crate::SessionLogEntry::Control(
+            ControlEntry::ContinuationStateSaved(state),
+        ));
     }
-    Ok(())
+    handler.commit_session_publications(session, entries, publications)?;
+    Ok(message_id)
 }
 
 fn count_agent_tool_calls(tools: &ToolRegistry, calls: &[ToolCall]) -> usize {

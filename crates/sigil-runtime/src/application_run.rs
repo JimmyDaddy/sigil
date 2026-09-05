@@ -15,13 +15,14 @@ use sigil_kernel::{
     ConversationRunLifecycleRecorder, ConversationRunStartedEntryV1, EgressDisclosurePresenter,
     EventHandler, FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore,
     McpServerStartup, MessageRole, ModelMessage, ModelRef, MutationEventRecorder, NoopEventHandler,
-    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionMode, PublicEventDeliveryReceiptV1,
-    PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1, PublicEventOutboxRecorder,
-    PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector, ReasoningEffort,
-    ResolvedModelRoute, RootConfig, RunCancellationFinalizedEntry, RunCancellationHandle,
-    RunCancellationOwner, RunCancellationRecorder, RunCancellationRequestedEntry,
-    RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome,
-    RunTaskGuard, SecretString, Session, SessionLogEntry, SessionRef, TaskId, TaskPauseRequest,
+    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PermissionMode, Provider,
+    ProviderOutputPublicationIntentV1, PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder, PublicRunEvent, PublicRunEventKind,
+    PublicTaskEventProjector, ReasoningEffort, ResolvedModelRoute, RootConfig,
+    RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
+    RunCancellationRecorder, RunCancellationRequestedEntry, RunCancellationTarget,
+    RunCancellationTerminalOutcome, RunEvent, RunQuiescenceOutcome, RunTaskGuard, SecretString,
+    Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, TaskId, TaskPauseRequest,
     TaskRunStatus, TaskVerificationRerunRequest, ToolArtifactStore, ToolRegistryScope,
     VerificationProductView, WorkspaceTrust, conversation_route_routing_contract_material,
     rerun_task_verification_check, resolve_workspace_root, safe_persistence_text,
@@ -143,6 +144,10 @@ pub enum ApplicationRunPrepareErrorClass {
     ConnectionConfigInvalid,
     /// The configured provider could not become ready.
     ProviderUnavailable,
+    /// The authority plane is unavailable; this is not a provider failure.
+    AuthorityUnavailable,
+    /// The authority journal failed integrity validation; repair is required before durable use.
+    AuthorityJournalCorrupted,
     /// No saved or explicit compound model route was available.
     ModelRouteNotConfigured,
     /// The current connection target needs an exact-bound user confirmation.
@@ -183,6 +188,16 @@ pub enum ApplicationRunPrepareError {
     },
     #[error("provider is unavailable")]
     ProviderUnavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("authority is unavailable")]
+    AuthorityUnavailable {
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("authority journal is corrupted")]
+    AuthorityJournalCorrupted {
         #[source]
         source: anyhow::Error,
     },
@@ -228,6 +243,12 @@ impl ApplicationRunPrepareError {
             }
             Self::ProviderUnavailable { .. } => {
                 ApplicationRunPrepareErrorClass::ProviderUnavailable
+            }
+            Self::AuthorityUnavailable { .. } => {
+                ApplicationRunPrepareErrorClass::AuthorityUnavailable
+            }
+            Self::AuthorityJournalCorrupted { .. } => {
+                ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted
             }
             Self::ModelRouteNotConfigured => {
                 ApplicationRunPrepareErrorClass::ModelRouteNotConfigured
@@ -397,6 +418,8 @@ pub enum ApplicationSessionRouteRecoveryCode {
     ModelRouteNotConfigured,
     ConnectionConfigInvalid,
     ProviderUnavailable,
+    AuthorityUnavailable,
+    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -406,6 +429,7 @@ pub enum ApplicationSessionRouteRecoveryCode {
 pub enum ApplicationSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
+    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -3344,8 +3368,13 @@ fn append_application_final_answer(
     let mut message = ModelMessage::assistant(Some(safe_persistence_text(&text)), Vec::new());
     message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
     let final_message_id = message.id.clone();
-    session.append_assistant_message(message.clone())?;
-    handler.handle(RunEvent::AssistantMessage(message))?;
+    handler.commit_session_publications(
+        session,
+        vec![SessionLogEntry::Assistant(message.clone())],
+        vec![SessionPublicEventProjectionV1::assistant_message(
+            0, message,
+        )],
+    )?;
     Ok(final_message_id)
 }
 
@@ -3529,8 +3558,13 @@ async fn execute_application_agent_profile(
     let mut message = ModelMessage::assistant(Some(parent_summary.clone()), Vec::new());
     message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
     let final_message_id = message.id.clone();
-    session.append_assistant_message(message.clone())?;
-    handler.handle(RunEvent::AssistantMessage(message))?;
+    handler.commit_session_publications(
+        session,
+        vec![SessionLogEntry::Assistant(message.clone())],
+        vec![SessionPublicEventProjectionV1::assistant_message(
+            0, message,
+        )],
+    )?;
     Ok(AgentRunOutput {
         disposition: AgentRunDisposition::FinalAnswer,
         result: AgentRunResult {
@@ -3696,9 +3730,7 @@ pub async fn prepare_application_run(
     #[cfg(not(test))]
     services
         .require_current_schema_authority()
-        .map_err(|error| ApplicationRunPrepareError::Configuration {
-            source: anyhow!(error),
-        })?;
+        .map_err(application_authority_prepare_error)?;
     let (prepared, frozen_request) =
         prepare_application_run_internal(request, services, None).await?;
     debug_assert!(frozen_request.is_none());
@@ -3717,9 +3749,7 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
     #[cfg(not(test))]
     services
         .require_current_schema_authority()
-        .map_err(|error| ApplicationRunPrepareError::Configuration {
-            source: anyhow!(error),
-        })?;
+        .map_err(application_authority_prepare_error)?;
     if exact_prompt.expose_secret().trim().is_empty() || durable_user_message_id.trim().is_empty() {
         return Err(ApplicationRunPrepareError::InvalidInvocation {
             message: "queued exact prompt and durable user message id must not be empty".to_owned(),
@@ -3816,7 +3846,7 @@ async fn prepare_application_run_internal(
         root_task_guard,
         model_ref,
         mut options,
-        target_max_tokens,
+        mut target_max_tokens,
         mut input,
         run_id,
         prompt,
@@ -3834,6 +3864,28 @@ async fn prepare_application_run_internal(
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
+    if target_max_tokens.is_none() {
+        let effective_context_window = crate::resolve_model_context_window_tokens(
+            &root_config,
+            &model_ref,
+            session.provider_name(),
+        )
+        .tokens;
+        target_max_tokens = crate::resolve_automatic_output_token_budget(
+            effective_context_window,
+            provider.default_max_output_tokens(session.model_name()),
+        )
+        .map_err(|source| ApplicationRunPrepareError::Configuration { source })?;
+        if let Some(max_output_tokens) = target_max_tokens {
+            input = input.with_max_output_tokens(max_output_tokens);
+        }
+    }
+    crate::validate_provider_output_token_budget(
+        provider.as_ref(),
+        session.model_name(),
+        target_max_tokens,
+    )
+    .map_err(|source| ApplicationRunPrepareError::Configuration { source })?;
     let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
         session.provider_name(),
         session.model_name(),
@@ -5936,7 +5988,7 @@ fn prepare_application_run_blocking_with_writer(
         &runtime_provider_name,
         &session_route.model_ref.model_id,
     )?;
-    root_config.agent.runtime_provider = runtime_provider_name;
+    root_config.agent.runtime_provider = runtime_provider_name.clone();
     root_config.agent.connection = Some(session_route.model_ref.connection_id.clone());
     root_config.agent.model = session_route.model_ref.model_id.clone();
     if request.skill_binding.is_some() && request.agent_binding.is_some() {
@@ -6006,6 +6058,24 @@ fn prepare_application_run_blocking_with_writer(
             None
         };
     let model_ref = session_route.model_ref.clone();
+    let effective_context_window = crate::resolve_model_context_window_tokens(
+        &root_config,
+        &model_ref,
+        &runtime_provider_name,
+    )
+    .tokens;
+    let requested_max_output_tokens = request
+        .constraints
+        .as_ref()
+        .map(|constraints| constraints.max_output_tokens)
+        .or(root_config.model_request.max_output_tokens);
+    if let Err(error) =
+        crate::validate_output_token_budget(effective_context_window, requested_max_output_tokens)
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: error.to_string(),
+        });
+    }
     let route_transition = crate::provider_connections::SessionRouteTransitionView {
         kind: route_transition_kind,
         connection_id: Some(session_route.model_ref.connection_id.as_str().to_owned()),
@@ -6044,6 +6114,7 @@ fn prepare_application_run_blocking_with_writer(
     if let Some(constraints) = request.constraints.as_ref() {
         options.max_turns = Some(constraints.max_turns);
     }
+    let configured_max_output_tokens = crate::configured_max_output_tokens(&root_config);
     let mut input = AgentRunInput::user(request.prompt.clone())
         .with_logical_run_id(request.run_id.clone())
         .with_cancellation(cancellation_handle.clone())
@@ -6055,13 +6126,14 @@ fn prepare_application_run_blocking_with_writer(
             .transient_context
             .push(loaded_skill.transient_context.clone());
     }
-    if let Some(constraints) = request.constraints.as_ref() {
-        input = input.with_max_output_tokens(constraints.max_output_tokens);
-    }
     let target_max_tokens = request
         .constraints
         .as_ref()
-        .map(|constraints| constraints.max_output_tokens);
+        .map(|constraints| constraints.max_output_tokens)
+        .or(configured_max_output_tokens);
+    if let Some(max_output_tokens) = target_max_tokens {
+        input = input.with_max_output_tokens(max_output_tokens);
+    }
     let redactor = secret_redactor_for_root_config(&root_config);
     Ok(BlockingApplicationRunPreparation {
         root_config,
@@ -6108,6 +6180,31 @@ fn application_route_authority_prepare_error(
             }
         }
         other => ApplicationRunPrepareError::execution(anyhow::Error::new(other)),
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+fn application_authority_prepare_error(
+    error: sigil_kernel::cutover_manifest::CutoverErrorV1,
+) -> ApplicationRunPrepareError {
+    match error {
+        sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable => {
+            ApplicationRunPrepareError::AuthorityUnavailable {
+                source: anyhow::Error::new(
+                    sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable,
+                ),
+            }
+        }
+        sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityJournalCorrupted => {
+            ApplicationRunPrepareError::AuthorityJournalCorrupted {
+                source: anyhow::Error::new(
+                    sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityJournalCorrupted,
+                ),
+            }
+        }
+        other => ApplicationRunPrepareError::Configuration {
+            source: anyhow::Error::new(other),
+        },
     }
 }
 
@@ -7489,6 +7586,160 @@ where
             );
         }
         Ok(events)
+    }
+
+    fn commit_session_publications(
+        &mut self,
+        session: &mut Session,
+        entries: Vec<SessionLogEntry>,
+        publications: Vec<SessionPublicEventProjectionV1>,
+    ) -> Result<Vec<sigil_kernel::StoredEvent>> {
+        self.events
+            .ensure_pending_replayed_before_live(self.handler)?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application public session publication belongs to another durable session");
+        }
+        if session.store_path() != Some(self.events.outbox_store.path()) {
+            bail!("application public session publication uses a different durable session store");
+        }
+
+        // This mixed-bundle API only accepts explicitly projected provider-visible entries plus
+        // private companion controls. A control with its own public projection must use
+        // `commit_controls`; accepting it here would recreate a split domain/outbox append.
+        let mut staged_task_events = self.task_events.clone();
+        for entry in &entries {
+            let SessionLogEntry::Control(control) = entry else {
+                continue;
+            };
+            let projected = staged_task_events
+                .project_control(control)
+                .map_err(|source| {
+                    anyhow::Error::new(ApplicationPublicOutboxAppendError { source })
+                })?;
+            if !projected.is_empty() {
+                bail!(
+                    "public controls must be committed through the atomic control publication boundary"
+                );
+            }
+        }
+
+        let mut state = self
+            .events
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let next_sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        let (events, outbox) = session
+            .append_session_entries_with_public_outbox(
+                entries,
+                publications,
+                &self.events.run_id,
+                next_sequence,
+            )
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
+        self.task_events = staged_task_events;
+        if let Some(last) = outbox.last() {
+            state.sequence = last.sequence;
+        }
+        for entry in outbox {
+            self.events.deliver_committed(
+                &mut state,
+                self.handler,
+                entry.event,
+                &entry.public_event_id,
+            );
+        }
+        Ok(events)
+    }
+
+    fn prepare_provider_output_publication(
+        &mut self,
+        session: &Session,
+        control: &ControlEntry,
+    ) -> Result<Option<ProviderOutputPublicationIntentV1>> {
+        self.events
+            .ensure_pending_replayed_before_live(self.handler)?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application provider output belongs to another durable session");
+        }
+        if session.store_path() != Some(self.events.outbox_store.path()) {
+            bail!("application provider output uses a different durable session store");
+        }
+        match control {
+            ControlEntry::UsageSnapshot(usage) => {
+                let state = self
+                    .events
+                    .state
+                    .lock()
+                    .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+                if state.terminal {
+                    bail!("application run event stream is already terminal");
+                }
+                let next_sequence = state
+                    .sequence
+                    .checked_add(1)
+                    .context("application run event sequence exhausted")?;
+                Ok(Some(ProviderOutputPublicationIntentV1::public(
+                    self.events.run_id.clone(),
+                    next_sequence,
+                    SessionPublicEventProjectionV1::usage_snapshot(0, usage.clone()),
+                )?))
+            }
+            ControlEntry::ResponseHandleTracked(_) | ControlEntry::BackgroundTaskTracked(_) => {
+                Ok(Some(ProviderOutputPublicationIntentV1::private()))
+            }
+            _ => bail!("unsupported provider-attempt output control"),
+        }
+    }
+
+    fn complete_provider_output_publication(
+        &mut self,
+        intent: Option<ProviderOutputPublicationIntentV1>,
+        committed: Vec<PublicEventOutboxEntryV1>,
+        event: RunEvent,
+    ) -> Result<()> {
+        let Some(intent) = intent else {
+            return self.handle(event);
+        };
+        if !intent.is_public() {
+            if !committed.is_empty() {
+                bail!("private provider output unexpectedly created a public outbox entry");
+            }
+            return Ok(());
+        }
+        if committed.len() != 1 {
+            bail!("public provider output did not commit exactly one public outbox entry");
+        }
+        let entry = committed.into_iter().next().expect("length checked");
+        let mut state = self
+            .events
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let expected = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        if entry.run_id != self.events.run_id || entry.sequence != expected {
+            bail!("committed provider output does not match the application public frontier");
+        }
+        state.sequence = entry.sequence;
+        self.events.deliver_committed(
+            &mut state,
+            self.handler,
+            entry.event,
+            &entry.public_event_id,
+        );
+        Ok(())
     }
 }
 

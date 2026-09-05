@@ -21,17 +21,34 @@ pub use catalog::{
     ModelRecommendation, ProviderModelCatalogService, bundled_model_entries,
     connection_semantic_fingerprint, fresh_cached_model_entries_native,
 };
+pub(crate) use config::allowed_environment_names;
 pub use config::{
     CredentialId, CredentialRefConfig, ProviderConnectionConfig, ProviderFamily, ProviderProtocol,
     provider_connection_template,
 };
 pub use configured_store::ConfiguredProviderCredentialStore;
+pub(crate) use credential::read_configured_environment_credential;
 pub use credential::{
     CredentialAuthKind, CredentialEnvironment, CredentialGenerationId, LoadedCredentialRef,
     PreparedCredential, ProcessCredentialEnvironment, ProviderCredentialError,
     ProviderCredentialErrorCode, ProviderCredentialRecord, ProviderCredentialStore,
     ResolvedCredential, ResolvedCredentialSource, resolve_connection_credential,
 };
+
+/// Returns whether an environment-backed connection credential is available without reading
+/// from a credential store. The provider-owned alias fallback is shared with the real resolver.
+#[must_use]
+pub fn configured_environment_credential_available(
+    connection: &ProviderConnectionConfig,
+    name: &str,
+) -> bool {
+    credential::read_configured_environment_credential(
+        connection,
+        name,
+        &ProcessCredentialEnvironment,
+    )
+    .is_some()
+}
 pub use dto::{
     ConfigMode, ConnectionConfigIssue, ConnectionInventory, ConnectionInventoryEntry,
     ConnectionIssueView, ConnectionReadiness, CredentialSourceView, LoadedConnection,
@@ -46,8 +63,9 @@ pub use keyring_store::SystemProviderCredentialStore;
 pub use loader::{load_provider_connections, materialize_root_config};
 pub use persistence::{
     ConfigPublishOutcome, ConnectionCredentialUpdate, ConnectionSaveDraft, ConnectionSaveError,
-    ConnectionSaveOutcome, ProviderConfigPublisher, RootConfigPublisher, save_connection_config,
-    save_connection_config_replacing_invalid, save_connection_config_with_base,
+    ConnectionSaveOutcome, PersistedConfigSnapshot, ProviderConfigPublisher, RootConfigPublisher,
+    save_connection_config, save_connection_config_replacing_invalid,
+    save_connection_config_with_base, save_connection_config_with_base_from_snapshot,
 };
 pub use recent::{load_recent_model_refs, recent_models_path, record_recent_model_ref};
 pub use route::{

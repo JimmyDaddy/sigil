@@ -20,6 +20,254 @@ fn task_control() -> Result<ControlEntry> {
     }))
 }
 
+fn continuation_state(message_id: &str) -> crate::ProviderContinuationState {
+    crate::ProviderContinuationState {
+        provider_name: "test".to_owned(),
+        state_kind: "cursor".to_owned(),
+        message_id: Some(message_id.to_owned()),
+        opaque_blob: serde_json::json!({"cursor": "private-provider-state"}),
+    }
+}
+
+fn tool_publication_bundle() -> Result<(Vec<SessionLogEntry>, Vec<SessionPublicEventProjectionV1>)>
+{
+    let source = crate::ToolResult::ok(
+        "tool-call-1",
+        "read_file",
+        "private tool body",
+        crate::ToolResultMeta::default(),
+    );
+    let (recorded, display) = crate::ToolResultRecordedV3::capture(
+        &source,
+        None,
+        crate::ToolArtifactSensitivity::Ordinary,
+    )?;
+    let public = crate::ToolResult::ok(
+        "tool-call-1",
+        "read_file",
+        display.preview,
+        crate::ToolResultMeta::default(),
+    );
+    Ok((
+        vec![
+            SessionLogEntry::ToolResultV3(recorded),
+            SessionLogEntry::Control(ControlEntry::Note {
+                kind: "private_tool_companion".to_owned(),
+                data: serde_json::json!({"secret": "do not publish"}),
+            }),
+        ],
+        vec![SessionPublicEventProjectionV1::tool_result(0, public)],
+    ))
+}
+
+#[test]
+fn mixed_session_publication_commits_assistant_tool_and_private_entries_in_one_outbox_intent()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = active_session(&store)?;
+    let assistant =
+        crate::ModelMessage::assistant(Some("safe assistant answer".to_owned()), Vec::new());
+    let continuation = continuation_state(&assistant.id);
+    let (assistant_domain, assistant_public) = session.append_session_entries_with_public_outbox(
+        vec![
+            SessionLogEntry::Assistant(assistant.clone()),
+            SessionLogEntry::Control(ControlEntry::Note {
+                kind: "private_assistant_companion".to_owned(),
+                data: serde_json::json!({"secret": "never public"}),
+            }),
+            SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(continuation.clone())),
+        ],
+        vec![SessionPublicEventProjectionV1::assistant_message(
+            0, assistant,
+        )],
+        "run-1",
+        1,
+    )?;
+    let (tool_entries, tool_publications) = tool_publication_bundle()?;
+    let (tool_domain, tool_public) = session.append_session_entries_with_public_outbox(
+        tool_entries,
+        tool_publications,
+        "run-1",
+        2,
+    )?;
+
+    assert_eq!(assistant_domain.len(), 3);
+    assert_eq!(tool_domain.len(), 2);
+    assert_eq!(assistant_public.len(), 1);
+    assert_eq!(tool_public.len(), 1);
+    let public = [assistant_public, tool_public].concat();
+    assert_eq!(
+        public
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(public[0].domain_event_id, assistant_domain[0].event_id);
+    assert_eq!(public[1].domain_event_id, tool_domain[0].event_id);
+    let public_json = serde_json::to_string(&public)?;
+    assert!(!public_json.contains("never public"));
+    assert!(!public_json.contains("do not publish"));
+    assert!(!public_json.contains("private-provider-state"));
+    assert!(
+        public_json.contains("private tool body"),
+        "ordinary tool output is allowed only through its bounded public preview"
+    );
+
+    let before_replay = std::fs::read(&path)?;
+    drop(session);
+    let reopened = JsonlSessionStore::open_existing(&path)?;
+    let projection =
+        PublicEventOutboxProjectionV1::from_records(&reopened.read_event_records_writer()?)?;
+    assert_eq!(projection.events_in_order().len(), 2);
+    assert_eq!(projection.pending_for_adapter("application").len(), 2);
+    assert_eq!(
+        std::fs::read(&path)?,
+        before_replay,
+        "replay reads the original bytes"
+    );
+    let receipt = crate::PublicEventDeliveryReceiptV1 {
+        schema_version: crate::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+        public_event_id: public[0].public_event_id.clone(),
+        adapter: "application".to_owned(),
+        delivered_at_unix_ms: 1,
+    };
+    assert!(crate::PublicEventOutboxRecorder::new(reopened.clone()).append_delivery(&receipt)?);
+    let after_ack = reopened.read_event_records_writer()?;
+    let after_ack_projection = PublicEventOutboxProjectionV1::from_records(&after_ack)?;
+    assert_eq!(after_ack_projection.events_in_order().len(), 2);
+    assert_eq!(
+        after_ack
+            .iter()
+            .filter(|record| record.stored_event().event_kind()
+                == Some(crate::DurableEventType::ToolResultRecordedV3))
+            .count(),
+        1,
+        "ACK/replay appends only its receipt and never reruns the tool"
+    );
+    Ok(())
+}
+
+#[test]
+fn mixed_session_publication_rejects_forged_source_or_dto_before_writing_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = active_session(&store)?;
+    let before = std::fs::read(&path)?;
+    let entry_count = session.entries().len();
+    let (entries, mut publications) = tool_publication_bundle()?;
+    publications[0] = SessionPublicEventProjectionV1::tool_result(
+        1,
+        crate::ToolResult::ok(
+            "tool-call-1",
+            "read_file",
+            "forged public body",
+            crate::ToolResultMeta::default(),
+        ),
+    );
+    assert!(
+        session
+            .append_session_entries_with_public_outbox(entries, publications, "run-1", 1)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(session.entries().len(), entry_count);
+
+    let (entries, _) = tool_publication_bundle()?;
+    assert!(
+        session
+            .append_session_entries_with_public_outbox(
+                entries,
+                vec![SessionPublicEventProjectionV1::tool_result(
+                    0,
+                    crate::ToolResult::ok(
+                        "tool-call-1",
+                        "read_file",
+                        "forged public body",
+                        crate::ToolResultMeta::default(),
+                    ),
+                )],
+                "run-1",
+                1,
+            )
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(session.entries().len(), entry_count);
+    Ok(())
+}
+
+#[test]
+fn mixed_session_publication_recovers_writer_fault_without_reexecuting_the_producer() -> Result<()>
+{
+    for fault in [
+        SessionWriterFault::BeforeWrite,
+        SessionWriterFault::PartialFirstRecord,
+        SessionWriterFault::PartialSecondRecord,
+        SessionWriterFault::BeforeSync,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("session.jsonl");
+        let store = JsonlSessionStore::new(&path)?;
+        let mut session = active_session(&store)?;
+        let (entries, publications) = tool_publication_bundle()?;
+        store.inject_writer_fault(fault)?;
+        let (domain, public) =
+            session.append_session_entries_with_public_outbox(entries, publications, "run-1", 1)?;
+        assert_eq!(domain.len(), 2, "{fault:?}");
+        assert_eq!(public.len(), 1, "{fault:?}");
+        assert_eq!(domain[0].event_id, public[0].domain_event_id, "{fault:?}");
+        let bytes = std::fs::read(&path)?;
+        drop(session);
+        drop(store);
+
+        let reopened = JsonlSessionStore::open_existing(&path)?;
+        let records = reopened.read_event_records_writer()?;
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        assert_eq!(projection.events_in_order().len(), 1, "{fault:?}");
+        assert_eq!(
+            serde_json::to_value(projection.events_in_order()[0])?,
+            serde_json::to_value(&public[0])?,
+            "{fault:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path)?,
+            bytes,
+            "reopen/replay must not run the tool producer again ({fault:?})"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn mixed_session_publication_rejects_duplicate_projection_for_one_source_before_append()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = active_session(&store)?;
+    let (entries, mut publications) = tool_publication_bundle()?;
+    publications.push(publications[0].clone());
+    let before = std::fs::read(&path)?;
+    let entry_count = session.entries().len();
+
+    let error = session
+        .append_session_entries_with_public_outbox(entries, publications, "run-1", 1)
+        .expect_err("one durable source cannot mint two public DTOs");
+
+    assert!(
+        error
+            .to_string()
+            .contains("exactly one projection per source")
+    );
+    assert_eq!(std::fs::read(&path)?, before);
+    assert_eq!(session.entries().len(), entry_count);
+    Ok(())
+}
+
 #[test]
 fn control_publication_does_not_treat_an_ordinary_review_as_a_revision_run() -> Result<()> {
     let temp = tempfile::tempdir()?;

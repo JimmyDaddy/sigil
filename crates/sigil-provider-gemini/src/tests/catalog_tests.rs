@@ -1,4 +1,17 @@
-use crate::parse_gemini_model_list;
+use crate::{gemini_maximum_output_tokens, parse_gemini_model_list};
+
+#[test]
+fn gemini_maximum_output_tokens_is_exact_and_unknown_models_remain_unconstrained() {
+    assert_eq!(
+        gemini_maximum_output_tokens("models/gemini-2.5-pro"),
+        Some(65_536)
+    );
+    assert_eq!(
+        gemini_maximum_output_tokens("gemini-2.5-flash"),
+        Some(65_536)
+    );
+    assert_eq!(gemini_maximum_output_tokens("custom-model"), None);
+}
 
 #[test]
 fn gemini_catalog_filters_non_generate_content_and_keeps_page_token() {

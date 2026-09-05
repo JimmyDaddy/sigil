@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
+use crate::task::{TaskRootCompletionBlockerV1, TaskRootTerminalCandidateV1};
 use crate::{
     AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId,
     ConversationTurnRef, ModelMessage, Session, SessionLogEntry, SessionRef,
@@ -10,16 +11,17 @@ use crate::{
     TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
     TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskApprovalRouteBinding, TaskCapabilityV2,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
-    TaskContinuationSelectedEntry, TaskFinalAnswerCommittedEntry, TaskGraphProjection,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode,
-    TaskParticipantAttemptEntry, TaskParticipantAttemptId, TaskParticipantAttemptStatus,
-    TaskParticipantPurpose, TaskParticipantResultEntry, TaskParticipantRetryProof,
-    TaskParticipantRetryScheduledEntry, TaskPauseRequest, TaskPlanContractSetCommittedV2,
-    TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskPlannerWorktreeAvailability,
-    TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus,
-    TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry,
-    TaskStateProjection, TaskStepCheckpointV2, TaskStepEntry, TaskStepId, TaskStepMode,
-    TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
+    TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGuidanceApplyReason,
+    TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
+    TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
+    TaskPauseRequest, TaskPlanContractSetCommittedV2, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskReadyDeferredReason,
+    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStateProjection,
+    TaskStepCheckpointV2, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection,
+    TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
     TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref, derive_task_execution_segments,
     normalize_task_agent_display_name, project_conversation_prompt_for_persistence,
     stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
@@ -1533,6 +1535,25 @@ fn task_projection_tracks_latest_task_by_replay_order() -> Result<()> {
 }
 
 #[test]
+fn task_projection_rejects_a_standalone_completed_claim() -> Result<()> {
+    let task_id = task_id("standalone_completed")?;
+    let projection = TaskStateProjection::from_entries(&[SessionLogEntry::Control(
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "must not manufacture completion".to_owned(),
+            title: None,
+            status: TaskRunStatus::Completed,
+            reason: None,
+        }),
+    )]);
+
+    assert!(!projection.tasks.contains_key(&task_id));
+    assert!(projection.latest_task().is_none());
+    Ok(())
+}
+
+#[test]
 fn task_projection_keeps_the_first_semantic_title_across_lifecycle_updates() -> Result<()> {
     let task_id = task_id("task_title")?;
     let entries = vec![
@@ -1649,6 +1670,15 @@ fn task_projection_tracks_latest_unfinished_task_by_replay_order() -> Result<()>
             objective: "second".to_owned(),
             title: None,
 
+            status: TaskRunStatus::Started,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id("task_2")?,
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "second".to_owned(),
+            title: None,
+
             status: TaskRunStatus::Completed,
             reason: None,
         })),
@@ -1703,6 +1733,7 @@ fn task_projection_returns_none_when_latest_tasks_are_final() -> Result<()> {
 #[test]
 fn task_projection_tracks_duplicate_terminal_entries() -> Result<()> {
     let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
         SessionLogEntry::Control(run_entry(TaskRunStatus::Completed)?),
         SessionLogEntry::Control(run_entry(TaskRunStatus::Failed)?),
     ]);
@@ -1828,6 +1859,190 @@ fn task_projection_creates_placeholder_for_plan_before_run() -> Result<()> {
     );
     assert_eq!(task.status, TaskRunStatus::Started);
     assert_eq!(task.latest_plan_version, Some(1));
+    Ok(())
+}
+
+#[test]
+fn task_root_terminal_evaluator_requires_direct_attempt_terminal_candidate() -> Result<()> {
+    let task_id = task_id("task-terminal-direct")?;
+    let objective = "complete exactly one direct task";
+    let admission = TaskDirectExecutionAdmittedV1::planner_fallback(
+        task_id.clone(),
+        objective,
+        "planner-attempt-terminal",
+        1,
+    );
+    let attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission)),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone())),
+    ]);
+
+    let unfinished = projection
+        .evaluate_root_terminal(&task_id, TaskRunStatus::Completed, None)
+        .expect("direct task should project");
+    assert_eq!(unfinished.effective_status, TaskRunStatus::Paused);
+    assert_eq!(
+        unfinished.primary_completion_blocker(),
+        Some(TaskRootCompletionBlockerV1::UnfinishedDirectExecution)
+    );
+    let candidate = TaskRootTerminalCandidateV1::DirectExecution {
+        attempt_id: attempt.attempt_id,
+        status: TaskParticipantAttemptStatus::Completed,
+    };
+    assert!(
+        projection
+            .evaluate_root_terminal(&task_id, TaskRunStatus::Completed, Some(&candidate))
+            .expect("direct task should project")
+            .allows_completed()
+    );
+    Ok(())
+}
+
+#[test]
+fn task_root_terminal_evaluator_blocks_failed_dependencies_and_started_participants() -> Result<()>
+{
+    let task_id = task_id("task-terminal-dag")?;
+    let failed_step = step_id("failed")?;
+    let dependent_step = step_id("dependent")?;
+    let participant_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&dependent_step),
+        1,
+    )?;
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "complete DAG only after dependencies settle".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![
+                read_step("failed", Vec::new())?,
+                read_step("dependent", vec![failed_step.clone()])?,
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: failed_step,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Failed,
+            title: Some("failed".to_owned()),
+            summary: None,
+            reason: Some("provider failed".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
+            TaskParticipantAttemptEntry {
+                attempt_id: participant_id.clone(),
+                task_id: task_id.clone(),
+                purpose: TaskParticipantPurpose::Step,
+                ordinal: 1,
+                plan_version: Some(1),
+                step_id: Some(dependent_step.clone()),
+                role: AgentRole::SubagentRead,
+                child_session_ref: task_participant_session_ref(&task_id, &participant_id)?,
+                status: TaskParticipantAttemptStatus::Started,
+                reason: None,
+            },
+        )),
+    ]);
+
+    let evaluation = projection
+        .evaluate_root_terminal(&task_id, TaskRunStatus::Completed, None)
+        .expect("DAG task should project");
+    assert_eq!(evaluation.effective_status, TaskRunStatus::Paused);
+    assert_eq!(
+        evaluation.blocked_dependency_steps,
+        vec![dependent_step.clone()]
+    );
+    assert_eq!(evaluation.unfinished_steps, vec![dependent_step]);
+    assert_eq!(evaluation.unfinished_participants, vec![participant_id]);
+    assert!(
+        evaluation
+            .completion_blockers
+            .contains(&TaskRootCompletionBlockerV1::FailedDependency)
+    );
+    assert!(
+        evaluation
+            .completion_blockers
+            .contains(&TaskRootCompletionBlockerV1::UnfinishedParticipant)
+    );
+    Ok(())
+}
+
+#[test]
+fn task_root_terminal_evaluator_returns_the_full_cancellation_closure() -> Result<()> {
+    let task_id = task_id("task-terminal-cancel")?;
+    let cancelled_step = step_id("cancelled")?;
+    let dependent_step = step_id("dependent")?;
+    let leaf_step = step_id("leaf")?;
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: "cancel the DAG exactly".to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![
+                read_step("cancelled", Vec::new())?,
+                read_step("dependent", vec![cancelled_step.clone()])?,
+                read_step("leaf", vec![dependent_step.clone()])?,
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: cancelled_step,
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Cancelled,
+            title: Some("cancelled".to_owned()),
+            summary: None,
+            reason: Some("user cancelled".to_owned()),
+        })),
+    ]);
+
+    let evaluation = projection
+        .evaluate_root_terminal(&task_id, TaskRunStatus::Cancelled, None)
+        .expect("DAG task should project");
+    assert_eq!(evaluation.effective_status, TaskRunStatus::Cancelled);
+    assert_eq!(
+        evaluation.cancelled_dependency_steps,
+        vec![dependent_step.clone(), leaf_step.clone()]
+    );
+    assert_eq!(
+        evaluation.cancellation_closure,
+        vec![dependent_step, leaf_step]
+    );
+    assert!(
+        evaluation
+            .completion_blockers
+            .contains(&TaskRootCompletionBlockerV1::CancelledDependency)
+    );
     Ok(())
 }
 

@@ -680,8 +680,9 @@ fn real_tui_first_run_without_model_catalog_completes_the_first_request() -> Res
                     "Custom endpoint · Chat Completions",
                 )?;
 
-                // Context window is optional. Leave it automatic and move to the save action.
-                write_input(writer, b"\x1b[B\x1b[B\r")?;
+                // Context window and max output tokens are optional. Leave both automatic and
+                // move from the model row to the save action.
+                write_input(writer, b"\x1b[B\x1b[B\x1b[B\r")?;
 
                 let deadline = Instant::now() + PROCESS_TIMEOUT;
                 while !config_path.exists() {

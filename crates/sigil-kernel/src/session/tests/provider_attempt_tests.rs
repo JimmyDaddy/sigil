@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use super::super::writer::SessionWriterFault;
 use super::*;
 
 fn cache_layout_proof() -> crate::CacheLayoutProofV1 {
@@ -557,5 +558,84 @@ async fn non_generating_attempt_records_an_input_measurement_lifecycle() -> Resu
             .kind,
         crate::CacheLayoutMutationKind::Identical
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_usage_source_and_public_outbox_recover_as_one_conditional_bundle() -> Result<()> {
+    for fault in [
+        SessionWriterFault::BeforeWrite,
+        SessionWriterFault::PartialFirstRecord,
+        SessionWriterFault::PartialSecondRecord,
+        SessionWriterFault::BeforeSync,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("session.jsonl");
+        let store = JsonlSessionStore::new(&path)?;
+        let mut session = Session::new("test-provider", "test-model").with_store(store.clone());
+        session
+            .conversation_run_lifecycle_recorder()?
+            .append_started(&crate::ConversationRunStartedEntryV1::new(
+                "agent-run-usage",
+                1,
+            )?)?;
+        let frozen = crate::FrozenProviderRequestMaterial::freeze(
+            session.session_scope_id(),
+            crate::CompletionRequest {
+                provider_name: "test-provider".to_owned(),
+                model_name: "test-model".to_owned(),
+                messages: vec![crate::ModelMessage::user("usage source")],
+                tools: Vec::new(),
+                temperature: None,
+                max_tokens: Some(128),
+                reasoning_effort: None,
+                previous_response_handle: None,
+                continuation_states: Vec::new(),
+                traffic_partition_key: None,
+                background: false,
+                store: false,
+                deterministic_materialization: true,
+                hosted_tools: Vec::new(),
+            },
+        )?;
+        let mut attempt =
+            ProviderPhysicalAttemptAudit::start(&session, "agent-run-usage", &frozen).await?;
+        let usage = crate::UsageStats {
+            prompt_tokens: 7,
+            ..crate::UsageStats::default()
+        };
+        let intent = crate::ProviderOutputPublicationIntentV1::public(
+            "agent-run-usage",
+            1,
+            SessionPublicEventProjectionV1::usage_snapshot(0, usage.clone()),
+        )?;
+        store.inject_writer_fault(fault)?;
+
+        let outbox = attempt
+            .append_output_control(
+                &mut session,
+                ControlEntry::UsageSnapshot(usage),
+                Some(&intent),
+            )
+            .await?;
+
+        assert_eq!(outbox.len(), 1, "{fault:?}");
+        let records = JsonlSessionStore::read_event_records(&path)?;
+        let source_position = records
+            .iter()
+            .position(|record| record.stored_event().event_id == outbox[0].domain_event_id)
+            .expect("usage source");
+        let public_position = records
+            .iter()
+            .position(|record| record.stored_event().event_id == outbox[0].public_event_id)
+            .expect("usage outbox");
+        assert_eq!(public_position, source_position + 1, "{fault:?}");
+        let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
+        assert_eq!(projection.events_in_order().len(), 1, "{fault:?}");
+        assert!(matches!(
+            &projection.events_in_order()[0].event.event,
+            crate::PublicRunEventKind::Usage { usage } if usage.prompt_tokens == 7
+        ));
+    }
     Ok(())
 }

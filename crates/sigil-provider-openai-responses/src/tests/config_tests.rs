@@ -33,6 +33,20 @@ fn resolved_config_uses_responses_specific_environment_overrides() -> Result<()>
 }
 
 #[test]
+fn resolved_config_uses_openai_api_key_alias_when_responses_name_is_missing() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[
+        (OPENAI_RESPONSES_API_KEY_ENV, "   "),
+        ("OPENAI_API_KEY", "openai-key"),
+    ]);
+
+    let resolved = OpenAiResponsesProviderConfig::default_for_model("gpt-test").resolved()?;
+
+    assert_eq!(resolved.api_key.as_deref(), Some("openai-key"));
+    Ok(())
+}
+
+#[test]
 fn config_rejects_provider_model_field() {
     let error = serde_json::from_value::<OpenAiResponsesProviderConfig>(serde_json::json!({
         "model": "gpt-test"

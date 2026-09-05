@@ -63,10 +63,19 @@ impl AnthropicProvider {
         config: AnthropicProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
+        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+    }
+
+    /// Builds an exact provider with a caller-owned HTTP client.
+    pub fn new_exact_with_client(
+        config: AnthropicProviderConfig,
+        timeouts: ModelRequestTimeouts,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         let hosted_platform = AnthropicHostedPlatform::from_base_url(&config.base_url);
         Ok(Self {
             timeouts,
-            client: build_http_client()?,
+            client,
             capabilities: anthropic_capabilities(),
             config,
             hosted_continuations: AnthropicHostedContinuationStore::default(),

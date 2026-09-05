@@ -4,12 +4,14 @@ use serde_json::json;
 use sigil_kernel::{ConnectionId, ModelRef, ModelRequestConfig, RootConfig};
 
 use super::{
-    ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, GEMINI_PROVIDER_KEY, OPENAI_COMPAT_PROVIDER_KEY,
-    OPENAI_RESPONSES_PROVIDER_KEY, ProviderConfigFields, bundled_provider_models,
-    default_provider_config_fields, default_provider_model, next_provider_name,
-    normalize_provider_model_alias, normalize_provider_name, provider_api_key_env_name,
+    ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, GEMINI_PROVIDER_KEY, ModelRequestConfigFields,
+    OPENAI_COMPAT_PROVIDER_KEY, OPENAI_RESPONSES_PROVIDER_KEY, ProviderConfigFields,
+    bundled_provider_models, default_provider_config_fields, default_provider_model,
+    model_request_config_fields, next_provider_name, normalize_provider_model_alias,
+    normalize_provider_name, provider_api_key_env_name, provider_api_key_env_names,
     provider_balance_status_config, provider_model_status_config,
     provider_model_status_config_from_fields, provider_status_config_from_fields,
+    set_model_request_config_fields,
 };
 
 fn test_root_config() -> RootConfig {
@@ -92,6 +94,28 @@ fn provider_helpers_use_only_canonical_names_and_env_labels() {
         Some("SIGIL_GEMINI_API_KEY")
     );
     assert_eq!(provider_api_key_env_name("claude"), None);
+
+    assert_eq!(
+        provider_api_key_env_names("deepseek"),
+        Some(&["SIGIL_API_KEY", "DEEPSEEK_API_KEY"][..])
+    );
+    assert_eq!(
+        provider_api_key_env_names("openai_compat"),
+        Some(&["SIGIL_OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"][..])
+    );
+    assert_eq!(
+        provider_api_key_env_names("openai_responses"),
+        Some(&["SIGIL_OPENAI_RESPONSES_API_KEY", "OPENAI_API_KEY"][..])
+    );
+    assert_eq!(
+        provider_api_key_env_names("anthropic"),
+        Some(&["SIGIL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"][..])
+    );
+    assert_eq!(
+        provider_api_key_env_names("gemini"),
+        Some(&["SIGIL_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",][..])
+    );
+    assert_eq!(provider_api_key_env_names("claude"), None);
 }
 
 #[test]
@@ -192,6 +216,42 @@ fn provider_status_config_from_fields_validates_common_status_surface() {
     assert_eq!(
         error.to_string(),
         "model_request.request_timeout_secs must be greater than 0"
+    );
+}
+
+#[test]
+fn model_request_fields_roundtrip_an_optional_output_token_default() {
+    let mut root = test_root_config();
+    root.model_request.max_output_tokens = Some(8_192);
+
+    let fields = model_request_config_fields(&root);
+    assert_eq!(fields.max_output_tokens, "8192");
+
+    let automatic = ModelRequestConfigFields {
+        max_output_tokens: String::new(),
+        ..fields.clone()
+    };
+    set_model_request_config_fields(&mut root, &automatic)
+        .expect("empty output-token setting should keep provider automatic behavior");
+    assert_eq!(root.model_request.max_output_tokens, None);
+
+    let configured = ModelRequestConfigFields {
+        max_output_tokens: "4096".to_owned(),
+        ..automatic
+    };
+    set_model_request_config_fields(&mut root, &configured)
+        .expect("positive output-token setting should save");
+    assert_eq!(root.model_request.max_output_tokens, Some(4_096));
+
+    let invalid = ModelRequestConfigFields {
+        max_output_tokens: "0".to_owned(),
+        ..configured
+    };
+    let error = set_model_request_config_fields(&mut root, &invalid)
+        .expect_err("zero output-token setting must fail");
+    assert_eq!(
+        error.to_string(),
+        "model_request.max_output_tokens must be greater than 0"
     );
 }
 

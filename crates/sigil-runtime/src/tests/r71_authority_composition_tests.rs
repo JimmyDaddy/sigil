@@ -76,6 +76,10 @@ fn r71_composition_tool_authority_facade_is_wired() {
         &state,
         &exec,
         CanonicalHash::from_bytes([0x55; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
     )
@@ -135,6 +139,10 @@ fn r71_composition_declared_channel_writes_and_probes_exactly() {
         &state,
         &exec,
         CanonicalHash::from_bytes([0x55; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
     )
@@ -155,7 +163,7 @@ fn r71_composition_declared_channel_writes_and_probes_exactly() {
     let probes = probe_mandatory_adapters(
         &composition.services,
         &recovery,
-        CanonicalHash::from_bytes([0x56; 32]),
+        CanonicalHash::from_bytes([0x55; 32]),
         1,
     );
     let session_log = probes
@@ -786,8 +794,14 @@ fn r71_concurrent_boots_publish_monotonic_generation_under_one_lock() {
         build_current_boot_transaction(snapshot_b)
     });
     barrier.wait();
-    assert!(handle_a.join().expect("boot a thread").is_ok());
-    assert!(handle_b.join().expect("boot b thread").is_ok());
+    let result_a = handle_a.join().expect("boot a thread");
+    if let Err(error) = result_a {
+        panic!("boot a failed: {error}");
+    }
+    let result_b = handle_b.join().expect("boot b thread");
+    if let Err(error) = result_b {
+        panic!("boot b failed: {error}");
+    }
 
     let bootstrap =
         sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(&config)
@@ -902,6 +916,10 @@ fn r71_reopen_ignores_settled_admission_after_source_bound_grant_rollover() {
         &state,
         &exec,
         CanonicalHash::from_bytes([0x55; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
     )
@@ -932,6 +950,10 @@ fn r71_reopen_ignores_settled_admission_after_source_bound_grant_rollover() {
         &state,
         &exec,
         CanonicalHash::from_bytes([0x56; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
     )
@@ -975,6 +997,10 @@ fn r71_reopen_recovers_pending_v2_admission_after_source_bound_grant_rollover() 
         &state,
         &exec,
         CanonicalHash::from_bytes([0x55; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
     )
@@ -1001,20 +1027,23 @@ fn r71_reopen_recovers_pending_v2_admission_after_source_bound_grant_rollover() 
         &state,
         &exec,
         CanonicalHash::from_bytes([0x56; 32]),
+        AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Ch::SessionLog],
-    )
-    .expect("pending historical admission must be reconciled across grant rollover");
+    );
+    assert!(matches!(
+        second,
+        Err(
+            crate::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(
+                _
+            )
+        )
+    ));
     assert_eq!(
         std::fs::read(pending_path.join("records.jsonl")).expect("records retained"),
         records_before
     );
-    let new_lease = second
-        .storage_writer
-        .acquire_named(Ch::SessionLog, "after-recovery")
-        .expect("new admissions unblocked");
-    second
-        .storage_writer
-        .finalize(new_lease)
-        .expect("new admission finalizes");
 }

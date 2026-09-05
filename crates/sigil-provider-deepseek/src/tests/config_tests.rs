@@ -3,8 +3,8 @@ use std::{env, ffi::OsString};
 use anyhow::Result;
 
 use super::{
-    DeepSeekProviderConfig, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV,
-    SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV,
+    DEEPSEEK_API_KEY_ENV, DeepSeekProviderConfig, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV,
+    SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV,
     SIGIL_USER_ID_STRATEGY_ENV, StrictToolsMode,
 };
 
@@ -93,14 +93,28 @@ fn resolved_applies_sigil_env_overrides() -> Result<()> {
 }
 
 #[test]
-fn resolved_ignores_deepseek_api_key_when_sigil_api_key_is_missing() -> Result<()> {
+fn resolved_accepts_deepseek_api_key_alias_when_sigil_api_key_is_missing() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _sigil_api_key_scope = EnvScope::unset_many(&[SIGIL_API_KEY_ENV]);
-    let _scope = EnvScope::set_many(&[("DEEPSEEK_API_KEY", "legacy-key")]);
+    let _scope = EnvScope::set_many(&[(DEEPSEEK_API_KEY_ENV, "provider-key")]);
 
     let resolved = file_config().resolved()?;
 
-    assert!(resolved.api_key.is_none());
+    assert_eq!(resolved.api_key.as_deref(), Some("provider-key"));
+    Ok(())
+}
+
+#[test]
+fn resolved_prefers_sigil_api_key_over_deepseek_alias() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_API_KEY_ENV, "sigil-key"),
+        (DEEPSEEK_API_KEY_ENV, "provider-key"),
+    ]);
+
+    let resolved = file_config().resolved()?;
+
+    assert_eq!(resolved.api_key.as_deref(), Some("sigil-key"));
     Ok(())
 }
 
@@ -142,7 +156,11 @@ fn config_rejects_provider_model_field() {
 #[test]
 fn resolved_ignores_blank_string_env_overrides() -> Result<()> {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, "   "), (SIGIL_BASE_URL_ENV, "   ")]);
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_API_KEY_ENV, "   "),
+        (DEEPSEEK_API_KEY_ENV, "   "),
+        (SIGIL_BASE_URL_ENV, "   "),
+    ]);
 
     let resolved = DeepSeekProviderConfig {
         api_key: Some("file-key".to_owned()),

@@ -59,6 +59,10 @@ fn managed_writer(
         &state,
         &execution,
         CanonicalHash::from_bytes([0xa2; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Channel::AdapterIdempotencyLedger],
     )
@@ -92,6 +96,10 @@ fn application_managed_writer(
         &state,
         &execution,
         CanonicalHash::from_bytes([0xa3; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[Channel::ApplicationControlLog],
     )

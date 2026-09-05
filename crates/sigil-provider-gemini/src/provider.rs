@@ -51,9 +51,18 @@ impl GeminiProvider {
     /// Builds a provider from an already resolved connection snapshot without applying
     /// process-environment overrides.
     pub fn new_exact(config: GeminiProviderConfig, timeouts: ModelRequestTimeouts) -> Result<Self> {
+        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+    }
+
+    /// Builds an exact provider with a caller-owned HTTP client.
+    pub fn new_exact_with_client(
+        config: GeminiProviderConfig,
+        timeouts: ModelRequestTimeouts,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         Ok(Self {
             timeouts,
-            client: build_http_client()?,
+            client,
             capabilities: gemini_capabilities(),
             config,
         })
@@ -103,6 +112,10 @@ impl Provider for GeminiProvider {
             self.config.base_url.trim_end_matches('/')
                 == "https://generativelanguage.googleapis.com/v1beta",
         )
+    }
+
+    fn maximum_output_tokens(&self, model_name: &str) -> Option<u32> {
+        crate::gemini_maximum_output_tokens(model_name)
     }
 
     fn image_input_capability(&self, model_name: &str) -> ImageInputCapability {

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     ExternalProvenanceEntry, ExternalTrust,
-    event::{EventHandler, RunEvent},
+    event::EventHandler,
     provider::ToolCall,
     session::{
         ControlEntry, Session, ToolArtifactSensitivity, ToolExecutionStatus, ToolResultRecordedV3,
@@ -118,7 +118,7 @@ where
         ToolArtifactSensitivity::ExternalUntrusted
     };
     let artifact_store = session.tool_artifact_store();
-    let (recorded, display) = if let Some(recorded) = result.durable_v3_projection() {
+    let recorded = if let Some(recorded) = result.durable_v3_projection() {
         // RFC-0062 8/11.2: harness-owned process capture already published the artifact; the
         // pre-settled projection is re-projected against the batch-allocated preview budget so
         // the provider never sees more than the allocator awarded.
@@ -127,8 +127,7 @@ where
             model_preview_limit,
             crate::ToolPreviewTruncationReasonV1::BatchBudget,
         )?;
-        let display = recorded.display_view();
-        (recorded, display)
+        recorded
     } else {
         ToolResultRecordedV3::capture_with_model_preview_limit(
             &result,
@@ -137,7 +136,12 @@ where
             model_preview_limit,
             None,
         )?
+        .0
     };
+    // The persisted record is the authority for the provider-visible preview. The capture helper
+    // also returns a broader display projection for host UI, but publishing that value would
+    // make the public event diverge from the bounded model view stored in the durable record.
+    let display = recorded.display_view();
     let message = recorded.model_message()?;
     for registration in registrations.iter_mut() {
         registration.durable_entry_id.clone_from(&message.id);
@@ -172,7 +176,30 @@ where
         };
         controls.push(ControlEntry::ExternalProvenance(provenance));
     }
-    if let Err(error) = session.append_tool_result_bundle(recorded, controls.clone()) {
+    result.content = display.preview.clone();
+    result.metadata.bytes = Some(display.observed_bytes);
+    result.metadata.returned_bytes = Some(display.preview.len() as u64);
+    result.metadata.truncated = display.observed_bytes > display.preview.len() as u64;
+    result.metadata.details = serde_json::to_value(&display)
+        .unwrap_or_else(|_| serde_json::json!({"projection": "unavailable"}));
+    if let Err(error) = session.validate_tool_result_bundle(&recorded, &controls) {
+        if !registrations.is_empty()
+            && let Some(registrar) = registrar.as_ref()
+        {
+            let _ = registrar.rollback_message(&message.id);
+        }
+        return Err(error);
+    }
+    let mut entries = Vec::with_capacity(controls.len() + 1);
+    entries.push(crate::SessionLogEntry::ToolResultV3(recorded));
+    entries.extend(controls.into_iter().map(crate::SessionLogEntry::Control));
+    if let Err(error) = handler.commit_session_publications(
+        session,
+        entries,
+        vec![crate::session::SessionPublicEventProjectionV1::tool_result(
+            0, result,
+        )],
+    ) {
         if !registrations.is_empty()
             && let Some(registrar) = registrar.as_ref()
         {
@@ -192,16 +219,7 @@ where
             None => "failed to commit tool-result URL capabilities".to_owned(),
         }));
     }
-    for control in controls {
-        handler.handle(RunEvent::Control(control))?;
-    }
-    result.content = display.preview.clone();
-    result.metadata.bytes = Some(display.observed_bytes);
-    result.metadata.returned_bytes = Some(display.preview.len() as u64);
-    result.metadata.truncated = display.observed_bytes > display.preview.len() as u64;
-    result.metadata.details = serde_json::to_value(&display)
-        .unwrap_or_else(|_| serde_json::json!({"projection": "unavailable"}));
-    handler.handle(RunEvent::ToolResult(result))
+    Ok(())
 }
 
 pub(super) fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {

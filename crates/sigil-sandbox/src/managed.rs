@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,15 +97,7 @@ pub struct SandboxManagedExecutionServiceV1 {
     terminal_launcher: Option<Arc<dyn ManagedTerminalLaunchServiceV1>>,
     extension_launcher: Option<Arc<dyn ManagedExtensionLaunchServiceV1>>,
     code_intel_launcher: Option<Arc<dyn ManagedCodeIntelLaunchServiceV1>>,
-}
-
-enum ReapedOneShotSettlementV1 {
-    Settled(Box<ManagedExecutionReceiptV1>),
-    StillRunning(sigil_resource_authority::AuthorityProcessInventoryClaimV1),
-    NeedsCleanup {
-        claim: sigil_resource_authority::AuthorityProcessInventoryClaimV1,
-        error: ManagedExecutionErrorV1,
-    },
+    output_sink: Option<Arc<dyn ManagedOutputCaptureSinkV1>>,
 }
 
 /// Host-private one-shot launch seam. The service owns admission, planning, output bounds and
@@ -117,6 +109,16 @@ pub trait ManagedOneShotLaunchServiceV1: Send + Sync {
         request: &ManagedExecutionRequestV1,
         environment: &BTreeMap<String, String>,
     ) -> Result<Child, ManagedExecutionErrorV1>;
+}
+
+/// Host-owned policy-safe sink for one-shot process bytes. The sandbox only sees the typed
+/// channel and chunk; it never receives an artifact path or a second persistence authority.
+pub trait ManagedOutputCaptureSinkV1: Send + Sync {
+    fn write_chunk(
+        &self,
+        channel: ManagedProcessOutputChannelV1,
+        bytes: &[u8],
+    ) -> Result<(), ManagedExecutionErrorV1>;
 }
 
 /// Host-private terminal launch seam. Persistent terminal cwd and argv remain bound to the
@@ -285,6 +287,7 @@ impl ManagedOneShotLaunchServiceV1 for CommandManagedOneShotLaunchServiceV1 {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        sigil_process::configure_process_tree(&mut command);
         command
             .spawn()
             .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)
@@ -465,6 +468,7 @@ impl SandboxManagedExecutionServiceV1 {
             terminal_launcher: None,
             extension_launcher: None,
             code_intel_launcher: None,
+            output_sink: None,
         }
     }
 
@@ -512,6 +516,14 @@ impl SandboxManagedExecutionServiceV1 {
         launcher: Arc<dyn ManagedCodeIntelLaunchServiceV1>,
     ) -> Self {
         self.code_intel_launcher = Some(launcher);
+        self
+    }
+
+    /// Binds a policy-safe sink before launch. Reader failures in this secondary sink never stop
+    /// pipe draining; the sink owner records them and makes artifact settlement unavailable.
+    #[must_use]
+    pub fn with_output_capture_sink(mut self, sink: Arc<dyn ManagedOutputCaptureSinkV1>) -> Self {
+        self.output_sink = Some(sink);
         self
     }
 
@@ -755,63 +767,6 @@ impl SandboxManagedExecutionServiceV1 {
             effect_settlement: sigil_kernel::recovery::EffectSettlementV1::Applied,
         }
     }
-
-    /// Completes the narrow post-spawn race only from the owned child's exact exit status.
-    ///
-    /// This never treats a failed platform observation as process absence. `StillRunning` returns
-    /// the unchanged claim so callers preserve the prepared record as a fault.
-    fn try_settle_reaped_one_shot(
-        &self,
-        child: &mut Child,
-        prepared: &PreparedLocalRunV1,
-        inventory: &dyn sigil_resource_authority::AuthorityProcessInventoryPortV1,
-        claim: sigil_resource_authority::AuthorityProcessInventoryClaimV1,
-        max_output_bytes: u64,
-    ) -> Result<ReapedOneShotSettlementV1, ManagedExecutionErrorV1> {
-        let status = match child.try_wait() {
-            Ok(Some(status)) => status,
-            Ok(None) => return Ok(ReapedOneShotSettlementV1::StillRunning(claim)),
-            Err(_) => {
-                return Ok(ReapedOneShotSettlementV1::NeedsCleanup {
-                    claim,
-                    error: ManagedExecutionErrorV1::OutcomeUncertain,
-                });
-            }
-        };
-        // `Some(status)` is the owned child's exact reap fact. Settle before any fallible pipe
-        // drain so every subsequent receipt-formatting error has already released the durable
-        // claim; failed settle remains fail-closed because the durable record is not erased.
-        inventory
-            .settle_spawn(claim)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let stdout_pipe = child
-            .stdout
-            .take()
-            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let stderr_pipe = child
-            .stderr
-            .take()
-            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let mut stdout_pipe = stdout_pipe;
-        let mut stderr_pipe = stderr_pipe;
-        let stdout_outcome = bounded_post_reap_read(&mut stdout_pipe, max_output_bytes)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        let stderr_outcome = bounded_post_reap_read(&mut stderr_pipe, max_output_bytes)
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        Ok(ReapedOneShotSettlementV1::Settled(Box::new(
-            ManagedExecutionReceiptV1 {
-                physical_attempt_id: prepared.attempt_id.clone(),
-                process: process_receipt_from(
-                    prepared,
-                    classify_status(status),
-                    stdout_outcome.summary,
-                    stderr_outcome.summary,
-                ),
-                resources: self.service_resource_receipt(prepared),
-                check: None,
-            },
-        )))
-    }
 }
 
 /// Kernel-shaped process receipt derived from observed facts.
@@ -864,41 +819,15 @@ fn control_receipt(
     }
 }
 
-/// Reads one pipe with a hard byte cap; the pipe is drained past the cap so the child never
-/// blocks on a full pipe, while retained bytes never exceed the cap (truncation is observed).
 struct BoundedReadOutcome {
     summary: BoundedOutputSummaryV1,
 }
 
-fn bounded_read(reader: &mut impl Read, cap_bytes: u64) -> std::io::Result<BoundedReadOutcome> {
-    let mut observed: u64 = 0;
-    let mut retained: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let read = reader.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        observed += read as u64;
-        let remaining = cap_bytes.saturating_sub(retained.len() as u64) as usize;
-        if remaining > 0 {
-            retained.extend_from_slice(&chunk[..read.min(remaining)]);
-        }
-    }
-    Ok(BoundedReadOutcome {
-        summary: BoundedOutputSummaryV1 {
-            observed_bytes: observed,
-            retained_bytes: retained.len() as u64,
-            retained_payload: retained.clone(),
-            content_digest: content_digest(&retained),
-            truncated: observed > cap_bytes,
-            artifact_ref: None,
-        },
-    })
-}
-
-mod post_reap_capture;
-use post_reap_capture::bounded_post_reap_read;
+const POST_LEADER_CAPTURE_BUDGET: Duration = Duration::from_millis(50);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const OWNED_TREE_CLEANUP_GRACE: Duration = Duration::from_millis(250);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const OWNED_TREE_CLEANUP_BUDGET: Duration = Duration::from_secs(1);
 
 /// Classifies an exit status truthfully (code or signal).
 fn classify_status(status: ExitStatus) -> ProcessTerminationV1 {
@@ -917,38 +846,227 @@ fn classify_status(status: ExitStatus) -> ProcessTerminationV1 {
     ProcessTerminationV1::Exited { code: -1 }
 }
 
-/// Polls exit within the runtime cap; on deadline it kills and reports TimedOut.
-async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerminationV1 {
+/// Owns a one-shot child without allowing an early `try_wait` to discard the leader before its
+/// process-group cleanup has run. macOS/Linux use the exact WNOWAIT reaper; other targets retain
+/// the platform owner path below.
+enum OneShotChildV1 {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Unix(sigil_process::UnixOwnedChildReaperV1),
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Native(Child),
+}
+
+impl OneShotChildV1 {
+    fn process_id(&self) -> u32 {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Unix(reaper) => reaper.direct_child_process_id(),
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            Self::Native(child) => child.id(),
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Unix(reaper) => reaper.take_stdout(),
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            Self::Native(child) => child.stdout.take(),
+        }
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Unix(reaper) => reaper.take_stderr(),
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            Self::Native(child) => child.stderr.take(),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn owned_tree_cleanup_deadline() -> std::time::Instant {
+    std::time::Instant::now() + OWNED_TREE_CLEANUP_BUDGET
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cleanup_unix_one_shot(
+    reaper: &mut sigil_process::UnixOwnedChildReaperV1,
+    terminal_override: Option<ProcessTerminationV1>,
+) -> Result<ProcessTerminationV1, ManagedExecutionErrorV1> {
+    use sigil_process::OwnedChildLifecycleV1;
+
+    reaper
+        .cleanup_and_reap(owned_tree_cleanup_deadline(), OWNED_TREE_CLEANUP_GRACE)
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+    let status = reaper
+        .direct_child_exit_status()
+        .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
+    Ok(terminal_override.unwrap_or_else(|| classify_status(*status)))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn poll_one_shot_termination(
+    child: &mut OneShotChildV1,
+    _process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    max_runtime_ms: u64,
+    launch_started: std::time::Instant,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<ProcessTerminationV1, ManagedExecutionErrorV1> {
+    use sigil_process::{NonConsumingChildTerminalObservationV1, OwnedChildLifecycleV1};
+
+    let OneShotChildV1::Unix(reaper) = child;
+    let max_runtime = Duration::from_millis(max_runtime_ms);
+    loop {
+        match reaper
+            .observe_terminal_without_reap()
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        {
+            NonConsumingChildTerminalObservationV1::Terminal => {
+                return cleanup_unix_one_shot(reaper, None);
+            }
+            NonConsumingChildTerminalObservationV1::StillRunning => {
+                if cancellation
+                    .as_ref()
+                    .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+                {
+                    return cleanup_unix_one_shot(reaper, Some(ProcessTerminationV1::Cancelled));
+                }
+                if launch_started.elapsed() >= max_runtime {
+                    return cleanup_unix_one_shot(reaper, Some(ProcessTerminationV1::TimedOut));
+                }
+                if let Some(cancellation) = cancellation.as_ref()
+                    && tokio::runtime::Handle::try_current().is_ok()
+                {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        _ = cancellation.cancelled() => {
+                            return cleanup_unix_one_shot(
+                                reaper,
+                                Some(ProcessTerminationV1::Cancelled),
+                            );
+                        }
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn poll_one_shot_termination(
+    child: &mut OneShotChildV1,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    max_runtime_ms: u64,
+    launch_started: std::time::Instant,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> Result<ProcessTerminationV1, ManagedExecutionErrorV1> {
+    let OneShotChildV1::Native(child) = child;
+    let termination = poll_termination(
+        child,
+        process_owner,
+        max_runtime_ms,
+        launch_started,
+        cancellation,
+    )
+    .await;
+    if matches!(termination, ProcessTerminationV1::OutcomeUncertain { .. }) {
+        return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+    }
+    Ok(termination)
+}
+
+fn terminate_reap_one_shot_and_settle(
+    child: &mut OneShotChildV1,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    inventory: &dyn sigil_resource_authority::AuthorityProcessInventoryPortV1,
+    claim: &mut Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
+) -> Result<(), ManagedExecutionErrorV1> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let _ = process_owner;
+    match child {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        OneShotChildV1::Unix(reaper) => {
+            cleanup_unix_one_shot(
+                reaper,
+                Some(ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                }),
+            )?;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        OneShotChildV1::Native(child) => {
+            if let Some(process_owner) = process_owner {
+                let _ = process_owner.terminate();
+            }
+            let _ = child.kill();
+            child
+                .wait()
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
+    }
+    inventory
+        .settle_spawn(
+            claim
+                .take()
+                .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+        )
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)
+}
+
+/// Polls exit within the runtime cap; on deadline or cancellation it terminates the owned tree,
+/// then waits only on the direct child handle owned by this service.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn poll_termination(
+    child: &mut Child,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    max_runtime_ms: u64,
+    launch_started: std::time::Instant,
+    cancellation: Option<sigil_kernel::RunCancellationHandle>,
+) -> ProcessTerminationV1 {
     if max_runtime_ms == 0 {
         return ProcessTerminationV1::NotSpawned;
     }
-    let deadline = std::time::Instant::now() + Duration::from_millis(max_runtime_ms);
+    let max_runtime = Duration::from_millis(max_runtime_ms);
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return classify_status(status),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    // A timeout is truthful only after this owned handle confirms reaping. If a
-                    // kill races a natural exit, preserve that observed status; if neither path
-                    // can produce a wait result, the caller must retain the claim as uncertain.
-                    return match child.kill() {
-                        Ok(()) => match child.wait() {
-                            Ok(_) => ProcessTerminationV1::TimedOut,
-                            Err(_) => ProcessTerminationV1::OutcomeUncertain {
-                                evidence_digest: zero_hash(),
-                            },
-                        },
-                        Err(_) => match child.wait() {
-                            Ok(status) => classify_status(status),
-                            Err(_) => ProcessTerminationV1::OutcomeUncertain {
-                                evidence_digest: zero_hash(),
-                            },
-                        },
+            Ok(Some(status)) => {
+                if let Some(process_owner) = process_owner
+                    && process_owner.terminate().is_err()
+                {
+                    return ProcessTerminationV1::OutcomeUncertain {
+                        evidence_digest: zero_hash(),
                     };
                 }
-                // Blocking poll: the managed seam is blocking-IO here; R71.8 backends
-                // replace this with a backend-native wait.
-                std::thread::sleep(Duration::from_millis(10));
+                return classify_status(status);
+            }
+            Ok(None) => {
+                if cancellation
+                    .as_ref()
+                    .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+                {
+                    return terminate_controlled_child(child, process_owner, true);
+                }
+                if launch_started.elapsed() >= max_runtime {
+                    return terminate_controlled_child(child, process_owner, false);
+                }
+                if let Some(cancellation) = cancellation.as_ref()
+                    && tokio::runtime::Handle::try_current().is_ok()
+                {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        _ = cancellation.cancelled() => {
+                            return terminate_controlled_child(child, process_owner, true);
+                        }
+                    }
+                } else {
+                    // The synchronous fallback keeps the crate's non-Tokio unit-test executor
+                    // usable while still checking cancellation before each next process probe.
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
             Err(_) => {
                 return ProcessTerminationV1::OutcomeUncertain {
@@ -956,6 +1074,28 @@ async fn poll_termination(child: &mut Child, max_runtime_ms: u64) -> ProcessTerm
                 };
             }
         }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn terminate_controlled_child(
+    child: &mut Child,
+    process_owner: Option<&sigil_process::ProcessTreeOwnerGuard>,
+    cancelled: bool,
+) -> ProcessTerminationV1 {
+    // The process owner is the only authority that can cover descendants. Direct kill remains a
+    // race-tolerant fallback for the leader handle, and wait is the sole reap operation.
+    if let Some(process_owner) = process_owner {
+        let _ = process_owner.terminate();
+    }
+    match child.kill() {
+        Ok(()) | Err(_) => match child.wait() {
+            Ok(_) if cancelled => ProcessTerminationV1::Cancelled,
+            Ok(_) => ProcessTerminationV1::TimedOut,
+            Err(_) => ProcessTerminationV1::OutcomeUncertain {
+                evidence_digest: zero_hash(),
+            },
+        },
     }
 }
 
@@ -1059,7 +1199,7 @@ impl CapState {
     }
 
     fn push(&mut self, payload: &[u8]) {
-        self.observed += payload.len() as u64;
+        self.observed = self.observed.saturating_add(payload.len() as u64);
         let remaining = self.cap.saturating_sub(self.retained.len() as u64) as usize;
         if remaining > 0 {
             self.retained
@@ -1077,6 +1217,79 @@ impl CapState {
             artifact_ref: None,
         }
     }
+
+    fn incomplete_summary(&self) -> BoundedOutputSummaryV1 {
+        let mut summary = self.summary();
+        summary.truncated = true;
+        summary
+    }
+}
+
+/// Starts an unbounded pipe drain with bounded retention. The reader never sends retained frames
+/// through a bounded channel, because that would reintroduce backpressure and let a child block
+/// once the consumer stops reading. Completion is reported separately so the caller can stop
+/// waiting after the leader has exited without inferring EOF from that fact.
+fn spawn_summary_capture(
+    mut pipe: impl Read + Send + 'static,
+    cap: u64,
+    channel: ManagedProcessOutputChannelV1,
+    sink: Option<Arc<dyn ManagedOutputCaptureSinkV1>>,
+) -> (
+    std::sync::mpsc::Receiver<io::Result<BoundedReadOutcome>>,
+    Arc<Mutex<CapState>>,
+) {
+    let state = Arc::new(Mutex::new(CapState::new(cap)));
+    let state_for_reader = Arc::clone(&state);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        let result = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => {
+                    let summary = state_for_reader
+                        .lock()
+                        .map(|state| state.summary())
+                        .map_err(|_| io::Error::other("managed output state poisoned"));
+                    break summary.map(|summary| BoundedReadOutcome { summary });
+                }
+                Ok(read) => {
+                    match state_for_reader.lock() {
+                        Ok(mut state) => state.push(&chunk[..read]),
+                        Err(_) => break Err(io::Error::other("managed output state poisoned")),
+                    }
+                    if let Some(sink) = sink.as_ref() {
+                        // Capture is secondary to process ownership. A failed sink must not
+                        // stop this reader, otherwise the child can deadlock on a full pipe. Do
+                        // not hold the bounded-summary mutex while crossing the sink seam.
+                        let _ = sink.write_chunk(channel, &chunk[..read]);
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = done_tx.send(result);
+    });
+    (done_rx, state)
+}
+
+/// Returns a complete reader result when EOF arrives promptly. If a descendant still owns the
+/// write end, return the bounded snapshot and mark it incomplete instead of waiting indefinitely.
+fn finish_summary_capture(
+    done_rx: &std::sync::mpsc::Receiver<io::Result<BoundedReadOutcome>>,
+    state: &Arc<Mutex<CapState>>,
+) -> io::Result<BoundedReadOutcome> {
+    match done_rx.recv_timeout(POST_LEADER_CAPTURE_BUDGET) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => state
+            .lock()
+            .map(|state| BoundedReadOutcome {
+                summary: state.incomplete_summary(),
+            })
+            .map_err(|_| io::Error::other("managed output state poisoned")),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
+            "managed output reader stopped unexpectedly",
+        )),
+    }
 }
 
 /// Drains one pipe into bounded frames; the EOF frame carries end_of_stream exactly once.
@@ -1087,7 +1300,7 @@ fn spawn_drain(
     mut pipe: impl Read + Send + 'static,
     channel: ManagedProcessOutputChannelV1,
     cap: u64,
-    frame_tx: tokio::sync::mpsc::Sender<BoundedProcessOutputFrameV1>,
+    frame_tx: tokio::sync::mpsc::UnboundedSender<BoundedProcessOutputFrameV1>,
     state: Arc<Mutex<CapState>>,
 ) {
     std::thread::spawn(move || {
@@ -1106,7 +1319,7 @@ fn spawn_drain(
                     drop(guard);
                     if fit_fully && read > 0 {
                         let payload = chunk[..read].to_vec();
-                        let _ = frame_tx.blocking_send(BoundedProcessOutputFrameV1 {
+                        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
                             channel,
                             sequence,
                             payload,
@@ -1122,7 +1335,7 @@ fn spawn_drain(
             .lock()
             .map(|guard| guard.observed > cap)
             .unwrap_or(false);
-        let _ = frame_tx.blocking_send(BoundedProcessOutputFrameV1 {
+        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
             channel,
             sequence,
             payload: Vec::new(),
@@ -1138,6 +1351,16 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         &self,
         bundle: IssuedExecutionAdmissionBundleV1,
         request: ManagedExecutionRequestV1,
+    ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
+        self.execute_once_with_cancellation(bundle, request, None)
+            .await
+    }
+
+    async fn execute_once_with_cancellation(
+        &self,
+        bundle: IssuedExecutionAdmissionBundleV1,
+        request: ManagedExecutionRequestV1,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         if !matches!(bundle, IssuedExecutionAdmissionBundleV1::OneShot { .. }) {
             return Err(ManagedExecutionErrorV1::AdmissionMismatch);
@@ -1159,7 +1382,8 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         let claim = inventory
             .prepare_spawn(process_inventory_spawn_request(&prepared))
             .map_err(|_| ManagedExecutionErrorV1::ProviderUnavailable)?;
-        let mut child = match launcher.launch(&request, &prepared.env) {
+        let launch_started = std::time::Instant::now();
+        let child = match launcher.launch(&request, &prepared.env) {
             Ok(child) => child,
             Err(error) => {
                 inventory
@@ -1168,62 +1392,54 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 return Err(error);
             }
         };
-        let registration = claim.register_spawned_process(child.id());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let mut child = match sigil_process::UnixOwnedChildReaperV1::adopt_with_child(child) {
+            Ok(reaper) => OneShotChildV1::Unix(reaper),
+            Err((mut child, _error)) => {
+                // Adoption could not prove the configured tree. The direct handle is still exact,
+                // so terminate and reap it before exposing the failed attempt. Settling releases
+                // the durable Prepared claim while the inventory retains its bounded native
+                // exposure; no success receipt is produced because group coverage was unproven.
+                let _ = child.kill();
+                child
+                    .wait()
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                inventory
+                    .settle_spawn(claim)
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let mut child = OneShotChildV1::Native(child);
+        let registration = claim.register_spawned_process(child.process_id());
         if registration
             .and_then(|registration| inventory.attach_spawn(&claim, registration))
             .is_err()
         {
-            // A concrete owned child may finish before a platform can complete its first birth
-            // observation. `try_wait` is the exact child-handle fact for this branch: only a
-            // reaped exit may settle the prepared claim into a truthful one-shot receipt. Do not
-            // turn an observation failure for a still-running child into an absence proof.
-            let claim = match self.try_settle_reaped_one_shot(
-                &mut child,
-                &prepared,
-                inventory.as_ref(),
-                claim,
-                request.limits.max_output_bytes,
-            )? {
-                ReapedOneShotSettlementV1::Settled(receipt) => return Ok(*receipt),
-                ReapedOneShotSettlementV1::StillRunning(claim) => claim,
-                ReapedOneShotSettlementV1::NeedsCleanup { claim, error } => {
-                    let mut claim = Some(claim);
-                    terminate_reap_and_settle(&mut child, None, inventory.as_ref(), &mut claim)?;
-                    return Err(error);
-                }
-            };
             let mut claim = Some(claim);
-            terminate_reap_and_settle(&mut child, None, inventory.as_ref(), &mut claim)?;
+            terminate_reap_one_shot_and_settle(&mut child, None, inventory.as_ref(), &mut claim)?;
             return Err(ManagedExecutionErrorV1::ProviderUnavailable);
         }
-        // The issuance can capture a real live birth just before a very short command exits.
-        // Do not pass an already reaped child into process-tree ownership setup: its owned handle
-        // supplies exact exit evidence for normal settlement without treating PID absence as live.
-        let claim = match self.try_settle_reaped_one_shot(
-            &mut child,
-            &prepared,
-            inventory.as_ref(),
-            claim,
-            request.limits.max_output_bytes,
-        )? {
-            ReapedOneShotSettlementV1::Settled(receipt) => return Ok(*receipt),
-            ReapedOneShotSettlementV1::StillRunning(claim) => claim,
-            ReapedOneShotSettlementV1::NeedsCleanup { claim, error } => {
-                let mut claim = Some(claim);
-                terminate_reap_and_settle(&mut child, None, inventory.as_ref(), &mut claim)?;
-                return Err(error);
-            }
-        };
+        let claim = claim;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let process_owner: Option<sigil_process::ProcessTreeOwnerGuard> = None;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let process_owner = if prepared
             .requested_enforcement
             .require_process_tree_ownership
             || cfg!(unix)
         {
-            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.id())) {
+            match sigil_process::ProcessTreeOwnerGuard::assign(Some(child.process_id())) {
                 Ok(owner) => Some(owner),
                 Err(_error) => {
                     let mut claim = Some(claim);
-                    terminate_reap_and_settle(&mut child, None, inventory.as_ref(), &mut claim)?;
+                    terminate_reap_one_shot_and_settle(
+                        &mut child,
+                        None,
+                        inventory.as_ref(),
+                        &mut claim,
+                    )?;
                     return Err(ManagedExecutionErrorV1::ConfinementUnproven);
                 }
             }
@@ -1232,10 +1448,10 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         };
         let mut claim = Some(claim);
         let cap = request.limits.max_output_bytes;
-        let stdout_pipe = match child.stdout.take() {
+        let stdout_pipe = match child.take_stdout() {
             Some(pipe) => pipe,
             None => {
-                terminate_reap_and_settle(
+                terminate_reap_one_shot_and_settle(
                     &mut child,
                     process_owner.as_ref(),
                     inventory.as_ref(),
@@ -1244,10 +1460,10 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
-        let stderr_pipe = match child.stderr.take() {
+        let stderr_pipe = match child.take_stderr() {
             Some(pipe) => pipe,
             None => {
-                terminate_reap_and_settle(
+                terminate_reap_one_shot_and_settle(
                     &mut child,
                     process_owner.as_ref(),
                     inventory.as_ref(),
@@ -1256,49 +1472,62 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                 return Err(ManagedExecutionErrorV1::ProviderUnavailable);
             }
         };
-        let mut stdout_pipe = stdout_pipe;
-        let mut stderr_pipe = stderr_pipe;
-        let stdout_outcome = match bounded_read(&mut stdout_pipe, cap) {
+        // Start both drains before the first process probe. This makes the runtime deadline cover
+        // the whole launch-to-settlement interval and prevents a full stderr pipe from blocking
+        // stdout (or delaying timeout/cancellation) behind a sequential read.
+        let (stdout_done, stdout_state) = spawn_summary_capture(
+            stdout_pipe,
+            cap,
+            ManagedProcessOutputChannelV1::Stdout,
+            self.output_sink.clone(),
+        );
+        let (stderr_done, stderr_state) = spawn_summary_capture(
+            stderr_pipe,
+            cap,
+            ManagedProcessOutputChannelV1::Stderr,
+            self.output_sink.clone(),
+        );
+        let termination = poll_one_shot_termination(
+            &mut child,
+            process_owner.as_ref(),
+            request.limits.max_runtime_ms,
+            launch_started,
+            cancellation,
+        )
+        .await?;
+        let stdout_outcome = match finish_summary_capture(&stdout_done, &stdout_state) {
             Ok(outcome) => outcome,
             Err(_) => {
-                terminate_reap_and_settle(
-                    &mut child,
-                    process_owner.as_ref(),
-                    inventory.as_ref(),
-                    &mut claim,
-                )?;
+                inventory
+                    .settle_spawn(
+                        claim
+                            .take()
+                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                    )
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
                 return Err(ManagedExecutionErrorV1::OutcomeUncertain);
             }
         };
-        let stderr_outcome = match bounded_read(&mut stderr_pipe, cap) {
+        let stderr_outcome = match finish_summary_capture(&stderr_done, &stderr_state) {
             Ok(outcome) => outcome,
             Err(_) => {
-                terminate_reap_and_settle(
-                    &mut child,
-                    process_owner.as_ref(),
-                    inventory.as_ref(),
-                    &mut claim,
-                )?;
+                inventory
+                    .settle_spawn(
+                        claim
+                            .take()
+                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+                    )
+                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
                 return Err(ManagedExecutionErrorV1::OutcomeUncertain);
             }
         };
-        let termination = poll_termination(&mut child, request.limits.max_runtime_ms).await;
-        if matches!(termination, ProcessTerminationV1::OutcomeUncertain { .. }) {
-            terminate_reap_and_settle(
-                &mut child,
-                process_owner.as_ref(),
-                inventory.as_ref(),
-                &mut claim,
-            )?;
-        } else {
-            inventory
-                .settle_spawn(
-                    claim
-                        .take()
-                        .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
-                )
-                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-        }
+        inventory
+            .settle_spawn(
+                claim
+                    .take()
+                    .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
+            )
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
         let process_receipt = process_receipt_from(
             &prepared,
             termination,
@@ -1468,7 +1697,11 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             }
         };
         let stdin_pipe = child.stdin.take();
-        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
+        // The reader owns the process pipe and must never wait for a UI/protocol consumer. The
+        // frame payload is already bounded by `cap` in `spawn_drain`, so this transport does not
+        // make retained output unbounded.
+        let (frame_tx, frame_rx) =
+            tokio::sync::mpsc::unbounded_channel::<BoundedProcessOutputFrameV1>();
         let handle_stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
         let handle_stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
         spawn_drain(
@@ -1557,7 +1790,8 @@ impl SandboxManagedExecutionServiceV1 {
         } else {
             None
         };
-        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<BoundedProcessOutputFrameV1>(128);
+        let (frame_tx, frame_rx) =
+            tokio::sync::mpsc::unbounded_channel::<BoundedProcessOutputFrameV1>();
         let stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
         let stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
         spawn_drain(
@@ -1637,7 +1871,7 @@ struct LocalPersistentProcessHandleV1 {
     process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdin_open: Arc<AtomicBool>,
-    frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
+    frame_rx: Option<tokio::sync::mpsc::UnboundedReceiver<BoundedProcessOutputFrameV1>>,
     stdout_cap: Arc<Mutex<CapState>>,
     stderr_cap: Arc<Mutex<CapState>>,
     attempt_id: PhysicalAttemptId,
@@ -1649,7 +1883,7 @@ struct LocalPersistentProcessHandleV1 {
 }
 
 struct LocalPersistentOutputStreamV1 {
-    rx: tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<BoundedProcessOutputFrameV1>,
 }
 
 #[async_trait]
@@ -1870,7 +2104,7 @@ struct LocalPersistentPtyProcessHandleV1 {
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     stdin: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
     stdin_open: Arc<AtomicBool>,
-    frame_rx: Option<tokio::sync::mpsc::Receiver<BoundedProcessOutputFrameV1>>,
+    frame_rx: Option<tokio::sync::mpsc::UnboundedReceiver<BoundedProcessOutputFrameV1>>,
     stdout_cap: Arc<Mutex<CapState>>,
     stderr_cap: Arc<Mutex<CapState>>,
     attempt_id: PhysicalAttemptId,

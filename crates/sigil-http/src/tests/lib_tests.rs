@@ -505,8 +505,12 @@ credential = { source = "none" }
 "#,
     )
     .expect("test configuration should write");
-    let parsed =
+    let mut parsed =
         sigil_kernel::RootConfig::load(&config_path).expect("test configuration should load");
+    parsed.model_request.max_output_tokens = Some(200_000);
+    parsed
+        .save(&config_path)
+        .expect("test configuration with output limit should write");
     let beta_ref = sigil_kernel::ModelRef::new(
         sigil_kernel::ConnectionId::new("beta").expect("connection id"),
         "beta-model",
@@ -538,7 +542,7 @@ credential = { source = "none" }
             .await
     });
 
-    let (status, saved) = http_raw_request(
+    let (status, rejected) = http_raw_request(
         address,
         http_put(
             "/settings/provider-connections/default-model",
@@ -554,13 +558,34 @@ credential = { source = "none" }
         ),
     )
     .await;
+    assert_eq!(
+        status, 422,
+        "incompatible token limits must be rejected: {rejected}"
+    );
+
+    let (status, saved) = http_raw_request(
+        address,
+        http_put(
+            "/settings/provider-connections/default-model",
+            Some("secret-token"),
+            &json!({
+                "model_ref": {
+                    "connection_id": "beta",
+                    "model_id": "beta-model"
+                },
+                "context_window_tokens": 262144
+            })
+            .to_string(),
+        ),
+    )
+    .await;
 
     assert_eq!(status, 200, "default-route save response: {saved}");
     assert_eq!(saved["default_model"]["connection_id"], "beta");
     assert_eq!(saved["default_model"]["model_id"], "beta-model");
     assert_eq!(
         saved["inventory"]["connections"][1]["model_context_windows"]["beta-model"],
-        131_072
+        262_144
     );
     assert_eq!(
         saved["inventory"]["connections"].as_array().map(Vec::len),
@@ -569,7 +594,7 @@ credential = { source = "none" }
     let persisted = fs::read_to_string(&config_path).expect("saved config should read");
     assert!(persisted.contains("connection = \"beta\""));
     assert!(persisted.contains("model = \"beta-model\""));
-    assert!(persisted.contains("131072"));
+    assert!(persisted.contains("262144"));
     assert!(persisted.contains("[connections.alpha]"));
     assert!(persisted.contains("[connections.beta]"));
 
@@ -593,8 +618,17 @@ credential = { source = "none" }
         cleared["inventory"]["connections"][1]["model_context_windows"],
         json!({})
     );
-    let persisted = fs::read_to_string(&config_path).expect("cleared config should read");
-    assert!(!persisted.contains("131072"));
+    let cleared_root = sigil_kernel::RootConfig::load(&config_path)
+        .expect("cleared configuration should remain readable");
+    let cleared_inventory =
+        sigil_runtime::provider_connections::load_provider_connections(&cleared_root);
+    assert_eq!(
+        cleared_inventory
+            .connections
+            .get(&sigil_kernel::ConnectionId::new("beta").expect("connection id"))
+            .and_then(|connection| connection.config.model_context_windows.get("beta-model")),
+        None
+    );
 
     shutdown_tx.send(()).expect("shutdown should signal");
     serving

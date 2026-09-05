@@ -207,6 +207,30 @@ impl SharedSessionCoordinator {
         pending: Vec<PendingStoredEvent>,
         run_id: &str,
     ) -> Result<Vec<StoredEvent>> {
+        self.append_control_publication_inner(pending, run_id, None)?
+            .context("control publication append predicate unexpectedly rejected its bundle")
+    }
+
+    /// Appends one source/publication bundle while holding the same writer lease across a
+    /// caller-owned durable guard and the crash-safe append.
+    pub(super) fn append_control_publication_if_records<F>(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        run_id: &str,
+        should_append: F,
+    ) -> Result<Option<Vec<StoredEvent>>>
+    where
+        F: FnOnce(&[SessionStreamRecord]) -> Result<bool>,
+    {
+        self.append_control_publication_inner(pending, run_id, Some(Box::new(should_append)))
+    }
+
+    fn append_control_publication_inner(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        run_id: &str,
+        should_append: Option<ControlPublicationPredicate<'_>>,
+    ) -> Result<Option<Vec<StoredEvent>>> {
         let (events, notice) = {
             let mut writer = self.lock_writer()?;
             writer.ensure_public_event_outbox_index()?;
@@ -214,6 +238,12 @@ impl SharedSessionCoordinator {
                 .public_event_outbox_index()
                 .context("public outbox index is unavailable")?
                 .require_active_run(run_id)?;
+            if let Some(should_append) = should_append {
+                let records = writer.read_records_writer()?;
+                if !should_append(&records)? {
+                    return Ok(None);
+                }
+            }
             // Reject a stale caller before attempting I/O. Only an error from this very append
             // may be reconciled as an uncertain commit; an already-applied batch is not a new
             // Session delta and must never be appended to its in-memory entries twice.
@@ -265,7 +295,7 @@ impl SharedSessionCoordinator {
             (events, notice)
         };
         self.notify(notice);
-        Ok(events)
+        Ok(Some(events))
     }
 
     pub(super) fn append_public_event_delivery(
@@ -1794,6 +1824,7 @@ impl DurableEventLinkIndex {
 }
 
 type StoredEventAppendResult = (Vec<StoredEvent>, Vec<(u64, u64)>);
+type ControlPublicationPredicate<'a> = Box<dyn FnOnce(&[SessionStreamRecord]) -> Result<bool> + 'a>;
 
 impl LinearSessionWriter {
     fn new(path: PathBuf) -> Self {
@@ -2006,19 +2037,30 @@ impl LinearSessionWriter {
                         .position(|source| source.event_id == event.event_id)
                         .context("public control envelope is unavailable")?;
                     let source = &pending[source_index];
-                    let control: SessionLogEntry = serde_json::from_value(
+                    let source_entry: SessionLogEntry = serde_json::from_value(
                         source
                             .payload
                             .get("session_log_entry")
                             .cloned()
-                            .context("public source is not a control entry")?,
+                            .context("public source is not a session entry")?,
                     )?;
                     if source_index >= public_index
-                        || !matches!(&control, SessionLogEntry::Control(_))
-                        || source.event_type != super::store::session_entry_event_type(&control)
+                        || source.event_type
+                            != super::store::session_entry_event_type(&source_entry)
                         || event.causation_id.as_deref() != Some(entry.domain_event_id.as_str())
                     {
-                        bail!("public event is not linked to its preceding source control");
+                        bail!("public event is not linked to its preceding source entry");
+                    }
+                    // Existing control publications are validated against the stateful
+                    // `project_explicit_control` mapping when the append intent is rebuilt.
+                    // The writer has no task projector prefix here, so it only proves their
+                    // structural source linkage. New non-control mixed sources are closed,
+                    // stateless typed mappings and can be rejected before bytes are appended.
+                    if !matches!(source_entry, SessionLogEntry::Control(_)) {
+                        super::control_publication::validate_explicit_session_publication(
+                            &source_entry,
+                            &entry.event.event,
+                        )?;
                     }
                     index.require_active_run(&entry.run_id)?;
                 }

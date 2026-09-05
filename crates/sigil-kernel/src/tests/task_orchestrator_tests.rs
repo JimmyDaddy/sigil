@@ -233,6 +233,7 @@ struct NamedFixtureTool {
 fn seed_completed_synthesis_prefix(
     session: &mut Session,
     append_parent_assistant: bool,
+    complete_inspect_step: bool,
 ) -> Result<TaskId> {
     let task_id = TaskId::new("task_recovery")?;
     let parent_session_ref = SessionRef::new_relative("parent.jsonl")?;
@@ -252,6 +253,20 @@ fn seed_completed_synthesis_prefix(
         status: TaskPlanStatus::Accepted,
         steps: vec![step],
         reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: TaskStepId::new("inspect")?,
+        role: crate::AgentRole::Executor,
+        status: if complete_inspect_step {
+            TaskStepStatus::Completed
+        } else {
+            TaskStepStatus::Pending
+        },
+        title: Some("inspect".to_owned()),
+        summary: complete_inspect_step.then(|| "recovered before final-answer commit".to_owned()),
+        reason: (!complete_inspect_step).then(|| "step remains unfinished".to_owned()),
     }))?;
     let attempt_id = task_participant_attempt_id(
         &task_id,
@@ -3806,7 +3821,7 @@ fn final_answer_recovery_repairs_child_only_and_parent_assistant_prefixes_idempo
         let temp = tempfile::tempdir()?;
         let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
         let mut session = Session::load_from_store("planner", "model", store)?;
-        let task_id = seed_completed_synthesis_prefix(&mut session, append_parent_assistant)?;
+        let task_id = seed_completed_synthesis_prefix(&mut session, append_parent_assistant, true)?;
 
         assert!(reconcile_task_final_answer_prefix(&mut session, &task_id)?);
         assert!(!reconcile_task_final_answer_prefix(&mut session, &task_id)?);
@@ -3855,7 +3870,7 @@ fn final_answer_recovery_never_overrides_a_cancelled_task() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
     let mut session = Session::load_from_store("planner", "model", store)?;
-    let task_id = seed_completed_synthesis_prefix(&mut session, false)?;
+    let task_id = seed_completed_synthesis_prefix(&mut session, false, true)?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -3880,6 +3895,27 @@ fn final_answer_recovery_never_overrides_a_cancelled_task() -> Result<()> {
         SessionLogEntry::Assistant(message)
             if message.assistant_kind == Some(crate::AssistantMessageKind::FinalAnswer)
     )));
+    Ok(())
+}
+
+#[test]
+fn final_answer_recovery_does_not_close_an_unfinished_plan() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = seed_completed_synthesis_prefix(&mut session, false, false)?;
+
+    let entries_before = session.entries().len();
+    assert!(!reconcile_task_final_answer_prefix(&mut session, &task_id)?);
+    assert_eq!(session.entries().len(), entries_before);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .cloned()
+        .expect("task projection");
+    assert_eq!(task.status, TaskRunStatus::Running);
+    assert!(task.final_answer.is_none());
     Ok(())
 }
 

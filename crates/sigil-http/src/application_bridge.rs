@@ -17,9 +17,10 @@ use sigil_application::{
     ApplicationCommandRequest, ApplicationDomainReceipt, ApplicationError,
     ApplicationPermissionMode, ApplicationPort, ApplicationQueueAction, ApplicationQueueItemKind,
     ApplicationQueueTarget, ApplicationReasoningEffort, ApplicationRecoveryAction,
-    ApplicationRecoveryOutcome, ApplicationScope, AuthenticatedSubject, ConversationCommand,
-    HostConnectionInstanceId, PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId,
-    ProjectionPage, RunCommand, RunStartOptions, SessionScopeId, StablePageCursor,
+    ApplicationRecoveryOutcome, ApplicationScope, AuthenticatedSubject, CommandEffectBinding,
+    CommandLifecyclePhase, CommandRecoveryBinding, ConversationCommand, HostConnectionInstanceId,
+    PageAnchor, PageDirection, PageQueryFingerprint, PageRequestId, ProjectionPage, RunCommand,
+    RunStartOptions, SessionScopeId, StablePageCursor,
 };
 use sigil_runtime::{
     ManagedApplicationReservationStore, RuntimeApplicationDeliveryAckStore,
@@ -28,7 +29,10 @@ use sigil_runtime::{
 };
 use tokio::runtime::{Handle, RuntimeFlavor};
 
-use crate::{HttpRunDriverError, HttpSessionRunRegistry, HttpSessionSnapshot};
+use crate::{
+    HttpCommandEnvelope, HttpRunDriverError, HttpSessionRunRegistry, HttpSessionSnapshot,
+    HttpTerminalTaskCancelRequest,
+};
 
 /// Host-bound command request for the HTTP application endpoint.
 ///
@@ -173,6 +177,7 @@ pub(crate) fn build_client(
     let executor = Arc::new(HttpApplicationCommandExecutor {
         registry: Arc::clone(&context.registry),
         session_id: session.id.clone(),
+        client_id: client_id.to_owned(),
     });
     let service: Arc<dyn ApplicationPort> = Arc::new(RuntimeApplicationService::new(
         Arc::new(projection),
@@ -332,6 +337,70 @@ fn validate_client_id(client_id: &str) -> Result<(), HttpRunDriverError> {
     Ok(())
 }
 
+fn uncertain_dispatch(
+    request: &ApplicationCommandRequest,
+    owner_recovery_binding: impl Into<String>,
+) -> Result<RuntimeApplicationDispatch, ApplicationError> {
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    Ok(RuntimeApplicationDispatch::Uncertain(
+        sigil_application::UncertainCommandReceipt {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: sigil_application::command_fingerprint(request)?,
+            recovery: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            owner_recovery_binding: Some(owner_recovery_binding.into()),
+        },
+    ))
+}
+
+fn confirmed_no_effect(
+    request: &ApplicationCommandRequest,
+    rejection: sigil_application::CommandRejection,
+) -> Result<RuntimeApplicationDispatch, ApplicationError> {
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    let fingerprint = sigil_application::command_fingerprint(request)?;
+    Ok(RuntimeApplicationDispatch::ConfirmedNoEffect {
+        proof: sigil_application::CommandNoEffectProof {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: fingerprint,
+            source: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            reason: "HTTP owner rejected the command before a physical effect".to_owned(),
+        },
+        rejection,
+    })
+}
+
+fn application_recovery_domain_commit(
+    request: &ApplicationCommandRequest,
+    receipt: &crate::HttpConversationRecoveryCommandReceipt,
+) -> Result<sigil_application::ApplicationDomainCommitRef, ApplicationError> {
+    let source_sequence = receipt.recovery.through_stream_sequence;
+    if source_sequence == 0 {
+        return Err(ApplicationError::CorruptProjection(
+            "HTTP recovery owner returned no committed stream sequence".to_owned(),
+        ));
+    }
+    Ok(sigil_application::ApplicationDomainCommitRef {
+        source_event_id: format!(
+            "http-recovery-domain:{}:{}",
+            receipt.session_id, source_sequence
+        ),
+        source_sequence,
+        source_digest: sigil_application::command_fingerprint(request)?,
+    })
+}
+
 fn stable_http_client_epoch(scope: &ApplicationScope, client_id: &str) -> u64 {
     let mut hasher = Sha256::new();
     hasher.update(b"sigil-http-application-client-epoch-v1\0");
@@ -356,9 +425,32 @@ fn stable_http_client_epoch(scope: &ApplicationScope, client_id: &str) -> u64 {
 struct HttpApplicationCommandExecutor {
     registry: Arc<HttpSessionRunRegistry>,
     session_id: String,
+    client_id: String,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommandExecutor {
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: sigil_application::CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let binding = CommandEffectBinding {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: fingerprint,
+            recovery: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            owner_effect_id: format!("http-command:{}", request.envelope.command_id),
+        };
+        Box::pin(async move {
+            binding.validate()?;
+            Ok(binding)
+        })
+    }
+
     fn dispatch(
         &self,
         request: ApplicationCommandRequest,
@@ -377,6 +469,45 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
         } else {
             self.dispatch_sync(&request)
         };
+        Box::pin(async move { result })
+    }
+
+    fn request_safety_stop(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<sigil_application::SafetyStopDisposition, ApplicationError>>
+    {
+        let result = (|| {
+            let ApplicationCommand::Run(RunCommand::CancelTerminalTask { identity }) =
+                &request.envelope.command
+            else {
+                return Ok(sigil_application::SafetyStopDisposition::Uncertain);
+            };
+
+            // This is the real HTTP terminal-owner path, including its exact run/task/generation
+            // checks and cleanup confirmation. It is intentionally independent of the
+            // application reservation journal: this method is entered only when that journal
+            // could not admit the normal command. A transport enqueue or a run cancellation
+            // receipt is not enough to claim that the forward gate closed.
+            let command = HttpCommandEnvelope::new(
+                request.envelope.command_id.as_str(),
+                &self.client_id,
+                &self.session_id,
+                HttpTerminalTaskCancelRequest {
+                    task_id: identity.task_id.as_str().to_owned(),
+                    expected_generation: identity.expected_generation,
+                },
+            );
+            let receipt = self
+                .registry
+                .cancel_terminal_task_command(identity.run_id.as_str(), command)
+                .map_err(|_| ApplicationError::Unavailable)?;
+            if receipt.terminal_task.status.is_terminal() {
+                Ok(sigil_application::SafetyStopDisposition::ForwardGateClosed)
+            } else {
+                Ok(sigil_application::SafetyStopDisposition::Uncertain)
+            }
+        })();
         Box::pin(async move { result })
     }
 }
@@ -404,25 +535,18 @@ impl HttpApplicationCommandExecutor {
                     .registry
                     .start_run(&self.session_id, run_request)
                     .map_err(|_| ApplicationError::Unavailable)?;
-                let fingerprint = sigil_application::command_fingerprint(request)?;
-                Ok(RuntimeApplicationDispatch::Uncertain(
-                    sigil_application::UncertainCommandReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        reservation_fingerprint: fingerprint,
-                        recovery_binding: format!("http-run-start:{}", run.id),
-                    },
-                ))
+                uncertain_dispatch(request, format!("http-run-start:{}", run.id))
             }
             ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
                 options: None,
                 ..
-            }) => Ok(RuntimeApplicationDispatch::Rejected(
+            }) => confirmed_no_effect(
+                request,
                 sigil_application::CommandRejection {
                     kind: "missing_http_run_options".to_owned(),
                     reason: "HTTP run start requires explicit typed run options".to_owned(),
                 },
-            )),
+            ),
             ApplicationCommand::Conversation(ConversationCommand::Queue {
                 expected_generation,
                 action,
@@ -445,26 +569,22 @@ impl HttpApplicationCommandExecutor {
                 ) {
                     Ok(queue) => queue,
                     Err(error) => {
-                        return Ok(RuntimeApplicationDispatch::Rejected(
+                        return confirmed_no_effect(
+                            request,
                             sigil_application::CommandRejection {
                                 kind: "http_conversation_queue_rejected".to_owned(),
                                 reason: error.to_string(),
                             },
-                        ));
+                        );
                     }
                 };
-                let fingerprint = sigil_application::command_fingerprint(request)?;
-                Ok(RuntimeApplicationDispatch::Uncertain(
-                    sigil_application::UncertainCommandReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        reservation_fingerprint: fingerprint,
-                        recovery_binding: format!(
-                            "http-queue:{}",
-                            hex_binding_component(queue.generation.0.as_str())
-                        ),
-                    },
-                ))
+                uncertain_dispatch(
+                    request,
+                    format!(
+                        "http-queue:{}",
+                        hex_binding_component(queue.generation.0.as_str())
+                    ),
+                )
             }
             ApplicationCommand::Conversation(ConversationCommand::Recovery { action }) => {
                 let receipt = match self
@@ -482,15 +602,16 @@ impl HttpApplicationCommandExecutor {
                     ) {
                     Ok(receipt) => receipt,
                     Err(error) => {
-                        return Ok(RuntimeApplicationDispatch::Rejected(
+                        return confirmed_no_effect(
+                            request,
                             sigil_application::CommandRejection {
                                 kind: "http_conversation_recovery_rejected".to_owned(),
                                 reason: error.to_string(),
                             },
-                        ));
+                        );
                     }
                 };
-                let outcome = crate::application_bridge::application_recovery_outcome(&receipt)?;
+                let outcome = application_recovery_outcome(&receipt)?;
                 let frontier = sigil_application::ApplicationFrontier {
                     schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
                     scope: request.admission.scope.clone(),
@@ -509,6 +630,7 @@ impl HttpApplicationCommandExecutor {
                         frontier,
                         settlement: request.envelope.command.policy().settlement,
                         summary: "HTTP conversation recovery mutation committed".to_owned(),
+                        domain_commit: application_recovery_domain_commit(request, &receipt)?,
                         outcome: Some(Box::new(ApplicationCommandOutcome::Recovery(outcome))),
                     },
                 ))
@@ -526,21 +648,14 @@ impl HttpApplicationCommandExecutor {
                 if run.session_id != self.session_id {
                     return Err(ApplicationError::ScopeMismatch);
                 }
-                self.registry
+                let _run = self
+                    .registry
                     .cancel_run_with_reason(
                         binding,
                         reason.as_ref().map(|reason| reason.as_str().to_owned()),
                     )
                     .map_err(|_| ApplicationError::Unavailable)?;
-                let fingerprint = sigil_application::command_fingerprint(request)?;
-                Ok(RuntimeApplicationDispatch::Uncertain(
-                    sigil_application::UncertainCommandReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        reservation_fingerprint: fingerprint,
-                        recovery_binding: "http-run-cancel-event-reconcile".to_owned(),
-                    },
-                ))
+                uncertain_dispatch(request, format!("http-run-cancel:{}", binding))
             }
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                 binding,
@@ -595,29 +710,25 @@ impl HttpApplicationCommandExecutor {
                         resolution.expected_stream_sequence,
                     )
                     .map_err(|_| ApplicationError::Unavailable)?;
-                let fingerprint = sigil_application::command_fingerprint(request)?;
-                Ok(RuntimeApplicationDispatch::Uncertain(
-                    sigil_application::UncertainCommandReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        reservation_fingerprint: fingerprint,
-                        recovery_binding: format!(
-                            "http-approval:{}:{}",
-                            approval_route_token(route.0),
-                            route.1
-                        ),
-                    },
-                ))
+                uncertain_dispatch(
+                    request,
+                    format!(
+                        "http-approval:{}:{}",
+                        approval_route_token(route.0),
+                        route.1
+                    ),
+                )
             }
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                 resolution: None,
                 ..
-            }) => Ok(RuntimeApplicationDispatch::Rejected(
+            }) => confirmed_no_effect(
+                request,
                 sigil_application::CommandRejection {
                     kind: "missing_http_approval_resolution".to_owned(),
                     reason: "HTTP approval requires its exact typed guard and decision".to_owned(),
                 },
-            )),
+            ),
             ApplicationCommand::UserInput(sigil_application::UserInputCommand::Resolve {
                 binding,
                 generation,
@@ -655,45 +766,43 @@ impl HttpApplicationCommandExecutor {
                 ) {
                     Ok(receipt) => receipt,
                     Err(crate::HttpRegistryError::DriverRejected { message, .. }) => {
-                        return Ok(RuntimeApplicationDispatch::Rejected(
+                        return confirmed_no_effect(
+                            request,
                             sigil_application::CommandRejection {
                                 kind: "http_user_input_rejected".to_owned(),
                                 reason: message,
                             },
-                        ));
+                        );
                     }
                     Err(crate::HttpRegistryError::UserInputStale) => {
-                        return Ok(RuntimeApplicationDispatch::Rejected(
+                        return confirmed_no_effect(
+                            request,
                             sigil_application::CommandRejection {
                                 kind: "http_user_input_stale".to_owned(),
                                 reason: "user input request is stale".to_owned(),
                             },
-                        ));
+                        );
                     }
                     Err(_) => return Err(ApplicationError::Unavailable),
                 };
                 let continuation = receipt.continuation_run_id.as_deref().unwrap_or_default();
-                let fingerprint = sigil_application::command_fingerprint(request)?;
-                Ok(RuntimeApplicationDispatch::Uncertain(
-                    sigil_application::UncertainCommandReceipt {
-                        command_id: request.envelope.command_id.clone(),
-                        command_kind: request.envelope.command.kind().to_owned(),
-                        reservation_fingerprint: fingerprint,
-                        recovery_binding: format!(
-                            "http-user-input:{}:{}",
-                            hex_binding_component(binding),
-                            hex_binding_component(continuation)
-                        ),
-                    },
-                ))
+                uncertain_dispatch(
+                    request,
+                    format!(
+                        "http-user-input:{}:{}",
+                        hex_binding_component(binding),
+                        hex_binding_component(continuation)
+                    ),
+                )
             }
-            _ => Ok(RuntimeApplicationDispatch::Rejected(
+            _ => confirmed_no_effect(
+                request,
                 sigil_application::CommandRejection {
                     kind: "unsupported_http_application_command".to_owned(),
                     reason: "this HTTP bridge has no lossless host mapping for the command"
                         .to_owned(),
                 },
-            )),
+            ),
         }
     }
 }

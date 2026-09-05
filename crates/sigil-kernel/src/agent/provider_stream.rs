@@ -26,6 +26,23 @@ struct ProviderTurnPartialOutput {
     streamed_tool_call_count: usize,
 }
 
+async fn commit_provider_output_control<H>(
+    physical_attempt: &mut ProviderPhysicalAttemptAudit,
+    session: &mut Session,
+    control: ControlEntry,
+    event: RunEvent,
+    handler: &mut H,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let publication = handler.prepare_provider_output_publication(session, &control)?;
+    let committed = physical_attempt
+        .append_output_control(session, control, publication.as_ref())
+        .await?;
+    handler.complete_provider_output_publication(publication, committed, event)
+}
+
 impl ProviderTurnPartialOutput {
     fn observes_tool_call(&mut self) {
         self.streamed_tool_call_count = self.streamed_tool_call_count.saturating_add(1);
@@ -1004,25 +1021,37 @@ where
                     usage = snapshot.apply_to_usage(usage)?;
                 }
                 session.stats_mut().apply_usage(&usage);
-                physical_attempt
-                    .append_output_control(session, ControlEntry::UsageSnapshot(usage.clone()))
-                    .await?;
-                handler.handle(RunEvent::Usage(usage))?;
+                commit_provider_output_control(
+                    physical_attempt,
+                    session,
+                    ControlEntry::UsageSnapshot(usage.clone()),
+                    RunEvent::Usage(usage),
+                    handler,
+                )
+                .await?;
             }
             ProviderChunk::ResponseHandle(handle) => {
-                *previous_response_handle = Some(handle.clone());
-                let control = ControlEntry::ResponseHandleTracked(handle);
-                physical_attempt
-                    .append_output_control(session, control.clone())
-                    .await?;
-                handler.handle(RunEvent::Control(control))?;
+                let control = ControlEntry::ResponseHandleTracked(handle.clone());
+                commit_provider_output_control(
+                    physical_attempt,
+                    session,
+                    control.clone(),
+                    RunEvent::Control(control),
+                    handler,
+                )
+                .await?;
+                *previous_response_handle = Some(handle);
             }
             ProviderChunk::BackgroundTaskAccepted(handle) => {
                 let control = ControlEntry::BackgroundTaskTracked(handle);
-                physical_attempt
-                    .append_output_control(session, control.clone())
-                    .await?;
-                handler.handle(RunEvent::Control(control))?;
+                commit_provider_output_control(
+                    physical_attempt,
+                    session,
+                    control.clone(),
+                    RunEvent::Control(control),
+                    handler,
+                )
+                .await?;
             }
             ProviderChunk::BackgroundTaskStatus(status) => {
                 handler.handle(RunEvent::Notice(format!(
@@ -1033,7 +1062,6 @@ where
             ProviderChunk::ReasoningArtifact(_) => {}
             ProviderChunk::ContinuationState(state) => {
                 pending_states.push(state.clone());
-                handler.handle(RunEvent::ContinuationState(state))?;
             }
             ProviderChunk::ToolCallStreamError(error) => return Err(error.into()),
             ProviderChunk::HostedToolStarted { .. }
@@ -1206,25 +1234,37 @@ where
             usage = snapshot.apply_to_usage(usage)?;
         }
         session.stats_mut().apply_usage(&usage);
-        physical_attempt
-            .append_output_control(session, ControlEntry::UsageSnapshot(usage.clone()))
-            .await?;
-        handler.handle(RunEvent::Usage(usage))?;
+        commit_provider_output_control(
+            physical_attempt,
+            session,
+            ControlEntry::UsageSnapshot(usage.clone()),
+            RunEvent::Usage(usage),
+            handler,
+        )
+        .await?;
     }
     for handle in buffer.response_handles() {
-        *previous_response_handle = Some(handle.clone());
         let control = ControlEntry::ResponseHandleTracked(handle.clone());
-        physical_attempt
-            .append_output_control(session, control.clone())
-            .await?;
-        handler.handle(RunEvent::Control(control))?;
+        commit_provider_output_control(
+            physical_attempt,
+            session,
+            control.clone(),
+            RunEvent::Control(control),
+            handler,
+        )
+        .await?;
+        *previous_response_handle = Some(handle.clone());
     }
     for handle in buffer.background_accepted() {
         let control = ControlEntry::BackgroundTaskTracked(handle.clone());
-        physical_attempt
-            .append_output_control(session, control.clone())
-            .await?;
-        handler.handle(RunEvent::Control(control))?;
+        commit_provider_output_control(
+            physical_attempt,
+            session,
+            control.clone(),
+            RunEvent::Control(control),
+            handler,
+        )
+        .await?;
     }
     for status in buffer.background_statuses() {
         handler.handle(RunEvent::Notice(format!(
@@ -1233,9 +1273,6 @@ where
         )))?;
     }
     let pending_states = buffer.continuation_states().to_vec();
-    for state in &pending_states {
-        handler.handle(RunEvent::ContinuationState(state.clone()))?;
-    }
     if !finalized.reasoning_trace.is_empty() {
         handler.handle(RunEvent::ReasoningDelta(finalized.reasoning_trace.clone()))?;
     }

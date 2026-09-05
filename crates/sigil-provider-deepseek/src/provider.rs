@@ -70,6 +70,16 @@ impl DeepSeekProvider {
         config: DeepSeekProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
+        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+    }
+
+    /// Builds an exact provider with a caller-owned HTTP client. Recovery surfaces use this to
+    /// guarantee that client construction does not consult process-global CA-file settings.
+    pub fn new_exact_with_client(
+        config: DeepSeekProviderConfig,
+        timeouts: ModelRequestTimeouts,
+        client: reqwest::Client,
+    ) -> Result<Self> {
         let profile = config.profile();
         let mut capabilities = deepseek_capabilities();
         if profile.primary_base_url.trim_end_matches('/') != "https://api.deepseek.com" {
@@ -78,7 +88,7 @@ impl DeepSeekProvider {
         Ok(Self {
             profile,
             timeouts,
-            client: build_http_client()?,
+            client,
             capabilities,
             config,
             messages_continuations: DeepSeekHostedContinuationStore::default(),

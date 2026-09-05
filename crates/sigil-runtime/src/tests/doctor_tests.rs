@@ -67,12 +67,10 @@ fn run_authority_recovery_owner_child_fixture() -> Result<bool> {
             }
             Err(error) => error,
         };
-    if !failed
-        .to_string()
-        .contains("durable authority journal failed")
-    {
+    let failure = failed.to_string();
+    if !failure.contains("durable authority journal is corrupted") {
         return Err(anyhow::anyhow!(
-            "recovery child observed the wrong corrupt-journal failure: {failed}"
+            "recovery child observed the wrong corrupt-journal failure: {failure}"
         ));
     }
     fs::write(&ready, b"old-epoch-owner-ready")?;
@@ -201,20 +199,12 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
         ));
     }
 
-    let state_b = temp.path().join("state-b");
-    let cache_b = temp.path().join("cache-b");
-    fs::create_dir(&state_b)?;
-    fs::create_dir(&cache_b)?;
-    fs::write(&config_path, config(&state_b, &cache_b))?;
     let root_config = sigil_kernel::RootConfig::load(&config_path)?;
     let workspace = sigil_kernel::resolve_workspace_root(
         &config_path,
         temp.path(),
         &root_config.workspace.root,
     );
-    let fresh_paths =
-        crate::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
-    fs::create_dir_all(&fresh_paths.scratch_root)?;
 
     let live_owner =
         recover_authority_bootstrap_with_confirmation(&config_path, temp.path(), |challenge| {
@@ -234,6 +224,18 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
         live_owner.contains("old authority process is still live"),
         "live old owner must remain a typed recovery blocker: {live_owner}"
     );
+    let leaked_recovery_root = fs::read_dir(temp.path())?.any(|entry| {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("sigil-recovery-state-") || name.starts_with("sigil-recovery-cache-")
+    });
+    assert!(
+        !leaked_recovery_root,
+        "failed recovery attempt must clean up uncommitted fresh roots"
+    );
 
     let summary =
         recover_authority_bootstrap_with_confirmation(&config_path, temp.path(), |challenge| {
@@ -243,7 +245,20 @@ fn authority_recovery_consumes_durable_failure_and_boots_fresh_roots() -> Result
     assert_eq!(summary.old_authority_epoch, 1);
     assert_eq!(summary.new_authority_epoch, 2);
     assert!(!summary.reconciled_after_crash);
-    assert!(state_b.join("authority-resources.journal.json").is_file());
+    let recovered_root_config = sigil_kernel::RootConfig::load(&config_path)?;
+    let recovered_paths = crate::resolve_sigil_paths(
+        &recovered_root_config.storage,
+        &recovered_root_config.session,
+        &workspace,
+    );
+    assert_ne!(recovered_paths.state_root, state_a);
+    assert_ne!(recovered_paths.cache_root, cache_a);
+    assert!(
+        recovered_paths
+            .state_root
+            .join("authority-resources.journal.json")
+            .is_file()
+    );
     assert_eq!(fs::read(&corrupt_journal)?, b"{corrupt-authority-journal");
     let store = sigil_resource_authority::AuthorityBootstrapStoreV1::for_config_path(&config_path)?;
     assert_eq!(store.authority_epoch(), 2);
@@ -1549,6 +1564,57 @@ credential = {{ source = "none" }}
 }
 
 #[test]
+fn doctor_uses_v2_inventory_for_canonical_environment_alias_readiness() -> Result<()> {
+    let _env_lock = crate::test_env::lock();
+    let _env_scope = EnvScope::set_many(&[
+        ("SIGIL_OPENAI_RESPONSES_API_KEY", " "),
+        ("OPENAI_API_KEY", "doctor-alias-secret"),
+    ]);
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"config_version = 2
+
+[workspace]
+root = "."
+
+[agent]
+connection = "openai-default"
+model = "gpt-4.1"
+
+[connections.openai-default]
+label = "OpenAI"
+provider = "openai"
+protocol = "responses"
+base_url = "https://api.openai.com/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_RESPONSES_API_KEY" }
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+    let connection = report
+        .checks
+        .iter()
+        .find(|check| check.name == "provider:connection:openai-default")
+        .expect("V2 connection readiness check");
+
+    assert_eq!(connection.status, DoctorStatus::Ok);
+    assert!(connection.message.contains("credential_source=environment"));
+    assert!(connection.message.contains("readiness=ready"));
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|check| check.name != "provider:auth"),
+        "doctor must not append an env-only auth result after V2 inventory"
+    );
+    assert!(!format!("{report:?}").contains("doctor-alias-secret"));
+    Ok(())
+}
+
+#[test]
 fn doctor_classifies_rebindable_sessions_without_exposing_endpoint_material() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path();
@@ -1699,15 +1765,6 @@ credential.name = "SIGIL_API_KEY"
             .all(|check| !check.name.starts_with("provider"))
     );
     Ok(())
-}
-
-#[test]
-fn secret_source_labels_cover_environment_and_session_sources() {
-    assert_eq!(
-        secret_source_label(SecretSource::Environment("SIGIL_API_KEY")),
-        "SIGIL_API_KEY"
-    );
-    assert_eq!(secret_source_label(SecretSource::Session), "session");
 }
 
 #[test]

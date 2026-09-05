@@ -179,14 +179,14 @@ fn check_deepseek_provider(
     root_config: &RootConfig,
     cache_root: &std::path::Path,
 ) {
-    let config = match load_deepseek_config(root_config).and_then(|config| config.resolved()) {
+    let config = match load_deepseek_config(root_config) {
         Ok(config) => config,
         Err(error) => {
             report.push_with_remediation(
                 DoctorStatus::Error,
                 "provider:deepseek",
                 error.to_string(),
-                Some("add a valid [providers.deepseek] block, or rerun Quick Setup"),
+                Some("fix the active DeepSeek connection or rerun Quick Setup"),
             );
             return;
         }
@@ -197,12 +197,6 @@ fn check_deepseek_provider(
         format!("model={} endpoint=configured", config.model),
     );
 
-    push_provider_auth_check(
-        report,
-        resolve_deepseek_api_key(&config),
-        SIGIL_API_KEY_ENV,
-        "[providers.deepseek].api_key",
-    );
     push_provider_capability_checks(report, "deepseek");
     if config.model == sigil_provider_deepseek::DEFAULT_DEEPSEEK_V4_FLASH_MODEL {
         let tokenizer_path =
@@ -226,14 +220,14 @@ fn check_deepseek_provider(
 }
 
 fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootConfig) {
-    let config = match load_openai_compat_config(root_config).and_then(|config| config.resolved()) {
+    let config = match load_openai_compat_config(root_config) {
         Ok(config) => config,
         Err(error) => {
             report.push_with_remediation(
                 DoctorStatus::Error,
                 "provider:openai_compat",
                 error.to_string(),
-                Some("add a valid [providers.openai_compat] block"),
+                Some("fix the active OpenAI-compatible connection"),
             );
             return;
         }
@@ -244,53 +238,40 @@ fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootCon
         format!("model={} endpoint=configured", config.model),
     );
 
-    push_provider_auth_check(
-        report,
-        resolve_openai_compat_api_key(&config),
-        OPENAI_COMPATIBLE_API_KEY_ENV,
-        "[providers.openai_compat].api_key",
-    );
     push_provider_capability_checks(report, "openai_compat");
 }
 
 fn check_openai_responses_provider(report: &mut DoctorReport, root_config: &RootConfig) {
-    let config =
-        match load_openai_responses_config(root_config).and_then(|config| config.resolved()) {
-            Ok(config) => config,
-            Err(error) => {
-                report.push_with_remediation(
-                    DoctorStatus::Error,
-                    "provider:openai_responses",
-                    error.to_string(),
-                    Some("add a valid [providers.openai_responses] block"),
-                );
-                return;
-            }
-        };
+    let config = match load_openai_responses_config(root_config) {
+        Ok(config) => config,
+        Err(error) => {
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "provider:openai_responses",
+                error.to_string(),
+                Some("fix the active OpenAI Responses connection"),
+            );
+            return;
+        }
+    };
     report.push(
         DoctorStatus::Ok,
         "provider:openai_responses",
         format!("model={} endpoint=configured", config.model),
     );
 
-    push_provider_auth_check(
-        report,
-        resolve_openai_responses_api_key(&config),
-        OPENAI_RESPONSES_API_KEY_ENV,
-        "[providers.openai_responses].api_key",
-    );
     push_provider_capability_checks(report, "openai_responses");
 }
 
 fn check_anthropic_provider(report: &mut DoctorReport, root_config: &RootConfig) {
-    let config = match load_anthropic_config(root_config).and_then(|config| config.resolved()) {
+    let config = match load_anthropic_config(root_config) {
         Ok(config) => config,
         Err(error) => {
             report.push_with_remediation(
                 DoctorStatus::Error,
                 "provider:anthropic",
                 error.to_string(),
-                Some("add a valid [providers.anthropic] block"),
+                Some("fix the active Anthropic connection"),
             );
             return;
         }
@@ -304,24 +285,18 @@ fn check_anthropic_provider(report: &mut DoctorReport, root_config: &RootConfig)
         ),
     );
 
-    push_provider_auth_check(
-        report,
-        resolve_anthropic_api_key(&config),
-        SIGIL_ANTHROPIC_API_KEY_ENV,
-        "[providers.anthropic].api_key",
-    );
     push_provider_capability_checks(report, "anthropic");
 }
 
 fn check_gemini_provider(report: &mut DoctorReport, root_config: &RootConfig) {
-    let config = match load_gemini_config(root_config).and_then(|config| config.resolved()) {
+    let config = match load_gemini_config(root_config) {
         Ok(config) => config,
         Err(error) => {
             report.push_with_remediation(
                 DoctorStatus::Error,
                 "provider:gemini",
                 error.to_string(),
-                Some("add a valid [providers.gemini] block"),
+                Some("fix the active Gemini connection"),
             );
             return;
         }
@@ -332,12 +307,6 @@ fn check_gemini_provider(report: &mut DoctorReport, root_config: &RootConfig) {
         format!("model={} endpoint=configured", config.model),
     );
 
-    push_provider_auth_check(
-        report,
-        resolve_gemini_api_key(&config),
-        SIGIL_GEMINI_API_KEY_ENV,
-        "[providers.gemini].api_key",
-    );
     push_provider_capability_checks(report, "gemini");
 }
 
@@ -372,33 +341,5 @@ fn push_provider_capability_checks(report: &mut DoctorReport, provider_name: &st
             format!("provider:{provider_name}:capability:{}", row.key),
             format!("{}: {} ({})", row.label, row.status.as_str(), row.detail),
         );
-    }
-}
-
-pub(super) fn push_provider_auth_check(
-    report: &mut DoctorReport,
-    secret: Option<SecretResolution>,
-    preferred_env: &'static str,
-    _config_key: &'static str,
-) {
-    match secret {
-        Some(secret) => report.push(
-            DoctorStatus::Ok,
-            "provider:auth",
-            format!("resolved from {}", secret_source_label(secret.source)),
-        ),
-        None => report.push_with_remediation(
-            DoctorStatus::Error,
-            "provider:auth",
-            format!("missing api key; set {preferred_env} or save a credential reference"),
-            Some("open Provider settings to store a credential or configure the environment"),
-        ),
-    }
-}
-
-pub(super) fn secret_source_label(source: SecretSource) -> &'static str {
-    match source {
-        SecretSource::Environment(name) => name,
-        SecretSource::Session => "session",
     }
 }

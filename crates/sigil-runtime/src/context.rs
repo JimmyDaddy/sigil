@@ -78,6 +78,7 @@ pub struct RequestContextResolver {
     workspace_root: PathBuf,
     code_intelligence: Option<CodeIntelligenceService>,
     writable_memory: Option<crate::WritableMemoryStore>,
+    provider_only: bool,
 }
 
 impl std::fmt::Debug for RequestContextResolver {
@@ -90,6 +91,7 @@ impl std::fmt::Debug for RequestContextResolver {
                 &self.code_intelligence.as_ref().map(|_| "shared"),
             )
             .field("writable_memory", &self.writable_memory.is_some())
+            .field("provider_only", &self.provider_only)
             .finish()
     }
 }
@@ -104,6 +106,7 @@ impl RequestContextResolver {
             workspace_root,
             code_intelligence,
             writable_memory: None,
+            provider_only: false,
         }
     }
 
@@ -116,6 +119,17 @@ impl RequestContextResolver {
     #[must_use]
     pub fn request_local(workspace_root: PathBuf) -> Self {
         Self::new(workspace_root, None)
+    }
+
+    /// Creates a resolver that never reads workspace, cache, LSP, or memory state.
+    #[must_use]
+    pub fn provider_only() -> Self {
+        Self {
+            workspace_root: PathBuf::new(),
+            code_intelligence: None,
+            writable_memory: None,
+            provider_only: true,
+        }
     }
 
     /// Reports whether this resolver is bound to the service shared with code-intelligence tools.
@@ -132,7 +146,7 @@ impl RequestContextResolver {
     /// cannot complete. A missing, stale, timed-out, or unrelated LSP cache is normal fallback.
     pub async fn resolve(&self, query: &str) -> Result<RuntimeContextCandidates> {
         let query = query.trim();
-        if query.is_empty() {
+        if query.is_empty() || self.provider_only {
             return Ok(RuntimeContextCandidates::default());
         }
         let snapshot = if let Some(service) = self.code_intelligence.as_ref() {

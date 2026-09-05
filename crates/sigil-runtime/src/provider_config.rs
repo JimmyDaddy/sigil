@@ -1,11 +1,15 @@
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{ModelRequestConfig, RootConfig};
-use sigil_provider_anthropic::{AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV};
-use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV, StrictToolsMode};
-use sigil_provider_gemini::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV};
-use sigil_provider_openai_compat::{OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProviderConfig};
+use sigil_provider_anthropic::{AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV_NAMES};
+use sigil_provider_deepseek::{
+    DeepSeekProviderConfig, SIGIL_API_KEY_ENV, SIGIL_API_KEY_ENV_NAMES, StrictToolsMode,
+};
+use sigil_provider_gemini::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV_NAMES};
+use sigil_provider_openai_compat::{
+    OPENAI_COMPATIBLE_API_KEY_ENV_NAMES, OpenAiCompatibleProviderConfig,
+};
 use sigil_provider_openai_responses::{
-    OPENAI_RESPONSES_API_KEY_ENV, OpenAiResponsesProviderConfig,
+    OPENAI_RESPONSES_API_KEY_ENV_NAMES, OpenAiResponsesProviderConfig,
 };
 
 use crate::{
@@ -51,6 +55,8 @@ impl std::fmt::Debug for ProviderConfigFields {
 pub struct ModelRequestConfigFields {
     pub request_timeout_secs: String,
     pub stream_idle_timeout_secs: String,
+    /// Empty means automatic provider output-token behavior.
+    pub max_output_tokens: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,12 +157,22 @@ pub fn next_provider_name(provider: &str) -> &'static str {
 
 #[must_use]
 pub fn provider_api_key_env_name(provider: &str) -> Option<&'static str> {
+    provider_api_key_env_names(provider).and_then(|names| names.first().copied())
+}
+
+/// Returns the canonical environment name followed by commonly used provider aliases.
+///
+/// The canonical `SIGIL_*` name remains first so callers that persist a credential reference
+/// continue to produce stable configuration, while runtime resolution can accept an existing
+/// provider-standard environment variable.
+#[must_use]
+pub fn provider_api_key_env_names(provider: &str) -> Option<&'static [&'static str]> {
     match normalize_provider_name(provider) {
-        DEEPSEEK_PROVIDER_KEY => Some(SIGIL_API_KEY_ENV),
-        OPENAI_COMPAT_PROVIDER_KEY => Some(OPENAI_COMPATIBLE_API_KEY_ENV),
-        OPENAI_RESPONSES_PROVIDER_KEY => Some(OPENAI_RESPONSES_API_KEY_ENV),
-        ANTHROPIC_PROVIDER_KEY => Some(SIGIL_ANTHROPIC_API_KEY_ENV),
-        GEMINI_PROVIDER_KEY => Some(SIGIL_GEMINI_API_KEY_ENV),
+        DEEPSEEK_PROVIDER_KEY => Some(SIGIL_API_KEY_ENV_NAMES),
+        OPENAI_COMPAT_PROVIDER_KEY => Some(OPENAI_COMPATIBLE_API_KEY_ENV_NAMES),
+        OPENAI_RESPONSES_PROVIDER_KEY => Some(OPENAI_RESPONSES_API_KEY_ENV_NAMES),
+        ANTHROPIC_PROVIDER_KEY => Some(SIGIL_ANTHROPIC_API_KEY_ENV_NAMES),
+        GEMINI_PROVIDER_KEY => Some(SIGIL_GEMINI_API_KEY_ENV_NAMES),
         _ => None,
     }
 }
@@ -296,6 +312,10 @@ pub fn model_request_config_fields(root_config: &RootConfig) -> ModelRequestConf
             .model_request
             .stream_idle_timeout_secs
             .to_string(),
+        max_output_tokens: root_config
+            .model_request
+            .max_output_tokens
+            .map_or_else(String::new, |value| value.to_string()),
     }
 }
 
@@ -311,10 +331,15 @@ pub fn set_model_request_config_fields(
         "model_request.stream_idle_timeout_secs",
         &fields.stream_idle_timeout_secs,
     )?;
+    let max_output_tokens = parse_optional_model_request_max_output_tokens(
+        "model_request.max_output_tokens",
+        &fields.max_output_tokens,
+    )?;
     root_config.model_request = ModelRequestConfig {
         request_timeout_secs,
         stream_idle_timeout_secs,
         stream_total_timeout_secs: root_config.model_request.stream_total_timeout_secs,
+        max_output_tokens,
         provider_turn_recovery: root_config.model_request.provider_turn_recovery.clone(),
     };
     root_config.model_request.to_timeouts()?;
@@ -493,6 +518,20 @@ fn parse_model_request_timeout_secs(label: &str, raw: &str) -> Result<u64> {
         bail!("{label} must be greater than 0");
     }
     Ok(parsed)
+}
+
+fn parse_optional_model_request_max_output_tokens(label: &str, raw: &str) -> Result<Option<u32>> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| anyhow!("{label} must be a positive integer: {error}"))?;
+    if parsed == 0 {
+        bail!("{label} must be greater than 0");
+    }
+    Ok(Some(parsed))
 }
 
 fn optional_trimmed_string(raw: &str) -> Option<String> {

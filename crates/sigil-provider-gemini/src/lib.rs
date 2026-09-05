@@ -12,9 +12,13 @@ mod stream;
 
 pub use capabilities::gemini_capabilities;
 pub use catalog::{
-    BUNDLED_GEMINI_MODELS, GeminiCatalogModel, GeminiCatalogPage, parse_gemini_model_list,
+    BUNDLED_GEMINI_MODELS, GeminiCatalogModel, GeminiCatalogPage, gemini_maximum_output_tokens,
+    parse_gemini_model_list,
 };
-pub use config::{GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV, SIGIL_GEMINI_BASE_URL_ENV};
+pub use config::{
+    GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV,
+    SIGIL_GEMINI_API_KEY_ENV_NAMES, SIGIL_GEMINI_BASE_URL_ENV,
+};
 pub use provider::GeminiProvider;
 
 #[cfg(test)]

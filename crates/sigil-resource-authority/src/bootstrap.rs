@@ -114,6 +114,7 @@ const ACTIVE_EPOCH_POINTER_FILE: &str = ".sigil-active-epoch.json";
 const OLD_EPOCH_INERT_FILE: &str = ".sigil-old-epoch-inert.json";
 const RECOVERY_INTENT_FILE: &str = ".sigil-bootstrap-recovery-intent.json";
 const RECOVERY_RECEIPT_FILE: &str = ".sigil-bootstrap-recovery-receipt.json";
+const RECOVERY_ROOT_CONFIG_INTENT_FILE: &str = ".sigil-bootstrap-recovery-root-config-intent.json";
 const EPOCHS_DIRECTORY_NAME: &str = "epochs";
 const MAX_BOOTSTRAP_METADATA_BYTES: u64 = 2 * 1024 * 1024;
 const ACTIVE_EPOCH_POINTER_SCHEMA_VERSION: u32 = 1;
@@ -195,7 +196,7 @@ impl AuthorityBootstrapRecoveryNamespaceV1 {
 
     /// Resolves the active store for recovery without changing the normal boot fail-closed rule.
     pub fn active_store(&self) -> Result<AuthorityBootstrapStoreV1, BootstrapErrorV1> {
-        let (root, epoch) = resolve_active_epoch(&self.namespace)?;
+        let (root, epoch) = resolve_active_epoch_for_recovery(&self.namespace)?;
         AuthorityBootstrapStoreV1::open(&self.namespace, root, epoch)
     }
 
@@ -392,6 +393,28 @@ impl AuthorityBootstrapStoreV1 {
     #[must_use]
     pub const fn authority_epoch(&self) -> u64 {
         self.authority_epoch
+    }
+
+    /// Returns the bootstrap-owned identity for this exact active authority instance.
+    ///
+    /// The identity binds the stable namespace, selected active root identity and authority
+    /// epoch while the publication transaction is held. Runtime consumers may transport this
+    /// value, but must not derive or substitute their own instance identity.
+    pub fn authority_instance_hash(
+        &self,
+        guard: &AuthorityBootstrapPublicationGuard,
+    ) -> Result<CanonicalHash, BootstrapErrorV1> {
+        self.validate_guard(guard)?;
+        let namespace_identity = bootstrap_root_identity(&self.namespace)?;
+        let root_identity = bootstrap_root_identity(&self.root)?;
+        let material = serde_json::to_vec(&(
+            "authority-bootstrap-instance-generation-v1",
+            namespace_identity,
+            root_identity,
+            self.authority_epoch,
+        ))
+        .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+        Ok(canonical_bootstrap_hash(&material))
     }
 
     #[must_use]
@@ -686,6 +709,14 @@ fn open_private_lock_file(path: &Path) -> Result<File, BootstrapErrorV1> {
 }
 
 fn resolve_active_epoch(namespace: &Path) -> Result<(PathBuf, u64), BootstrapErrorV1> {
+    reject_pending_root_config_switch(namespace)?;
+    resolve_active_epoch_for_recovery(namespace)
+}
+
+/// Resolves the active epoch for the independent recovery service. Normal boot must use
+/// [`resolve_active_epoch`], which rejects an incomplete config-root switch before it can reopen
+/// the old authority epoch under newly published roots.
+fn resolve_active_epoch_for_recovery(namespace: &Path) -> Result<(PathBuf, u64), BootstrapErrorV1> {
     match fs::symlink_metadata(namespace) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
@@ -776,6 +807,53 @@ fn publish_private_bootstrap_file(path: &Path, bytes: &[u8]) -> Result<(), Boots
         BootstrapErrorV1::MetadataCorrupted(format!("{} disappeared after publish", path.display()))
     })?;
     validate_private_open_file(path, &file, true)
+}
+
+fn read_recovery_root_config_intent(
+    namespace: &Path,
+) -> Result<Option<FreshRootConfigIntentRecordV1>, BootstrapErrorV1> {
+    let path = namespace.join(RECOVERY_ROOT_CONFIG_INTENT_FILE);
+    let Some(file) = open_private_read_file(&path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_BOOTSTRAP_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+    if bytes.len() as u64 > MAX_BOOTSTRAP_METADATA_BYTES {
+        return Err(BootstrapErrorV1::MetadataCorrupted(
+            "recovery root-config intent exceeds the bounded metadata size".to_owned(),
+        ));
+    }
+    let record: FreshRootConfigIntentRecordV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| BootstrapErrorV1::MetadataCorrupted(error.to_string()))?;
+    record.validate()?;
+    Ok(Some(record))
+}
+
+fn reject_pending_root_config_switch(namespace: &Path) -> Result<(), BootstrapErrorV1> {
+    match fs::symlink_metadata(namespace) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(BootstrapErrorV1::NotPlainDirectory(
+                namespace.display().to_string(),
+            ));
+        }
+        Err(error) => return Err(BootstrapErrorV1::HardeningFailed(error.to_string())),
+    }
+    ensure_owner_only_directory(namespace)?;
+    if read_recovery_root_config_intent(namespace)?.is_some_and(|record| {
+        matches!(
+            record.phase.as_str(),
+            "prepared" | "authority-epoch-published"
+        )
+    }) {
+        return Err(BootstrapErrorV1::ReconciliationRequired(
+            "a doctor recovery root-config switch is pending".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Failure evidence supplied by the doctor/operator. It is deliberately separate from the
@@ -958,6 +1036,62 @@ struct FreshRootSelectionRecordV1 {
     selection_identity_hash: CanonicalHash,
 }
 
+/// Doctor-only projection of a durable config-root switch that has not yet published its
+/// authority epoch. These paths stay inside the recovery contract and must not be projected to
+/// ordinary product surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityBootstrapPendingRootConfigIntentV1 {
+    pub expected_config_source_hash: CanonicalHash,
+    pub state_root: PathBuf,
+    pub cache_root: PathBuf,
+    pub execution_temp_root: PathBuf,
+    pub selection_hash: CanonicalHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FreshRootConfigIntentRecordV1 {
+    schema_version: u32,
+    phase: String,
+    operation_hash: CanonicalHash,
+    expected_config_source_hash: CanonicalHash,
+    selection: FreshRootSelectionRecordV1,
+    new_authority_epoch: Option<u64>,
+}
+
+impl FreshRootConfigIntentRecordV1 {
+    fn validate(&self) -> Result<(), BootstrapErrorV1> {
+        if self.schema_version != RECOVERY_RECORD_SCHEMA_VERSION
+            || !matches!(
+                self.phase.as_str(),
+                "prepared" | "authority-epoch-published" | "completed" | "aborted"
+            )
+            || (matches!(self.phase.as_str(), "prepared" | "aborted")
+                && self.new_authority_epoch.is_some())
+            || (matches!(
+                self.phase.as_str(),
+                "authority-epoch-published" | "completed"
+            ) && self.new_authority_epoch.is_none_or(|epoch| epoch == 0))
+            || self.selection.root_ref.as_str()
+                != format!("bootstrap-root-selection:{}", self.selection.selection_hash)
+        {
+            return Err(BootstrapErrorV1::MetadataCorrupted(
+                "durable recovery root-config intent is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn doctor_projection(&self) -> AuthorityBootstrapPendingRootConfigIntentV1 {
+        AuthorityBootstrapPendingRootConfigIntentV1 {
+            expected_config_source_hash: self.expected_config_source_hash,
+            state_root: self.selection.state_root.clone(),
+            cache_root: self.selection.cache_root.clone(),
+            execution_temp_root: self.selection.execution_temp_root.clone(),
+            selection_hash: self.selection.selection_hash,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct FreshEpochRecoveryRecordV1 {
     schema_version: u32,
@@ -1058,6 +1192,7 @@ const RECOVERY_QUIESCENCE_TTL_MS: u64 = 5 * 60 * 1000;
 pub struct AuthorityBootstrapRecoveryServiceV1 {
     namespace: AuthorityBootstrapRecoveryNamespaceV1,
     process_factory: Arc<dyn sigil_kernel::process_observation::HostProcessObservationFactoryV1>,
+    config_path: Option<PathBuf>,
     service_instance_hash: CanonicalHash,
     selections: Mutex<BTreeMap<String, FreshRootSelectionRecordV1>>,
     proofs: Mutex<BTreeMap<CanonicalHash, QuiescenceRecordV1>>,
@@ -1084,14 +1219,29 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         let namespace =
             AuthorityBootstrapStoreV1::recovery_namespace_for_canonical_config_path(config_path)
                 .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        Ok(Self::from_namespace(namespace, process_factory))
+        Ok(Self::from_namespace_with_config_path(
+            namespace,
+            process_factory,
+            Some(config_path.to_path_buf()),
+        ))
     }
 
+    #[cfg(test)]
     fn from_namespace(
         namespace: AuthorityBootstrapRecoveryNamespaceV1,
         process_factory: Arc<
             dyn sigil_kernel::process_observation::HostProcessObservationFactoryV1,
         >,
+    ) -> Self {
+        Self::from_namespace_with_config_path(namespace, process_factory, None)
+    }
+
+    fn from_namespace_with_config_path(
+        namespace: AuthorityBootstrapRecoveryNamespaceV1,
+        process_factory: Arc<
+            dyn sigil_kernel::process_observation::HostProcessObservationFactoryV1,
+        >,
+        config_path: Option<PathBuf>,
     ) -> Self {
         let service_instance_hash = canonical_bootstrap_hash(
             format!(
@@ -1104,6 +1254,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         Self {
             namespace,
             process_factory,
+            config_path,
             service_instance_hash,
             selections: Mutex::new(BTreeMap::new()),
             proofs: Mutex::new(BTreeMap::new()),
@@ -1238,6 +1389,211 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         root_ref: &OpaqueBootstrapRootConfigRef,
     ) -> Result<CanonicalHash, AuthorityBootstrapRecoveryErrorV1> {
         Ok(self.selection(root_ref)?.selection_hash)
+    }
+
+    /// Returns a durable root-config switch that still needs the independent doctor flow. Normal
+    /// boot rejects this state, so callers must either publish the exact staged config or finish
+    /// the already-authorized fresh-epoch operation; they must not allocate another root set.
+    pub fn pending_fresh_root_config_intent(
+        &self,
+    ) -> Result<
+        Option<AuthorityBootstrapPendingRootConfigIntentV1>,
+        AuthorityBootstrapRecoveryErrorV1,
+    > {
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let Some(record) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            record.phase.as_str(),
+            "prepared" | "authority-epoch-published"
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(record.doctor_projection()))
+    }
+
+    /// Restores the exact staged selection into this process-local recovery service after a
+    /// crash. The durable intent remains the authority for the paths and identities; this method
+    /// only reconstructs the opaque reference needed for a new operator confirmation.
+    pub fn restore_pending_fresh_root_config_selection(
+        &self,
+    ) -> Result<Option<OpaqueBootstrapRootConfigRef>, AuthorityBootstrapRecoveryErrorV1> {
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let Some(record) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            record.phase.as_str(),
+            "prepared" | "authority-epoch-published"
+        ) {
+            return Ok(None);
+        }
+        let selection = record.selection;
+        let state_root = validate_fresh_root(&selection.state_root, "state")?;
+        let execution_temp_root =
+            validate_fresh_root(&selection.execution_temp_root, "execution-temp")?;
+        let cache_root = validate_fresh_cache_root(&selection.cache_root, &execution_temp_root)?;
+        let selection_hash =
+            fresh_root_selection_hash(&state_root, &cache_root, &execution_temp_root);
+        let selection_identity_hash =
+            fresh_root_identity_hash(&state_root, &cache_root, &execution_temp_root)
+                .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if selection.selection_hash != selection_hash
+            || selection.selection_identity_hash != selection_identity_hash
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::RootSelectionInvalid(
+                "durable recovery root-config intent no longer matches its selected roots"
+                    .to_owned(),
+            ));
+        }
+        let root_ref = selection.root_ref.clone();
+        self.selections
+            .lock()
+            .map_err(|_| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                    "selection table poisoned".to_owned(),
+                )
+            })?
+            .insert(root_ref.as_str().to_owned(), selection);
+        Ok(Some(root_ref))
+    }
+
+    /// Durably fences the config publication that must happen before an authority epoch cutover.
+    /// This consumes no authorization; `execute` remains the one-shot commit point. A restart can
+    /// therefore recover the selected roots and require a fresh operator confirmation instead of
+    /// reopening the old authority epoch under a partially published configuration.
+    pub fn stage_fresh_root_config_switch(
+        &self,
+        operation: &AuthorityBootstrapRecoveryOperationV1,
+        authorization: &AuthorityBootstrapRecoveryAuthorizationV1,
+        expected_config_source_hash: CanonicalHash,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        let operation_hash = Self::operation_hash(operation)?;
+        self.validate_live_authorization(operation_hash, authorization)?;
+        let AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            explicit_root_config,
+            ..
+        } = operation
+        else {
+            return Err(AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                "only a fresh authority epoch can stage a root-config switch".to_owned(),
+            ));
+        };
+        let selection = self.selection(explicit_root_config)?;
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if let Some(mut existing) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        {
+            if existing.phase == "prepared" {
+                if existing.expected_config_source_hash == expected_config_source_hash
+                    && existing.selection == selection
+                {
+                    if existing.operation_hash != operation_hash {
+                        existing.operation_hash = operation_hash;
+                        publish_private_bootstrap_file(
+                            &self
+                                .namespace
+                                .namespace()
+                                .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+                            &serde_json::to_vec(&existing).map_err(|error| {
+                                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                                    error.to_string(),
+                                )
+                            })?,
+                        )
+                        .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+                    }
+                    return Ok(());
+                }
+                return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+            }
+            if !matches!(existing.phase.as_str(), "completed" | "aborted") {
+                return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+            }
+        }
+        let record = FreshRootConfigIntentRecordV1 {
+            schema_version: RECOVERY_RECORD_SCHEMA_VERSION,
+            phase: "prepared".to_owned(),
+            operation_hash,
+            expected_config_source_hash,
+            selection,
+            new_authority_epoch: None,
+        };
+        publish_private_bootstrap_file(
+            &self
+                .namespace
+                .namespace()
+                .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+            &serde_json::to_vec(&record).map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+            })?,
+        )
+        .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)
+    }
+
+    /// Retires a prepared root-config switch after a definite config CAS failure. The marker is
+    /// kept as a durable terminal record instead of being deleted, so a later boot can distinguish
+    /// an intentionally abandoned attempt from a torn, still-recoverable cutover.
+    pub fn abort_staged_root_config_switch(
+        &self,
+        operation: &AuthorityBootstrapRecoveryOperationV1,
+        authorization: &AuthorityBootstrapRecoveryAuthorizationV1,
+        expected_config_source_hash: CanonicalHash,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        let operation_hash = Self::operation_hash(operation)?;
+        self.validate_live_authorization(operation_hash, authorization)?;
+        let AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            explicit_root_config,
+            ..
+        } = operation
+        else {
+            return Err(AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                "only a fresh authority epoch can abort a root-config switch".to_owned(),
+            ));
+        };
+        let selection = self.selection(explicit_root_config)?;
+        let _transaction = self
+            .namespace
+            .acquire_transaction()
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let Some(mut intent) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(());
+        };
+        if intent.phase != "prepared"
+            || intent.operation_hash != operation_hash
+            || intent.expected_config_source_hash != expected_config_source_hash
+            || intent.selection != selection
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+        }
+        intent.phase = "aborted".to_owned();
+        intent.new_authority_epoch = None;
+        publish_private_bootstrap_file(
+            &self
+                .namespace
+                .namespace()
+                .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+            &serde_json::to_vec(&intent).map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+            })?,
+        )
+        .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)
     }
 
     /// Probes the authenticated old-epoch inventory while the shared transaction lock is held.
@@ -1608,12 +1964,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         let (old_root, old_epoch) = recoverable_active_root(self.namespace.namespace())?;
         let old_identity = bootstrap_root_identity(&old_root)
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        let (
-            selection_hash,
-            selection_identity_hash,
-            expected_failed_bootstrap_hash,
-            evidence_set_hash,
-        ) = match &operation {
+        let (selection, expected_failed_bootstrap_hash, evidence_set_hash) = match &operation {
             AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
                 explicit_root_config,
                 expected_failed_bootstrap_hash,
@@ -1622,8 +1973,7 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             } => {
                 let selection = self.selection(explicit_root_config)?;
                 (
-                    selection.selection_hash,
-                    selection.selection_identity_hash,
+                    selection,
                     *expected_failed_bootstrap_hash,
                     *evidence_set_hash,
                 )
@@ -1632,6 +1982,9 @@ impl AuthorityBootstrapRecoveryServiceV1 {
                 unreachable!()
             }
         };
+        self.validate_staged_root_config_switch(operation_hash, &selection)?;
+        let selection_hash = selection.selection_hash;
+        let selection_identity_hash = selection.selection_identity_hash;
         if let Some(expected) = expected_failed_bootstrap_hash {
             let observed = observed_bootstrap_digest(&old_root)
                 .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
@@ -1703,6 +2056,8 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         self.namespace
             .publish_active_epoch(&transaction, new_epoch, &new_root)
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        self.publish_staged_root_config_epoch(&transaction, &completed)?;
+        self.complete_staged_root_config_switch(&transaction, &completed)?;
         let receipt_hash = canonical_bootstrap_hash(&completed_bytes);
         Ok(AuthorityBootstrapRecoveryReceiptV1 {
             schema_version: RECOVERY_RECORD_SCHEMA_VERSION,
@@ -1717,32 +2072,94 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         })
     }
 
-    /// Reconciles only a durable completed fresh-epoch record. It never allocates a second epoch
-    /// and is safe to call after a crash between old-root inertization and pointer publication.
+    /// Reconciles only a fresh-epoch receipt that matches an unfinished durable root-config
+    /// intent. It never allocates a second epoch and is safe to call after a crash between
+    /// old-root inertization and pointer publication.
     pub fn reconcile_pending_fresh_epoch(
         &self,
+    ) -> Result<Option<AuthorityBootstrapRecoveryReceiptV1>, AuthorityBootstrapRecoveryErrorV1>
+    {
+        self.reconcile_pending_fresh_epoch_inner(None)
+    }
+
+    /// Reconciles a pending fresh epoch only after verifying that the caller is still operating
+    /// on the exact configuration source it reviewed. The source check runs while the authority
+    /// transaction is held, so a config drift cannot be mistaken for a safe pointer publication.
+    pub fn reconcile_pending_fresh_epoch_with_config_source(
+        &self,
+        expected_config_source_hash: CanonicalHash,
+    ) -> Result<Option<AuthorityBootstrapRecoveryReceiptV1>, AuthorityBootstrapRecoveryErrorV1>
+    {
+        self.reconcile_pending_fresh_epoch_inner(Some(expected_config_source_hash))
+    }
+
+    fn reconcile_pending_fresh_epoch_inner(
+        &self,
+        expected_config_source_hash: Option<CanonicalHash>,
     ) -> Result<Option<AuthorityBootstrapRecoveryReceiptV1>, AuthorityBootstrapRecoveryErrorV1>
     {
         let transaction = self
             .namespace
             .acquire_transaction()
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        if let Some(expected_config_source_hash) = expected_config_source_hash {
+            let config_path = self.config_path.as_deref().ok_or_else(|| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                    "config source binding is unavailable for recovery reconciliation".to_owned(),
+                )
+            })?;
+            let source = fs::read(config_path).map_err(|error| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(format!(
+                    "authority config could not be read during recovery reconciliation: {error}"
+                ))
+            })?;
+            if canonical_bootstrap_hash(&source) != expected_config_source_hash {
+                return Err(AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                    "authority config changed during recovery reconciliation; no fresh epoch was published"
+                        .to_owned(),
+                ));
+            }
+        }
+        let Some(root_config_intent) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(None);
+        };
+        if !matches!(
+            root_config_intent.phase.as_str(),
+            "prepared" | "authority-epoch-published"
+        ) {
+            return Ok(None);
+        }
         let candidates = recovery_candidates(self.namespace.namespace())?;
         let Some((root, record)) = candidates
             .into_iter()
+            .filter(|(_, record)| {
+                record.operation_hash == root_config_intent.operation_hash
+                    && record.selection_hash == root_config_intent.selection.selection_hash
+                    && record.selection_identity_hash
+                        == root_config_intent.selection.selection_identity_hash
+            })
             .max_by_key(|(_, record)| record.new_authority_epoch)
         else {
             return Ok(None);
         };
         // A corrupt pointer is precisely one of the states this independent service is allowed
-        // to recover. Normal boot still returns the typed corruption error from
-        // `resolve_active_epoch`; only this explicitly-authorized path treats it as unknown.
+        // to recover, but only when the matching durable root-config intent proves that this
+        // cutover was in flight. A settled receipt must never turn a later journal failure into a
+        // new startup cutover or replay an already-completed recovery.
         let current = read_active_pointer_record(self.namespace.namespace()).unwrap_or(None);
-        if current
-            .as_ref()
-            .is_some_and(|current| current.epoch >= record.new_authority_epoch)
-        {
-            return Ok(None);
+        if let Some(current) = current {
+            if current.epoch == record.new_authority_epoch {
+                if current.root_identity_hash != record.new_root_identity_hash {
+                    return Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch);
+                }
+                self.complete_staged_root_config_switch(&transaction, &record)?;
+                return recovery_receipt_from_record(&root, &record).map(Some);
+            }
+            if current.epoch > record.new_authority_epoch {
+                return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+            }
         }
         let old_root = if record.old_authority_epoch == 1 {
             self.namespace.namespace().to_path_buf()
@@ -1764,20 +2181,8 @@ impl AuthorityBootstrapRecoveryServiceV1 {
         self.namespace
             .publish_active_epoch(&transaction, record.new_authority_epoch, &root)
             .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        let receipt_bytes = read_private_bytes(&root.join(RECOVERY_RECEIPT_FILE))
-            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        let receipt_hash = canonical_bootstrap_hash(&receipt_bytes);
-        Ok(Some(AuthorityBootstrapRecoveryReceiptV1 {
-            schema_version: record.schema_version,
-            operation_hash: record.operation_hash,
-            evidence_set_hash: record.evidence_set_hash,
-            old_authority_epoch: record.old_authority_epoch,
-            new_authority_epoch: record.new_authority_epoch,
-            old_root_identity_hash: record.old_root_identity_hash,
-            new_root_identity_hash: record.new_root_identity_hash,
-            recovery_intent_hash: record.recovery_intent_hash,
-            receipt_hash,
-        }))
+        self.complete_staged_root_config_switch(&transaction, &record)?;
+        recovery_receipt_from_record(&root, &record).map(Some)
     }
 
     fn selection(
@@ -1814,6 +2219,155 @@ impl AuthorityBootstrapRecoveryServiceV1 {
             ));
         }
         Ok(selection)
+    }
+
+    fn validate_live_authorization(
+        &self,
+        operation_hash: CanonicalHash,
+        authorization: &AuthorityBootstrapRecoveryAuthorizationV1,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        if authorization.operation_hash != operation_hash {
+            return Err(AuthorityBootstrapRecoveryErrorV1::StaleServiceAuthorization);
+        }
+        let record = self
+            .authorizations
+            .lock()
+            .map_err(|_| {
+                AuthorityBootstrapRecoveryErrorV1::InvalidOperation(
+                    "authorization table poisoned".to_owned(),
+                )
+            })?
+            .get(authorization.authorization_id.as_str())
+            .cloned()
+            .ok_or(AuthorityBootstrapRecoveryErrorV1::AuthorizationReplay)?;
+        if record.service_instance_hash != self.service_instance_hash
+            || record.operation_hash != operation_hash
+            || record.authenticator != authorization.authenticator
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::StaleServiceAuthorization);
+        }
+        if current_epoch_ms() > record.expires_at_ms
+            || current_epoch_ms() > authorization.expires_at_ms
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::AuthorizationExpired);
+        }
+        Ok(())
+    }
+
+    fn validate_staged_root_config_switch(
+        &self,
+        operation_hash: CanonicalHash,
+        selection: &FreshRootSelectionRecordV1,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        let Some(record) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(());
+        };
+        if record.phase != "prepared"
+            || record.operation_hash != operation_hash
+            || record.selection != *selection
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+        }
+        Ok(())
+    }
+
+    fn complete_staged_root_config_switch(
+        &self,
+        transaction: &AuthorityBootstrapRecoveryTransactionGuard,
+        record: &FreshEpochRecoveryRecordV1,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        self.namespace
+            .validate_guard(transaction)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let Some(mut intent) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(());
+        };
+        if intent.operation_hash != record.operation_hash
+            || intent.selection.selection_hash != record.selection_hash
+            || intent.selection.selection_identity_hash != record.selection_identity_hash
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+        }
+        match intent.phase.as_str() {
+            "prepared" => {
+                intent.phase = "completed".to_owned();
+                intent.new_authority_epoch = Some(record.new_authority_epoch);
+                publish_private_bootstrap_file(
+                    &self
+                        .namespace
+                        .namespace()
+                        .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+                    &serde_json::to_vec(&intent).map_err(|error| {
+                        AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+                    })?,
+                )
+                .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+            }
+            "authority-epoch-published"
+                if intent.new_authority_epoch == Some(record.new_authority_epoch) =>
+            {
+                intent.phase = "completed".to_owned();
+                publish_private_bootstrap_file(
+                    &self
+                        .namespace
+                        .namespace()
+                        .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+                    &serde_json::to_vec(&intent).map_err(|error| {
+                        AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+                    })?,
+                )
+                .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+            }
+            "completed" if intent.new_authority_epoch == Some(record.new_authority_epoch) => {}
+            _ => return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending),
+        }
+        Ok(())
+    }
+
+    fn publish_staged_root_config_epoch(
+        &self,
+        transaction: &AuthorityBootstrapRecoveryTransactionGuard,
+        record: &FreshEpochRecoveryRecordV1,
+    ) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+        self.namespace
+            .validate_guard(transaction)
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+        let Some(mut intent) = read_recovery_root_config_intent(self.namespace.namespace())
+            .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?
+        else {
+            return Ok(());
+        };
+        if intent.operation_hash != record.operation_hash
+            || intent.selection.selection_hash != record.selection_hash
+            || intent.selection.selection_identity_hash != record.selection_identity_hash
+        {
+            return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending);
+        }
+        match intent.phase.as_str() {
+            "prepared" => {
+                intent.phase = "authority-epoch-published".to_owned();
+                intent.new_authority_epoch = Some(record.new_authority_epoch);
+                publish_private_bootstrap_file(
+                    &self
+                        .namespace
+                        .namespace()
+                        .join(RECOVERY_ROOT_CONFIG_INTENT_FILE),
+                    &serde_json::to_vec(&intent).map_err(|error| {
+                        AuthorityBootstrapRecoveryErrorV1::InvalidOperation(error.to_string())
+                    })?,
+                )
+                .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+            }
+            "authority-epoch-published"
+                if intent.new_authority_epoch == Some(record.new_authority_epoch) => {}
+            "completed" if intent.new_authority_epoch == Some(record.new_authority_epoch) => {}
+            _ => return Err(AuthorityBootstrapRecoveryErrorV1::ReconciliationPending),
+        }
+        Ok(())
     }
 
     fn validate_operation(
@@ -2391,20 +2945,107 @@ fn recovery_candidates(
                 ),
             ));
         }
-        let identity =
-            bootstrap_root_identity(&path).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
-        if identity != record.new_root_identity_hash {
-            return Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch);
-        }
+        validate_completed_recovery_record(&path, &record)?;
         candidates.push((path, record));
     }
     Ok(candidates)
 }
 
+fn validate_completed_recovery_record(
+    root: &Path,
+    record: &FreshEpochRecoveryRecordV1,
+) -> Result<(), AuthorityBootstrapRecoveryErrorV1> {
+    if record.old_authority_epoch == 0
+        || record.new_authority_epoch == 0
+        || record.old_authority_epoch.checked_add(1) != Some(record.new_authority_epoch)
+    {
+        return Err(AuthorityBootstrapRecoveryErrorV1::Bootstrap(
+            BootstrapErrorV1::MetadataCorrupted(
+                "fresh epoch recovery receipt has an invalid epoch transition".to_owned(),
+            ),
+        ));
+    }
+    let expected_epoch_name = format!(
+        "epoch-{}-{}",
+        record.new_authority_epoch,
+        record.selection_hash.to_hex()
+    );
+    let actual_epoch_name = root.file_name().and_then(|name| name.to_str());
+    if actual_epoch_name != Some(expected_epoch_name.as_str()) {
+        return Err(AuthorityBootstrapRecoveryErrorV1::Bootstrap(
+            BootstrapErrorV1::MetadataCorrupted(
+                "fresh epoch recovery receipt does not match its epoch directory".to_owned(),
+            ),
+        ));
+    }
+    let identity =
+        bootstrap_root_identity(root).map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+    if identity != record.new_root_identity_hash {
+        return Err(AuthorityBootstrapRecoveryErrorV1::ExpectedEvidenceMismatch);
+    }
+    let expected_intent_hash = canonical_bootstrap_hash(
+        format!(
+            "{}\0{}\0{}\0{}",
+            record.operation_hash,
+            record.old_authority_epoch,
+            record.new_authority_epoch,
+            record.new_root_identity_hash
+        )
+        .as_bytes(),
+    );
+    if record.recovery_intent_hash != expected_intent_hash {
+        return Err(AuthorityBootstrapRecoveryErrorV1::Bootstrap(
+            BootstrapErrorV1::MetadataCorrupted(
+                "fresh epoch recovery receipt has an invalid intent binding".to_owned(),
+            ),
+        ));
+    }
+    let intent_bytes = read_private_bytes(&root.join(RECOVERY_INTENT_FILE)).map_err(|error| {
+        AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(format!(
+            "fresh epoch recovery intent is unavailable: {error}"
+        )))
+    })?;
+    let intent: FreshEpochRecoveryRecordV1 =
+        serde_json::from_slice(&intent_bytes).map_err(|error| {
+            AuthorityBootstrapRecoveryErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(
+                format!("fresh epoch recovery intent is invalid: {error}"),
+            ))
+        })?;
+    let mut expected_intent = record.clone();
+    expected_intent.phase = "prepared".to_owned();
+    if intent != expected_intent {
+        return Err(AuthorityBootstrapRecoveryErrorV1::Bootstrap(
+            BootstrapErrorV1::MetadataCorrupted(
+                "fresh epoch recovery intent does not match its completed receipt".to_owned(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_receipt_from_record(
+    root: &Path,
+    record: &FreshEpochRecoveryRecordV1,
+) -> Result<AuthorityBootstrapRecoveryReceiptV1, AuthorityBootstrapRecoveryErrorV1> {
+    let receipt_bytes = read_private_bytes(&root.join(RECOVERY_RECEIPT_FILE))
+        .map_err(AuthorityBootstrapRecoveryErrorV1::Bootstrap)?;
+    Ok(AuthorityBootstrapRecoveryReceiptV1 {
+        schema_version: record.schema_version,
+        operation_hash: record.operation_hash,
+        evidence_set_hash: record.evidence_set_hash,
+        old_authority_epoch: record.old_authority_epoch,
+        new_authority_epoch: record.new_authority_epoch,
+        old_root_identity_hash: record.old_root_identity_hash,
+        new_root_identity_hash: record.new_root_identity_hash,
+        recovery_intent_hash: record.recovery_intent_hash,
+        receipt_hash: canonical_bootstrap_hash(&receipt_bytes),
+    })
+}
+
 fn recoverable_active_root(
     namespace: &Path,
 ) -> Result<(PathBuf, u64), AuthorityBootstrapRecoveryErrorV1> {
-    if let Ok(active) = resolve_active_epoch(namespace) {
+    if let Ok(active) = resolve_active_epoch_for_recovery(namespace) {
         return Ok(active);
     }
     let candidates = recovery_candidates(namespace)?;
@@ -2730,6 +3371,7 @@ mod recovery_tests {
     }
 
     const RECOVERY_CHILD_NAMESPACE_ENV: &str = "SIGIL_E02_RECOVERY_CHILD_NAMESPACE";
+    const RECOVERY_ACTIVE_CHILD_NAMESPACE_ENV: &str = "SIGIL_E02_RECOVERY_ACTIVE_CHILD_NAMESPACE";
 
     #[test]
     #[ignore]
@@ -2782,6 +3424,44 @@ mod recovery_tests {
     }
 
     #[test]
+    #[ignore]
+    fn r71_bootstrap_recovery_active_epoch_inventory_child_fixture() {
+        let namespace = PathBuf::from(
+            std::env::var_os(RECOVERY_ACTIVE_CHILD_NAMESPACE_ENV)
+                .expect("fixture namespace supplied by parent test"),
+        );
+        let (root, epoch) = resolve_active_epoch_for_recovery(&namespace).expect("active epoch");
+        let store = AuthorityBootstrapStoreV1::open(&namespace, &root, epoch)
+            .expect("active epoch bootstrap store");
+        let publication = store.acquire_publication().expect("active publication");
+        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
+            store,
+            &publication,
+            process_inventory_binding(1),
+            process_factory(),
+        )
+        .expect("active epoch authenticated inventory");
+    }
+
+    fn spawn_active_epoch_inventory_child(namespace: &Path) {
+        let status = std::process::Command::new(
+            std::env::current_exe().expect("current test executable"),
+        )
+        .args([
+            "--ignored",
+            "--exact",
+            "bootstrap::recovery_tests::r71_bootstrap_recovery_active_epoch_inventory_child_fixture",
+        ])
+        .env(RECOVERY_ACTIVE_CHILD_NAMESPACE_ENV, namespace)
+        .status()
+        .expect("run active epoch recovery fixture child");
+        assert!(
+            status.success(),
+            "active epoch recovery fixture child succeeds"
+        );
+    }
+
+    #[test]
     fn r71_bootstrap_recovery_selects_fresh_epoch_and_is_one_shot() {
         let temp = tempfile::tempdir().expect("tempdir");
         let base = fs::canonicalize(temp.path()).expect("canonical tempdir");
@@ -2823,8 +3503,8 @@ mod recovery_tests {
         let root_ref = service
             .prepare_fresh_root_selection(&state, &cache, &execution_temp)
             .expect("fresh roots");
-        let evidence = evidence();
-        let evidence_hash = AuthorityBootstrapRecoveryServiceV1::evidence_set_hash(&evidence)
+        let first_evidence = evidence();
+        let evidence_hash = AuthorityBootstrapRecoveryServiceV1::evidence_set_hash(&first_evidence)
             .expect("evidence hash");
         let proof = service
             .probe_old_epoch_quiescence(evidence_hash)
@@ -2832,7 +3512,7 @@ mod recovery_tests {
         let operation = AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
             explicit_root_config: root_ref,
             expected_failed_bootstrap_hash: Some(expected_failed_bootstrap_hash),
-            failed_journal_evidence: evidence,
+            failed_journal_evidence: first_evidence.clone(),
             evidence_set_hash: evidence_hash,
             old_epoch_quiescence: Box::new(proof.clone()),
         };
@@ -2850,8 +3530,76 @@ mod recovery_tests {
         let authorization = service
             .authorize(&operation, confirmation, now)
             .expect("authorization");
+        service
+            .stage_fresh_root_config_switch(
+                &operation,
+                &authorization,
+                canonical_bootstrap_hash(b"r71-recovery-config-before-publish"),
+            )
+            .expect("durable config-root switch intent");
+        assert!(matches!(
+            resolve_active_epoch(&namespace),
+            Err(BootstrapErrorV1::ReconciliationRequired(_))
+        ));
+        service
+            .abort_staged_root_config_switch(
+                &operation,
+                &authorization,
+                canonical_bootstrap_hash(b"r71-recovery-config-before-publish"),
+            )
+            .expect("definite config CAS failure can retire the prepared intent");
+        assert!(resolve_active_epoch(&namespace).is_ok());
+        service
+            .stage_fresh_root_config_switch(
+                &operation,
+                &authorization,
+                canonical_bootstrap_hash(b"r71-recovery-config-before-publish"),
+            )
+            .expect("a retired root-config intent can be staged again");
+        // A restarted doctor obtains a new time-bound quiescence proof and authorization. It
+        // must rebind the existing root-config intent instead of allocating another root set.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let retry_proof = service
+            .probe_old_epoch_quiescence(evidence_hash)
+            .expect("retry quiescence");
+        let retry_operation = AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            explicit_root_config: match &operation {
+                AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+                    explicit_root_config,
+                    ..
+                } => explicit_root_config.clone(),
+                AuthorityBootstrapRecoveryOperationV1::RevealBootstrapDiagnostic { .. } => {
+                    unreachable!()
+                }
+            },
+            expected_failed_bootstrap_hash: Some(expected_failed_bootstrap_hash),
+            failed_journal_evidence: first_evidence.clone(),
+            evidence_set_hash: evidence_hash,
+            old_epoch_quiescence: Box::new(retry_proof.clone()),
+        };
+        let retry_now = current_epoch_ms();
+        let retry_challenge = service
+            .issue_operator_challenge(&retry_operation, retry_now, 60_000)
+            .expect("retry challenge");
+        let retry_confirmation = ExactBootstrapOperatorConfirmationV1::for_challenge(
+            &retry_challenge,
+            evidence_hash,
+            Some(retry_proof.proof_hash),
+            operation_root_selection_hash(&retry_operation),
+            retry_now,
+        );
+        let retry_authorization = service
+            .authorize(&retry_operation, retry_confirmation, retry_now)
+            .expect("retry authorization");
+        service
+            .stage_fresh_root_config_switch(
+                &retry_operation,
+                &retry_authorization,
+                canonical_bootstrap_hash(b"r71-recovery-config-before-publish"),
+            )
+            .expect("rebind durable config-root switch intent");
         let receipt = service
-            .execute(operation.clone(), authorization)
+            .execute(retry_operation, retry_authorization)
             .expect("fresh epoch");
         assert_eq!(receipt.old_authority_epoch, 1);
         assert_eq!(receipt.new_authority_epoch, 2);
@@ -2866,17 +3614,49 @@ mod recovery_tests {
             old_root.join(OLD_EPOCH_INERT_FILE).is_file(),
             "the actual old epoch is inert before the new active pointer is published"
         );
-
-        let active_store = service.namespace.active_store().expect("new active store");
-        let publication = active_store.acquire_publication().expect("new publication");
-        crate::process_inventory::AuthorityManagedProcessInventoryV1::initialize(
-            active_store,
-            &publication,
-            process_inventory_binding(1),
+        let restarted_service = AuthorityBootstrapRecoveryServiceV1::from_namespace(
+            AuthorityBootstrapRecoveryNamespaceV1 {
+                namespace: namespace.clone(),
+            },
             process_factory(),
+        );
+        assert!(
+            restarted_service
+                .reconcile_pending_fresh_epoch()
+                .expect("settled recovery is not pending")
+                .is_none()
+        );
+
+        // Recreate the only legitimate reconciliation window: the active pointer is already
+        // published, but the durable root-config intent is still in an unfinished phase.
+        let intent_path = namespace.join(RECOVERY_ROOT_CONFIG_INTENT_FILE);
+        let mut pending_intent: FreshRootConfigIntentRecordV1 =
+            serde_json::from_slice(&read_private_bytes(&intent_path).expect("root intent"))
+                .expect("root intent record");
+        pending_intent.phase = "authority-epoch-published".to_owned();
+        pending_intent.new_authority_epoch = Some(receipt.new_authority_epoch);
+        publish_private_bootstrap_file(
+            &intent_path,
+            &serde_json::to_vec(&pending_intent).expect("pending root intent"),
         )
-        .expect("new process inventory");
-        drop(publication);
+        .expect("simulate crash before intent completion");
+        assert!(matches!(
+            resolve_active_epoch(&namespace),
+            Err(BootstrapErrorV1::ReconciliationRequired(_))
+        ));
+        let reconciled = restarted_service
+            .reconcile_pending_fresh_epoch()
+            .expect("pointer-published recovery reconciliation")
+            .expect("pending pointer-published epoch must return its original receipt");
+        assert_eq!(reconciled, receipt);
+        assert!(
+            restarted_service
+                .reconcile_pending_fresh_epoch()
+                .expect("completed recovery reconciliation")
+                .is_none()
+        );
+
+        spawn_active_epoch_inventory_child(&namespace);
 
         let challenge = service
             .issue_operator_challenge(&operation, current_epoch_ms(), 60_000)
@@ -2891,10 +3671,88 @@ mod recovery_tests {
         let error = service
             .authorize(&operation, confirmation, current_epoch_ms())
             .expect_err("stale old-epoch proof must not authorize twice");
-        assert!(matches!(
-            error,
-            AuthorityBootstrapRecoveryErrorV1::NoQuiescence
-        ));
+        assert!(
+            matches!(&error, AuthorityBootstrapRecoveryErrorV1::NoQuiescence),
+            "unexpected stale-operation error: {error:?}"
+        );
+
+        // A later journal failure must be recoverable as a new cutover. The completed epoch-2
+        // receipt above is historical state and must not be selected as the pending operation.
+        let second_expected_failed_bootstrap_hash =
+            observed_bootstrap_digest(&new_active_root).expect("epoch-2 digest");
+        let mut second_failure = DurableAuthorityBootFailureEvidenceV1 {
+            schema_version: BOOT_FAILURE_EVIDENCE_SCHEMA_VERSION,
+            authority_epoch: 2,
+            status: "pending".to_owned(),
+            observed_bootstrap_hash: second_expected_failed_bootstrap_hash,
+            failed_journal_evidence: evidence(),
+            record_hash: CanonicalHash::from_bytes([0; 32]),
+        };
+        second_failure.record_hash = second_failure.compute_hash().expect("epoch-2 failure hash");
+        publish_private_bootstrap_file(
+            &new_active_root.join("boot-failure-evidence.json"),
+            &serde_json::to_vec(&second_failure).expect("epoch-2 failure evidence"),
+        )
+        .expect("epoch-2 failure evidence fixture");
+        let second_state = base.join("state-2");
+        let second_cache = base.join("cache-2");
+        let second_execution_temp = base.join("execution-temp-2");
+        fs::create_dir(&second_state).expect("epoch-3 state");
+        fs::create_dir(&second_cache).expect("epoch-3 cache");
+        fs::create_dir(&second_execution_temp).expect("epoch-3 execution temp");
+        let second_root_ref = service
+            .prepare_fresh_root_selection(&second_state, &second_cache, &second_execution_temp)
+            .expect("epoch-3 fresh roots");
+        let second_evidence = evidence();
+        let second_evidence_hash =
+            AuthorityBootstrapRecoveryServiceV1::evidence_set_hash(&second_evidence)
+                .expect("epoch-2 evidence hash");
+        let second_proof = service
+            .probe_old_epoch_quiescence(second_evidence_hash)
+            .expect("epoch-2 quiescence");
+        let second_operation = AuthorityBootstrapRecoveryOperationV1::SelectFreshAuthorityEpoch {
+            explicit_root_config: second_root_ref,
+            expected_failed_bootstrap_hash: Some(second_expected_failed_bootstrap_hash),
+            failed_journal_evidence: second_evidence,
+            evidence_set_hash: second_evidence_hash,
+            old_epoch_quiescence: Box::new(second_proof.clone()),
+        };
+        let second_now = current_epoch_ms();
+        let second_challenge = service
+            .issue_operator_challenge(&second_operation, second_now, 60_000)
+            .expect("epoch-3 challenge");
+        let second_confirmation = ExactBootstrapOperatorConfirmationV1::for_challenge(
+            &second_challenge,
+            second_evidence_hash,
+            Some(second_proof.proof_hash),
+            operation_root_selection_hash(&second_operation),
+            second_now,
+        );
+        let second_authorization = service
+            .authorize(&second_operation, second_confirmation, second_now)
+            .expect("epoch-3 authorization");
+        service
+            .stage_fresh_root_config_switch(
+                &second_operation,
+                &second_authorization,
+                canonical_bootstrap_hash(b"r71-recovery-config-epoch-3"),
+            )
+            .expect("epoch-3 root-config switch");
+        assert!(
+            service
+                .reconcile_pending_fresh_epoch()
+                .expect("historical receipt is not pending")
+                .is_none()
+        );
+        let second_receipt = service
+            .execute(second_operation, second_authorization)
+            .expect("epoch-3 fresh recovery");
+        assert_eq!(second_receipt.old_authority_epoch, 2);
+        assert_eq!(second_receipt.new_authority_epoch, 3);
+        assert_eq!(
+            resolve_active_epoch(&namespace).expect("epoch-3 active").1,
+            3
+        );
     }
 
     #[test]

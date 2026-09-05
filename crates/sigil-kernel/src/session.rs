@@ -209,6 +209,7 @@ pub use continuity_v2::{
     ObjectiveAuthorityRefV1, SESSION_ANCHOR_V1_SCHEMA_VERSION, SessionAnchorRefV1, SessionAnchorV1,
     SourceSpanRefV1, UntrustedModelNarrativeV2,
 };
+pub use control_publication::SessionPublicEventProjectionV1;
 pub use conversation_promotion_projection::conversation_transcript_entry_from_record;
 pub use effect_reconciliation::{
     EFFECT_RECONCILIATION_SCHEMA_VERSION, EffectReconciliationOutcomeV1, EffectReconciliationProbe,

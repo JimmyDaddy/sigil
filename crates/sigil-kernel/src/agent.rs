@@ -93,9 +93,7 @@ use approval_policy::{
     active_plan_approval_authority, interactive_external_directory_approval_override,
     plan_approval_decision_override, tool_session_grant_decision_override,
 };
-use assistant_messages::{
-    append_final_answer_message, append_tool_preamble_message, save_continuation_states,
-};
+use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
 use plan_draft::{
     append_tool_ignored_after_plan_draft, handle_submit_plan_draft_call,
     submit_plan_draft_call_is_accepted,
@@ -1861,6 +1859,7 @@ pub struct Agent<P> {
     provider: P,
     tools: ToolRegistry,
     provider_turn_recovery_policy: crate::ProviderTurnRecoveryPolicyV1,
+    default_max_output_tokens: Option<u32>,
 }
 
 impl<P> Agent<P>
@@ -1873,7 +1872,22 @@ where
             provider,
             tools,
             provider_turn_recovery_policy: crate::ProviderTurnRecoveryPolicyV1::default(),
+            default_max_output_tokens: None,
         }
+    }
+
+    /// Installs the configured output-token default used when a run does not provide an
+    /// explicit per-run limit. Provider-specific defaults remain the final fallback.
+    #[must_use]
+    pub fn with_default_max_output_tokens(mut self, max_output_tokens: Option<u32>) -> Self {
+        self.default_max_output_tokens = max_output_tokens;
+        self
+    }
+
+    /// Returns the configured output-token default for this agent, if any.
+    #[must_use]
+    pub fn default_max_output_tokens(&self) -> Option<u32> {
+        self.default_max_output_tokens
     }
 
     /// Installs the provider-neutral recovery policy used only when this agent creates future
@@ -2164,6 +2178,8 @@ where
         // protocol requires max_tokens or pins a canonical output budget.
         let input = if input.max_output_tokens.is_some() {
             input
+        } else if let Some(default) = self.default_max_output_tokens {
+            input.with_max_output_tokens(default)
         } else {
             match self
                 .provider
@@ -4318,10 +4334,13 @@ where
                         crate::AssistantMessageKind::FinalAnswer,
                     );
                     let (message, _) = crate::project_message_for_persistence(exact_message)?;
-                    let message_id = message.id.clone();
-                    session.append_assistant_message(message.clone())?;
-                    handler.handle(RunEvent::AssistantMessage(message))?;
-                    save_continuation_states(session, handler, pending_states, &message_id)?;
+                    assistant_messages::append_assistant_message_bundle(
+                        session,
+                        handler,
+                        message,
+                        pending_states,
+                        Vec::new(),
+                    )?;
                 }
                 continue;
             }

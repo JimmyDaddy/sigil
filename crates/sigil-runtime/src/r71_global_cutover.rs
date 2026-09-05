@@ -358,6 +358,28 @@ impl RuntimeGlobalCutoverV1 {
         services: &RuntimeManagedResourceServicesV1,
         recovery: &ApplicationResourceRecoveryFacadeV1,
     ) -> Self {
+        Self::evaluate_current_schema_with_source(
+            instance_id,
+            application_generation,
+            authority_generation,
+            services,
+            recovery,
+            probe_source::probe(application_generation),
+        )
+    }
+
+    /// Evaluates readiness against the exact source binding used to compose the storage grants.
+    /// The first boot pass uses a provisional binding; the final pass uses the resulting manifest
+    /// hash. Keeping this explicit prevents a probe-only generation hash from being mistaken for
+    /// the current cutover root while still allowing the manifest to be content-addressed.
+    pub(crate) fn evaluate_current_schema_with_source(
+        instance_id: impl Into<String>,
+        application_generation: u64,
+        authority_generation: AuthorityGeneration,
+        services: &RuntimeManagedResourceServicesV1,
+        recovery: &ApplicationResourceRecoveryFacadeV1,
+        source_binding: CanonicalHash,
+    ) -> Self {
         let mut manifest = CutoverManifestV1 {
             schema_version: 1,
             application_instance_id: instance_id.into(),
@@ -367,12 +389,8 @@ impl RuntimeGlobalCutoverV1 {
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };
-        manifest.mandatory_readiness = probe_mandatory_adapters(
-            services,
-            recovery,
-            probe_source::probe(application_generation),
-            application_generation,
-        );
+        manifest.mandatory_readiness =
+            probe_mandatory_adapters(services, recovery, source_binding, application_generation);
         manifest.manifest_hash = compute_manifest_hash(&manifest);
         let gate_error = validate_cutover_manifest(&manifest).err();
         Self {

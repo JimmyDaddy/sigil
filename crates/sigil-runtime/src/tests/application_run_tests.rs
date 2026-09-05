@@ -25,10 +25,10 @@ use sigil_kernel::{
     ProviderCapabilities, ProviderChunk, PublicRunEvent, PublicRunEventKind, ReasoningEffort,
     ReasoningStreamSupport, RootConfig, RunCancellationOwner, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent, RuntimeContextCandidates,
-    Session, SessionLogEntry, SessionRef, StartDurableTaskAction, StartPlanReviewAction,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME, TERMINAL_TASK_SCHEMA_VERSION,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskHandoffId, TaskId,
-    TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
+    Session, SessionLogEntry, SessionPublicEventProjectionV1, SessionRef, StartDurableTaskAction,
+    StartPlanReviewAction, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+    TERMINAL_TASK_SCHEMA_VERSION, TaskChildSessionEntry, TaskChildSessionStatus, TaskHandoffId,
+    TaskId, TaskIntegrationReviewRequest, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus,
     TaskRoutingPolicy, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
     TaskStepEntry, TaskStepId, TaskStepStatus, TaskVerificationRerunRequest,
     TerminalLifecycleEvent, TerminalLifecycleUpdateV2, TerminalReadinessKind,
@@ -49,19 +49,20 @@ use crate::application_run::is_application_public_outbox_append_error;
 use sigil_tools_builtin::LocalExecutionBackend;
 
 use super::{
-    ApplicationCancellationTicket, ApplicationRunControl, ApplicationRunEventHandler,
-    ApplicationRunEventSequence, ApplicationRunExecutionKind, ApplicationRunInteraction,
-    ApplicationRunPrepareError, ApplicationRunPrepareErrorClass, ApplicationRunRequest,
-    ApplicationRunServices, ApplicationRunTerminalStatus, ApplicationSessionLeaseManager,
-    ApplicationTaskContinuationRequest, ApplicationTaskExecutionRuntime,
-    ApplicationTaskPauseTicket, ApplicationTranscriptRole, ApplicationUserInputDecisionRequest,
-    MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES, PublicApplicationEventBridge,
-    accept_application_task_integration_review, admit_application_agent_binding,
-    admit_application_model_selection, admit_application_reasoning_effort,
-    admit_application_skill_binding, application_run_context_view, application_run_input,
-    application_session_frontier_view, application_session_transcript_page,
-    application_task_integration_review_view, application_terminal_projection,
-    application_verification_view, attach_application_request_context, bind_application_session,
+    ApplicationCancellationTicket, ApplicationRunConstraints, ApplicationRunControl,
+    ApplicationRunEventHandler, ApplicationRunEventSequence, ApplicationRunExecutionKind,
+    ApplicationRunInteraction, ApplicationRunPrepareError, ApplicationRunPrepareErrorClass,
+    ApplicationRunRequest, ApplicationRunServices, ApplicationRunTerminalStatus,
+    ApplicationSessionLeaseManager, ApplicationTaskContinuationRequest,
+    ApplicationTaskExecutionRuntime, ApplicationTaskPauseTicket, ApplicationTranscriptRole,
+    ApplicationUserInputDecisionRequest, MAX_APPLICATION_TRANSCRIPT_MESSAGE_BYTES,
+    PublicApplicationEventBridge, accept_application_task_integration_review,
+    admit_application_agent_binding, admit_application_model_selection,
+    admit_application_reasoning_effort, admit_application_skill_binding,
+    application_run_context_view, application_run_input, application_session_frontier_view,
+    application_session_transcript_page, application_task_integration_review_view,
+    application_terminal_projection, application_verification_view,
+    attach_application_request_context, bind_application_session,
     bind_application_session_with_model, bind_application_session_with_model_ref,
     bind_application_session_with_model_ref_and_attachment, bind_existing_application_session,
     constrain_application_tool_registry, continue_application_task_handoff,
@@ -230,6 +231,43 @@ credential = {{ source = "none" }}
     Ok(())
 }
 
+#[test]
+fn application_run_preparation_applies_configured_output_default_unless_constrained() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_application_test_config(&config_path)?;
+    let mut config = RootConfig::load(&config_path)?;
+    config.model_request.max_output_tokens = Some(8_192);
+    config.save(&config_path)?;
+
+    let prepared = prepare_application_run_blocking(
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "default-cap"),
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+        None,
+    )?;
+    assert_eq!(prepared.target_max_tokens, Some(8_192));
+    drop(prepared);
+
+    let constrained = prepare_application_run_blocking(
+        ApplicationRunRequest::non_interactive(&config_path, temp.path(), "hello", "explicit-cap")
+            .with_constraints(ApplicationRunConstraints {
+                max_turns: 1,
+                max_output_tokens: 4_096,
+                tool_scope: ToolRegistryScope {
+                    allow_all: true,
+                    ..Default::default()
+                },
+            }),
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+        None,
+    )?;
+    assert_eq!(constrained.target_max_tokens, Some(4_096));
+    Ok(())
+}
+
 fn with_application_test_managed_authority(
     root: &Path,
     services: ApplicationRunServices,
@@ -254,6 +292,10 @@ fn with_application_test_managed_authority(
         &state,
         &execution_temp,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x4a; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;
@@ -3139,6 +3181,73 @@ fn public_control_commit_bundles_typed_controls_with_their_exact_domain_ids() ->
             if task_id == "task-control"
     ));
     assert_eq!(recorder.0.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn public_session_commit_bundles_source_private_companion_and_outbox_atomically() -> Result<()> {
+    #[derive(Default)]
+    struct Recorder(Vec<PublicRunEvent>);
+
+    impl ApplicationRunEventHandler for Recorder {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.0.push(event);
+            Ok(())
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut session =
+        Session::load_from_store("deepseek", "model", JsonlSessionStore::new(&path)?)?;
+    start_application_public_control_run(&session, "run-session-publication")?;
+    let mut recorder = Recorder::default();
+    let events = durable_application_event_sequence(
+        session.session_scope_id(),
+        "run-session-publication",
+        &path,
+    )?;
+    let mut bridge = PublicApplicationEventBridge::new(events, &mut recorder)?;
+    let assistant = ModelMessage::assistant(Some("bounded public answer".to_owned()), Vec::new());
+    let domain = EventHandler::commit_session_publications(
+        &mut bridge,
+        &mut session,
+        vec![
+            SessionLogEntry::Assistant(assistant.clone()),
+            SessionLogEntry::Control(ControlEntry::Note {
+                kind: "private_publication_companion".to_owned(),
+                data: serde_json::json!({"secret": "must not leave the durable domain log"}),
+            }),
+        ],
+        vec![SessionPublicEventProjectionV1::assistant_message(
+            0, assistant,
+        )],
+    )?;
+    drop(bridge);
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let public = projection.events_in_order();
+    assert_eq!(domain.len(), 2);
+    assert_eq!(public.len(), 1);
+    assert_eq!(public[0].domain_event_id, domain[0].event_id);
+    assert_eq!(public[0].sequence, 1);
+    assert!(matches!(
+        &public[0].event.event,
+        PublicRunEventKind::AssistantMessage { message }
+            if message.content.as_deref() == Some("bounded public answer")
+    ));
+    let source_position = records
+        .iter()
+        .position(|record| record.stored_event().event_id == domain[0].event_id)
+        .expect("assistant source record");
+    let public_position = records
+        .iter()
+        .position(|record| record.stored_event().event_id == public[0].public_event_id)
+        .expect("public outbox record");
+    assert_eq!(public_position, source_position + 1);
+    assert!(!serde_json::to_string(&public)?.contains("must not leave"));
+    assert_eq!(recorder.0.len(), 1);
     Ok(())
 }
 
@@ -8475,6 +8584,10 @@ async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()>
         &state,
         &exec,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;
@@ -8541,6 +8654,10 @@ async fn r71_application_prepare_keeps_legacy_tool_authority_absent() -> Result<
         &state,
         &exec,
         sigil_kernel::resource::CanonicalHash::from_bytes([0x5b; 32]),
+        sigil_kernel::resource::AuthorityGeneration {
+            epoch: 1,
+            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
+        },
         planner,
         &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
     )?;

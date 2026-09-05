@@ -387,7 +387,7 @@ fn json_process_rejects_non_regular_config_before_run() {
     assert_eq!(record["error"]["code"], "configuration_invalid");
     assert_eq!(
         record["error"]["message"],
-        "application boot failed before the run started"
+        "application configuration is invalid"
     );
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }

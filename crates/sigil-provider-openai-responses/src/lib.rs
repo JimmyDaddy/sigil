@@ -20,15 +20,17 @@ mod stream;
 pub use capabilities::openai_responses_capabilities;
 pub use catalog::{
     BUNDLED_OPENAI_RESPONSES_MODELS, OpenAiCatalogModel, OpenAiModelAdmission,
-    parse_openai_responses_model_list,
+    openai_responses_maximum_output_tokens, parse_openai_responses_model_list,
 };
 pub use config::{
-    OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_BASE_URL_ENV, OpenAiResponsesProviderConfig,
+    OPENAI_API_KEY_ENV, OPENAI_RESPONSES_API_KEY_ENV, OPENAI_RESPONSES_API_KEY_ENV_NAMES,
+    OPENAI_RESPONSES_BASE_URL_ENV, OpenAiResponsesProviderConfig,
 };
 pub use models::OpenAiResponsesCompactedWindow;
 pub use provider::{
     OPENAI_RESPONSES_PORTABLE_TARGET_CONTEXT_WINDOW_TOKENS, OPENAI_RESPONSES_PORTABLE_TARGET_MODEL,
     OPENAI_RESPONSES_PORTABLE_TARGET_OUTPUT_TOKENS, OpenAiResponsesProvider,
+    is_official_openai_base_url,
 };
 pub use reasoning_effort::openai_responses_reasoning_efforts;
 pub use request::OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND;

@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use sigil_kernel::task::TaskRootTerminalCandidateV1;
 use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     AgentApprovalRouteBinding, AgentApprovalRouteEntry, AgentBatchId, AgentDelegationRunContext,
@@ -30,8 +31,8 @@ use sigil_kernel::{
     TaskParticipantRetryRouteDriftError, TaskPlannerSessionAwaitingUserInput,
     TaskPlannerSessionResumeRequest, TaskPlannerSessionRunOutcome, TaskPlannerSessionRunOutput,
     TaskPlannerSessionRunRequest, TaskPlannerWorktreeAvailability, TaskPromotionPreview,
-    TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskStepId, TaskStepMode,
-    TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
+    TaskPromotionPreviewInput, TaskRouteId, TaskRouteStatus, TaskRunStatus, TaskStepId,
+    TaskStepMode, TaskStepSpec, TaskSubagentApprovalRouteEntry, TaskSynthesisSessionRunOutput,
     TaskSynthesisSessionRunRequest, ToolApproval, ToolApprovalContext, ToolCall, ToolErrorKind,
     ToolExecutionStatus, ToolOperation, ToolRegistry, ToolSpec, VerificationPolicy,
     WriteIsolationMode, build_task_promotion_preview, changeset_only_child_tool_registry,
@@ -2211,7 +2212,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             .executor
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?;
-        let output = executor
+        let task_id = request.task.task_id.clone();
+        let attempt_id = request.attempt.attempt_id.clone();
+        let mut output = executor
             .run_with_approval_input(
                 parent_session,
                 request.input,
@@ -2220,8 +2223,27 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 approval_handler,
             )
             .await?;
+        if matches!(
+            output.disposition,
+            sigil_kernel::AgentRunDisposition::FinalAnswer
+        ) && parent_session
+            .task_state_projection()
+            .evaluate_root_terminal(
+                &task_id,
+                TaskRunStatus::Completed,
+                Some(&TaskRootTerminalCandidateV1::DirectExecution {
+                    attempt_id: attempt_id.clone(),
+                    status: sigil_kernel::TaskParticipantAttemptStatus::Completed,
+                }),
+            )
+            .is_some_and(|evaluation| !evaluation.allows_completed())
+        {
+            // The kernel runner maps this to a resumable blocked Task terminal instead of
+            // accepting a final prose answer as authority to complete the root.
+            output.disposition = sigil_kernel::AgentRunDisposition::Blocked;
+        }
         Ok(TaskDirectExecutionSessionRunOutput {
-            attempt_id: request.attempt.attempt_id,
+            attempt_id,
             final_text: output.result.final_text,
             final_message_id: output.result.final_message_id,
             outcome: output.outcome,
@@ -3591,6 +3613,26 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             }
         };
         let postprocessed = (|| -> Result<TaskSynthesisSessionRunOutput> {
+            let completion_candidate = TaskRootTerminalCandidateV1::Participant {
+                attempt_id: request.attempt_id.clone(),
+                status: sigil_kernel::TaskParticipantAttemptStatus::Completed,
+            };
+            if let Some(evaluation) = parent_session
+                .task_state_projection()
+                .evaluate_root_terminal(
+                    &request.task.task_id,
+                    TaskRunStatus::Completed,
+                    Some(&completion_candidate),
+                )
+                && !evaluation.allows_completed()
+            {
+                let reason_code = evaluation
+                    .primary_completion_blocker()
+                    .map_or("unfinished_task_root", |blocker| blocker.reason_code());
+                return Err(anyhow::anyhow!(
+                    "task root completion blocked: {reason_code}"
+                ));
+            }
             let final_text = sigil_kernel::safe_persistence_text(&output.result.final_text);
             let final_answer_ref = output
                 .result

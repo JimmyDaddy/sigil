@@ -16,7 +16,7 @@ use crate::application_run::{
     ApplicationRunConstraints, ApplicationRunEventHandler, ApplicationRunOutput,
     ApplicationRunRequest, ApplicationRunServices, prepare_application_run,
 };
-use crate::provider_api_key_env_name;
+use crate::provider_api_key_env_names;
 
 use super::{
     LoadedModelEvalFixture, MODEL_EVAL_ORCHESTRATION_ROUTE_CONTRACT_SCHEMA_VERSION,
@@ -207,8 +207,18 @@ pub fn write_isolated_model_eval_config(
         isolated_connection.credential,
         crate::provider_connections::CredentialRefConfig::Stored { .. }
     ) {
-        let environment_name = crate::provider_api_key_env_name(&active_provider)
+        let names = crate::provider_api_key_env_names(&active_provider)
             .context("model eval connection has no process-environment credential binding")?;
+        let environment_name = names
+            .iter()
+            .copied()
+            .find(|name| {
+                env::var_os(name)
+                    .and_then(|value| value.into_string().ok())
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+            .or_else(|| names.first().copied())
+            .expect("provider API key environment names are non-empty");
         isolated_connection.credential =
             crate::provider_connections::CredentialRefConfig::Environment {
                 name: environment_name.to_owned(),
@@ -482,28 +492,41 @@ fn preflight_campaign(
         .context("model eval default connection is missing")?;
     let active_provider =
         crate::provider_connections::runtime_provider_name(&selected_connection.config);
-    let credential_env = match &selected_connection.config.credential {
+    match &selected_connection.config.credential {
         crate::provider_connections::CredentialRefConfig::Environment { name } => {
-            Some(name.as_str())
+            let environment = crate::provider_connections::ProcessCredentialEnvironment;
+            let credential_is_present =
+                crate::provider_connections::read_configured_environment_credential(
+                    &selected_connection.config,
+                    name,
+                    &environment,
+                )
+                .is_some();
+            if !credential_is_present {
+                bail!(
+                    "model eval requires {name}; isolated eval configs intentionally exclude provider credentials from retained artifacts"
+                );
+            }
         }
-        crate::provider_connections::CredentialRefConfig::Stored { .. } => Some(
-            provider_api_key_env_name(active_provider).with_context(|| {
+        crate::provider_connections::CredentialRefConfig::Stored { .. } => {
+            let names = provider_api_key_env_names(active_provider).with_context(|| {
                 format!(
                     "model eval provider {active_provider} has no runtime credential environment mapping"
                 )
-            })?,
-        ),
-        crate::provider_connections::CredentialRefConfig::None => None,
-    };
-    if let Some(credential_env) = credential_env {
-        let credential_is_present = env::var_os(credential_env)
-            .and_then(|value| value.into_string().ok())
-            .is_some_and(|value| !value.trim().is_empty());
-        if !credential_is_present {
-            bail!(
-                "model eval requires {credential_env}; isolated eval configs intentionally exclude provider credentials from retained artifacts"
-            );
+            })?;
+            let credential_env = names.iter().copied().find(|name| {
+                env::var_os(name)
+                    .and_then(|value| value.into_string().ok())
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            if credential_env.is_none() {
+                bail!(
+                    "model eval requires one of {}; isolated eval configs intentionally exclude provider credentials from retained artifacts",
+                    names.join(" or ")
+                );
+            }
         }
+        crate::provider_connections::CredentialRefConfig::None => {}
     }
     let mut fixtures = request
         .fixture_roots

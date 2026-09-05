@@ -1,5 +1,14 @@
 use super::*;
 
+/// Returns the optional provider-neutral output-token default for ordinary agent runs.
+///
+/// Callers apply this to fresh [`sigil_kernel::AgentRunInput`] values before any explicit
+/// per-run constraint. A missing value leaves provider-owned automatic behavior intact.
+#[must_use]
+pub fn configured_max_output_tokens(root_config: &RootConfig) -> Option<u32> {
+    root_config.model_request.max_output_tokens
+}
+
 /// Builds shared agent run options for CLI, TUI, and future entrypoints.
 pub fn build_run_options(
     root_config: &RootConfig,

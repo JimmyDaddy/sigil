@@ -56,6 +56,54 @@ pub struct SigilPaths {
     pub workspace_plugins_dir: PathBuf,
 }
 
+/// Returns inert path labels for a provider-only recovery surface.
+///
+/// This deliberately does not inspect the filesystem, environment, or workspace. The values
+/// are URI-like labels rather than usable local paths; callers must keep provider-only mode away
+/// from persistence and workspace discovery until authority has been repaired.
+#[must_use]
+pub fn ephemeral_sigil_paths() -> SigilPaths {
+    let root = PathBuf::from("ephemeral://provider-only");
+    let workspace_root = root.clone();
+    let workspace_state_root = root.join("state");
+    let workspace_cache_root = root.join("cache");
+    let projections_root = workspace_state_root.join(DEFAULT_PROJECTIONS_DIR);
+    let session_log_dir = workspace_state_root.join(DEFAULT_SESSIONS_DIR);
+    let session_exports_root = workspace_state_root.join(DEFAULT_SESSION_EXPORTS_DIR);
+    let artifacts_root = workspace_state_root.join(DEFAULT_ARTIFACTS_DIR);
+    let changesets_root = artifacts_root.join(DEFAULT_CHANGESETS_DIR);
+    let terminal_tasks_root = artifacts_root.join(DEFAULT_TERMINAL_TASKS_DIR);
+    let project_assets_root = workspace_root.join(DEFAULT_PROJECT_ASSETS_DIR);
+
+    SigilPaths {
+        workspace_root,
+        workspace_id: "provider-only".to_owned(),
+        state_root: workspace_state_root.clone(),
+        cache_root: workspace_cache_root.clone(),
+        workspace_state_root: workspace_state_root.clone(),
+        workspace_cache_root: workspace_cache_root.clone(),
+        projections_root,
+        session_catalog_db: workspace_state_root
+            .join(DEFAULT_PROJECTIONS_DIR)
+            .join(DEFAULT_SESSION_CATALOG_DB_FILE),
+        session_log_dir,
+        session_exports_root,
+        session_lifecycle_journal: workspace_state_root
+            .join(DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE),
+        input_history_file: workspace_state_root.join(INPUT_HISTORY_FILE),
+        artifacts_root,
+        changesets_root,
+        terminal_tasks_root,
+        scratch_root: workspace_cache_root.join(DEFAULT_SCRATCH_DIR),
+        attachments_root: workspace_cache_root.join(DEFAULT_ATTACHMENTS_DIR),
+        project_assets_root: project_assets_root.clone(),
+        workspace_skills_dir: project_assets_root.join(DEFAULT_WORKSPACE_SKILLS_LEAF),
+        workspace_commands_dir: project_assets_root.join(DEFAULT_WORKSPACE_COMMANDS_LEAF),
+        workspace_agents_dir: project_assets_root.join(DEFAULT_WORKSPACE_AGENTS_LEAF),
+        workspace_plugins_dir: project_assets_root.join(DEFAULT_WORKSPACE_PLUGINS_LEAF),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoragePlatform {
     Macos,

@@ -4,6 +4,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sigil_kernel::ConnectionId;
+use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV_NAMES;
+use sigil_provider_deepseek::SIGIL_API_KEY_ENV_NAMES;
+use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV_NAMES;
+use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV_NAMES;
+use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV_NAMES;
 use url::Url;
 use uuid::Uuid;
 
@@ -424,19 +429,19 @@ pub(crate) fn allowed_environment_names(
     protocol: ProviderProtocol,
 ) -> &'static [&'static str] {
     match (family, protocol) {
-        (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => &["SIGIL_API_KEY"],
+        (ProviderFamily::DeepSeek, ProviderProtocol::DeepSeek) => SIGIL_API_KEY_ENV_NAMES,
         (ProviderFamily::OpenAi, ProviderProtocol::OpenAiResponses)
         | (ProviderFamily::Custom, ProviderProtocol::OpenAiResponses) => {
-            &["SIGIL_OPENAI_RESPONSES_API_KEY"]
+            OPENAI_RESPONSES_API_KEY_ENV_NAMES
         }
         (ProviderFamily::Custom, ProviderProtocol::OpenAiChatCompletions) => {
-            &["SIGIL_OPENAI_COMPATIBLE_API_KEY"]
+            OPENAI_COMPATIBLE_API_KEY_ENV_NAMES
         }
         (ProviderFamily::Anthropic, ProviderProtocol::AnthropicMessages) => {
-            &["SIGIL_ANTHROPIC_API_KEY"]
+            SIGIL_ANTHROPIC_API_KEY_ENV_NAMES
         }
         (ProviderFamily::Gemini, ProviderProtocol::GeminiGenerateContent) => {
-            &["SIGIL_GEMINI_API_KEY"]
+            SIGIL_GEMINI_API_KEY_ENV_NAMES
         }
         _ => &[],
     }

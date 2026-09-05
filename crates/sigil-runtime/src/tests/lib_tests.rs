@@ -29,9 +29,9 @@ use sigil_kernel::{
     ToolLifecycleOwner, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, ToolSubjectKind, WorkspaceTrust, durable_tool_execution_entry,
 };
-use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
-use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
-use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
+use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
+use sigil_provider_deepseek::{DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
+use sigil_provider_gemini::{GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI_API_KEY_ENV};
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_provider_openai_responses::OPENAI_RESPONSES_API_KEY_ENV;
 
@@ -40,20 +40,21 @@ pub(crate) mod rollout_manifest_test_support;
 
 use super::{
     ApplicationTerminalLifecycleHandler, ApplicationTerminalLifecycleRouter,
-    ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher,
+    ExtensionProcessNetworkAdmission, McpProcessLaunchRequest, McpProcessLauncher, SecretSource,
     activate_eager_remote_mcp_server, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
     activate_or_refresh_configured_remote_mcp_server, build_plan_prompt_tool_registry,
     build_plan_review_tool_registry, build_provider, build_role_provider, build_role_run_options,
     build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
     build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
     build_tool_registry_without_eager_mcp_with_workspace_trust,
-    build_tool_surface_without_eager_mcp_with_workspace_trust,
+    build_tool_surface_without_eager_mcp_with_workspace_trust, configured_max_output_tokens,
     deactivate_configured_remote_mcp_server, launch_planned_mcp_process, load_anthropic_config,
     load_deepseek_config, load_gemini_config, load_openai_compat_config,
     load_openai_responses_config, provider_capabilities_for_name, provider_capability_view,
     refresh_mcp_server_tools_with_mcp_handlers,
     refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder_and_network_admission,
-    register_lazy_mcp_activation_tool, secret_redactor_for_root_config, shutdown_registered_tools,
+    register_lazy_mcp_activation_tool, resolve_deepseek_api_key, secret_redactor_for_root_config,
+    shutdown_registered_tools,
 };
 
 #[test]
@@ -576,9 +577,45 @@ fn secret_redactor_for_root_config_redacts_resolved_api_key() {
 }
 
 #[test]
+fn secret_redactor_for_root_config_redacts_provider_aliases() {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_API_KEY_ENV, " "),
+        (DEEPSEEK_API_KEY_ENV, "deepseek-alias-secret"),
+    ]);
+
+    let redactor = secret_redactor_for_root_config(&test_root_config("deepseek"));
+
+    assert_eq!(
+        redactor.redact_text("Authorization: Bearer deepseek-alias-secret"),
+        "Authorization: [redacted] [redacted]"
+    );
+}
+
+#[test]
+fn provider_factory_resolves_deepseek_common_api_key_alias() {
+    let _guard = crate::test_env::lock();
+    let _canonical = EnvScope::set_many(&[(SIGIL_API_KEY_ENV, " ")]);
+    let _alias = EnvScope::set_many(&[(DEEPSEEK_API_KEY_ENV, "deepseek-alias-secret")]);
+
+    let resolution =
+        resolve_deepseek_api_key(&sigil_provider_deepseek::DeepSeekProviderConfig::default())
+            .expect("provider alias should resolve");
+
+    assert_eq!(resolution.value, "deepseek-alias-secret");
+    assert_eq!(
+        resolution.source,
+        SecretSource::Environment(DEEPSEEK_API_KEY_ENV)
+    );
+}
+
+#[test]
 fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "openai-env-secret")]);
+    let _scope = EnvScope::set_many(&[
+        (OPENAI_COMPATIBLE_API_KEY_ENV, " "),
+        ("OPENAI_API_KEY", "openai-env-secret"),
+    ]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("openai_compat"));
 
@@ -591,7 +628,10 @@ fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
 #[test]
 fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(OPENAI_RESPONSES_API_KEY_ENV, "responses-env-secret")]);
+    let _scope = EnvScope::set_many(&[
+        (OPENAI_RESPONSES_API_KEY_ENV, " "),
+        ("OPENAI_API_KEY", "responses-env-secret"),
+    ]);
 
     let redactor = secret_redactor_for_root_config(&test_root_config("openai_responses"));
 
@@ -605,8 +645,11 @@ fn secret_redactor_for_root_config_redacts_openai_responses_api_key() {
 fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
-        (SIGIL_ANTHROPIC_API_KEY_ENV, "anthropic-env-secret"),
-        (SIGIL_GEMINI_API_KEY_ENV, "gemini-env-secret"),
+        (SIGIL_ANTHROPIC_API_KEY_ENV, " "),
+        (ANTHROPIC_API_KEY_ENV, "anthropic-env-secret"),
+        (SIGIL_GEMINI_API_KEY_ENV, " "),
+        (GEMINI_API_KEY_ENV, "gemini-env-secret"),
+        (GOOGLE_API_KEY_ENV, "google-env-secret"),
     ]);
 
     let anthropic_redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
@@ -810,6 +853,16 @@ fn build_run_options_carries_shared_runtime_defaults() {
             .is_some_and(|key| key.starts_with("workspace-"))
     );
     assert_eq!(options.interaction_mode, InteractionMode::Interactive);
+}
+
+#[test]
+fn configured_max_output_tokens_preserves_automatic_when_unset() {
+    let mut configured = test_root_config("deepseek");
+    configured.model_request.max_output_tokens = Some(8_192);
+    assert_eq!(configured_max_output_tokens(&configured), Some(8_192));
+
+    configured.model_request.max_output_tokens = None;
+    assert_eq!(configured_max_output_tokens(&configured), None);
 }
 
 #[test]

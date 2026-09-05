@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::verification::VerificationExecutionPortV1;
@@ -9,10 +9,10 @@ use sigil_kernel::{
     RootConfig, RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
     RunCancellationTarget, RunTaskGuard, SandboxProfileRequirement, SequentialTaskRequest, Session,
     SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskContinuationSelectedEntry,
-    TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptStatus,
-    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
-    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
-    VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
+    TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptEntry,
+    TaskParticipantAttemptStatus, TaskPauseRequest, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus,
+    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
     discover_candidate_checks_with_user_config, recoverable_task_guidance,
     recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
     safe_persistence_text, stable_workspace_id,
@@ -392,32 +392,91 @@ where
         .title
         .clone()
         .unwrap_or_else(|| sigil_kernel::task_semantic_title(&objective));
-    let active_steps = task
+    let cancellation_closure = if disposition == TaskStopDisposition::Cancelled {
+        projection
+            .evaluate_root_terminal(&task_id, TaskRunStatus::Cancelled, None)
+            .map(|evaluation| evaluation.cancellation_closure)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut active_steps = task
         .active_steps
         .iter()
         .filter_map(|key| task.steps.get(key))
         .filter(|step| !step.status.is_terminal())
         .cloned()
-        .collect::<Vec<_>>();
+        .map(|step| {
+            (
+                step.step_id.clone(),
+                TaskStepEntry {
+                    task_id: task_id.clone(),
+                    plan_version: step.plan_version,
+                    step_id: step.step_id,
+                    role: step.role,
+                    status: step.status,
+                    title: step.title,
+                    summary: step.summary,
+                    reason: step.reason,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if !cancellation_closure.is_empty()
+        && let Some(plan) = task
+            .latest_plan_version
+            .and_then(|version| task.plans.get(&version))
+    {
+        for step_id in cancellation_closure {
+            let Some(step) = plan.steps.iter().find(|step| step.step_id == step_id) else {
+                continue;
+            };
+            active_steps
+                .entry(step_id.clone())
+                .or_insert_with(|| TaskStepEntry {
+                    task_id: task_id.clone(),
+                    plan_version: plan.plan_version,
+                    step_id,
+                    role: step.role,
+                    status: TaskStepStatus::Pending,
+                    title: Some(step.title.clone()),
+                    summary: None,
+                    reason: None,
+                });
+        }
+    }
+    let active_participants = match disposition {
+        // A root cancellation must leave no active DAG participant behind. Paused and
+        // interrupted Task paths retain their existing recovery semantics.
+        TaskStopDisposition::Cancelled => task
+            .participant_attempts
+            .values()
+            .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
+            .cloned()
+            .collect::<Vec<TaskParticipantAttemptEntry>>(),
+        TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => Vec::new(),
+    };
     let active_children = task
         .child_sessions
         .values()
         .filter(|child| child.status == TaskChildSessionStatus::Started)
         .cloned()
         .collect::<Vec<_>>();
-    let _ = task;
-
-    let safe_reason = safe_persistence_text(reason);
     let active_direct_attempts = task
         .direct_execution_attempts
         .values()
         .filter(|attempt| attempt.status == TaskParticipantAttemptStatus::Started)
         .cloned()
         .collect::<Vec<_>>();
+    let safe_reason = safe_persistence_text(reason);
     let mut controls = Vec::with_capacity(
-        active_steps.len() + active_children.len() + active_direct_attempts.len() + 1,
+        active_steps.len()
+            + active_participants.len()
+            + active_children.len()
+            + active_direct_attempts.len()
+            + 1,
     );
-    for step in active_steps {
+    for step in active_steps.into_values() {
         controls.push(ControlEntry::TaskStep(TaskStepEntry {
             task_id: task_id.clone(),
             plan_version: step.plan_version,
@@ -428,6 +487,16 @@ where
             summary: None,
             reason: Some(safe_reason.clone()),
         }));
+    }
+    for mut attempt in active_participants {
+        attempt.status = match disposition {
+            TaskStopDisposition::Cancelled => TaskParticipantAttemptStatus::Cancelled,
+            TaskStopDisposition::Paused | TaskStopDisposition::Interrupted => {
+                TaskParticipantAttemptStatus::Interrupted
+            }
+        };
+        attempt.reason = Some(safe_reason.clone());
+        controls.push(ControlEntry::TaskParticipantAttempt(attempt));
     }
     for mut child in active_children {
         child.status = disposition.child_status();
@@ -1078,6 +1147,8 @@ pub fn finalize_task_root(
     {
         return Err(anyhow!("run cancellation won the task terminal-state race"));
     }
+    let result =
+        normalize_completed_task_terminal(session, task_id, parent_session_ref, objective, result);
     let Err(error) = &result else {
         return result;
     };
@@ -1168,6 +1239,54 @@ pub fn finalize_task_root(
         }))?;
     }
     result
+}
+
+/// Downgrades an unsupported root completion claim to the resumable terminal selected by the
+/// shared durable evaluator.
+fn normalize_completed_task_terminal(
+    session: &mut Session,
+    task_id: &TaskId,
+    parent_session_ref: &SessionRef,
+    objective: &str,
+    result: Result<TaskRunStatus>,
+) -> Result<TaskRunStatus> {
+    let status = result?;
+    if status != TaskRunStatus::Completed {
+        return Ok(status);
+    }
+    let Some(evaluation) = session.task_state_projection().evaluate_root_terminal(
+        task_id,
+        TaskRunStatus::Completed,
+        None,
+    ) else {
+        // Keep legacy callers that do not yet have a durable direct/DAG authority unchanged.
+        return Ok(status);
+    };
+    if evaluation.allows_completed() {
+        return Ok(status);
+    }
+    let current_status = session
+        .task_state_projection()
+        .tasks
+        .get(task_id)
+        .map(|task| task.status);
+    if matches!(
+        current_status,
+        Some(TaskRunStatus::Started | TaskRunStatus::Running)
+    ) {
+        let reason_code = evaluation
+            .primary_completion_blocker()
+            .map_or("unfinished_task_root", |blocker| blocker.reason_code());
+        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: parent_session_ref.clone(),
+            objective: safe_persistence_text(objective),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: Some(format!("task completion blocked: {reason_code}")),
+        }))?;
+    }
+    Ok(TaskRunStatus::Paused)
 }
 
 /// Finalizes one continuation without turning admission/re-entry failures into Task failure.

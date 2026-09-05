@@ -28,20 +28,21 @@ pub use sigil_mcp::{
     unsupported_mcp_runtime_event_handler,
 };
 use sigil_provider_anthropic::{
-    AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV, anthropic_capabilities,
+    AnthropicProvider, AnthropicProviderConfig, SIGIL_ANTHROPIC_API_KEY_ENV_NAMES,
+    anthropic_capabilities,
 };
 use sigil_provider_deepseek::{
-    DeepSeekProvider, DeepSeekProviderConfig, SIGIL_API_KEY_ENV, deepseek_capabilities,
+    DeepSeekProvider, DeepSeekProviderConfig, SIGIL_API_KEY_ENV_NAMES, deepseek_capabilities,
 };
 use sigil_provider_gemini::{
-    GeminiProvider, GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV, gemini_capabilities,
+    GeminiProvider, GeminiProviderConfig, SIGIL_GEMINI_API_KEY_ENV_NAMES, gemini_capabilities,
 };
 use sigil_provider_openai_compat::{
-    OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
+    OPENAI_COMPATIBLE_API_KEY_ENV_NAMES, OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig,
     openai_compatible_capabilities,
 };
 use sigil_provider_openai_responses::{
-    OPENAI_RESPONSES_API_KEY_ENV, OpenAiResponsesProvider, OpenAiResponsesProviderConfig,
+    OPENAI_RESPONSES_API_KEY_ENV_NAMES, OpenAiResponsesProvider, OpenAiResponsesProviderConfig,
     openai_responses_capabilities,
 };
 /// Session-scoped scratch lease registry shared by built-in tools and maintenance GC.
@@ -51,7 +52,7 @@ use tokio::process::Command;
 
 /// Constructs a runtime-owned agent with the root-configured policy for future durable
 /// provider-turn schedules. Existing schedules carry their own durable policy fingerprint.
-pub(crate) fn configured_agent<P>(
+pub fn configured_agent<P>(
     root_config: &RootConfig,
     provider: P,
     tools: ToolRegistry,
@@ -59,9 +60,11 @@ pub(crate) fn configured_agent<P>(
 where
     P: Provider,
 {
-    Agent::new(provider, tools).with_provider_turn_recovery_policy(
-        root_config.model_request.provider_turn_recovery_policy()?,
-    )
+    Agent::new(provider, tools)
+        .with_default_max_output_tokens(root_config.model_request.max_output_tokens)
+        .with_provider_turn_recovery_policy(
+            root_config.model_request.provider_turn_recovery_policy()?,
+        )
 }
 
 #[cfg(test)]
@@ -221,12 +224,14 @@ pub use context::{
     context_items_from_plugin_hook_output, context_items_from_task_memory,
 };
 pub use context_window::{
-    ContextWindowSource, ResolvedContextWindow, configured_model_context_window_tokens,
-    configured_runtime_model_context_window_tokens, effective_compaction_config,
-    effective_compaction_config_for_model_ref, effective_compaction_config_for_runtime_model,
-    effective_compaction_config_with_override, provider_context_window_tokens,
+    ContextWindowSource, REQUEST_INPUT_SAFETY_BUFFER_TOKENS, ResolvedContextWindow,
+    configured_model_context_window_tokens, configured_runtime_model_context_window_tokens,
+    effective_compaction_config, effective_compaction_config_for_model_ref,
+    effective_compaction_config_for_runtime_model, effective_compaction_config_with_override,
+    provider_context_window_tokens, resolve_automatic_output_token_budget,
     resolve_context_window_tokens, resolve_context_window_tokens_with_override,
-    resolve_model_context_window_tokens,
+    resolve_model_context_window_tokens, validate_output_token_budget,
+    validate_provider_output_token_budget,
 };
 pub use conversation_coordinator::{
     ConversationCoordinator, ConversationSourceTurn, RouteCapabilityEvidence,
@@ -270,7 +275,7 @@ pub use paths::{
     DEFAULT_SESSION_LIFECYCLE_JOURNAL_FILE, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
     DEFAULT_WORKSPACE_AGENTS_LEAF, DEFAULT_WORKSPACE_COMMANDS_LEAF, DEFAULT_WORKSPACE_PLUGINS_LEAF,
     DEFAULT_WORKSPACE_SKILLS_LEAF, INPUT_HISTORY_FILE, PathResolverEnv, SIGIL_CACHE_HOME_ENV,
-    SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform, resolve_sigil_paths,
+    SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform, ephemeral_sigil_paths, resolve_sigil_paths,
     resolve_sigil_paths_with_env, workspace_id_for_root,
 };
 pub use plan_review_coordinator::{
@@ -320,10 +325,10 @@ pub use provider_config::{
     bundled_provider_models, deepseek_provider_config_fields, deepseek_provider_status_config,
     default_provider_config_fields, default_provider_model, default_setup_provider_model,
     model_request_config_fields, next_provider_name, normalize_provider_model_alias,
-    normalize_provider_name, provider_api_key_env_name, provider_balance_status_config,
-    provider_config_fields, provider_model_status_config, provider_model_status_config_from_fields,
-    provider_status_config_from_fields, set_active_provider_model, set_model_request_config_fields,
-    supported_provider_name,
+    normalize_provider_name, provider_api_key_env_name, provider_api_key_env_names,
+    provider_balance_status_config, provider_config_fields, provider_model_status_config,
+    provider_model_status_config_from_fields, provider_status_config_from_fields,
+    set_active_provider_model, set_model_request_config_fields, supported_provider_name,
 };
 pub use provider_debug::{
     DeepSeekFimDebugRequest, DeepSeekPrefixDebugRequest, ProviderDebugStream,
@@ -459,9 +464,10 @@ pub use mcp_registry::build_configured_execution_backend;
 pub use provider_factory::{
     ProviderCapabilityRow, ProviderCapabilityStatus, ProviderCapabilityView, SecretResolution,
     SecretSource, build_provider, build_provider_async, build_provider_for_model_ref,
-    build_provider_for_model_ref_async, build_provider_for_model_ref_with_credentials,
-    build_provider_with_credentials, build_role_provider, build_role_provider_async,
-    build_role_provider_with_credentials, load_anthropic_config, load_deepseek_config,
+    build_provider_for_model_ref_async, build_provider_for_model_ref_from_environment_async,
+    build_provider_for_model_ref_with_credentials, build_provider_with_credentials,
+    build_role_provider, build_role_provider_async, build_role_provider_with_credentials,
+    configured_provider_maximum_output_tokens, load_anthropic_config, load_deepseek_config,
     load_gemini_config, load_openai_compat_config, load_openai_responses_config,
     provider_capabilities_for_name, provider_capability_view, provider_config_key,
     resolve_anthropic_api_key, resolve_anthropic_api_key_with_session, resolve_anthropic_config,
@@ -475,7 +481,7 @@ pub use provider_factory::{
 pub use run_options::{
     build_plan_prompt_tool_registry, build_plan_review_tool_registry, build_role_run_options,
     build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
-    build_skill_tool_registry,
+    build_skill_tool_registry, configured_max_output_tokens,
 };
 
 use run_options::canonical_workspace_root;

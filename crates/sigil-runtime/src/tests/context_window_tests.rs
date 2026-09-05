@@ -3,8 +3,9 @@ use sigil_kernel::{CompactionConfig, JsonlSessionStore, ModelMessage, Session};
 
 use super::{
     ContextWindowSource, compaction_preview_for_strategy, effective_compaction_config,
-    effective_compaction_config_with_override, resolve_context_window_tokens,
-    resolve_context_window_tokens_with_override,
+    effective_compaction_config_with_override, resolve_automatic_output_token_budget,
+    resolve_context_window_tokens, resolve_context_window_tokens_with_override,
+    validate_output_token_budget,
 };
 
 #[test]
@@ -42,6 +43,27 @@ fn configured_window_is_used_when_provider_window_is_unknown() {
 
     assert_eq!(resolved.tokens, Some(128_000));
     assert_eq!(resolved.source, ContextWindowSource::Config);
+}
+
+#[test]
+fn output_budget_leaves_room_for_a_real_request_envelope() {
+    assert!(validate_output_token_budget(Some(1_000_000), Some(256_000)).is_ok());
+    assert!(validate_output_token_budget(Some(256_000), Some(256_000)).is_err());
+    assert!(validate_output_token_budget(Some(64_000), Some(60_000)).is_err());
+    assert!(validate_output_token_budget(None, Some(256_000)).is_ok());
+}
+
+#[test]
+fn automatic_provider_default_is_capped_for_small_configured_windows() -> Result<()> {
+    assert_eq!(
+        resolve_automatic_output_token_budget(Some(256_000), Some(256_000))?,
+        Some(247_808)
+    );
+    assert_eq!(
+        resolve_automatic_output_token_budget(Some(1_000_000), Some(256_000))?,
+        Some(256_000)
+    );
+    Ok(())
 }
 
 #[test]

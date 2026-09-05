@@ -324,6 +324,7 @@ pub struct HttpProductionRunDriver {
     options: HttpProductionRunDriverOptions,
     services: ApplicationRunServices,
     authority_ready: bool,
+    authority_recovery_code: HttpSessionRouteRecoveryCode,
     preparer: Arc<dyn HttpApplicationRunPreparer>,
     event_bus: Arc<HttpLiveEventBus>,
     runtime: Handle,
@@ -1064,6 +1065,7 @@ impl HttpProductionRunDriver {
         // composition, shared with CLI/TUI). A missing/invalid config may still expose the
         // bounded provider-setup recovery surface, but it never receives a runnable authority
         // route; every run/session mutation below checks `authority_ready` before proceeding.
+        let mut authority_recovery_code = HttpSessionRouteRecoveryCode::AuthorityUnavailable;
         let (services, authority_ready) =
             match sigil_runtime::application_host::attach_boot_authority_to_services(
                 services.clone(),
@@ -1072,9 +1074,23 @@ impl HttpProductionRunDriver {
             ) {
                 Ok(services) => (services, true),
                 Err(sigil_runtime::application_host::BootAuthorityErrorV1::Config(_)) => {
+                    authority_recovery_code = HttpSessionRouteRecoveryCode::ConnectionConfigInvalid;
                     (services, false)
                 }
-                Err(error) => return Err(HttpRunDriverError::new(error.to_string())),
+                Err(error) => {
+                    eprintln!("HTTP BOOT ERROR: {error:?}");
+                    if matches!(
+                        &error,
+                        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
+                            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
+                            | sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_)
+                        )
+                    ) {
+                        authority_recovery_code =
+                            HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted;
+                    }
+                    (services, false)
+                }
             };
         let mut options = options;
         let current_schema = services.cutover().is_some_and(|cutover| {
@@ -1133,6 +1149,7 @@ impl HttpProductionRunDriver {
             options,
             services,
             authority_ready,
+            authority_recovery_code,
             preparer,
             event_bus,
             runtime,
@@ -1161,8 +1178,55 @@ impl HttpProductionRunDriver {
     }
 
     fn require_current_schema_admission(&self) -> Result<(), HttpRunAdmissionError> {
-        self.require_current_schema_authority()
-            .map_err(|_| HttpRunAdmissionError::Unavailable)
+        if self.authority_ready {
+            Ok(())
+        } else {
+            Err(HttpRunAdmissionError::RouteRecovery(
+                self.authority_recovery_view(),
+            ))
+        }
+    }
+
+    fn authority_recovery_view(&self) -> crate::HttpSessionRouteRecoveryView {
+        let (allowed_actions, retryable) = match self.authority_recovery_code {
+            HttpSessionRouteRecoveryCode::ConnectionConfigInvalid => (
+                vec![
+                    crate::HttpSessionRouteRecoveryAction::RepairConnection,
+                    crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                false,
+            ),
+            HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted => (
+                vec![
+                    crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                    crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                false,
+            ),
+            _ => (
+                vec![
+                    crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                    crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+                ],
+                true,
+            ),
+        };
+        crate::HttpSessionRouteRecoveryView {
+            code: self.authority_recovery_code,
+            allowed_actions,
+            // Authority repair is a process-wide operation rather than a session attach, but
+            // the public recovery contract still requires a bounded opaque binding. Keep it
+            // path-free and stable so Desktop can safely project the recovery instead of
+            // dropping it as malformed.
+            recovery_binding: format!(
+                "authority-recovery-{}",
+                match self.authority_recovery_code {
+                    HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted => "corrupt",
+                    _ => "unavailable",
+                }
+            ),
+            retryable,
+        }
     }
 
     fn reconcile_terminal_session_once(
@@ -2101,7 +2165,14 @@ impl HttpRunDriver for HttpProductionRunDriver {
         session_id: &str,
         model_ref: Option<&crate::HttpProviderModelRef>,
     ) -> Result<HttpSessionBinding, HttpRunDriverError> {
-        self.require_current_schema_authority()?;
+        self.require_current_schema_authority().map_err(|error| {
+            if self.authority_ready {
+                error
+            } else {
+                HttpRunDriverError::new(error.message)
+                    .with_route_recovery(self.authority_recovery_view())
+            }
+        })?;
         let connection_id = model_ref
             .map(|model_ref| sigil_kernel::ConnectionId::new(model_ref.connection_id.clone()))
             .transpose()
@@ -2322,6 +2393,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
             HttpSessionRouteRecoveryCode::ModelRouteNotConfigured
             | HttpSessionRouteRecoveryCode::ConnectionConfigInvalid
             | HttpSessionRouteRecoveryCode::ProviderUnavailable
+            | HttpSessionRouteRecoveryCode::AuthorityUnavailable
+            | HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted
             | HttpSessionRouteRecoveryCode::SessionAlreadyActive
             | HttpSessionRouteRecoveryCode::SessionWriterBusy
             | HttpSessionRouteRecoveryCode::SessionStreamInvalid => false,
@@ -2928,6 +3001,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ModelRouteNotConfigured => crate::HttpSessionRouteRecoveryCode::ModelRouteNotConfigured,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ConnectionConfigInvalid => crate::HttpSessionRouteRecoveryCode::ConnectionConfigInvalid,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ProviderUnavailable => crate::HttpSessionRouteRecoveryCode::ProviderUnavailable,
+                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::AuthorityUnavailable => crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable,
+                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::AuthorityJournalCorrupted => crate::HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionAlreadyActive => crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionWriterBusy => crate::HttpSessionRouteRecoveryCode::SessionWriterBusy,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionStreamInvalid => crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid,
@@ -2935,6 +3010,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     allowed_actions: recovery.allowed_actions.into_iter().map(|action| match action {
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::ConfirmCurrentRoute => crate::HttpSessionRouteRecoveryAction::ConfirmCurrentRoute,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RepairConnection => crate::HttpSessionRouteRecoveryAction::RepairConnection,
+                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RepairAuthority => crate::HttpSessionRouteRecoveryAction::RepairAuthority,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::SelectReplacement => crate::HttpSessionRouteRecoveryAction::SelectReplacement,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::StartNewSession => crate::HttpSessionRouteRecoveryAction::StartNewSession,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RetryProvider => crate::HttpSessionRouteRecoveryAction::RetryProvider,
@@ -4602,6 +4678,29 @@ fn public_preparation_failure_event(error: &anyhow::Error) -> PublicRunEventKind
                     ],
                     recovery_binding,
                     retryable: true,
+                };
+            }
+            sigil_runtime::application_run::ApplicationRunPrepareErrorClass::AuthorityUnavailable => {
+                return PublicRunEventKind::RouteRecoveryRequired {
+                    code: PublicRouteRecoveryCode::AuthorityUnavailable,
+                    actions: vec![
+                        PublicRouteRecoveryAction::RepairAuthority,
+                        PublicRouteRecoveryAction::StartNewSession,
+                        PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    recovery_binding,
+                    retryable: true,
+                };
+            }
+            sigil_runtime::application_run::ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => {
+                return PublicRunEventKind::RouteRecoveryRequired {
+                    code: PublicRouteRecoveryCode::AuthorityJournalCorrupted,
+                    actions: vec![
+                        PublicRouteRecoveryAction::RepairAuthority,
+                        PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    recovery_binding,
+                    retryable: false,
                 };
             }
             sigil_runtime::application_run::ApplicationRunPrepareErrorClass::SessionAlreadyActive => {
@@ -7597,6 +7696,23 @@ fn http_route_recovery_from_prepare_error(
                 crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
             ],
             true,
+        ),
+        Class::AuthorityUnavailable => (
+            crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable,
+            vec![
+                crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                crate::HttpSessionRouteRecoveryAction::StartNewSession,
+                crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+            ],
+            true,
+        ),
+        Class::AuthorityJournalCorrupted => (
+            crate::HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted,
+            vec![
+                crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
+            ],
+            false,
         ),
         Class::SessionAlreadyActive => (
             crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive,

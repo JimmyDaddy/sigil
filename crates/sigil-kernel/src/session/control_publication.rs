@@ -4,6 +4,94 @@ use std::collections::BTreeSet;
 use super::*;
 use crate::{PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector};
 
+/// An explicit, source-bound public projection for one provider-visible session entry.
+///
+/// The caller provides the source position inside its original durable bundle. The session
+/// validates the typed source-to-DTO mapping before the writer sees either record, so a private
+/// entry can never become public through a generic serde fallback.
+#[derive(Debug, Clone)]
+pub struct SessionPublicEventProjectionV1 {
+    source_entry_index: usize,
+    event: crate::RunEvent,
+}
+
+impl SessionPublicEventProjectionV1 {
+    #[must_use]
+    pub fn assistant_message(source_entry_index: usize, message: ModelMessage) -> Self {
+        Self {
+            source_entry_index,
+            event: crate::RunEvent::AssistantMessage(message),
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(source_entry_index: usize, result: ToolResult) -> Self {
+        Self {
+            source_entry_index,
+            event: crate::RunEvent::ToolResult(result),
+        }
+    }
+
+    #[must_use]
+    pub fn usage_snapshot(source_entry_index: usize, usage: UsageStats) -> Self {
+        Self {
+            source_entry_index,
+            event: crate::RunEvent::Usage(usage),
+        }
+    }
+
+    /// Validates that the caller's public DTO is the explicit safe projection of its source.
+    fn validate_source(&self, entry: &SessionLogEntry) -> Result<()> {
+        validate_explicit_session_publication(entry, &self.public_event())
+    }
+
+    pub(crate) fn source_entry_index(&self) -> usize {
+        self.source_entry_index
+    }
+
+    pub(crate) fn public_event(&self) -> PublicRunEventKind {
+        self.event.clone().into()
+    }
+
+    pub(crate) fn into_run_event(self) -> crate::RunEvent {
+        self.event
+    }
+}
+
+pub(super) fn validate_explicit_session_publication(
+    entry: &SessionLogEntry,
+    event: &PublicRunEventKind,
+) -> Result<()> {
+    match (entry, event) {
+        (
+            SessionLogEntry::Assistant(source),
+            PublicRunEventKind::AssistantMessage { message: public },
+        ) if public.id == source.id
+            && public.content == source.content
+            && serde_json::to_value(&public.tool_calls)?
+                == serde_json::to_value(&source.tool_calls)?
+            && public.assistant_kind == source.assistant_kind =>
+        {
+            Ok(())
+        }
+        (SessionLogEntry::ToolResultV3(recorded), PublicRunEventKind::ToolResult { result }) => {
+            let display = recorded.display_view();
+            if result.call_id != recorded.call_id
+                || result.tool_name != recorded.tool_name
+                || result.content != display.preview
+            {
+                bail!("public tool result does not match its bounded durable display view");
+            }
+            Ok(())
+        }
+        (
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(source)),
+            PublicRunEventKind::Usage { usage: public },
+        ) if serde_json::to_value(public)? == serde_json::to_value(source)? => Ok(()),
+        _ => bail!("public session projection does not match its durable source type"),
+    }
+}
+
 /// Rebuildable projection of this Session's append-only entries, never an authority or log.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ControlPublicProjection {
@@ -73,6 +161,138 @@ pub(super) fn project_explicit_control(
 }
 
 impl Session {
+    /// Validates a provider-visible bundle before either the private-child fallback or the
+    /// public outbox path writes its first byte.
+    pub(crate) fn validate_session_publication_bundle(
+        &self,
+        entries: &[SessionLogEntry],
+        publications: &[SessionPublicEventProjectionV1],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            bail!("public session publication requires at least one source entry");
+        }
+        validate_session_entries_for_publication(entries, self)?;
+        let mut published_sources = BTreeSet::new();
+        for publication in publications {
+            if !published_sources.insert(publication.source_entry_index()) {
+                bail!("public session publication requires exactly one projection per source");
+            }
+            let source = entries
+                .get(publication.source_entry_index())
+                .context("public session publication source index is outside its bundle")?;
+            publication.validate_source(source)?;
+        }
+        Ok(())
+    }
+
+    /// Commits an existing provider-visible session-entry bundle and its explicit public DTOs in
+    /// one recoverable writer intent. Entries with no public projection remain domain-only and do
+    /// not consume a public sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a source/projection pair is invalid, the session is not durable, the
+    /// public run is stale, or writer recovery cannot prove the original complete bundle.
+    pub fn append_session_entries_with_public_outbox(
+        &mut self,
+        entries: Vec<SessionLogEntry>,
+        publications: Vec<SessionPublicEventProjectionV1>,
+        run_id: &str,
+        next_sequence: u64,
+    ) -> Result<(Vec<StoredEvent>, Vec<PublicEventOutboxEntryV1>)> {
+        if entries.is_empty()
+            || publications.is_empty()
+            || run_id.trim().is_empty()
+            || next_sequence == 0
+        {
+            bail!(
+                "public session publication requires entries, projections, and an active run sequence"
+            );
+        }
+        let store = self
+            .store
+            .as_ref()
+            .context("public session publication requires a durable session")?;
+        self.validate_session_publication_bundle(&entries, &publications)?;
+
+        let mut publications_by_source =
+            BTreeMap::<usize, Vec<SessionPublicEventProjectionV1>>::new();
+        for publication in publications {
+            publications_by_source
+                .entry(publication.source_entry_index())
+                .or_default()
+                .push(publication);
+        }
+
+        let mut candidate = self.control_public_projection.clone();
+        candidate.refresh(&self.entries)?;
+        let mut sequence = next_sequence;
+        let mut pending = Vec::with_capacity(entries.len() + publications_by_source.len());
+        let mut outbox = Vec::new();
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let domain_id = uuid::Uuid::new_v4().to_string();
+            let event_type = super::store::session_entry_event_type(entry);
+            pending.push(PendingStoredEvent {
+                event_type,
+                event_class: super::store::session_entry_event_class(event_type),
+                payload: serde_json::json!({ "session_log_entry": entry }),
+                event_id: Some(domain_id.clone()),
+                correlation_id: Some(domain_id.clone()),
+                causation_id: None,
+            });
+            for publication in publications_by_source
+                .remove(&entry_index)
+                .unwrap_or_default()
+            {
+                let public = PublicRunEvent::new(
+                    self.session_scope_id.clone(),
+                    run_id,
+                    sequence,
+                    publication.public_event(),
+                );
+                let public_event_id = format!(
+                    "application-public:{}:{run_id}:{sequence}",
+                    self.session_scope_id
+                );
+                let entry = PublicEventOutboxEntryV1 {
+                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    domain_event_id: domain_id.clone(),
+                    public_event_id: public_event_id.clone(),
+                    run_id: run_id.to_owned(),
+                    sequence,
+                    payload_digest: stable_event_hash(&serde_json::to_vec(&public)?),
+                    event: public,
+                };
+                if super::public_event_outbox::is_terminal_event(&entry.event.event) {
+                    bail!("session publication cannot create a run terminal");
+                }
+                pending.push(PendingStoredEvent {
+                    event_type: DurableEventType::PublicEventOutbox,
+                    event_class: EventClass::Critical,
+                    payload: serde_json::to_value(&entry)?,
+                    event_id: Some(public_event_id),
+                    correlation_id: Some(domain_id.clone()),
+                    causation_id: Some(domain_id.clone()),
+                });
+                outbox.push(entry);
+                sequence = sequence
+                    .checked_add(1)
+                    .context("public session publication sequence exhausted")?;
+            }
+        }
+        let events = store.append_control_publication(pending, run_id)?;
+        let domain_events = events
+            .into_iter()
+            .filter(|event| event.event_kind() != Some(DurableEventType::PublicEventOutbox))
+            .collect::<Vec<_>>();
+        self.bind_tool_artifacts_after_append(&entries, &domain_events);
+        self.entries.extend(entries);
+        candidate.refresh(&self.entries)?;
+        self.control_public_projection = candidate;
+        self.advance_durable_session_entry_count(&domain_events);
+        Ok((domain_events, outbox))
+    }
+
     /// Commits an explicitly observable control transition and its exact public DTOs in one
     /// existing writer append intent. Runtime proposes the next sequence; writer admission
     /// remains the sole durable frontier check. No adapter delivery occurs in this method.
@@ -168,9 +388,33 @@ impl Session {
     }
 }
 
-/// Validates the original source-to-DTO mapping on replay without creating missing events.
-/// Old controls without publications remain readable; a linked publication must be complete,
-/// adjacent to its source, and equal to the typed projection at that exact durable prefix.
+fn validate_session_entries_for_publication(
+    entries: &[SessionLogEntry],
+    session: &Session,
+) -> Result<()> {
+    for entry in entries {
+        match entry {
+            SessionLogEntry::ToolResultV3(result) => result.validate()?,
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => snapshot.validate()?,
+            SessionLogEntry::Control(control) => {
+                control.validate_durable_contract()?;
+                session.validate_user_input_controls(std::iter::once(control))?;
+                session.validate_plan_controls(std::iter::once(control))?;
+                if matches!(control, ControlEntry::ConversationInputPromoted(_)) {
+                    bail!(
+                        "conversation input promotion requires its dedicated critical append API"
+                    );
+                }
+            }
+            SessionLogEntry::User(_) | SessionLogEntry::Assistant(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Validates every source-linked public DTO on replay without creating missing events. Old
+/// controls without publications remain readable; a linked publication must be complete,
+/// adjacent to its source, and equal to its explicit typed projection at that durable prefix.
 pub(super) fn validate_control_publication_pairs(
     records: &[SessionStreamRecord],
     outbox: &PublicEventOutboxProjectionV1,
@@ -194,49 +438,76 @@ pub(super) fn validate_control_publication_pairs(
     for (index, record) in records.iter().enumerate() {
         super::public_event_outbox::apply_public_run_admission_record(&mut active_run_ids, record)?;
         let source = record.stored_event();
-        let Some(SessionLogEntry::Control(control)) = record.session_log_entry()? else {
+        let Some(source_entry) = record.session_log_entry()? else {
             continue;
         };
         let Some(publications) = linked.remove(source.event_id.as_str()) else {
             // A domain-only record may carry context without promising a public DTO. Preserve
             // that distinction when rebuilding old/private prefixes; only linked sources must
             // satisfy the stricter explicit-publication projection contract.
-            projector.project_control(&control)?;
+            if let SessionLogEntry::Control(control) = source_entry {
+                projector.project_control(&control)?;
+            }
             continue;
         };
-        let expected = project_explicit_control(&mut projector, &control)?;
-        if source.event_kind()
-            != Some(super::store::session_entry_event_type(
-                &SessionLogEntry::Control(control.clone()),
-            ))
-        {
-            bail!("public control source uses an incorrect durable event type");
-        }
-        if publications.len() != expected.len() {
-            bail!("public control publication is missing part of its source projection");
+        if source.event_kind() != Some(super::store::session_entry_event_type(&source_entry)) {
+            bail!("public session source uses an incorrect durable event type");
         }
         let run_id = &publications[0].run_id;
         if !active_run_ids.contains(run_id) {
-            bail!("public control publication source is outside its active durable run");
+            bail!("public session publication source is outside its active durable run");
         }
-        for (ordinal, (entry, expected)) in publications.iter().zip(expected).enumerate() {
+        let explicit = matches!(
+            &source_entry,
+            SessionLogEntry::Assistant(_)
+                | SessionLogEntry::ToolResultV3(_)
+                | SessionLogEntry::Control(ControlEntry::UsageSnapshot(_))
+        );
+        let expected = if explicit {
+            if publications.len() != 1 {
+                bail!("explicit public session projection must have exactly one DTO");
+            }
+            if let SessionLogEntry::Control(control) = &source_entry {
+                projector.project_control(control)?;
+            }
+            None
+        } else {
+            let SessionLogEntry::Control(control) = &source_entry else {
+                bail!("public session publication source has no explicit projection contract");
+            };
+            Some(project_explicit_control(&mut projector, control)?)
+        };
+        if let Some(expected) = expected.as_ref()
+            && publications.len() != expected.len()
+        {
+            bail!("public control publication is missing part of its source projection");
+        }
+        for (ordinal, entry) in publications.iter().enumerate() {
             let envelope = records
                 .get(index + ordinal + 1)
-                .context("public control publication is detached from its source")?
+                .context("public session publication is detached from its source")?
                 .stored_event();
             if envelope.event_id != entry.public_event_id
                 || envelope.causation_id.as_deref() != Some(source.event_id.as_str())
                 || envelope.correlation_id != source.correlation_id
                 || entry.event.session_id != source.session_id
                 || entry.run_id != *run_id
-                || serde_json::to_value(&entry.event.event)? != serde_json::to_value(expected)?
             {
-                bail!("public control publication does not match its exact source projection");
+                bail!("public session publication does not match its durable envelope");
+            }
+            if let Some(expected) = expected.as_ref() {
+                if serde_json::to_value(&entry.event.event)?
+                    != serde_json::to_value(&expected[ordinal])?
+                {
+                    bail!("public control publication does not match its exact source projection");
+                }
+            } else {
+                validate_explicit_session_publication(&source_entry, &entry.event.event)?;
             }
         }
     }
     if !linked.is_empty() {
-        bail!("public control publication has no durable source control");
+        bail!("public session publication has no durable source entry");
     }
     Ok(())
 }

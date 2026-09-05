@@ -2284,6 +2284,10 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
                 "connection_config_invalid"
             }
             crate::HttpSessionRouteRecoveryCode::ProviderUnavailable => "provider_unavailable",
+            crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable => "authority_unavailable",
+            crate::HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted => {
+                "authority_journal_corrupted"
+            }
             crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
             crate::HttpSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
             crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",

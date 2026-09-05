@@ -755,6 +755,17 @@ async fn request_context_resolver_without_service_uses_bounded_fallback() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn provider_only_context_resolver_never_reads_local_sources() -> Result<()> {
+    let resolver = RequestContextResolver::provider_only();
+
+    let context = resolver.resolve("summarize the workspace").await?;
+
+    assert!(context.items.is_empty());
+    assert!(!resolver.has_shared_code_intelligence());
+    Ok(())
+}
+
 #[test]
 fn safe_context_sources_record_lsp_timeout_as_excluded_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;

@@ -12,7 +12,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, VerifiedExecutionBundleViewV1};
@@ -892,6 +895,71 @@ pub struct RuntimeManagedCommandExecutionRouteV1 {
     process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 }
 
+/// Bridges the pre-spawn artifact handle into the sandbox's concurrent readers. The bridge is
+/// explicitly closeable because a descendant-held pipe may outlive the bounded receipt path;
+/// late chunks then fail closed instead of mutating a finalized sink.
+struct ManagedOutputCaptureBridge {
+    handle: Mutex<Option<sigil_kernel::ExecutionCaptureHandle>>,
+    failed: AtomicBool,
+    closed: AtomicBool,
+}
+
+impl ManagedOutputCaptureBridge {
+    fn new(handle: sigil_kernel::ExecutionCaptureHandle) -> Self {
+        Self {
+            handle: Mutex::new(Some(handle)),
+            failed: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn take_handle(&self) -> Option<sigil_kernel::ExecutionCaptureHandle> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.handle.lock().ok()?.take()
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+}
+
+impl sigil_sandbox::managed::ManagedOutputCaptureSinkV1 for ManagedOutputCaptureBridge {
+    fn write_chunk(
+        &self,
+        channel: ManagedProcessOutputChannelV1,
+        bytes: &[u8],
+    ) -> Result<(), sigil_kernel::managed_execution::ManagedExecutionErrorV1> {
+        if self.closed.load(Ordering::SeqCst) {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
+        }
+        let mut handle = self.handle.lock().map_err(|_| {
+            self.failed.store(true, Ordering::SeqCst);
+            sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain
+        })?;
+        if self.closed.load(Ordering::SeqCst) {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
+        }
+        let stream = match channel {
+            ManagedProcessOutputChannelV1::Stdout => ToolOutputStreamV1::Stdout,
+            ManagedProcessOutputChannelV1::Stderr => ToolOutputStreamV1::Stderr,
+            ManagedProcessOutputChannelV1::Pty => ToolOutputStreamV1::Combined,
+        };
+        let Some(handle) = handle.as_mut() else {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
+        };
+        if let Err(error) = handle.sink.write_stream(stream, bytes) {
+            handle.sink.mark_process_write_failed();
+            self.failed.store(true, Ordering::SeqCst);
+            let _ = error;
+            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for RuntimeManagedCommandExecutionRouteV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1298,7 +1366,7 @@ impl RuntimeManagedCommandExecutionRouteV1 {
     async fn execute_managed(
         &self,
         mut request: ExecutionRequest,
-        _cancellation: Option<sigil_kernel::RunCancellationHandle>,
+        cancellation: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<ExecutionReceipt> {
         let cwd_subject_ref = Self::cwd_subject(&request);
         let argv = std::iter::once(OsString::from(&request.program))
@@ -1336,6 +1404,10 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             pty_size: None,
             environment,
         };
+        let capture_bridge = request
+            .capture
+            .take()
+            .map(|handle| Arc::new(ManagedOutputCaptureBridge::new(handle)));
         let proof = self.broker.seal_execution_proof(
             sigil_kernel::capability_issuer::ProofKindV1::ExecutionOneShot,
             "builtin-command",
@@ -1365,7 +1437,15 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         )
         .with_process_inventory(Arc::clone(process_inventory))
         .with_one_shot_launcher(launcher);
-        let managed_result = service.execute_once(bundle, managed_request).await;
+        let service = if let Some(capture_bridge) = capture_bridge.as_ref() {
+            service.with_output_capture_sink(Arc::clone(capture_bridge)
+                as Arc<dyn sigil_sandbox::managed::ManagedOutputCaptureSinkV1>)
+        } else {
+            service
+        };
+        let managed_result = service
+            .execute_once_with_cancellation(bundle, managed_request, cancellation)
+            .await;
         let mut managed_receipt = match managed_result {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1390,25 +1470,31 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => Some(code),
             _ => None,
         };
-        let capture_outcome = request.capture.take().map(|capture| {
-            let mut sink = capture.sink;
-            let stdout_result = sink.write_stream(
-                ToolOutputStreamV1::Stdout,
-                &process.stdout_summary.retained_payload,
-            );
-            let stderr_result = sink.write_stream(
-                ToolOutputStreamV1::Stderr,
-                &process.stderr_summary.retained_payload,
-            );
-            if stdout_result.is_err() || stderr_result.is_err() {
-                sink.mark_process_write_failed();
-            }
-            ExecutionCaptureOutcome {
-                sink,
-                source: source_completeness(&process.termination),
-                observed_bytes: output.combined_total_bytes,
-                reader_failed: false,
-            }
+        let capture_outcome = capture_bridge.and_then(|capture_bridge| {
+            let sink_failed = capture_bridge.failed();
+            capture_bridge.take_handle().map(|mut capture| {
+                // The bounded execution summary is a preview only. If the managed reader hit
+                // its cap, never publish that preview as a complete durable artifact; the sink
+                // records unavailable storage and the caller can recover from the typed receipt.
+                if process.stdout_summary.truncated
+                    || process.stderr_summary.truncated
+                    || sink_failed
+                {
+                    capture.sink.mark_process_write_failed();
+                }
+                let source = if process.stdout_summary.truncated || process.stderr_summary.truncated
+                {
+                    sigil_kernel::ToolSourceCompletenessV1::ResourceLimited
+                } else {
+                    source_completeness(&process.termination)
+                };
+                ExecutionCaptureOutcome {
+                    sink: capture.sink,
+                    source,
+                    observed_bytes: output.combined_total_bytes,
+                    reader_failed: false,
+                }
+            })
         });
         Ok(ExecutionReceipt {
             backend: ExecutionBackendKind::Local,

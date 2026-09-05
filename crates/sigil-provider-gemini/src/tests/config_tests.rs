@@ -59,7 +59,7 @@ fn default_config_has_stable_endpoint_and_model() {
 }
 
 #[test]
-fn resolved_config_uses_sigil_env_and_ignores_provider_envs() -> anyhow::Result<()> {
+fn resolved_config_prefers_sigil_env_then_gemini_and_google_aliases() -> anyhow::Result<()> {
     let _guard = test_env::lock();
     let base = GeminiProviderConfig::default();
 
@@ -86,7 +86,7 @@ fn resolved_config_uses_sigil_env_and_ignores_provider_envs() -> anyhow::Result<
             ("GOOGLE_API_KEY", "google-key"),
         ]);
         let resolved = base.clone().resolved()?;
-        assert_eq!(resolved.api_key, None);
+        assert_eq!(resolved.api_key.as_deref(), Some("gemini-key"));
     }
 
     {
@@ -96,7 +96,7 @@ fn resolved_config_uses_sigil_env_and_ignores_provider_envs() -> anyhow::Result<
             ("GOOGLE_API_KEY", "google-key"),
         ]);
         let resolved = base.resolved()?;
-        assert_eq!(resolved.api_key, None);
+        assert_eq!(resolved.api_key.as_deref(), Some("google-key"));
     }
     Ok(())
 }

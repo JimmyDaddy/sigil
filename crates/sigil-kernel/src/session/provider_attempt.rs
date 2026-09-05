@@ -5,8 +5,12 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::writer::PendingStoredEvent;
 use super::*;
-use crate::{EventId, SessionId, projection_apply_decision};
+use crate::{
+    EventId, ProviderOutputPublicationIntentV1, PublicRunEvent, SessionId,
+    projection_apply_decision,
+};
 
 /// Schema version for the provider physical-attempt direct payloads.
 pub const PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION: u16 = 3;
@@ -1117,9 +1121,14 @@ impl ProviderPhysicalAttemptAudit {
         &mut self,
         session: &mut Session,
         control: ControlEntry,
-    ) -> Result<()> {
+        publication: Option<&ProviderOutputPublicationIntentV1>,
+    ) -> Result<Vec<PublicEventOutboxEntryV1>> {
         let Self::Durable(audit) = self else {
-            return session.append_control(control);
+            if publication.is_some() {
+                bail!("provider output publication requires a durable physical attempt");
+            }
+            session.append_control(control)?;
+            return Ok(Vec::new());
         };
         if audit.terminal_recorded {
             bail!("provider physical-attempt output cannot follow its terminal");
@@ -1134,6 +1143,85 @@ impl ProviderPhysicalAttemptAudit {
         let expected_attempt_id = audit.physical_attempt_id.clone();
         let expected_start_event_id = audit.start_event_id.clone();
         let expected_causation_id = audit.last_causation_event_id.clone();
+        if let Some(publication) = publication.filter(|publication| publication.is_public()) {
+            let projection = publication
+                .projection()
+                .cloned()
+                .context("public provider output is missing its typed projection")?;
+            session.validate_session_publication_bundle(
+                std::slice::from_ref(&entry),
+                std::slice::from_ref(&projection),
+            )?;
+            let run_id = publication
+                .run_id()
+                .context("public provider output is missing its run identity")?
+                .to_owned();
+            let sequence = publication
+                .next_sequence()
+                .context("public provider output is missing its sequence")?;
+            let public = PublicRunEvent::new(
+                session.session_scope_id().to_owned(),
+                run_id.clone(),
+                sequence,
+                projection.public_event(),
+            );
+            let public_event_id = format!(
+                "application-public:{}:{run_id}:{sequence}",
+                session.session_scope_id()
+            );
+            let outbox = PublicEventOutboxEntryV1 {
+                schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                domain_event_id: event_id.clone(),
+                public_event_id: public_event_id.clone(),
+                run_id: run_id.clone(),
+                sequence,
+                payload_digest: stable_event_hash(&serde_json::to_vec(&public)?),
+                event: public,
+            };
+            if super::public_event_outbox::is_terminal_event(&outbox.event.event) {
+                bail!("provider output publication cannot create a run terminal");
+            }
+            let pending = vec![
+                PendingStoredEvent {
+                    event_type,
+                    event_class: session_entry_event_class(event_type),
+                    payload,
+                    event_id: Some(event_id.clone()),
+                    correlation_id: Some(expected_start_event_id.clone()),
+                    causation_id: Some(expected_causation_id.clone()),
+                },
+                PendingStoredEvent {
+                    event_type: DurableEventType::PublicEventOutbox,
+                    event_class: EventClass::Critical,
+                    payload: serde_json::to_value(&outbox)?,
+                    event_id: Some(public_event_id),
+                    correlation_id: Some(expected_start_event_id.clone()),
+                    causation_id: Some(event_id.clone()),
+                },
+            ];
+            let expected_attempt_id = audit.physical_attempt_id.clone();
+            let guard = PhysicalAttemptAppendGuard::Output {
+                physical_attempt_id: expected_attempt_id,
+                start_event_id: expected_start_event_id,
+                causation_event_id: expected_causation_id,
+            };
+            let appended = tokio::task::spawn_blocking(move || {
+                store.append_control_publication_if_records(pending, &run_id, |records| {
+                    guard.validate(records)
+                })
+            })
+            .await
+            .context("provider output publication durable append task failed")??
+            .context("provider output publication durable append was not attempted")?;
+            let source = appended
+                .iter()
+                .find(|event| event.event_id == event_id)
+                .context("provider output publication lost its durable source identity")?;
+            audit.last_causation_event_id = source.event_id.clone();
+            audit.durable_output_event_ids.push(source.event_id.clone());
+            session.record_durably_appended_control(control);
+            return Ok(vec![outbox]);
+        }
         let appended = tokio::task::spawn_blocking(move || {
             store.append_event_if_with_identity(
                 event_type,
@@ -1167,7 +1255,7 @@ impl ProviderPhysicalAttemptAudit {
         audit.last_causation_event_id = appended.event_id.clone();
         audit.durable_output_event_ids.push(appended.event_id);
         session.record_durably_appended_control(control);
-        Ok(())
+        Ok(Vec::new())
     }
 
     pub(crate) async fn finish(
@@ -1315,6 +1403,7 @@ pub async fn generate_semantic_compaction(
                         .append_output_control(
                             session,
                             ControlEntry::SemanticCompactionUsageSnapshot(usage.clone()),
+                            None,
                         )
                         .await?;
                     latest_usage = Some(usage);

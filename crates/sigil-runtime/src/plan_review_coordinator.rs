@@ -323,6 +323,56 @@ impl CurrentSchemaPlanReviewChildResourceBundleV1 {
         Arc::clone(&self.tool_authority)
     }
 
+    /// Verifies that every capability in this bundle belongs to the same deterministic child
+    /// admission.  The coordinator must not let a custom provisioner substitute a session log,
+    /// artifact facade, or authority generation from another child scope.
+    fn validate_for(
+        &self,
+        request: &PlanReviewRunRequest,
+        kind: PlanReviewChildResourceKindV1,
+        ordinal: u32,
+    ) -> Result<()> {
+        validate_managed_plan_review_request_binding(request, kind, ordinal)?;
+        validate_authority_generation(self.authority_generation)?;
+
+        let expected_scope_id = format!("{}-{}", request.child_logical_run_id(), kind.tag());
+        if self.scope_id != expected_scope_id {
+            bail!(
+                "managed plan-review child bundle scope does not match its request: expected {expected_scope_id}"
+            );
+        }
+
+        let expected_key = plan_review_child_resource_key(request, kind, ordinal);
+        let expected_session_log_dir = self
+            .session_log_lease
+            .writer
+            .managed_named_leaf_path(StorageWriterChannelV1::SessionLog, &expected_key)
+            .map_err(|error| {
+                anyhow!("managed child session-log path validation failed: {error}")
+            })?;
+        let expected_session_log_path = self.session_log_lease.path().join("records.jsonl");
+        if self.session_log_path != expected_session_log_path
+            || self.session_log_lease.path() != expected_session_log_dir
+        {
+            bail!("managed plan-review child bundle session-log path is not authority-bound");
+        }
+        if self.artifact_store.session_log_path() != self.session_log_path {
+            bail!("managed plan-review child artifact store is bound to another session log");
+        }
+        if self.artifact_store.session_scope_id_hash()
+            != sigil_kernel::stable_event_hash(self.scope_id.as_bytes())
+        {
+            bail!("managed plan-review child artifact store scope does not match its bundle");
+        }
+        if !Arc::ptr_eq(
+            &self.session_log_lease.writer,
+            &self.artifact_lease.writer(),
+        ) {
+            bail!("managed plan-review child resources use different authority writers");
+        }
+        Ok(())
+    }
+
     /// Settles both child namespaces explicitly. `Drop` remains only a last-resort fallback for
     /// cancellation, panic or process teardown; normal coordinator exits must surface settlement
     /// failure to the caller so the parent can record a typed terminal failure.
@@ -473,6 +523,8 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
         kind: PlanReviewChildResourceKindV1,
         ordinal: u32,
     ) -> Result<CurrentSchemaPlanReviewChildResourceBundleV1> {
+        validate_managed_plan_review_request_binding(request, kind, ordinal)?;
+        validate_authority_generation(self.authority_generation)?;
         let key = plan_review_child_resource_key(request, kind, ordinal);
         let session_log_lease =
             ManagedPlanReviewSessionLogLeaseV1::acquire(Arc::clone(&self.writer), &key)?;
@@ -501,7 +553,7 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
                 };
             }
         };
-        Ok(CurrentSchemaPlanReviewChildResourceBundleV1 {
+        let bundle = CurrentSchemaPlanReviewChildResourceBundleV1 {
             session_log_path,
             scope_id,
             authority_generation: self.authority_generation,
@@ -509,13 +561,22 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
             tool_authority: Arc::clone(&self.tool_authority),
             session_log_lease,
             artifact_lease,
-        })
+        };
+        if let Err(error) = bundle.validate_for(request, kind, ordinal) {
+            return combine_child_resource_settlement(Err(error), bundle.finish());
+        }
+        Ok(bundle)
     }
 
     fn recover_research_session(
         &self,
         request: &PlanReviewRunRequest,
     ) -> Result<CurrentSchemaPlanReviewRecoveredSessionV1> {
+        validate_managed_plan_review_request_binding(
+            request,
+            PlanReviewChildResourceKindV1::Research,
+            0,
+        )?;
         let key =
             plan_review_child_resource_key(request, PlanReviewChildResourceKindV1::Research, 0);
         let session_log_lease = self
@@ -532,6 +593,11 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
         &self,
         request: &PlanReviewRunRequest,
     ) -> Result<CurrentSchemaPlanReviewExistingResearchSessionV1> {
+        validate_managed_plan_review_request_binding(
+            request,
+            PlanReviewChildResourceKindV1::Research,
+            0,
+        )?;
         let key =
             plan_review_child_resource_key(request, PlanReviewChildResourceKindV1::Research, 0);
         let session_log_lease = self
@@ -556,6 +622,48 @@ fn plan_review_child_resource_key(
         kind.tag(),
         ordinal
     )
+}
+
+fn validate_authority_generation(
+    generation: sigil_kernel::resource::AuthorityGeneration,
+) -> Result<()> {
+    if generation.epoch == 0
+        || !generation
+            .instance_hash
+            .as_bytes()
+            .iter()
+            .any(|byte| *byte != 0)
+    {
+        bail!("managed plan-review child bundle has an incomplete authority generation");
+    }
+    Ok(())
+}
+
+fn validate_managed_plan_review_request_binding(
+    request: &PlanReviewRunRequest,
+    kind: PlanReviewChildResourceKindV1,
+    ordinal: u32,
+) -> Result<()> {
+    let expected_child_session_ref =
+        plan_review_child_session_ref(&request.plan_review_id, &request.attempt_id);
+    if request.child_session_ref != expected_child_session_ref {
+        bail!("managed plan-review request has a non-canonical child session reference");
+    }
+    let expected_finalizer_session_ref =
+        plan_review_finalizer_session_ref(&request.plan_review_id, &request.attempt_id, 1);
+    if request.finalizer_session_ref != expected_finalizer_session_ref {
+        bail!("managed plan-review request has a non-canonical finalizer session reference");
+    }
+    match kind {
+        PlanReviewChildResourceKindV1::Research if ordinal == 0 => Ok(()),
+        PlanReviewChildResourceKindV1::Finalizer if ordinal > 0 => Ok(()),
+        PlanReviewChildResourceKindV1::Research => {
+            bail!("managed plan-review research bundle must use ordinal zero")
+        }
+        PlanReviewChildResourceKindV1::Finalizer => {
+            bail!("managed plan-review finalizer bundle must use a positive ordinal")
+        }
+    }
 }
 
 impl PlanReviewRunRequest {
@@ -1274,24 +1382,56 @@ impl PlanReviewCoordinator {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        // A revision's `Started` record remains owned by its revision execution protocol. An
-        // ordinary parent attempt instead crosses the supplied handler commit boundary so an
-        // application bridge can atomically append its source and public outbox entry.
-        if request.revision_request_id.is_some() {
-            Self::ensure_revision_attempt_started(parent_session, request, now_ms())?;
-        } else {
-            Self::ensure_attempt_started(parent_session, request, handler, now_ms())?;
+        if child_resource_provisioner.is_some() {
+            validate_managed_plan_review_request_binding(
+                request,
+                PlanReviewChildResourceKindV1::Research,
+                0,
+            )?;
+            if request.source_turn.session_scope_id != parent_session.session_scope_id() {
+                bail!("managed plan-review request source turn belongs to another parent session");
+            }
         }
-        // The host owns plan acceptance authority: the plan review run is always read-only,
-        // regardless of the enclosing run's permission mode.
-        let mut options = options;
-        options.permission_config.mode = sigil_kernel::PermissionMode::ReadOnly;
+
+        // Admit and validate every child capability before recording the parent Started state.
+        // A failed managed admission must not leave a parent attempt claiming that execution
+        // began, and must never reach provider/tool dispatch.
         let child_bundle = child_resource_provisioner
             .as_ref()
             .map(|provisioner| {
                 provisioner.provision(request, PlanReviewChildResourceKindV1::Research, 0)
             })
             .transpose()?;
+        let child_bundle = match child_bundle {
+            Some(bundle) => {
+                if let Err(error) =
+                    bundle.validate_for(request, PlanReviewChildResourceKindV1::Research, 0)
+                {
+                    return combine_child_resource_settlement(Err(error), bundle.finish());
+                }
+                Some(bundle)
+            }
+            None => None,
+        };
+
+        // A revision's `Started` record remains owned by its revision execution protocol. An
+        // ordinary parent attempt instead crosses the supplied handler commit boundary so an
+        // application bridge can atomically append its source and public outbox entry.
+        let started = if request.revision_request_id.is_some() {
+            Self::ensure_revision_attempt_started(parent_session, request, now_ms())
+        } else {
+            Self::ensure_attempt_started(parent_session, request, handler, now_ms())
+        };
+        if let Err(error) = started {
+            return combine_child_resource_settlement(
+                Err(error),
+                child_bundle.map(|bundle| bundle.finish()).unwrap_or(Ok(())),
+            );
+        }
+        // The host owns plan acceptance authority: the plan review run is always read-only,
+        // regardless of the enclosing run's permission mode.
+        let mut options = options;
+        options.permission_config.mode = sigil_kernel::PermissionMode::ReadOnly;
         let outcome = async {
         let mut child_session =
             build_plan_review_child_session(parent_session, request, child_bundle.as_ref())?;
@@ -5434,9 +5574,10 @@ fn route_and_credential_probe(root_config: &RootConfig) -> (bool, bool) {
             crate::provider_connections::CredentialRefConfig::Environment { name },
         ) => {
             let environment = crate::provider_connections::ProcessCredentialEnvironment;
-            <crate::provider_connections::ProcessCredentialEnvironment as crate::provider_connections::CredentialEnvironment>::read(
-                &environment,
+            crate::provider_connections::read_configured_environment_credential(
+                &connection.config,
                 name,
+                &environment,
             )
             .is_some()
         }

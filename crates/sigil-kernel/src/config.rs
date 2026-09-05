@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::Write,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(not(unix))]
@@ -39,6 +39,7 @@ pub const CONFIG_VERSION_V2: u32 = 2;
 pub const SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_REQUEST_TIMEOUT_SECS";
 pub const SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS";
 pub const SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS";
+const CONFIG_UPDATE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
 #[derive(Clone, Serialize, Deserialize)]
@@ -547,7 +548,7 @@ const fn default_web_bundled_search_enabled() -> bool {
     true
 }
 
-/// Provider-neutral timeout settings for model requests.
+/// Provider-neutral settings for model requests.
 ///
 /// This config controls how long Sigil waits for model transport phases. It is intentionally
 /// separate from provider blocks so users do not need to configure the same timeout per provider.
@@ -560,6 +561,11 @@ pub struct ModelRequestConfig {
     pub stream_idle_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_total_timeout_secs: Option<u64>,
+    /// Optional default output-token ceiling for ordinary agent runs.
+    ///
+    /// A missing value preserves the provider's automatic output budget behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Internal storage for the provider-neutral durable recovery policy. `RootConfig` maps the
     /// public `[recovery.provider]` table here at parse/save boundaries so existing runtime
     /// consumers retain one coherent request-transport policy.
@@ -573,6 +579,7 @@ impl Default for ModelRequestConfig {
             request_timeout_secs: default_model_request_timeout_secs(),
             stream_idle_timeout_secs: default_model_request_stream_idle_timeout_secs(),
             stream_total_timeout_secs: None,
+            max_output_tokens: None,
             provider_turn_recovery: ProviderTurnRecoveryConfig::default(),
         }
     }
@@ -609,6 +616,13 @@ impl ModelRequestConfig {
     /// the delay bounds are internally inconsistent.
     pub fn provider_turn_recovery_policy(&self) -> Result<ProviderTurnRecoveryPolicyV1> {
         self.provider_turn_recovery.to_policy()
+    }
+
+    fn validate_max_output_tokens(&self) -> Result<()> {
+        if self.max_output_tokens == Some(0) {
+            anyhow::bail!("model_request.max_output_tokens must be greater than 0");
+        }
+        Ok(())
     }
 }
 
@@ -1379,8 +1393,8 @@ impl RootConfig {
     pub fn save_if_unchanged(&self, path: &Path, expected: &Self) -> Result<()> {
         let lock = ConfigUpdateLockGuard::acquire(path)?;
         let live = Self::load(path)?;
-        let expected = expected.render_persisted_toml()?;
-        let live = live.render_persisted_toml()?;
+        let expected = expected.persisted_toml()?;
+        let live = live.persisted_toml()?;
         anyhow::ensure!(
             expected == live,
             "config changed since it was loaded; reload and retry"
@@ -1413,12 +1427,17 @@ impl RootConfig {
             lock.config_path == path,
             "config update lock does not match publication path"
         );
-        let rendered = self.render_persisted_toml()?;
+        let rendered = self.persisted_toml()?;
         atomic_publish_private_file(path, rendered.as_bytes())
             .with_context(|| format!("failed to write config at {}", path.display()))
     }
 
-    fn render_persisted_toml(&self) -> Result<String> {
+    /// Renders the exact TOML representation used by durable config publication.
+    ///
+    /// Boot/recovery code uses this to bind an interactive, reviewed config snapshot to the
+    /// bytes that are actually on disk. Keeping the renderer here avoids a second serializer
+    /// silently producing a different source representation.
+    pub fn persisted_toml(&self) -> Result<String> {
         let mut root = toml::Value::try_from(self.clone())
             .context("failed to serialize root config to toml")?;
         let root_table = root
@@ -1481,6 +1500,7 @@ impl RootConfig {
             self.agent.connection.is_some(),
             "config_version = {CONFIG_VERSION_V2} requires [agent].connection"
         );
+        self.model_request.validate_max_output_tokens()?;
         self.model_request.provider_turn_recovery_policy()?;
         for (name, role) in self.task.role_configs() {
             anyhow::ensure!(
@@ -1580,12 +1600,27 @@ impl ConfigUpdateLockGuard {
             secure_private_path_permissions(&lock_path)?;
             file
         };
-        file.lock_exclusive().with_context(|| {
-            format!(
-                "failed to acquire config update lock {}",
-                lock_path.display()
-            )
-        })?;
+        let deadline = Instant::now() + CONFIG_UPDATE_LOCK_TIMEOUT;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to acquire config update lock {} within {:?}",
+                            lock_path.display(),
+                            CONFIG_UPDATE_LOCK_TIMEOUT
+                        )
+                    });
+                }
+            }
+        }
         Ok(Self {
             config_path: config_path.to_path_buf(),
             file,
@@ -1655,7 +1690,7 @@ fn open_config_update_lock_at(
 /// Atomically publishes one private local-state file using the same path, permission, no-follow,
 /// durability, and Windows replacement guarantees as the root configuration.
 ///
-/// The caller owns serialization and must create any missing parent hierarchy before calling.
+/// The function securely creates any missing parent hierarchy before publication.
 ///
 /// # Errors
 ///

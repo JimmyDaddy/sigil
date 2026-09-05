@@ -4,8 +4,9 @@ use std::{
 };
 
 use crate::{
-    SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV, SIGIL_BETA_BASE_URL_ENV,
-    SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV, SIGIL_USER_ID_STRATEGY_ENV,
+    DEEPSEEK_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV, SIGIL_BASE_URL_ENV,
+    SIGIL_BETA_BASE_URL_ENV, SIGIL_FIM_MODEL_ENV, SIGIL_STRICT_TOOLS_MODE_ENV,
+    SIGIL_USER_ID_STRATEGY_ENV,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -18,8 +19,9 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
 }
 
 pub(crate) fn with_clean_provider_env<T>(run: impl FnOnce() -> T) -> T {
-    const NAMES: [&str; 7] = [
+    const NAMES: [&str; 8] = [
         SIGIL_API_KEY_ENV,
+        DEEPSEEK_API_KEY_ENV,
         SIGIL_BASE_URL_ENV,
         SIGIL_BETA_BASE_URL_ENV,
         SIGIL_ANTHROPIC_BASE_URL_ENV,
@@ -39,13 +41,14 @@ pub(crate) fn with_clean_provider_env<T>(run: impl FnOnce() -> T) -> T {
 }
 
 struct ProviderEnvRestore {
-    previous: [Option<OsString>; 7],
+    previous: [Option<OsString>; 8],
 }
 
 impl Drop for ProviderEnvRestore {
     fn drop(&mut self) {
-        const NAMES: [&str; 7] = [
+        const NAMES: [&str; 8] = [
             SIGIL_API_KEY_ENV,
+            DEEPSEEK_API_KEY_ENV,
             SIGIL_BASE_URL_ENV,
             SIGIL_BETA_BASE_URL_ENV,
             SIGIL_ANTHROPIC_BASE_URL_ENV,

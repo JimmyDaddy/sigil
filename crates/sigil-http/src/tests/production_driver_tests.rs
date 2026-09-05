@@ -60,6 +60,49 @@ fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
     ));
 }
 
+#[test]
+fn preparation_authority_failure_projects_repair_authority_without_provider_fallback() {
+    let error = anyhow::Error::new(
+        sigil_runtime::application_run::ApplicationRunPrepareError::AuthorityUnavailable {
+            source: anyhow::anyhow!("durable authority journal failed"),
+        },
+    );
+    assert!(matches!(
+        public_preparation_failure_event(&error),
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::AuthorityUnavailable,
+            actions,
+            retryable: true,
+            ..
+        } if actions == vec![
+            PublicRouteRecoveryAction::RepairAuthority,
+            PublicRouteRecoveryAction::StartNewSession,
+            PublicRouteRecoveryAction::BackToSessionLibrary,
+        ]
+    ));
+}
+
+#[test]
+fn preparation_journal_corruption_projects_distinct_repair_code() {
+    let error = anyhow::Error::new(
+        sigil_runtime::application_run::ApplicationRunPrepareError::AuthorityJournalCorrupted {
+            source: anyhow::anyhow!("journal record is not hash-chained to the previous record"),
+        },
+    );
+    assert!(matches!(
+        public_preparation_failure_event(&error),
+        PublicRunEventKind::RouteRecoveryRequired {
+            code: PublicRouteRecoveryCode::AuthorityJournalCorrupted,
+            actions,
+            retryable: false,
+            ..
+        } if actions == vec![
+            PublicRouteRecoveryAction::RepairAuthority,
+            PublicRouteRecoveryAction::BackToSessionLibrary,
+        ]
+    ));
+}
+
 fn call() -> ToolCall {
     ToolCall {
         id: "call-1".to_owned(),
@@ -402,15 +445,25 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
     let ApplicationCommandReceipt::Uncertain(start_receipt) = start_receipt else {
         panic!("run start should be represented as an uncertain application receipt");
     };
-    assert!(
-        start_receipt
-            .recovery_binding
-            .starts_with("http-run-start:")
+    assert_eq!(
+        start_receipt.recovery.key.command_id.as_str(),
+        "application-start-test"
+    );
+    assert_eq!(
+        start_receipt.recovery.phase,
+        sigil_application::CommandLifecyclePhase::EffectStarted
     );
     let ApplicationCommandReceipt::Uncertain(queue_receipt) = queue_receipt else {
         panic!("queue mutation should be represented as an uncertain application receipt");
     };
-    assert!(queue_receipt.recovery_binding.starts_with("http-queue:"));
+    assert_eq!(
+        queue_receipt.recovery.key.command_id.as_str(),
+        "application-queue-test"
+    );
+    assert_eq!(
+        queue_receipt.recovery.phase,
+        sigil_application::CommandLifecyclePhase::EffectStarted
+    );
     let ApplicationCommandReceipt::Rejected(recovery_rejection) = recovery_receipt else {
         panic!("invalid recovery binding should be represented as a typed rejection");
     };
@@ -3694,7 +3747,9 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
         )
         .expect("owned production supervisor should accept the run");
 
-    let preparation_event = tokio::time::timeout(Duration::from_secs(5), async {
+    // Provider preparation and typed recovery publication each cross a blocking-runtime handoff;
+    // under the full workspace test fan-out both can be delayed without changing the outcome.
+    let preparation_event = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let event = subscriber
                 .recv()

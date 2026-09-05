@@ -4140,6 +4140,12 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
     let plan_version = task
         .latest_plan_version
         .ok_or_else(|| anyhow!("task final-answer reconciliation has no accepted plan"))?;
+    let completion = projection
+        .evaluate_root_terminal(task_id, TaskRunStatus::Completed, None)
+        .ok_or_else(|| anyhow!("task disappeared during final-answer reconciliation"))?;
+    if !completion.allows_completed() {
+        return Ok(false);
+    }
     let request = SequentialTaskRequest {
         task_id: task.task_id.clone(),
         parent_session_ref: task.parent_session_ref.clone(),

@@ -98,7 +98,7 @@ impl SafeText {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ApplicationScope {
     pub application_instance: ApplicationInstanceId,
     pub authenticated_subject: AuthenticatedSubject,
@@ -870,6 +870,7 @@ impl CommandAdmissionContext {
     pub fn reservation_key(&self, command_id: &ApplicationCommandId) -> CommandReservationKey {
         CommandReservationKey {
             application_instance: self.scope.application_instance.clone(),
+            authority_scope: self.scope.clone(),
             principal: self.principal.clone(),
             client_epoch: self.client_epoch,
             command_id: command_id.clone(),
@@ -880,9 +881,25 @@ impl CommandAdmissionContext {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CommandReservationKey {
     pub application_instance: ApplicationInstanceId,
+    /// The durable authority scope, not a live connection or selected-session fallback.
+    pub authority_scope: ApplicationScope,
     pub principal: AuthenticatedSubject,
     pub client_epoch: u64,
     pub command_id: ApplicationCommandId,
+}
+
+impl CommandReservationKey {
+    /// Validates the durable identity injected by the trusted application composition root.
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.application_instance != self.authority_scope.application_instance
+            || self.principal != self.authority_scope.authenticated_subject
+            || self.client_epoch == 0
+            || self.command_id.as_str().is_empty()
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(())
+    }
 }
 
 impl ApplicationCommandRequest {
@@ -904,22 +921,39 @@ impl ApplicationCommandRequest {
 }
 
 /// Computes the canonical command fingerprint used by application adapters.
+///
+/// The command id and durable client epoch are part of [`CommandReservationKey`], while
+/// correlation and connection identity are delivery concerns. They therefore cannot change the
+/// payload identity of an already admitted command.
 pub fn command_fingerprint(
     request: &ApplicationCommandRequest,
 ) -> Result<String, ApplicationError> {
     request.validate()?;
     #[derive(Serialize)]
     struct FingerprintInput<'a> {
-        envelope: &'a ApplicationCommandEnvelope,
+        schema_version: u16,
+        command: &'a ApplicationCommand,
+        expected_frontier: &'a ExpectedFrontier,
+        settlement: EffectSettlementClass,
         principal: &'a AuthenticatedSubject,
-        client_epoch: u64,
     }
-    let bytes = serde_json::to_vec(&FingerprintInput {
-        envelope: &request.envelope,
+    let value = serde_json::to_value(FingerprintInput {
+        schema_version: request.envelope.schema_version,
+        command: &request.envelope.command,
+        expected_frontier: &request.envelope.expected_frontier,
+        settlement: request.envelope.command.policy().settlement,
         principal: &request.admission.principal,
-        client_epoch: request.admission.client_epoch,
     })
     .map_err(|_| {
+        ApplicationError::InvalidRequest("command could not be canonicalized".to_owned())
+    })?;
+    // Reuse the kernel's one canonical JSON profile instead of relying on insertion order in
+    // nested command payloads. This deliberately excludes delivery-only correlation and
+    // connection facts from the serialized input above.
+    let canonical = sigil_kernel::canonicalize_cache_stable_json(&value).map_err(|_| {
+        ApplicationError::InvalidRequest("command could not be canonicalized".to_owned())
+    })?;
+    let bytes = serde_json::to_vec(&canonical).map_err(|_| {
         ApplicationError::InvalidRequest("command could not be canonicalized".to_owned())
     })?;
     Ok(hex_digest(&bytes))
@@ -932,16 +966,190 @@ pub struct ApplicationDomainReceipt {
     pub frontier: ApplicationFrontier,
     pub settlement: EffectSettlementClass,
     pub summary: String,
+    /// Immutable reference to the owner-owned domain commit. The application reservation log
+    /// indexes this fact; it must not manufacture a second domain terminal on recovery.
+    pub domain_commit: ApplicationDomainCommitRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Box<ApplicationCommandOutcome>>,
 }
 
+/// One exact domain commit that can be reopened by its owning reducer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationDomainCommitRef {
+    pub source_event_id: String,
+    pub source_sequence: u64,
+    pub source_digest: String,
+}
+
+impl ApplicationDomainCommitRef {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.source_event_id.is_empty()
+            || self.source_event_id.len() > 256
+            || self.source_sequence == 0
+            || self.source_digest.len() != 64
+            || !self
+                .source_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(ApplicationError::InvalidRequest(
+                "domain commit reference is incomplete".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ApplicationDomainReceipt {
+    /// Verifies the durable commit reference and that this receipt belongs to the reserved
+    /// command authority, rather than to a current transport attachment.
+    pub fn validate_for(&self, key: &CommandReservationKey) -> Result<(), ApplicationError> {
+        key.validate()?;
+        self.domain_commit.validate()?;
+        if self.command_id != key.command_id || self.frontier.scope != key.authority_scope {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Durable lifecycle state of one command reservation. These states are deliberately distinct:
+/// a restart may replay a commit or settlement, but it must never turn an incomplete effect into
+/// a new dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandLifecyclePhase {
+    Reserved,
+    DispatchStarted,
+    EffectStarted,
+    DomainCommitted,
+    Settled,
+    Uncertain,
+    ConfirmedNoEffect,
+}
+
+/// Typed recovery location for an application command. A transport connection or UI binding is
+/// intentionally not sufficient to recover a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRecoveryBinding {
+    pub key: CommandReservationKey,
+    pub phase: CommandLifecyclePhase,
+}
+
+impl CommandRecoveryBinding {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        self.key.validate()
+    }
+}
+
+/// A durable owner-issued claim made before the owner may cross its first physical effect
+/// boundary. The application reservation journal records this claim but never manufactures it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandEffectBinding {
+    pub command_id: ApplicationCommandId,
+    pub command_kind: String,
+    pub reservation_fingerprint: String,
+    pub recovery: CommandRecoveryBinding,
+    pub owner_effect_id: String,
+}
+
+impl CommandEffectBinding {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        self.recovery.validate()?;
+        if self.command_id != self.recovery.key.command_id
+            || self.command_kind.is_empty()
+            || self.reservation_fingerprint.len() != 64
+            || !self
+                .reservation_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.recovery.phase != CommandLifecyclePhase::EffectStarted
+            || self.owner_effect_id.is_empty()
+            || self.owner_effect_id.len() > 256
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// `Reserved` and `DispatchStarted` recovery phases represent a reservation-repair state: the
+/// durable marker is known, but it cannot elect a unique execution owner after retry or restart.
+/// Consumers must reconcile the exact owner binding and must not re-dispatch from this receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UncertainCommandReceipt {
     pub command_id: ApplicationCommandId,
     pub command_kind: String,
     pub reservation_fingerprint: String,
-    pub recovery_binding: String,
+    pub recovery: CommandRecoveryBinding,
+    /// Opaque binding returned by the concrete owner for response-loss recovery.  The
+    /// application layer transports it but never interprets its contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_recovery_binding: Option<String>,
+}
+
+impl UncertainCommandReceipt {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        self.recovery.validate()?;
+        if self.command_id != self.recovery.key.command_id
+            || self.reservation_fingerprint.len() != 64
+            || !self
+                .reservation_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || self.command_kind.is_empty()
+            || self.owner_recovery_binding.as_ref().is_some_and(|binding| {
+                binding.is_empty() || binding.len() > 1024 || binding.chars().any(char::is_control)
+            })
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Evidence that the command has not crossed its first effect boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandNoEffectProof {
+    pub command_id: ApplicationCommandId,
+    pub command_kind: String,
+    pub reservation_fingerprint: String,
+    pub source: CommandRecoveryBinding,
+    pub reason: String,
+}
+
+impl CommandNoEffectProof {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        self.source.validate()?;
+        if self.command_id != self.source.key.command_id
+            || self.reservation_fingerprint.is_empty()
+            || self.command_kind.is_empty()
+            || self.reason.is_empty()
+            || !matches!(
+                self.source.phase,
+                CommandLifecyclePhase::DispatchStarted | CommandLifecyclePhase::EffectStarted
+            )
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// The exact root received a best-effort safety stop while its command ledger was unavailable.
+/// This does not claim that cancellation was durable or that owned work is quiescent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafetyStopRequestedButUnrecorded {
+    pub command_id: ApplicationCommandId,
+    pub command_kind: String,
+    pub reason: String,
+}
+
+/// Result reported by the exact owner of an emergency stop request when the application command
+/// ledger is unavailable. Only `ForwardGateClosed` authorizes an unrecorded stop receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SafetyStopDisposition {
+    ForwardGateClosed,
+    Uncertain,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -949,6 +1157,8 @@ pub enum ApplicationCommandReceipt {
     Settled(ApplicationDomainReceipt),
     Replayed(ApplicationDomainReceipt),
     ReplayedUncertain(UncertainCommandReceipt),
+    ConfirmedNoEffect(CommandNoEffectProof),
+    SafetyStopRequestedButUnrecorded(SafetyStopRequestedButUnrecorded),
     Rejected(CommandRejection),
     PayloadConflict(CommandConflict),
     InFlight(ApplicationInFlightReceipt),
@@ -960,6 +1170,7 @@ pub struct ApplicationInFlightReceipt {
     pub command_id: ApplicationCommandId,
     pub command_kind: String,
     pub reservation_fingerprint: String,
+    pub phase: CommandLifecyclePhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1864,9 +2075,20 @@ impl ApplicationPort for FakeApplication {
             let receipt = ApplicationCommandReceipt::Settled(ApplicationDomainReceipt {
                 command_id: request.envelope.command_id.clone(),
                 command_kind: request.envelope.command.kind().to_owned(),
-                frontier,
+                frontier: frontier.clone(),
                 settlement: request.envelope.command.policy().settlement,
                 summary: "fake application command committed".to_owned(),
+                // `FakeApplication` is test-only contract scaffolding. Its source reference is
+                // deterministic fixture evidence, never a production domain commit.
+                domain_commit: ApplicationDomainCommitRef {
+                    source_event_id: format!(
+                        "fixture-application:{}:{}",
+                        request.envelope.command_id.as_str(),
+                        frontier.through_sequence
+                    ),
+                    source_sequence: frontier.through_sequence,
+                    source_digest: fingerprint.clone(),
+                },
                 outcome: None,
             });
             state.reservations.insert(
@@ -1890,12 +2112,14 @@ pub struct RendererNeutralPresentationObservation {
     pub sink_completion_nonce: u64,
 }
 
+#[cfg(test)]
 #[derive(PartialEq, Eq)]
 pub struct TrustedPresenterSession {
     id: PresenterSessionId,
     secret: u128,
 }
 
+#[cfg(test)]
 #[derive(PartialEq, Eq)]
 pub struct TrustedPresentationCapability {
     session_id: PresenterSessionId,
@@ -1904,18 +2128,21 @@ pub struct TrustedPresentationCapability {
     terminal_epoch: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct PresenterAttestation {
     session_id: PresenterSessionId,
     observation: RendererNeutralPresentationObservation,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumedPresentationReceipt {
     pub marker_id: PresentationMarkerId,
     pub frame_nonce: u64,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub struct PresenterBroker {
     sessions: Mutex<BTreeMap<PresenterSessionId, u128>>,
@@ -1923,6 +2150,7 @@ pub struct PresenterBroker {
     consumed: Mutex<BTreeMap<PresentationMarkerId, u64>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PresentationBinding {
     session_id: PresenterSessionId,
@@ -1930,6 +2158,7 @@ struct PresentationBinding {
     terminal_epoch: u64,
 }
 
+#[cfg(test)]
 impl fmt::Debug for TrustedPresenterSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1940,6 +2169,7 @@ impl fmt::Debug for TrustedPresenterSession {
     }
 }
 
+#[cfg(test)]
 impl fmt::Debug for TrustedPresentationCapability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1952,6 +2182,7 @@ impl fmt::Debug for TrustedPresentationCapability {
     }
 }
 
+#[cfg(test)]
 impl fmt::Debug for PresenterBroker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1963,6 +2194,7 @@ impl fmt::Debug for PresenterBroker {
     }
 }
 
+#[cfg(test)]
 impl PresenterBroker {
     pub fn register(
         &self,

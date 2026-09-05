@@ -381,7 +381,9 @@ fn parse_balance_snapshot_rejects_unparseable_items() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_reports_http_errors() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(500, r#"{ \"error\": \"down\" }"#.to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -399,7 +401,9 @@ async fn fetch_remote_model_ids_reports_http_errors() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_reports_decode_errors() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -417,7 +421,9 @@ async fn fetch_remote_model_ids_reports_decode_errors() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(
         200,
         json!({
@@ -441,7 +447,9 @@ async fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_returns_empty_remote_model_list() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(200, json!({"data": []}).to_string());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -455,7 +463,9 @@ async fn fetch_remote_model_ids_returns_empty_remote_model_list() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_rejects_missing_data_array() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(200, json!({"models": []}).to_string());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -472,7 +482,9 @@ async fn fetch_remote_model_ids_rejects_missing_data_array() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_remote_model_ids_rejects_malformed_array_items() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) =
         spawn_mock_http_server(200, json!({"data": [{"id": 42}, null]}).to_string());
     let mut config = provider_config(Some("test-key"));
@@ -487,7 +499,9 @@ async fn fetch_remote_model_ids_rejects_malformed_array_items() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_provider_balance_snapshot_reports_http_errors() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(503, r#"{ \"error\": \"down\" }"#.to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -501,7 +515,9 @@ async fn fetch_provider_balance_snapshot_reports_http_errors() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_provider_balance_snapshot_reports_decode_errors() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
@@ -519,7 +535,9 @@ async fn fetch_provider_balance_snapshot_reports_decode_errors() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
+    let _environment_guard = crate::test_env::lock();
     let (base_url, server) = spawn_mock_http_server(
         200,
         json!({

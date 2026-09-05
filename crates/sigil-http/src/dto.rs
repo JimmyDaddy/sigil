@@ -2275,6 +2275,8 @@ pub enum HttpSessionRouteRecoveryCode {
     ModelRouteNotConfigured,
     ConnectionConfigInvalid,
     ProviderUnavailable,
+    AuthorityUnavailable,
+    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -2285,6 +2287,7 @@ pub enum HttpSessionRouteRecoveryCode {
 pub enum HttpSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
+    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,

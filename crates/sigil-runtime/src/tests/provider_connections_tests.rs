@@ -510,6 +510,19 @@ fn connection_config_rejects_unknown_fields_and_unsafe_auth_or_endpoint() {
     });
     assert!(ProviderConnectionConfig::from_raw(id.clone(), wrong_env).is_err());
 
+    let accepted_alias = json!({
+        "label": "OpenAI",
+        "provider": "openai",
+        "protocol": "responses",
+        "base_url": "https://api.openai.com/v1",
+        "credential": {"source": "environment", "name": "OPENAI_API_KEY"},
+        "options": {}
+    });
+    assert!(
+        ProviderConnectionConfig::from_raw(id.clone(), accepted_alias).is_ok(),
+        "provider-standard API key alias should be accepted"
+    );
+
     let credentialed_http = json!({
         "label": "Custom",
         "provider": "custom",
@@ -703,6 +716,69 @@ async fn credential_resolution_is_exact_and_redacted() {
         "environment-secret"
     );
     assert!(!format!("{resolved:?}").contains("environment-secret"));
+}
+
+#[tokio::test]
+async fn canonical_environment_reference_falls_back_to_provider_alias() {
+    let connection = deepseek_connection();
+    let store = FakeCredentialStore::default();
+    let mut environment = MapEnvironment::default();
+    environment.0.insert(
+        "DEEPSEEK_API_KEY".to_owned(),
+        "provider-alias-secret".to_owned(),
+    );
+
+    let resolved = resolve_connection_credential(
+        &connection,
+        &LoadedCredentialRef::Config(CredentialRefConfig::Environment {
+            name: "SIGIL_API_KEY".to_owned(),
+        }),
+        &store,
+        &environment,
+    )
+    .await
+    .expect("provider alias should satisfy canonical reference");
+
+    assert_eq!(
+        resolved
+            .secret
+            .as_ref()
+            .expect("resolved secret")
+            .expose_secret(),
+        "provider-alias-secret"
+    );
+}
+
+#[tokio::test]
+async fn explicitly_configured_provider_alias_is_resolved_exactly() {
+    let mut connection = deepseek_connection();
+    connection.credential = CredentialRefConfig::Environment {
+        name: "DEEPSEEK_API_KEY".to_owned(),
+    };
+    let store = FakeCredentialStore::default();
+    let mut environment = MapEnvironment::default();
+    environment.0.insert(
+        "DEEPSEEK_API_KEY".to_owned(),
+        "provider-alias-secret".to_owned(),
+    );
+
+    let resolved = resolve_connection_credential(
+        &connection,
+        &LoadedCredentialRef::Config(connection.credential.clone()),
+        &store,
+        &environment,
+    )
+    .await
+    .expect("explicit provider alias should resolve");
+
+    assert_eq!(
+        resolved
+            .secret
+            .as_ref()
+            .expect("resolved secret")
+            .expose_secret(),
+        "provider-alias-secret"
+    );
 }
 
 #[tokio::test]
@@ -1205,6 +1281,25 @@ async fn connection_inventory_is_secret_free_and_reports_each_connection() {
     assert!(!rendered.contains(&missing_stored_id.to_string()));
     assert!(!rendered.contains("api.deepseek.com"));
     assert!(!rendered.contains("api.openai.com"));
+}
+
+#[test]
+fn offline_connection_inventory_accepts_provider_api_key_alias() {
+    let root = current_root("deepseek", "deepseek-v4-flash", "");
+    let mut environment = MapEnvironment::default();
+    environment.0.insert(
+        "DEEPSEEK_API_KEY".to_owned(),
+        "provider-alias-secret".to_owned(),
+    );
+
+    let inventory = connection_inventory_offline(&root, &environment);
+
+    assert_eq!(inventory.entries.len(), 1);
+    assert_eq!(inventory.entries[0].readiness, ConnectionReadiness::Ready);
+    assert_eq!(
+        inventory.entries[0].credential_source,
+        CredentialSourceView::Environment
+    );
 }
 
 #[tokio::test]
@@ -2296,6 +2391,57 @@ async fn cow_rejects_a_stale_config_snapshot_before_writing_credentials() {
 }
 
 #[tokio::test]
+async fn cow_exact_source_snapshot_rejects_even_semantically_equivalent_rewrites() {
+    let connection = deepseek_connection();
+    let default_model =
+        ModelRef::new(connection.id.clone(), "deepseek-v4-flash").expect("default model");
+    let current = materialize_root_config(
+        &current_root(
+            "deepseek",
+            "deepseek-v4-flash",
+            r#"base_url = "https://api.deepseek.com""#,
+        ),
+        &BTreeMap::from([(connection.id.clone(), connection.clone())]),
+        &default_model,
+    )
+    .expect("current V2 config");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("sigil.toml");
+    current.save(&path).expect("current config should save");
+    let snapshot = PersistedConfigSnapshot::load(&path).expect("source snapshot");
+    let mut rewritten = std::fs::read_to_string(&path).expect("read current config");
+    rewritten.push_str("\n# concurrent formatting-only rewrite\n");
+    std::fs::write(&path, rewritten).expect("concurrent rewrite should save");
+    let store = FakeCredentialStore::default();
+
+    let result = save_connection_config_with_base_from_snapshot(
+        &snapshot,
+        &current,
+        &path,
+        ConnectionSaveDraft {
+            connections: BTreeMap::from([(connection.id.clone(), connection.clone())]),
+            default_model,
+            credential_updates: vec![ConnectionCredentialUpdate {
+                connection_id: connection.id,
+                prepared: PreparedCredential::api_key(
+                    ProviderFamily::DeepSeek,
+                    "must-not-be-written",
+                ),
+            }],
+        },
+        &store,
+        &FakePublisher::published(ConfigPublishOutcome::Published),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ConnectionSaveError::ConcurrentModification)
+    ));
+    assert!(store.records.lock().expect("records lock").is_empty());
+}
+
+#[tokio::test]
 async fn cow_explicit_invalid_replacement_publishes_only_from_an_invalid_live_file() {
     let root = current_root(
         "deepseek",
@@ -2306,11 +2452,13 @@ async fn cow_explicit_invalid_replacement_publishes_only_from_an_invalid_live_fi
     let publisher = FakePublisher::published(ConfigPublishOutcome::Published);
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("sigil.toml");
-    std::fs::write(&path, "[legacy\nprovider = \"unsupported\"\n")
+    std::fs::write(&path, "[broken\nprovider = \"unsupported\"\n")
         .expect("invalid config should write");
+    let invalid = PersistedConfigSnapshot::load(&path).expect("invalid source snapshot");
 
     let outcome = save_connection_config_replacing_invalid(
         &root,
+        &invalid,
         &path,
         ConnectionSaveDraft {
             connections: loaded
@@ -2338,6 +2486,29 @@ async fn cow_explicit_invalid_replacement_publishes_only_from_an_invalid_live_fi
     );
 }
 
+#[test]
+fn persisted_snapshot_classifies_parseable_invalid_connection_config_as_invalid() {
+    let mut root = current_root(
+        "deepseek",
+        "deepseek-v4-flash",
+        r#"base_url = "https://api.deepseek.com""#,
+    );
+    root.connections
+        .get_mut("deepseek-default")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("default connection object")
+        .insert("base_url".to_owned(), json!("not-a-url"));
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("sigil.toml");
+    root.save(&path)
+        .expect("schema-valid config should serialize");
+
+    let snapshot = PersistedConfigSnapshot::load(&path).expect("source snapshot");
+
+    assert!(snapshot.is_invalid());
+    assert!(snapshot.parsed().is_none());
+}
+
 #[tokio::test]
 async fn cow_invalid_replacement_refuses_valid_or_missing_live_files() {
     for live_state in ["valid", "missing"] {
@@ -2350,12 +2521,19 @@ async fn cow_invalid_replacement_refuses_valid_or_missing_live_files() {
         let publisher = FakePublisher::published(ConfigPublishOutcome::Published);
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("sigil.toml");
-        if live_state == "valid" {
+        let snapshot = if live_state == "valid" {
             root.save(&path).expect("valid config should write");
-        }
+            PersistedConfigSnapshot::load(&path).expect("valid source snapshot")
+        } else {
+            std::fs::write(&path, "[malformed").expect("invalid source should write");
+            let snapshot = PersistedConfigSnapshot::load(&path).expect("invalid source snapshot");
+            std::fs::remove_file(&path).expect("live source should disappear");
+            snapshot
+        };
 
         let result = save_connection_config_replacing_invalid(
             &root,
+            &snapshot,
             &path,
             ConnectionSaveDraft {
                 connections: loaded
@@ -2383,6 +2561,52 @@ async fn cow_invalid_replacement_refuses_valid_or_missing_live_files() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn cow_invalid_replacement_refuses_a_different_malformed_live_file() {
+    let root = current_root(
+        "deepseek",
+        "deepseek-v4-flash",
+        r#"base_url = "https://api.deepseek.com""#,
+    );
+    let loaded = load_provider_connections(&root);
+    let publisher = FakePublisher::published(ConfigPublishOutcome::Published);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("sigil.toml");
+    std::fs::write(&path, "[first-malformed").expect("first invalid source should write");
+    let snapshot = PersistedConfigSnapshot::load(&path).expect("invalid source snapshot");
+    std::fs::write(&path, "[second-malformed").expect("concurrent invalid source should write");
+
+    let result = save_connection_config_replacing_invalid(
+        &root,
+        &snapshot,
+        &path,
+        ConnectionSaveDraft {
+            connections: loaded
+                .connections
+                .into_iter()
+                .map(|(id, loaded)| (id, loaded.config))
+                .collect(),
+            default_model: loaded.default_model.expect("default model"),
+            credential_updates: Vec::new(),
+        },
+        &FakeCredentialStore::default(),
+        &publisher,
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ConnectionSaveError::ConcurrentModification)
+    ));
+    assert!(
+        publisher
+            .published
+            .lock()
+            .expect("published config lock")
+            .is_none()
+    );
 }
 
 #[tokio::test]

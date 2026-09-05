@@ -502,6 +502,19 @@ pub trait ManagedExecutionServiceV1: Send + Sync {
         request: ManagedExecutionRequestV1,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1>;
 
+    /// Executes one request while observing the host cancellation fact. The compatibility
+    /// default preserves older adapters, but a production service that owns a live child should
+    /// override this method and carry the handle into its launch-to-settlement loop.
+    async fn execute_once_with_cancellation(
+        &self,
+        bundle: crate::resource::IssuedExecutionAdmissionBundleV1,
+        request: ManagedExecutionRequestV1,
+        cancellation: Option<crate::RunCancellationHandle>,
+    ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
+        let _ = cancellation;
+        self.execute_once(bundle, request).await
+    }
+
     async fn start_persistent(
         &self,
         bundle: crate::resource::IssuedExecutionAdmissionBundleV1,

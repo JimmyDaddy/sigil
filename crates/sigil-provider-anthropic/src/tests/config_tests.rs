@@ -59,7 +59,7 @@ fn default_config_has_stable_endpoint_model_and_limits() {
 }
 
 #[test]
-fn resolved_config_uses_sigil_env_and_ignores_provider_env() -> anyhow::Result<()> {
+fn resolved_config_prefers_sigil_env_over_anthropic_alias() -> anyhow::Result<()> {
     let _guard = test_env::lock();
     let _scope = EnvScope::set_many(&[
         ("ANTHROPIC_API_KEY", "provider-key"),
@@ -79,6 +79,17 @@ fn resolved_config_uses_sigil_env_and_ignores_provider_env() -> anyhow::Result<(
     assert_eq!(resolved.base_url, "https://anthropic.example.com");
     assert_eq!(resolved.anthropic_version, "2024-01-01");
     assert_eq!(resolved.max_tokens, 1234);
+    Ok(())
+}
+
+#[test]
+fn resolved_config_uses_anthropic_alias_when_sigil_name_is_missing() -> anyhow::Result<()> {
+    let _guard = test_env::lock();
+    let _scope = EnvScope::set_many(&[("ANTHROPIC_API_KEY", "provider-key")]);
+
+    let resolved = AnthropicProviderConfig::default().resolved()?;
+
+    assert_eq!(resolved.api_key.as_deref(), Some("provider-key"));
     Ok(())
 }
 

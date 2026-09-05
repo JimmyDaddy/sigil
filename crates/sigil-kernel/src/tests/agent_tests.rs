@@ -1041,6 +1041,51 @@ async fn agent_run_input_applies_output_token_ceiling_to_provider_request() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn configured_agent_default_output_cap_applies_before_provider_fallback() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    )
+    .with_default_max_output_tokens(Some(654));
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("configured default"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Headless,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+                tool_authority: None,
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")[0]
+            .max_tokens,
+        Some(654)
+    );
+    Ok(())
+}
+
 #[async_trait]
 impl Provider for ForegroundTerminalProvider {
     fn name(&self) -> &str {
@@ -14201,12 +14246,18 @@ async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -
     });
     assert_eq!(
         saved_state.and_then(|state| state.message_id.clone()),
-        Some(final_assistant_id)
+        Some(final_assistant_id.clone())
     );
-    assert!(handler.events.iter().any(|event| {
-        matches!(event, RunEvent::ContinuationState(state)
-            if state.provider_name == "mock-text-only")
-    }));
+    assert!(handler
+        .events
+        .iter()
+        .any(|event| matches!(event, RunEvent::AssistantMessage(message) if message.id == final_assistant_id)));
+    assert!(
+        !handler
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::ContinuationState(_)))
+    );
     Ok(())
 }
 

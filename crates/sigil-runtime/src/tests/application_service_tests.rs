@@ -10,12 +10,14 @@ use futures::future::BoxFuture;
 use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, ApplicationCommand, ApplicationCommandEnvelope,
     ApplicationCommandId, ApplicationCommandReceipt, ApplicationCommandRequest,
-    ApplicationDomainReceipt, ApplicationFrontier, ApplicationInFlightReceipt,
-    ApplicationInstanceId, ApplicationScope, AuthenticatedSubject, CommandAdmissionContext,
-    CommandConflict, CommandReservationKey, ConversationCommand, ExpectedFrontier,
-    HostConnectionInstanceId, OpenProjectionRequest, ProjectionDeliveryAck, ProjectionPage,
-    ProjectionPageRequest, ProjectionSnapshot, SafeText, SessionScopeId, UncertainCommandReceipt,
-    WorkspaceScopeId,
+    ApplicationDomainCommitRef, ApplicationDomainReceipt, ApplicationFrontier,
+    ApplicationInFlightReceipt, ApplicationInstanceId, ApplicationScope, AuthenticatedSubject,
+    CommandAdmissionContext, CommandConflict, CommandEffectBinding, CommandLifecyclePhase,
+    CommandNoEffectProof, CommandRecoveryBinding, CommandReservationKey, ConversationCommand,
+    ExpectedFrontier, HostConnectionInstanceId, OpenProjectionRequest, ProjectionDeliveryAck,
+    ProjectionPage, ProjectionPageRequest, ProjectionSnapshot, RunCommand, SafeText,
+    SafetyStopDisposition, SessionScopeId, UncertainCommandReceipt, WorkspaceScopeId,
+    command_fingerprint,
 };
 
 use super::*;
@@ -43,6 +45,25 @@ struct SettlingExecutor {
 }
 
 impl RuntimeApplicationCommandExecutor for SettlingExecutor {
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let binding = CommandEffectBinding {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: fingerprint,
+            recovery: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            owner_effect_id: "test-effect".to_owned(),
+        };
+        Box::pin(async move { binding.validate().map(|()| binding) })
+    }
+
     fn dispatch(
         &self,
         request: ApplicationCommandRequest,
@@ -61,6 +82,11 @@ impl RuntimeApplicationCommandExecutor for SettlingExecutor {
             },
             settlement: request.envelope.command.policy().settlement,
             summary: "settled in test executor".to_owned(),
+            domain_commit: ApplicationDomainCommitRef {
+                source_event_id: "test-domain-event".to_owned(),
+                source_sequence: 1,
+                source_digest: "a".repeat(64),
+            },
             outcome: None,
         };
         Box::pin(async move { Ok(RuntimeApplicationDispatch::Settled(receipt)) })
@@ -70,6 +96,25 @@ impl RuntimeApplicationCommandExecutor for SettlingExecutor {
 struct UncertainExecutor;
 
 impl RuntimeApplicationCommandExecutor for UncertainExecutor {
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let binding = CommandEffectBinding {
+            command_id: request.envelope.command_id.clone(),
+            command_kind: request.envelope.command.kind().to_owned(),
+            reservation_fingerprint: fingerprint,
+            recovery: CommandRecoveryBinding {
+                key,
+                phase: CommandLifecyclePhase::EffectStarted,
+            },
+            owner_effect_id: "test-uncertain-effect".to_owned(),
+        };
+        Box::pin(async move { binding.validate().map(|()| binding) })
+    }
+
     fn dispatch(
         &self,
         request: ApplicationCommandRequest,
@@ -77,10 +122,16 @@ impl RuntimeApplicationCommandExecutor for UncertainExecutor {
         Box::pin(async move {
             Ok(RuntimeApplicationDispatch::Uncertain(
                 UncertainCommandReceipt {
-                    command_id: request.envelope.command_id,
+                    command_id: request.envelope.command_id.clone(),
                     command_kind: request.envelope.command.kind().to_owned(),
-                    reservation_fingerprint: "fingerprint".to_owned(),
-                    recovery_binding: "test-reconcile".to_owned(),
+                    reservation_fingerprint: "a".repeat(64),
+                    recovery: CommandRecoveryBinding {
+                        key: request
+                            .admission
+                            .reservation_key(&request.envelope.command_id),
+                        phase: CommandLifecyclePhase::EffectStarted,
+                    },
+                    owner_recovery_binding: None,
                 },
             ))
         })
@@ -102,12 +153,17 @@ impl RuntimeApplicationDeliveryAcker for Acker {
 struct TestReservationStore {
     entries: Mutex<BTreeMap<CommandReservationKey, (String, TestReservationState)>>,
     fail_mark: bool,
+    fail_reserve: bool,
+    fail_settle: bool,
 }
 
 enum TestReservationState {
     Reserved,
     DispatchStarted,
-    Terminal(Box<ApplicationCommandReceipt>),
+    EffectStarted,
+    DomainCommitted(Box<ApplicationDomainReceipt>),
+    Uncertain(Box<UncertainCommandReceipt>),
+    Settled(Box<ApplicationCommandReceipt>),
 }
 
 impl RuntimeApplicationReservationStore for TestReservationStore {
@@ -117,6 +173,9 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
         fingerprint: String,
         request: ApplicationCommandRequest,
     ) -> BoxFuture<'static, Result<RuntimeApplicationReservationAdmission, ApplicationError>> {
+        if self.fail_reserve {
+            return Box::pin(async { Err(ApplicationError::Unavailable) });
+        }
         let result = (|| {
             let mut entries = self
                 .entries
@@ -136,14 +195,49 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
                 ));
             }
             Ok(match receipt {
-                TestReservationState::Terminal(receipt) => {
-                    RuntimeApplicationReservationAdmission::Existing(receipt.as_ref().clone())
+                TestReservationState::Settled(receipt) => {
+                    RuntimeApplicationReservationAdmission::Existing(Box::new(
+                        receipt.as_ref().clone(),
+                    ))
+                }
+                TestReservationState::Uncertain(receipt) => {
+                    RuntimeApplicationReservationAdmission::Existing(Box::new(
+                        ApplicationCommandReceipt::Uncertain(receipt.as_ref().clone()),
+                    ))
+                }
+                TestReservationState::DomainCommitted(receipt) => {
+                    RuntimeApplicationReservationAdmission::Existing(Box::new(
+                        ApplicationCommandReceipt::Settled(receipt.as_ref().clone()),
+                    ))
                 }
                 TestReservationState::Reserved | TestReservationState::DispatchStarted => {
+                    RuntimeApplicationReservationAdmission::Existing(Box::new(
+                        ApplicationCommandReceipt::Uncertain(UncertainCommandReceipt {
+                            command_id: request.envelope.command_id,
+                            command_kind: request.envelope.command.kind().to_owned(),
+                            reservation_fingerprint: fingerprint,
+                            recovery: CommandRecoveryBinding {
+                                key,
+                                phase: match receipt {
+                                    TestReservationState::Reserved => {
+                                        CommandLifecyclePhase::Reserved
+                                    }
+                                    TestReservationState::DispatchStarted => {
+                                        CommandLifecyclePhase::DispatchStarted
+                                    }
+                                    _ => unreachable!("pre-effect states are matched above"),
+                                },
+                            },
+                            owner_recovery_binding: None,
+                        }),
+                    ))
+                }
+                TestReservationState::EffectStarted => {
                     RuntimeApplicationReservationAdmission::InFlight(ApplicationInFlightReceipt {
                         command_id: request.envelope.command_id,
                         command_kind: request.envelope.command.kind().to_owned(),
                         reservation_fingerprint: fingerprint,
+                        phase: CommandLifecyclePhase::EffectStarted,
                     })
                 }
             })
@@ -176,8 +270,110 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
                     Ok(())
                 }
                 TestReservationState::DispatchStarted => Ok(()),
-                TestReservationState::Terminal(_) => Err(ApplicationError::InvalidRequest(
+                _ => Err(ApplicationError::InvalidRequest(
                     "terminal reservation cannot be dispatched".to_owned(),
+                )),
+            }
+        })();
+        Box::pin(async move { result })
+    }
+
+    fn mark_effect_started(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        _binding: CommandEffectBinding,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        let result = (|| {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let Some((original, state)) = entries.get_mut(&key) else {
+                return Err(ApplicationError::Unavailable);
+            };
+            if original != &fingerprint {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            match state {
+                TestReservationState::DispatchStarted => {
+                    *state = TestReservationState::EffectStarted;
+                    Ok(())
+                }
+                TestReservationState::EffectStarted => Ok(()),
+                _ => Err(ApplicationError::InvalidRequest(
+                    "effect marker is not monotonic".to_owned(),
+                )),
+            }
+        })();
+        Box::pin(async move { result })
+    }
+
+    fn mark_domain_committed(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        receipt: ApplicationDomainReceipt,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        let result = (|| {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let Some((original, state)) = entries.get_mut(&key) else {
+                return Err(ApplicationError::Unavailable);
+            };
+            if original != &fingerprint {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            match state {
+                TestReservationState::EffectStarted => {
+                    *state = TestReservationState::DomainCommitted(Box::new(receipt));
+                    Ok(())
+                }
+                TestReservationState::DomainCommitted(previous) if **previous == receipt => Ok(()),
+                _ => Err(ApplicationError::InvalidRequest(
+                    "domain commit marker is not monotonic".to_owned(),
+                )),
+            }
+        })();
+        Box::pin(async move { result })
+    }
+
+    fn mark_confirmed_no_effect(
+        &self,
+        _key: CommandReservationKey,
+        _fingerprint: String,
+        _proof: CommandNoEffectProof,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+
+    fn mark_uncertain(
+        &self,
+        key: CommandReservationKey,
+        fingerprint: String,
+        receipt: UncertainCommandReceipt,
+    ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        let result = (|| {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let Some((original, state)) = entries.get_mut(&key) else {
+                return Err(ApplicationError::Unavailable);
+            };
+            if original != &fingerprint {
+                return Err(ApplicationError::ScopeMismatch);
+            }
+            match state {
+                TestReservationState::EffectStarted => {
+                    *state = TestReservationState::Uncertain(Box::new(receipt));
+                    Ok(())
+                }
+                TestReservationState::Uncertain(previous) if **previous == receipt => Ok(()),
+                _ => Err(ApplicationError::InvalidRequest(
+                    "uncertain marker is not monotonic".to_owned(),
                 )),
             }
         })();
@@ -190,6 +386,9 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
         fingerprint: String,
         receipt: ApplicationCommandReceipt,
     ) -> BoxFuture<'static, Result<(), ApplicationError>> {
+        if self.fail_settle {
+            return Box::pin(async { Err(ApplicationError::Unavailable) });
+        }
         let result = (|| {
             let mut entries = self
                 .entries
@@ -201,10 +400,47 @@ impl RuntimeApplicationReservationStore for TestReservationStore {
             if original != &fingerprint {
                 return Err(ApplicationError::ScopeMismatch);
             }
-            *stored = TestReservationState::Terminal(Box::new(receipt));
+            *stored = TestReservationState::Settled(Box::new(receipt));
             Ok(())
         })();
         Box::pin(async move { result })
+    }
+}
+
+struct SafetyStopExecutor {
+    dispatch_calls: Arc<AtomicUsize>,
+    safety_stop_calls: Arc<AtomicUsize>,
+    disposition: SafetyStopDisposition,
+}
+
+impl RuntimeApplicationCommandExecutor for SafetyStopExecutor {
+    fn bind_effect(
+        &self,
+        request: ApplicationCommandRequest,
+        key: CommandReservationKey,
+        fingerprint: String,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        SettlingExecutor {
+            calls: Arc::clone(&self.dispatch_calls),
+        }
+        .bind_effect(request, key, fingerprint)
+    }
+
+    fn dispatch(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<RuntimeApplicationDispatch, ApplicationError>> {
+        self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(ApplicationError::Unavailable) })
+    }
+
+    fn request_safety_stop(
+        &self,
+        _request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<SafetyStopDisposition, ApplicationError>> {
+        self.safety_stop_calls.fetch_add(1, Ordering::SeqCst);
+        let disposition = self.disposition;
+        Box::pin(async move { Ok(disposition) })
     }
 }
 
@@ -239,6 +475,19 @@ fn request(prompt: &str, client_epoch: u64) -> ApplicationCommandRequest {
         )
         .expect("admission"),
     }
+}
+
+fn safety_stop_request() -> ApplicationCommandRequest {
+    let mut request = request("stop", 1);
+    request.envelope.command = ApplicationCommand::Run(RunCommand::CancelTerminalTask {
+        identity: sigil_application::ApplicationTerminalTaskIdentity {
+            session_scope_id: SafeText::new("session").expect("session"),
+            run_id: SafeText::new("run").expect("run"),
+            task_id: SafeText::new("task").expect("task"),
+            expected_generation: 1,
+        },
+    });
+    request
 }
 
 #[test]
@@ -285,16 +534,144 @@ fn runtime_service_settles_uncertain_when_dispatch_marker_fails() {
         Arc::clone(&reservations) as Arc<dyn RuntimeApplicationReservationStore>,
         Arc::new(Acker),
     );
-    let receipt = futures::executor::block_on(service.execute(request("hello", 1)))
-        .expect("uncertain terminal");
-    assert!(matches!(receipt, ApplicationCommandReceipt::Uncertain(_)));
+    let error = futures::executor::block_on(service.execute(request("hello", 1)))
+        .expect_err("dispatch marker failure must remain an error");
+    assert!(matches!(error, ApplicationError::Unavailable));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let state = reservations.entries.lock().expect("reservation state");
-    assert!(state.values().all(|(_, state)| matches!(
-        state,
-        TestReservationState::Terminal(receipt)
-            if matches!(receipt.as_ref(), ApplicationCommandReceipt::Uncertain(_))
-    )));
+    assert!(
+        state
+            .values()
+            .all(|(_, state)| matches!(state, TestReservationState::Reserved))
+    );
+    drop(state);
+    let repair = futures::executor::block_on(service.execute(request("hello", 1)))
+        .expect("same-key retry must require repair");
+    assert!(matches!(
+        repair,
+        ApplicationCommandReceipt::ReplayedUncertain(receipt)
+            if receipt.recovery.phase == CommandLifecyclePhase::Reserved
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runtime_service_does_not_redispatch_a_replayed_dispatch_marker() {
+    let request = request("hello", 1);
+    let key = request
+        .admission
+        .reservation_key(&request.envelope.command_id);
+    let fingerprint = command_fingerprint(&request).expect("fingerprint");
+    let reservations = Arc::new(TestReservationStore::default());
+    reservations
+        .entries
+        .lock()
+        .expect("reservation state")
+        .insert(key, (fingerprint, TestReservationState::DispatchStarted));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = RuntimeApplicationService::new(
+        Arc::new(UnavailableProjection),
+        Arc::new(SettlingExecutor {
+            calls: Arc::clone(&calls),
+        }),
+        Arc::clone(&reservations) as Arc<dyn RuntimeApplicationReservationStore>,
+        Arc::new(Acker),
+    );
+
+    let receipt = futures::executor::block_on(service.execute(request))
+        .expect("replayed dispatch marker must require repair");
+    assert!(matches!(
+        receipt,
+        ApplicationCommandReceipt::ReplayedUncertain(receipt)
+            if receipt.recovery.phase == CommandLifecyclePhase::DispatchStarted
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runtime_service_replays_domain_commit_after_fault_injected_settlement_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reservations = Arc::new(TestReservationStore {
+        fail_settle: true,
+        ..TestReservationStore::default()
+    });
+    let service = RuntimeApplicationService::new(
+        Arc::new(UnavailableProjection),
+        Arc::new(SettlingExecutor {
+            calls: Arc::clone(&calls),
+        }),
+        Arc::clone(&reservations) as Arc<dyn RuntimeApplicationReservationStore>,
+        Arc::new(Acker),
+    );
+
+    let first = futures::executor::block_on(service.execute(request("hello", 1)))
+        .expect("domain commit must remain terminal when settlement indexing fails");
+    assert!(matches!(first, ApplicationCommandReceipt::Settled(_)));
+    let replay = futures::executor::block_on(service.execute(request("hello", 1)))
+        .expect("same key must replay the verified domain commit");
+    assert!(matches!(replay, ApplicationCommandReceipt::Replayed(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        reservations
+            .entries
+            .lock()
+            .expect("reservation state")
+            .values()
+            .all(|(_, state)| matches!(state, TestReservationState::DomainCommitted(_)))
+    );
+}
+
+#[test]
+fn runtime_service_only_reports_unrecorded_stop_when_owner_closed_the_forward_gate() {
+    let dispatch_calls = Arc::new(AtomicUsize::new(0));
+    let safety_stop_calls = Arc::new(AtomicUsize::new(0));
+    let service = RuntimeApplicationService::new(
+        Arc::new(UnavailableProjection),
+        Arc::new(SafetyStopExecutor {
+            dispatch_calls: Arc::clone(&dispatch_calls),
+            safety_stop_calls: Arc::clone(&safety_stop_calls),
+            disposition: SafetyStopDisposition::ForwardGateClosed,
+        }),
+        Arc::new(TestReservationStore {
+            fail_reserve: true,
+            ..TestReservationStore::default()
+        }),
+        Arc::new(Acker),
+    );
+
+    let receipt = futures::executor::block_on(service.execute(safety_stop_request()))
+        .expect("owner-confirmed stop");
+    assert!(matches!(
+        receipt,
+        ApplicationCommandReceipt::SafetyStopRequestedButUnrecorded(_)
+    ));
+    assert_eq!(safety_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runtime_service_rejects_unconfirmed_safety_stop_without_normal_dispatch() {
+    let dispatch_calls = Arc::new(AtomicUsize::new(0));
+    let safety_stop_calls = Arc::new(AtomicUsize::new(0));
+    let service = RuntimeApplicationService::new(
+        Arc::new(UnavailableProjection),
+        Arc::new(SafetyStopExecutor {
+            dispatch_calls: Arc::clone(&dispatch_calls),
+            safety_stop_calls: Arc::clone(&safety_stop_calls),
+            disposition: SafetyStopDisposition::Uncertain,
+        }),
+        Arc::new(TestReservationStore {
+            fail_reserve: true,
+            ..TestReservationStore::default()
+        }),
+        Arc::new(Acker),
+    );
+
+    let error = futures::executor::block_on(service.execute(safety_stop_request()))
+        .expect_err("unconfirmed stop must not be reported as requested");
+    assert!(matches!(error, ApplicationError::Unavailable));
+    assert_eq!(safety_stop_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dispatch_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -21,7 +21,7 @@ pub fn connection_inventory_offline(
         .values()
         .map(|connection| {
             let (credential_source, readiness, issue) =
-                offline_credential_state(&connection.credential, environment);
+                offline_credential_state(&connection.config, &connection.credential, environment);
             ConnectionInventoryEntry {
                 id: connection.config.id.clone(),
                 label: connection.config.label.clone(),
@@ -176,6 +176,7 @@ pub fn connection_inventory_native(root_config: &RootConfig) -> ConnectionInvent
 }
 
 fn offline_credential_state(
+    connection: &super::ProviderConnectionConfig,
     credential: &LoadedCredentialRef,
     environment: &dyn CredentialEnvironment,
 ) -> (
@@ -185,7 +186,13 @@ fn offline_credential_state(
 ) {
     match credential {
         LoadedCredentialRef::Config(CredentialRefConfig::Environment { name }) => {
-            if environment.read(name).is_some() {
+            if super::credential::read_configured_environment_credential(
+                connection,
+                name,
+                environment,
+            )
+            .is_some()
+            {
                 (
                     CredentialSourceView::Environment,
                     ConnectionReadiness::Ready,

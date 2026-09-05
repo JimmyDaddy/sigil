@@ -9,23 +9,28 @@ use sigil_resource_authority::storage::{
 use super::*;
 
 fn writer(root: &Path) -> Arc<ManagedStorageWriterAdapterV1> {
+    let generation = AuthorityGeneration {
+        epoch: 1,
+        instance_hash: CanonicalHash::from_bytes([0x28; 32]),
+    };
+    let cutover_manifest_hash = CanonicalHash::from_bytes([0x84; 32]);
     let mut table = AuthorityStorageGrantTableV1::new();
-    let staging_grant = crate::managed_storage_writer::grant_for_channel(
+    let staging_grant = crate::managed_storage_writer::grant_for_channel_with_context(
         StorageWriterChannelV1::ArtifactStaging,
         0x81,
+        generation,
+        cutover_manifest_hash,
     );
-    let store_grant = crate::managed_storage_writer::grant_for_channel(
+    let store_grant = crate::managed_storage_writer::grant_for_channel_with_context(
         StorageWriterChannelV1::ArtifactStore,
         0x82,
+        generation,
+        cutover_manifest_hash,
     );
     table
         .register(staging_grant.clone())
         .expect("staging grant");
     table.register(store_grant.clone()).expect("store grant");
-    let generation = AuthorityGeneration {
-        epoch: 1,
-        instance_hash: CanonicalHash::from_bytes([0x28; 32]),
-    };
     let service: Arc<dyn ManagedStorageServiceV1> =
         Arc::new(AuthorityManagedStorageServiceV1::new(table, generation));
     Arc::new(

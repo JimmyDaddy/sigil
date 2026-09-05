@@ -17,14 +17,15 @@ use sigil_runtime::{
         ConfigMode, ConfigPublishOutcome, ConfiguredProviderCredentialStore,
         ConnectionCredentialUpdate, ConnectionInventory, ConnectionReadiness, ConnectionSaveDraft,
         CredentialRefConfig, CredentialSourceView, ModelAvailability, ModelCatalogRequest,
-        ModelCatalogResult, ModelRecommendation, PreparedCredential, ProcessCredentialEnvironment,
-        ProviderConfigPublisher, ProviderConnectionConfig, ProviderFamily,
-        ProviderModelCatalogService, ProviderProtocol, connection_inventory_native,
+        ModelCatalogResult, ModelRecommendation, PersistedConfigSnapshot, PreparedCredential,
+        ProcessCredentialEnvironment, ProviderConfigPublisher, ProviderConnectionConfig,
+        ProviderFamily, ProviderModelCatalogService, ProviderProtocol, connection_inventory_native,
         connection_semantic_fingerprint, default_setup_root_config, load_provider_connections,
         materialize_root_config, provider_connection_template, resolve_model_route,
         runtime_provider_name, save_connection_config, save_connection_config_replacing_invalid,
     },
-    provider_context_window_tokens, resolve_sigil_paths, secret_redactor_for_root_config,
+    provider_context_window_tokens, resolve_model_context_window_tokens, resolve_sigil_paths,
+    secret_redactor_for_root_config,
     support::{
         DoctorSupportProjectionContext, DoctorSupportReportV1, SupportBuildInfo, SupportBundleV1,
         SupportEnvironmentV1, SupportPathKind, SupportPathRedaction,
@@ -269,8 +270,11 @@ impl HttpSupportContext {
         let publisher =
             BorrowedConfigurationPublisher::new(service, capsule_id, expected_current_hash);
         let outcome = if draft.replace_invalid_config {
+            let invalid = PersistedConfigSnapshot::load(&self.config_path)
+                .map_err(|_| HttpProviderSetupFailure::Invalid)?;
             runtime.block_on(save_connection_config_replacing_invalid(
                 &save_current,
+                &invalid,
                 &self.config_path,
                 save_draft,
                 &credential_store,
@@ -376,6 +380,7 @@ impl HttpSupportContext {
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         let next = materialize_root_config(&current, &connections, &model_ref)
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+        validate_route_token_limits(&next, &model_ref)?;
         let service = self
             .borrowed_configuration_service
             .clone()
@@ -421,11 +426,20 @@ impl HttpSupportContext {
         let current = if self.config_path.exists() {
             match RootConfig::load(&self.config_path) {
                 Ok(current) => {
-                    anyhow::ensure!(
-                        !replace_invalid_config,
-                        "valid provider configuration must not be replaced as invalid"
-                    );
-                    current
+                    let loaded = load_provider_connections(&current);
+                    if matches!(loaded.mode, ConfigMode::V2) && loaded.issues.is_empty() {
+                        anyhow::ensure!(
+                            !replace_invalid_config,
+                            "valid provider configuration must not be replaced as invalid"
+                        );
+                        current
+                    } else {
+                        anyhow::ensure!(
+                            replace_invalid_config,
+                            "invalid provider configuration requires explicit replacement"
+                        );
+                        default_setup_root_config()
+                    }
                 }
                 Err(_) => {
                     anyhow::ensure!(
@@ -519,6 +533,8 @@ impl HttpSupportContext {
             .collect::<BTreeMap<_, _>>();
         connections.insert(connection_id, connection.clone());
         let prepared_root = materialize_root_config(&current, &connections, &default_model)?;
+        validate_route_token_limits(&prepared_root, &default_model)
+            .context("provider setup token limits are invalid")?;
         Ok(PreparedProviderSetup {
             current,
             prepared_root,
@@ -614,6 +630,29 @@ impl HttpSupportContext {
         )
         .context("project redacted desktop support report")
     }
+}
+
+fn validate_route_token_limits(
+    root_config: &RootConfig,
+    model_ref: &ModelRef,
+) -> Result<(), HttpProviderSetupFailure> {
+    let (provider_name, _) = resolve_model_route(root_config, model_ref)
+        .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+    let effective_context =
+        resolve_model_context_window_tokens(root_config, model_ref, &provider_name).tokens;
+    sigil_runtime::validate_output_token_budget(
+        effective_context,
+        root_config.model_request.max_output_tokens,
+    )
+    .map_err(|_| HttpProviderSetupFailure::Invalid)?;
+    if let Some(max_output_tokens) = root_config.model_request.max_output_tokens
+        && let Some(provider_limit) =
+            sigil_runtime::configured_provider_maximum_output_tokens(root_config, model_ref)
+        && max_output_tokens > provider_limit
+    {
+        return Err(HttpProviderSetupFailure::Invalid);
+    }
+    Ok(())
 }
 
 struct PreparedProviderSetup {

@@ -1,5 +1,16 @@
 use super::*;
 
+fn storage_test_source() -> sigil_kernel::managed_storage::StorageAdmissionSourceV1 {
+    sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
+        cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
+        application_generation: 1,
+    }
+}
+
+fn storage_test_source_binding_hash() -> CanonicalHash {
+    super::hash_debug(&storage_test_source())
+}
+
 fn grant() -> StorageAdmissionGrantV1 {
     StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new("grant-1".to_owned()),
@@ -8,7 +19,7 @@ fn grant() -> StorageAdmissionGrantV1 {
         purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
         purpose_hash: CanonicalHash::from_bytes([2u8; 32]),
         source_class: sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
-        source_binding_hash: CanonicalHash::from_bytes([9u8; 32]),
+        source_binding_hash: storage_test_source_binding_hash(),
         namespace_hash: CanonicalHash::from_bytes([3u8; 32]),
         journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
         journal_scope_hash: CanonicalHash::from_bytes([4u8; 32]),
@@ -83,10 +94,7 @@ fn storage_test_request() -> ManagedStorageAdmissionRequestV1 {
         semantic_owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1::SessionLog,
         capability_family: sigil_kernel::resource::ManagedStorageCapabilityFamilyV1::AppendLog,
         purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
-        source: sigil_kernel::managed_storage::StorageAdmissionSourceV1::ApplicationCutoverRoot {
-            cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
-            application_generation: 1,
-        },
+        source: storage_test_source(),
         owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
         journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
     }
@@ -165,7 +173,7 @@ fn r71_storage_rehydrates_pending_admission_requires_physical_bridge() {
 }
 
 #[test]
-fn r71_storage_rehydrates_source_bound_pending_grant_for_recovery_only() {
+fn r71_storage_rejects_source_bound_pending_grant_after_cutover() {
     let directory = tempfile::tempdir().expect("journal directory");
     let path = directory.path().join("authority-resources.journal.json");
     let header = storage_test_header();
@@ -192,37 +200,25 @@ fn r71_storage_rehydrates_source_bound_pending_grant_for_recovery_only() {
     current.grant_hash = CanonicalHash::from_bytes([0xacu8; 32]);
     let mut table = AuthorityStorageGrantTableV1::new();
     table.register(current.clone()).expect("current grant");
-    let service = AuthorityManagedStorageServiceV1::new_with_journal(
+    let error = match AuthorityManagedStorageServiceV1::new_with_journal(
         table,
         historical.authority_generation,
         &path,
         header.bootstrap_manifest_hash,
         header.journal_instance_hash,
-    )
-    .expect("source-bound rollover is recoverable historical state");
+    ) {
+        Ok(_) => panic!("stale pending source binding must fail closed"),
+        Err(error) => error,
+    };
     assert!(matches!(
-        service.require_startup_reconciliation(),
-        Err(ManagedStorageErrorV1::JournalUnavailable)
-    ));
-    assert!(matches!(
-        service.reconcile_unsettled_storage_grants_with_physical_bridge(),
-        Err(ManagedStorageErrorV1::JournalUnavailable)
-    ));
-
-    let broker = sigil_kernel::capability_issuer::KernelCapabilityBrokerV1::new();
-    let current_capability = broker
-        .issue_storage_namespace_capability(
-            broker.seal_storage_namespace_proof(current.capability_family, current.namespace_hash),
-        )
-        .expect("current capability");
-    assert!(matches!(
-        service.admit_namespace(storage_test_request(), current_capability),
-        Err(ManagedStorageErrorV1::JournalUnavailable)
+        error,
+        JournalErrorV1::Corrupt(message)
+            if message.contains("journal admission grant binding mismatch")
     ));
 }
 
 #[test]
-fn r71_storage_quarantines_ambiguous_legacy_alias_without_selecting_or_deleting_data() {
+fn r71_storage_rejects_stale_pending_legacy_alias_without_selecting_or_deleting_data() {
     let directory = tempfile::tempdir().expect("journal directory");
     let path = directory.path().join("authority-resources.journal.json");
     let header = storage_test_header();
@@ -272,23 +268,21 @@ fn r71_storage_quarantines_ambiguous_legacy_alias_without_selecting_or_deleting_
     current.grant_hash = CanonicalHash::from_bytes([0xacu8; 32]);
     let mut table = AuthorityStorageGrantTableV1::new();
     table.register(current.clone()).expect("current grant");
-    let service = AuthorityManagedStorageServiceV1::new_with_journal(
+    let error = match AuthorityManagedStorageServiceV1::new_with_journal(
         table,
         historical.authority_generation,
         &path,
         header.bootstrap_manifest_hash,
         header.journal_instance_hash,
-    )
-    .expect("recoverable historical admission");
-    let receipts = service
-        .reconcile_unsettled_storage_grants_with_physical_bridge()
-        .expect("quarantine legacy alias");
-    assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].committed_sequence_or_version, Some(3));
-    assert_eq!(receipts[0].physical_frontier_hash, None);
-    service
-        .require_startup_reconciliation()
-        .expect("exact admission blocker cleared");
+    ) {
+        Ok(_) => panic!("stale pending source binding must fail closed"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        JournalErrorV1::Corrupt(message)
+            if message.contains("journal admission grant binding mismatch")
+    ));
     assert_eq!(
         std::fs::read(first.join("records.jsonl")).expect("first retained"),
         first_before
@@ -297,26 +291,8 @@ fn r71_storage_quarantines_ambiguous_legacy_alias_without_selecting_or_deleting_
         std::fs::read(second.join("records.jsonl")).expect("second retained"),
         second_before
     );
-    drop(service);
-
-    let mut reopened_table = AuthorityStorageGrantTableV1::new();
-    reopened_table.register(current).expect("current grant");
-    let reopened = AuthorityManagedStorageServiceV1::new_with_journal(
-        reopened_table,
-        historical.authority_generation,
-        &path,
-        header.bootstrap_manifest_hash,
-        header.journal_instance_hash,
-    )
-    .expect("terminal quarantine replays");
-    reopened
-        .require_startup_reconciliation()
-        .expect("quarantine remains terminal");
-    let journal =
-        crate::journal::ResourceJournalFileV1::open(&path, header).expect("reopen durable journal");
-    assert!(journal.unsettled_storage_admissions().is_empty());
     let journal_text = std::fs::read_to_string(path).expect("journal text");
-    assert!(journal_text.contains("StorageAdmissionAliasQuarantined"));
+    assert!(!journal_text.contains("StorageAdmissionAliasQuarantined"));
 }
 
 #[test]
@@ -1247,8 +1223,8 @@ fn r71_storage_family_exact_closure() {
         ManagedStorageAdmissionRequestV1, ValidatedStorageAdmissionCapabilityV1,
     };
     use sigil_kernel::resource::{
-        ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1, OpaqueSessionId,
-        ResourceJournalScopeV1, ResourceOwnerScopeV1,
+        ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1, ResourceJournalScopeV1,
+        ResourceOwnerScopeV1,
     };
     let mut table = AuthorityStorageGrantTableV1::new();
     table.register(grant()).expect("register");
@@ -1267,7 +1243,7 @@ fn r71_storage_family_exact_closure() {
             cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
             application_generation: 1,
         },
-        owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+        owner_scope: ResourceOwnerScopeV1::Application,
         journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
     };
     service
@@ -1285,7 +1261,7 @@ fn r71_storage_family_exact_closure() {
             cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
             application_generation: 1,
         },
-        owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+        owner_scope: ResourceOwnerScopeV1::Application,
         journal_scope: ResourceJournalScopeV1::Application,
     };
     let error = service
@@ -1304,7 +1280,7 @@ fn r71_storage_family_exact_closure() {
             cutover_manifest_hash: CanonicalHash::from_bytes([9u8; 32]),
             application_generation: 1,
         },
-        owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new("s-1".to_owned())),
+        owner_scope: ResourceOwnerScopeV1::Application,
         journal_scope: ResourceJournalScopeV1::Application,
     };
     let error = service
