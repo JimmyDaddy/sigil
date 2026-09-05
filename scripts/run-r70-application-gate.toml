@@ -1,0 +1,423 @@
+# R70.4 / T12 / E13 real production-surface registration.
+#
+# This is a registration contract, not a fixture or a pass-only baseline.  A surface is
+# qualification-ready only after the listed production entries are exercised against the one
+# shared fixture and emit the normalized receipt/frontier/event evidence below.
+schema_version = "r70.4.t12-e13.real-production-surface-v1"
+qualification = "T12/E13"
+operation = "cancel_current_run"
+required_surface_ids = ["tui-keyboard", "tui-mouse", "cli", "http", "desktop"]
+excluded_unit_test = "crates/sigil-application/src/tests/lib_tests.rs::five_surface_clients_share_frontier_page_and_domain_receipt"
+
+[shared_fixture]
+id = "t12-e13-shared-authority-fixture-v1"
+status = "missing"
+owner = "application/runtime composition"
+reason = "No production fixture currently drives one logical command through all five real entries and exposes the same durable receipt/frontier/event comparison."
+source_files = [
+  "crates/sigil/tests/common.rs",
+  "crates/sigil/tests/serve_process_tests.rs",
+  "crates/sigil/tests/session_lifecycle_tui_process_tests.rs",
+  "crates/sigil-http/src/tests/production_driver_tests.rs",
+]
+required_artifacts = [
+  "explicit fixture state/cache/workspace roots",
+  "one authenticated application scope and session scope",
+  "one durable application reservation and projection owner",
+  "one provider fixture usable by every real entry",
+]
+
+[normalization]
+receipt_fields = [
+  "command_id",
+  "command_kind",
+  "frontier.scope",
+  "frontier.writer_generation",
+  "frontier.stream_generation",
+  "frontier.through_sequence",
+  "settlement",
+  "domain_commit.source_event_id",
+  "domain_commit.source_sequence",
+  "domain_commit.source_digest",
+  "outcome",
+]
+frontier_fields = [
+  "scope",
+  "writer_generation",
+  "stream_generation",
+  "through_sequence",
+]
+domain_event_fields = [
+  "event_id",
+  "base_frontier",
+  "next_frontier",
+  "payload_digest",
+  "payload.event_kind",
+]
+outcome_fields = [
+  "receipt_variant",
+  "settlement",
+  "effect_count",
+  "terminal_status",
+  "error_code",
+]
+identity_fields = [
+  "application_instance_id",
+  "authenticated_subject",
+  "workspace_scope_id",
+  "session_scope_id",
+  "client_epoch",
+  "command_id",
+  "command_fingerprint",
+]
+comparison = "exact equality after replacing only per-run opaque ids with the fixture identity map; no connection label is a comparison key"
+
+[rerun]
+same_command_id = true
+same_command_fingerprint = true
+replay_must_be = "Replayed(ApplicationDomainReceipt) or ReplayedUncertain(UncertainCommandReceipt)"
+boundary_metadata = ["reservation_phase", "dispatch_phase", "domain_commit_phase", "settlement_phase", "process_epoch", "crash_observed"]
+
+[[crash_boundaries]]
+id = "after-reservation-before-dispatch"
+required_receipt = "Uncertain or ConfirmedNoEffect; never a fresh dispatch"
+
+[[crash_boundaries]]
+id = "after-dispatch-before-domain-commit"
+required_receipt = "Uncertain with durable recovery binding"
+
+[[crash_boundaries]]
+id = "after-domain-commit-before-settlement"
+required_receipt = "Replayed(ApplicationDomainReceipt) without duplicate effect"
+
+[[crash_boundaries]]
+id = "after-settlement-before-client-response"
+required_receipt = "Replayed(ApplicationDomainReceipt) with the original domain commit"
+
+[[surfaces]]
+id = "tui-keyboard"
+kind = "tui"
+input_evidence = "keyboard"
+status = "blocked"
+required = true
+backend = "real sigil TUI process via PTY"
+fixture_id = "t12-e13-shared-authority-fixture-v1"
+caller = "AppState::handle_key_event -> AppAction -> TuiApplicationSession::try_execute_action"
+application_runtime_owner = "sigil_runtime::RuntimeApplicationService"
+durable_frontier = "sigil_runtime::application_session_frontier_view"
+domain_receipt = "sigil_application::ApplicationCommandReceipt"
+qualification_runner = "missing: no real PTY command currently exposes the normalized application receipt/frontier comparison"
+qualification_test_source = ""
+qualification_test_id = ""
+qualification_test_count_min = 1
+observed_test_source = "crates/sigil/tests/session_lifecycle_tui_process_tests.rs"
+observed_test_id = "real_tui_first_run_without_model_catalog_completes_the_first_request"
+observed_test_command = ["python3", "scripts/run-isolated-tests.py", "--", "cargo", "test", "--locked", "-p", "sigil", "--test", "session_lifecycle_tui_process_tests", "real_tui_first_run_without_model_catalog_completes_the_first_request", "--", "--format", "terse"]
+interaction_evidence = { source_file = "crates/sigil/tests/session_lifecycle_tui_process_tests.rs", marker = "write_input(writer" }
+evidence_log = { test_id = "real_tui_first_run_without_model_catalog_completes_the_first_request", count = "source-registered-not-run", log = "runtime-generated PTY log is required", compare_scope = "entry -> runtime owner -> durable frontier -> domain receipt" }
+proof = { real_entry = true, application_runtime_owner = true, durable_frontier = false, domain_receipt = false, normalized_compare = false, crash_boundary = false }
+rerun_boundary = "same isolated PTY fixture identity and command id across reconnect"
+crash_boundary = "real process termination at each registered application journal phase"
+blockers = [
+  "existing real PTY test exercises a first run but does not return ApplicationCommandReceipt or normalized frontier evidence",
+  "shared five-surface authority fixture is missing",
+]
+
+[[surfaces.entries]]
+role = "enum"
+source_file = "crates/sigil-tui/src/app.rs"
+symbol = "AppAction"
+variant = "CancelRun"
+anchor = "pub enum AppAction"
+caller = "AppState::handle_key_event"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-tui/src/app.rs"
+symbol = "handle_key_event"
+anchor = "pub fn handle_key_event"
+caller = "AppState::handle_key_event"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-tui/src/application_bridge.rs"
+symbol = "try_execute_action"
+anchor = "fn try_execute_action"
+caller = "TuiApplicationSession::try_execute_action"
+
+[[surfaces.entries]]
+role = "owner"
+source_file = "crates/sigil-runtime/src/application_service.rs"
+symbol = "RuntimeApplicationService"
+anchor = "impl ApplicationPort for RuntimeApplicationService"
+caller = "RuntimeApplicationService::execute"
+
+[[surfaces.entries]]
+role = "frontier"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "application_session_frontier_view"
+anchor = "pub fn application_session_frontier_view"
+caller = "application_session_frontier_view"
+
+[[surfaces]]
+id = "tui-mouse"
+kind = "tui"
+input_evidence = "mouse"
+status = "blocked"
+required = true
+backend = "real sigil TUI process via PTY with SGR mouse input"
+fixture_id = "t12-e13-shared-authority-fixture-v1"
+caller = "AppState::handle_mouse_event -> AppMouseOutcome::Action -> runtime.application.try_execute_action"
+application_runtime_owner = "sigil_runtime::RuntimeApplicationService"
+durable_frontier = "sigil_runtime::application_session_frontier_view"
+domain_receipt = "sigil_application::ApplicationCommandReceipt"
+qualification_runner = "missing: no real PTY mouse command currently drives an application command and emits normalized receipt/frontier evidence"
+qualification_test_source = ""
+qualification_test_id = ""
+qualification_test_count_min = 1
+observed_test_source = "scripts/tui-stateful-pty-acceptance.py"
+observed_test_id = "LIVE_PANEL_SCROLL_UP_SEQUENCE"
+observed_test_command = ["python3", "scripts/tui-stateful-pty-acceptance.py", "--binary", "<sigil-binary>", "--tokenizer-json", "<tokenizer-json>", "--output-dir", "<isolated-output>"]
+interaction_evidence = { source_file = "scripts/tui-stateful-pty-acceptance.py", marker = "LIVE_PANEL_SCROLL_UP_SEQUENCE" }
+evidence_log = { test_id = "LIVE_PANEL_SCROLL_UP_SEQUENCE", count = "source-registered-not-run", log = "runtime-generated stateful PTY manifest and process logs are required", compare_scope = "mouse input -> TUI action -> runtime owner -> durable frontier -> domain receipt" }
+proof = { real_entry = true, application_runtime_owner = false, durable_frontier = false, domain_receipt = false, normalized_compare = false, crash_boundary = false }
+rerun_boundary = "same isolated PTY fixture identity and command id across mouse reconnect"
+crash_boundary = "real process termination at each registered application journal phase"
+blockers = [
+  "existing stateful PTY campaign proves SGR mouse input but only checks TUI/session audit canaries",
+  "no mouse-driven application command qualification test exposes ApplicationCommandReceipt",
+  "shared five-surface authority fixture is missing",
+]
+
+[[surfaces.entries]]
+role = "enum"
+source_file = "crates/sigil-tui/src/app.rs"
+symbol = "AppAction"
+variant = "CancelRun"
+anchor = "pub enum AppAction"
+caller = "AppState::handle_mouse_event"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-tui/src/app/mouse_flow.rs"
+symbol = "handle_mouse_event"
+anchor = "pub fn handle_mouse_event"
+caller = "AppState::handle_mouse_event"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-tui/src/launcher.rs"
+symbol = "runtime.application.try_execute_action"
+anchor = "runtime.application.try_execute_action("
+caller = "TuiApplicationSession::try_execute_action"
+
+[[surfaces.entries]]
+role = "owner"
+source_file = "crates/sigil-runtime/src/application_service.rs"
+symbol = "RuntimeApplicationService"
+anchor = "impl ApplicationPort for RuntimeApplicationService"
+caller = "RuntimeApplicationService::execute"
+
+[[surfaces.entries]]
+role = "frontier"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "application_session_frontier_view"
+anchor = "pub fn application_session_frontier_view"
+caller = "application_session_frontier_view"
+
+[[surfaces]]
+id = "cli"
+kind = "cli"
+input_evidence = "process"
+status = "blocked"
+required = true
+backend = "real sigil binary with clap parser"
+fixture_id = "t12-e13-shared-authority-fixture-v1"
+caller = "Commands::Run -> run_command -> prepare_application_run"
+application_runtime_owner = "sigil_runtime::prepare_application_run (ordinary CLI run path)"
+durable_frontier = "sigil_runtime::application_session_frontier_view"
+domain_receipt = "missing: ordinary CLI run emits run output, not ApplicationCommandReceipt"
+qualification_runner = "missing: CLI parser/run binary has no application-command receipt qualification caller"
+qualification_test_source = ""
+qualification_test_id = ""
+qualification_test_count_min = 1
+observed_test_source = "crates/sigil/tests/machine_output_tests.rs"
+observed_test_id = "json_process_stdout_is_one_parseable_result_and_exit_zero"
+observed_test_command = ["python3", "scripts/run-isolated-tests.py", "--", "cargo", "test", "--locked", "-p", "sigil", "--test", "machine_output_tests", "json_process_stdout_is_one_parseable_result_and_exit_zero", "--", "--format", "terse"]
+interaction_evidence = { source_file = "crates/sigil/tests/machine_output_tests.rs", marker = "env!(\"CARGO_BIN_EXE_sigil\")" }
+evidence_log = { test_id = "json_process_stdout_is_one_parseable_result_and_exit_zero", count = "source-registered-not-run", log = "runtime-generated machine-output process log is required", compare_scope = "CLI parser/binary -> runtime owner -> durable frontier -> domain receipt" }
+proof = { real_entry = true, application_runtime_owner = false, durable_frontier = false, domain_receipt = false, normalized_compare = false, crash_boundary = false }
+rerun_boundary = "same isolated process fixture identity and command id across CLI rerun"
+crash_boundary = "real binary termination after each registered application journal phase"
+blockers = [
+  "ordinary CLI Commands::Run calls prepare_application_run directly and has no ApplicationPort command receipt caller",
+  "existing machine-output test proves a real binary result but not the shared application receipt/frontier",
+  "shared five-surface authority fixture is missing",
+]
+
+[[surfaces.entries]]
+role = "enum"
+source_file = "crates/sigil/src/main.rs"
+symbol = "Commands"
+variant = "Run"
+anchor = "enum Commands"
+caller = "Commands::Run"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil/src/main.rs"
+symbol = "run_command"
+anchor = "async fn run_command"
+caller = "run_command"
+
+[[surfaces.entries]]
+role = "owner"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "prepare_application_run"
+anchor = "pub async fn prepare_application_run"
+caller = "prepare_application_run"
+
+[[surfaces.entries]]
+role = "frontier"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "application_session_frontier_view"
+anchor = "pub fn application_session_frontier_view"
+caller = "application_session_frontier_view"
+
+[[surfaces]]
+id = "http"
+kind = "http"
+input_evidence = "http"
+status = "blocked"
+required = true
+backend = "real authenticated loopback HTTP route"
+fixture_id = "t12-e13-shared-authority-fixture-v1"
+caller = "POST /sessions/{session_id}/application/commands -> registry.application_client -> HttpApplicationClient::execute"
+application_runtime_owner = "sigil_runtime::RuntimeApplicationService"
+durable_frontier = "sigil_runtime::application_session_frontier_view"
+domain_receipt = "sigil_application::ApplicationCommandReceipt"
+qualification_runner = "missing: no route-level test currently drives the application command endpoint with the shared fixture"
+qualification_test_source = ""
+qualification_test_id = ""
+qualification_test_count_min = 1
+observed_test_source = "crates/sigil-http/src/tests/production_driver_tests.rs"
+observed_test_id = "production_http_application_client_uses_runtime_projection_page_and_reservation"
+observed_test_command = ["python3", "scripts/run-isolated-tests.py", "--", "cargo", "test", "--locked", "-p", "sigil-http", "--lib", "production_http_application_client_uses_runtime_projection_page_and_reservation", "--", "--format", "terse"]
+interaction_evidence = { source_file = "crates/sigil-http/src/listener.rs", marker = "strip_suffix(\"/application/commands\")" }
+evidence_log = { test_id = "production_http_application_client_uses_runtime_projection_page_and_reservation", count = "source-registered-not-run", log = "runtime-generated authenticated HTTP request/response log is required", compare_scope = "HTTP route -> runtime owner -> durable frontier -> domain receipt" }
+proof = { real_entry = true, application_runtime_owner = true, durable_frontier = true, domain_receipt = true, normalized_compare = false, crash_boundary = false }
+rerun_boundary = "same HTTP application client epoch and command id across response-lost retry"
+crash_boundary = "server termination after each registered application journal phase"
+blockers = [
+  "existing production HTTP test binds the application client directly and does not exercise the listener route",
+  "route-level test and shared five-surface authority fixture are missing",
+]
+
+[[surfaces.entries]]
+role = "enum"
+source_file = "crates/sigil-http/src/dto.rs"
+symbol = "HttpApplicationClientAction"
+variant = "PreviewCompaction"
+anchor = "pub enum HttpApplicationClientAction"
+caller = "HTTP application command catalog"
+
+[[surfaces.entries]]
+role = "request"
+source_file = "crates/sigil-http/src/application_bridge.rs"
+symbol = "HttpApplicationCommandRequest"
+anchor = "pub struct HttpApplicationCommandRequest"
+caller = "POST /sessions/{session_id}/application/commands"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-http/src/listener.rs"
+symbol = "/application/commands"
+anchor = "strip_suffix(\"/application/commands\")"
+caller = "handle_http_connection"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-http/src/listener.rs"
+symbol = "registry.application_client"
+anchor = "registry.application_client(session_id, client_id)"
+caller = "handle_http_connection"
+
+[[surfaces.entries]]
+role = "owner"
+source_file = "crates/sigil-http/src/application_bridge.rs"
+symbol = "RuntimeApplicationService"
+anchor = "RuntimeApplicationService::new("
+caller = "HttpApplicationClient::execute"
+
+[[surfaces.entries]]
+role = "frontier"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "application_session_frontier_view"
+anchor = "pub fn application_session_frontier_view"
+caller = "application_session_frontier_view"
+
+[[surfaces]]
+id = "desktop"
+kind = "desktop"
+input_evidence = "typed-native"
+status = "blocked"
+required = true
+backend = "real DesktopHttpClient plus Tauri native command boundary"
+fixture_id = "t12-e13-shared-authority-fixture-v1"
+caller = "DesktopRecoveryAction/native command -> DesktopHttpClient typed route"
+application_runtime_owner = "missing: current Desktop typed client exposes run/recovery routes, not the application command contract"
+durable_frontier = "missing: current Desktop qualification does not expose ApplicationFrontier"
+domain_receipt = "missing: current Desktop qualification emits run/recovery receipts, not ApplicationCommandReceipt"
+qualification_runner = "missing: Desktop typed/native application command qualification caller"
+qualification_test_source = ""
+qualification_test_id = ""
+qualification_test_count_min = 1
+observed_test_source = "crates/sigil/tests/serve_process_tests.rs"
+observed_test_id = "desktop_typed_client_streams_and_replays_real_run_events"
+observed_test_command = ["python3", "scripts/run-isolated-tests.py", "--", "cargo", "test", "--locked", "-p", "sigil", "--test", "serve_process_tests", "desktop_typed_client_streams_and_replays_real_run_events", "--", "--format", "terse"]
+interaction_evidence = { source_file = "crates/sigil/tests/serve_process_tests.rs", marker = "desktop_typed_client_streams_and_replays_real_run_events" }
+evidence_log = { test_id = "desktop_typed_client_streams_and_replays_real_run_events", count = "source-registered-not-run", log = "runtime-generated Desktop typed-client/server log is required", compare_scope = "native/typed Desktop entry -> runtime owner -> durable frontier -> domain receipt" }
+proof = { real_entry = true, application_runtime_owner = false, durable_frontier = false, domain_receipt = false, normalized_compare = false, crash_boundary = false }
+rerun_boundary = "same Desktop typed client epoch and command id across reconnect"
+crash_boundary = "server/native process termination after each registered application journal phase"
+blockers = [
+  "DesktopHttpClient has no typed application command method and the native DesktopRecoveryAction is a recovery UI enum rather than an application command",
+  "existing Desktop e2e proves typed run/replay behavior but not the shared application receipt/frontier",
+  "shared five-surface authority fixture is missing",
+]
+
+[[surfaces.entries]]
+role = "enum"
+source_file = "apps/desktop/src-tauri/src/commands.rs"
+symbol = "DesktopRecoveryAction"
+variant = "RetryCurrent"
+anchor = "enum DesktopRecoveryAction"
+caller = "desktop_command_conversation_recovery"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "apps/desktop/src-tauri/src/commands.rs"
+symbol = "desktop_command_conversation_recovery"
+anchor = "pub(crate) async fn desktop_command_conversation_recovery"
+caller = "desktop_command_conversation_recovery"
+
+[[surfaces.entries]]
+role = "caller"
+source_file = "crates/sigil-desktop/src/client.rs"
+symbol = "start_run"
+anchor = "pub async fn start_run"
+caller = "DesktopHttpClient::start_run"
+
+[[surfaces.entries]]
+role = "owner"
+source_file = "crates/sigil-http/src/application_bridge.rs"
+symbol = "RuntimeApplicationService"
+anchor = "RuntimeApplicationService::new("
+caller = "missing Desktop application command route"
+
+[[surfaces.entries]]
+role = "frontier"
+source_file = "crates/sigil-runtime/src/application_run.rs"
+symbol = "application_session_frontier_view"
+anchor = "pub fn application_session_frontier_view"
+caller = "application_session_frontier_view"
