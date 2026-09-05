@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Composer } from "./Composer";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
-import { LocaleProvider } from "./i18n";
+import { LocaleProvider, translateEnglish } from "./i18n";
+import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import type {
   AgentBinding,
   ProviderConnection,
@@ -282,6 +283,7 @@ function renderComposer(overrides: {
   onOpenIntentStack?: () => void;
   onNotice?: (message: string, error?: boolean) => void;
   activityState?: ComposerActivityState;
+  statusPresentation?: ProductStatusPresentation;
   runContext?: RunContext;
   providerConnections?: ProviderConnection[];
   onModelChange?: (modelRef: ProviderModelRef) => void;
@@ -332,6 +334,7 @@ function renderComposer(overrides: {
         queuePaused={overrides.queuePaused ?? false}
         queueBusy={overrides.queueBusy ?? false}
         activityState={overrides.activityState}
+        statusPresentation={overrides.statusPresentation}
         queuePanel={overrides.queuePanel}
         onModelChange={onModelChange}
         onPermissionModeChange={() => undefined}
@@ -511,6 +514,20 @@ describe("structured composer", () => {
     const status = screen.getByRole("status");
     expect(within(status).getByText("Sigil is working")).toBeTruthy();
     expect(within(status).getByText("Live output is updating. New messages will be queued.")).toBeTruthy();
+  });
+
+  it("renders the parent supplied typed status presentation", () => {
+    renderComposer({
+      active: true,
+      activityState: "reconnecting",
+      statusPresentation: presentComposerActivity("reconnecting", translateEnglish),
+    });
+
+    expect(document.querySelector(".composer")?.getAttribute("data-composer-product-status"))
+      .toBe("uncertain");
+    const status = screen.getByRole("status");
+    expect(within(status).getByText("Reconnecting to the task")).toBeTruthy();
+    expect(within(status).getByText("Execution may continue while live updates reconnect.")).toBeTruthy();
   });
 
   it("focuses the editor without asking WebKit to reveal it by scrolling", () => {

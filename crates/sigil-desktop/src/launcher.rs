@@ -470,6 +470,15 @@ impl DesktopServerProcess {
     /// Returns an error when the child cannot be waited, the forced tree cannot be terminated, or
     /// the direct child cannot be reaped within the fallback deadline.
     pub async fn shutdown(mut self) -> Result<DesktopShutdownReport, DesktopShutdownError> {
+        self.shutdown_in_place().await
+    }
+
+    /// Shuts down the owned child while retaining this process handle for a possible supervised
+    /// restart. The manager uses this when a saved configuration must be loaded by a fresh
+    /// server process.
+    pub(crate) async fn shutdown_in_place(
+        &mut self,
+    ) -> Result<DesktopShutdownReport, DesktopShutdownError> {
         self.owner_stdin.take();
         if self.shutdown_timeout.is_zero() {
             return self.shutdown_after_deadline().await;
@@ -494,6 +503,10 @@ impl DesktopServerProcess {
             Ok(Err(_)) => Err(DesktopShutdownError::WaitFailed),
             Err(_) => self.shutdown_after_deadline().await,
         }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.child.is_some()
     }
 
     async fn shutdown_after_deadline(

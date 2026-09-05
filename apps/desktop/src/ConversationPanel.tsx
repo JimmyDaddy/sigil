@@ -100,6 +100,7 @@ import { Icon } from "./ui/icons";
 import { Button, Drawer, IconButton, Tooltip } from "./ui/primitives";
 import { LoadingState, useNotifications } from "./ui/feedback";
 import { VerificationInspector } from "./VerificationInspector";
+import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 
 interface ConversationPanelProps {
   bridge: DesktopBridge;
@@ -1379,6 +1380,9 @@ export function ConversationPanel({
     streamState: streamStatus?.state,
     continuityLifecycle: continuityState.lifecycle,
   });
+  const composerStatusPresentation = composerActivityState === undefined
+    ? undefined
+    : presentComposerActivity(composerActivityState, t);
 
   useEffect(() => {
     if (pendingApproval?.approval !== undefined) setInspectorOpen(false);
@@ -2196,7 +2200,11 @@ export function ConversationPanel({
           </span>
         </div>
         <div className="conversation-header-actions">
-          <ConversationActivity state={streamStatus?.state} t={t} />
+          <ConversationActivity
+            state={streamStatus?.state}
+            presentation={composerStatusPresentation}
+            t={t}
+          />
           {agentActivity !== undefined && agentActivity.totalAgents > 0 ? (
             <Tooltip label={t("openAgentActivity")}>
               <IconButton
@@ -2394,6 +2402,10 @@ export function ConversationPanel({
                   ? "routeRecoveryReplacement"
                   : routeRecovery.code === "session_already_active"
                     ? "routeRecoveryBusy"
+                    : routeRecovery.code === "authority_journal_corrupted"
+                      ? "routeRecoveryAuthority"
+                      : routeRecovery.code === "authority_unavailable"
+                        ? "routeRecoveryAuthorityUnavailable"
                     : "routeRecoverySetup",
             )}</p>
           </div>
@@ -2443,7 +2455,9 @@ export function ConversationPanel({
               </Button>
             ) : null}
             {routeRecovery.actions.some((action) => (
-              action === "repair_connection" || action === "select_replacement"
+              action === "repair_connection"
+                || action === "repair_authority"
+                || action === "select_replacement"
             )) ? (
               <Button type="button" variant="quiet" onClick={onOpenSettings}>
                 {t("reviewRoute")}
@@ -2691,6 +2705,7 @@ export function ConversationPanel({
         queuePaused={conversationQueue?.paused ?? false}
         queueBusy={conversationQueueBusy || conversationQueueLoading}
         activityState={composerActivityState}
+        statusPresentation={composerStatusPresentation}
         queuePanel={(
           <ConversationQueuePanel
             queue={conversationQueue}
@@ -2893,14 +2908,16 @@ function compactionErrorMessage(error: unknown, t: Translate): string {
 
 function ConversationActivity({
   state,
+  presentation,
   t,
 }: {
   readonly state?: RunStreamState;
+  readonly presentation?: ProductStatusPresentation;
   readonly t: Translate;
 }) {
   const effectiveState = state ?? "idle";
   if (effectiveState === "idle" || effectiveState === "terminal") return null;
-  const label = (() => {
+  const label = presentation?.label ?? (() => {
     switch (effectiveState) {
       case "connecting": return t("conversationConnecting");
       case "live": return t("conversationLive");
@@ -2914,6 +2931,7 @@ function ConversationActivity({
       role={effectiveState === "error" ? "alert" : "status"}
       aria-live={effectiveState === "error" ? "assertive" : "polite"}
       aria-atomic="true"
+      data-conversation-product-status={presentation?.status}
     >
       <span className="conversation-activity-dot" aria-hidden="true" />
       {label}

@@ -1402,6 +1402,8 @@ pub enum DesktopSessionRouteRecoveryCode {
     ModelRouteNotConfigured,
     ConnectionConfigInvalid,
     ProviderUnavailable,
+    AuthorityUnavailable,
+    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -1412,6 +1414,7 @@ pub enum DesktopSessionRouteRecoveryCode {
 pub enum DesktopSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
+    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,

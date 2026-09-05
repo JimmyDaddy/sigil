@@ -1,4 +1,5 @@
 import { useLocale } from "./i18n";
+import { presentTerminalTask } from "./statusPresentation";
 import type { TimelineTerminalTask } from "./types";
 import { Button } from "./ui/primitives";
 
@@ -11,14 +12,15 @@ interface TerminalTaskCardProps {
 export function TerminalTaskCard({ task, stopping = false, onStop }: TerminalTaskCardProps) {
   const { t } = useLocale();
   const active = task.status === "starting" || task.status === "running";
-  const statusLabel = t(`terminalTaskStatus_${task.status}`);
+  const presentation = presentTerminalTask(task, t);
   const readinessLabel = t(`terminalTaskReadiness_${task.readiness}`);
 
   return (
     <article
-      className={`terminal-task-card terminal-task-${task.status}`}
+      className={`terminal-task-card terminal-task-${task.status} terminal-product-status-${presentation.status}`}
       data-terminal-task-id={task.taskId}
       data-terminal-task-status={task.status}
+      data-terminal-task-product-status={presentation.status}
       data-terminal-task-readiness={task.readiness}
       data-terminal-task-generation={task.generation}
       data-terminal-task-backend={task.executionBackend}
@@ -27,15 +29,15 @@ export function TerminalTaskCard({ task, stopping = false, onStop }: TerminalTas
       <header>
         <span>
           <small>{t("backgroundTerminalTask")}</small>
-          <strong>{task.taskId}</strong>
+          <strong>{t("terminalTaskTitle")}</strong>
         </span>
-        <span className={`terminal-task-status status-${task.status}`}>{statusLabel}</span>
+        <span className={`terminal-task-status status-${presentation.status}`}>{presentation.label}</span>
       </header>
+      <section className="terminal-task-status-copy" role="status" aria-live="polite">
+        <p>{presentation.message}</p>
+        <small><strong>{t("nextStepLabel")}:</strong> {presentation.nextStep}</small>
+      </section>
       <dl className="terminal-task-meta">
-        <div>
-          <dt>{t("terminalTaskGeneration")}</dt>
-          <dd>{task.generation}</dd>
-        </div>
         <div>
           <dt>{t("terminalTaskReadiness")}</dt>
           <dd>{readinessLabel}</dd>
@@ -63,6 +65,20 @@ export function TerminalTaskCard({ task, stopping = false, onStop }: TerminalTas
           </div>
         )}
       </dl>
+      <details className="terminal-task-details">
+        <summary>{t("showDetails")}</summary>
+        <p><strong>{t("technicalDetailsLabel")}:</strong> {presentation.technicalDetail}</p>
+        <dl className="terminal-task-meta">
+          <div>
+            <dt>{t("terminalTaskTaskId")}</dt>
+            <dd>{task.taskId}</dd>
+          </div>
+          <div>
+            <dt>{t("terminalTaskGeneration")}</dt>
+            <dd>{task.generation}</dd>
+          </div>
+        </dl>
+      </details>
       {task.failureReason === undefined && task.readinessFailureReason === undefined ? null : (
         <p className="terminal-task-failure" role="alert">
           {task.failureReason ?? task.readinessFailureReason}

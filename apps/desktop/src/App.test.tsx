@@ -786,7 +786,7 @@ describe("desktop coding-agent components", () => {
     );
 
     expect(screen.getByText("bounded durable summary")).toBeTruthy();
-    expect(screen.getByText("The complete saved output is no longer available.")).toBeTruthy();
+    expect(screen.getByText("Saved output is not currently available.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "View saved output" })).toBeNull();
     expect(readArtifact).not.toHaveBeenCalled();
   });

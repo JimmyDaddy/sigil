@@ -638,9 +638,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
         });
       }
       return session;
-    } catch {
+    } catch (error) {
       setSessionActionState("error");
-      setSessionMessage(t("conversationCreateFailed"));
+      const routeRecovery = sessionRouteRecoveryFromError(error);
+      setSessionMessage(
+        routeRecovery?.code === "authority_journal_corrupted"
+          ? t("routeRecoveryAuthority")
+          : routeRecovery?.code === "authority_unavailable"
+            ? t("routeRecoveryAuthorityUnavailable")
+            : t("conversationCreateFailed"),
+      );
       setConversationNavigation(undefined);
       return undefined;
     }
@@ -720,6 +727,21 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       return false;
     }
   };
+
+  const reloadConversationAfterProviderRestart = useCallback(async (workspaceId: string) => {
+    if (workspaceId !== activeWorkspaceIdRef.current) return;
+    const durableSessionId = selectedDurableSessionId;
+    setSelectedSession(undefined);
+    if (durableSessionId === undefined) return;
+    const page = await loadHistory(workspaceId);
+    if (workspaceId !== activeWorkspaceIdRef.current) return;
+    const entry = page?.entries.find((candidate) => candidate.sessionId === durableSessionId);
+    if (entry === undefined) {
+      setSelectedDurableSessionId(undefined);
+      return;
+    }
+    await openSession(entry);
+  }, [loadHistory, openSession, selectedDurableSessionId]);
 
   const openForkSession = async (sessionRef: string, sessionId: string) => {
     if (activeWorkspaceId === undefined) return;
@@ -1052,6 +1074,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 setProviderInventoryState("ready");
                 return true;
               }}
+              onProviderConfigurationReloaded={reloadConversationAfterProviderRestart}
               modelContext={workspaceRunContext}
               defaultModel={defaultModel}
               onDefaultModelChange={setDefaultModel}
@@ -1524,6 +1547,8 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
     "model_route_not_configured",
     "connection_config_invalid",
     "provider_unavailable",
+    "authority_unavailable",
+    "authority_journal_corrupted",
     "session_already_active",
     "session_writer_busy",
     "session_stream_invalid",
@@ -1531,6 +1556,7 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
   const actions = new Set([
     "confirm_current_route",
     "repair_connection",
+    "repair_authority",
     "select_replacement",
     "start_new_session",
     "retry_provider",

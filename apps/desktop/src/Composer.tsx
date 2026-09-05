@@ -12,6 +12,7 @@ import {
 
 import { ComposerSuggestions, type ComposerSuggestion } from "./ComposerSuggestions";
 import type { ComposerActivityState } from "./features/conversation/composerActivity";
+import { presentComposerActivity, type ProductStatusPresentation } from "./statusPresentation";
 import { modelOptionIsSelectable, providerModelRefKey, providerModelRefsEqual } from "./types";
 import type {
   AgentBinding,
@@ -54,6 +55,7 @@ export function Composer({
   queueBusy,
   queuePanel,
   activityState,
+  statusPresentation,
   onModelChange,
   onPermissionModeChange,
   onReasoningEffortChange,
@@ -90,6 +92,7 @@ export function Composer({
   queueBusy: boolean;
   queuePanel?: ReactNode;
   activityState?: ComposerActivityState;
+  statusPresentation?: ProductStatusPresentation;
   onModelChange: (modelRef: ProviderModelRef) => void;
   onPermissionModeChange: (mode: PermissionMode) => void;
   onReasoningEffortChange: (effort: ReasoningEffort) => void;
@@ -365,12 +368,16 @@ export function Composer({
   ).length;
   const availableReasoningEfforts = modelOption?.availableReasoningEfforts ?? [];
   const permissionModes = runContext?.availablePermissionModes ?? ["read-only", "manual", "auto-edit", "danger-full-access"];
-  const activity = activityState === undefined ? undefined : composerActivityCopy(activityState, t);
+  const activity = statusPresentation
+    ?? (activityState === undefined ? undefined : presentComposerActivity(activityState, t));
 
   return (
     <>
     <form
-      className={`composer${activityState === undefined ? "" : ` has-activity activity-${activityState}`}`}
+      className={`composer${activity === undefined
+        ? ""
+        : ` has-activity${activityState === undefined ? "" : ` activity-${activityState}`}`}`}
+      data-composer-product-status={activity?.status}
       onSubmit={(event) => { event.preventDefault(); void submit(); }}
     >
       {suggestionsOpen ? (
@@ -399,7 +406,7 @@ export function Composer({
           </span>
           <span className="composer-activity-copy">
             <strong>{activity.label}</strong>
-            <small>{activity.detail}</small>
+            <small>{activity.message}</small>
           </span>
         </div>
       ) : null}
@@ -634,29 +641,6 @@ export function Composer({
 
 function focusWithoutScroll(element: HTMLElement | null): void {
   element?.focus({ preventScroll: true });
-}
-
-function composerActivityCopy(state: ComposerActivityState, t: ReturnType<typeof useLocale>["t"]) {
-  switch (state) {
-    case "starting":
-      return { label: t("composerActivityStarting"), detail: t("composerActivityStartingDetail") };
-    case "connecting":
-      return { label: t("composerActivityConnecting"), detail: t("composerActivityConnectingDetail") };
-    case "running":
-      return { label: t("composerActivityRunning"), detail: t("composerActivityRunningDetail") };
-    case "waiting_for_approval":
-      return { label: t("composerActivityApproval"), detail: t("composerActivityApprovalDetail") };
-    case "stopping":
-      return { label: t("composerActivityStopping"), detail: t("composerActivityStoppingDetail") };
-    case "recovering":
-      return { label: t("composerActivityRecovering"), detail: t("composerActivityRecoveringDetail") };
-    case "reconnecting":
-      return { label: t("composerActivityReconnecting"), detail: t("composerActivityReconnectingDetail") };
-    case "connection_error":
-      return { label: t("composerActivityConnectionError"), detail: t("composerActivityConnectionErrorDetail") };
-    case "finalizing":
-      return { label: t("composerActivityFinalizing"), detail: t("composerActivityFinalizingDetail") };
-  }
 }
 
 function modelOptionCanBeSelected(

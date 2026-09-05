@@ -646,3 +646,44 @@ fn route_recovery_event_projects_bounded_renderer_actions() {
     assert_eq!(recovery.recovery_binding, "route-binding-1");
     assert!(recovery.retryable);
 }
+
+#[test]
+fn authority_journal_recovery_uses_stable_snake_case_and_preserves_repair_action() {
+    let event = envelope(
+        DesktopProtocolEventClass::Durable,
+        json!({
+            "type": "route_recovery_required",
+            "code": "authority_journal_corrupted",
+            "actions": ["repair_authority"],
+            "recovery_binding": "authority-recovery-binding",
+            "retryable": false
+        }),
+    );
+
+    let timeline = event
+        .into_timeline("workspace-1", "session-1", "run-1", "session-1")
+        .expect("authority recovery event should project");
+
+    assert_eq!(
+        timeline.text.as_deref(),
+        Some("The authority journal is corrupted and must be repaired before another run.")
+    );
+    let recovery = timeline.route_recovery.expect("typed authority recovery");
+    assert_eq!(
+        recovery.code,
+        DesktopRouteRecoveryCode::AuthorityJournalCorrupted
+    );
+    assert_eq!(
+        recovery.actions,
+        vec![DesktopRouteRecoveryAction::RepairAuthority]
+    );
+    assert_eq!(
+        serde_json::to_value(&recovery).expect("recovery should serialize"),
+        json!({
+            "code": "authority_journal_corrupted",
+            "actions": ["repair_authority"],
+            "recoveryBinding": "authority-recovery-binding",
+            "retryable": false
+        })
+    );
+}

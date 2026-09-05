@@ -2,6 +2,7 @@ import { useState, type RefObject } from "react";
 
 import { useLocale } from "./i18n";
 import type { TaskProductProjection } from "./features/conversation/taskProjection";
+import { isTaskRunningStatus, presentTaskStatus } from "./statusPresentation";
 import { Button, TextArea, Tooltip } from "./ui/primitives";
 
 interface TaskControlPanelProps {
@@ -36,23 +37,28 @@ export function TaskControlPanel({
   const { t } = useLocale();
   const [guidanceOpen, setGuidanceOpen] = useState(false);
   const [guidance, setGuidance] = useState("");
+  const statusPresentation = presentTaskStatus(task.status, t);
   const childTotal = task.activeChildren + task.completedChildren + task.failedChildren;
   const actionDisabled = disabled || busy || runActive;
   const canContinue = task.canContinue && !reviewReady && !runActive;
   const canPause = runActive
     && task.execution !== undefined
-    && ["started", "running"].includes(task.status.toLowerCase());
+    && isTaskRunningStatus(task.status);
 
   return (
-    <section className="task-control-panel sg-bounded-content" aria-labelledby="task-control-title">
+    <section
+      className="task-control-panel sg-bounded-content"
+      aria-labelledby="task-control-title"
+      data-task-product-status={statusPresentation.status}
+    >
       <header>
         <div>
           <span className="task-control-eyebrow">{t("task")}</span>
           <h3 id="task-control-title">{task.objective ?? t("taskInProgress")}</h3>
         </div>
         <div className="task-control-header-actions">
-          <span className={`task-status task-status-${statusClass(task.status)}`}>
-            {formatMachineLabel(task.status)}
+          <span className={`task-status task-status-${statusPresentation.status}`}>
+            {statusPresentation.label}
           </span>
           {canPause ? (
             <Tooltip label={t("pauseTaskDetail")}>
@@ -68,10 +74,12 @@ export function TaskControlPanel({
           ) : null}
         </div>
       </header>
+      <section className="task-status-copy" role="status" aria-live="polite">
+        <p>{statusPresentation.message}</p>
+        <small><strong>{t("nextStepLabel")}:</strong> {statusPresentation.nextStep}</small>
+      </section>
 
       <div className="task-control-meta">
-        <code>{task.taskId}</code>
-        {task.phase === undefined ? null : <span>{t("taskPhase", { phase: formatMachineLabel(task.phase) })}</span>}
         {task.planVersion === undefined ? null : <span>{t("taskPlanVersion", { version: task.planVersion })}</span>}
         {childTotal === 0 ? null : (
           <span>{t("taskChildProgress", {
@@ -81,6 +89,17 @@ export function TaskControlPanel({
           })}</span>
         )}
       </div>
+
+      <details className="task-status-details">
+        <summary>{t("showDetails")}</summary>
+        <p><strong>{t("technicalDetailsLabel")}:</strong> {statusPresentation.technicalDetail}</p>
+        <dl className="task-control-meta">
+          <div><dt>{t("taskId")}</dt><dd><code>{task.taskId}</code></dd></div>
+          {task.phase === undefined ? null : (
+            <div><dt>{t("taskPhaseLabel")}</dt><dd>{formatMachineLabel(task.phase)}</dd></div>
+          )}
+        </dl>
+      </details>
 
       {task.checklist.length === 0 ? null : (
         <ol className="task-step-list task-checklist">

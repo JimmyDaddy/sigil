@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { useLocale } from "./i18n";
+import { presentProductStatus } from "./statusPresentation";
 import type {
   CheckpointRestoreReview,
   CheckpointView,
@@ -42,6 +43,9 @@ export function ConversationRecoveryPanel({
     && preview.checkpointDigest === selected.checkpointDigest
     ? preview
     : undefined;
+  const emptyPresentation = recovery === undefined
+    ? presentProductStatus(error ? "failed" : "loading", t)
+    : undefined;
 
   return (
     <div className="conversation-recovery-panel sg-bounded-content">
@@ -75,9 +79,25 @@ export function ConversationRecoveryPanel({
       </section>
 
       {recovery === undefined ? (
-        <div className="conversation-recovery-empty">
+        <div
+          className={`conversation-recovery-empty task-status-${emptyPresentation?.status}`}
+          role={error ? "alert" : "status"}
+          aria-live="polite"
+          data-recovery-product-status={emptyPresentation?.status}
+          data-testid="recovery-state"
+        >
           <Icon name="history" />
-          <p>{error ? t("conversationRecoveryUnavailable") : t("loadingConversationRecovery")}</p>
+          <strong>{emptyPresentation?.label}</strong>
+          <p>{emptyPresentation?.message}</p>
+          {emptyPresentation === undefined ? null : (
+            <small><strong>{t("nextStepLabel")}:</strong> {emptyPresentation.nextStep}</small>
+          )}
+          {emptyPresentation === undefined ? null : (
+            <details>
+              <summary>{t("showDetails")}</summary>
+              <p><strong>{t("technicalDetailsLabel")}:</strong> {emptyPresentation.technicalDetail}</p>
+            </details>
+          )}
           {error ? <Button type="button" onClick={onRefresh}>{t("retry")}</Button> : null}
         </div>
       ) : <>

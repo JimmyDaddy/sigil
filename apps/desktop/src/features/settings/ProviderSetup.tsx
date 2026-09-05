@@ -188,9 +188,11 @@ export function ProviderSetup({
       setApiKey("");
       setState("idle");
       onSaved(result.inventory);
-    } catch {
+    } catch (saveError) {
       setState("error");
-      setError(t("providerSetupSaveFailed"));
+      setError(isWorkspaceReloadFailure(saveError)
+        ? t("providerSetupRestartFailed")
+        : t("providerSetupSaveFailed"));
     }
   };
 
@@ -449,6 +451,13 @@ export function ProviderSetup({
       )}
     </section>
   );
+}
+
+function isWorkspaceReloadFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  return error.code === "workspace_server_start_failed"
+    || error.code === "workspace_server_stop_failed"
+    || error.code === "workspace_server_unavailable";
 }
 
 function providerName(

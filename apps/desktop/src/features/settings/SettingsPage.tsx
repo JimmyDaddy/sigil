@@ -38,6 +38,7 @@ export function SettingsPage({
   isWorkspaceActive,
   providerInventory,
   onProviderInventoryChange,
+  onProviderConfigurationReloaded,
   modelContext,
   defaultModel,
   onDefaultModelChange,
@@ -50,6 +51,7 @@ export function SettingsPage({
   readonly isWorkspaceActive: () => boolean;
   readonly providerInventory?: ProviderConnectionInventory;
   readonly onProviderInventoryChange: (inventory: ProviderConnectionInventory) => boolean;
+  readonly onProviderConfigurationReloaded: (workspaceId: string) => Promise<void>;
   readonly modelContext?: RunContext;
   readonly defaultModel?: ProviderModelRef;
   readonly onDefaultModelChange: (modelRef?: ProviderModelRef) => void;
@@ -125,6 +127,7 @@ export function SettingsPage({
         );
       if (!onProviderInventoryChange(result.inventory)) return;
       onDefaultModelChange(result.defaultModel);
+      await onProviderConfigurationReloaded(workspaceId);
       notify({
         tone: result.saveWarning ? "warning" : "success",
         message: result.saveWarning ? t("defaultModelSaveWarning") : t("defaultModelSaved"),
@@ -152,6 +155,7 @@ export function SettingsPage({
       );
       if (!onProviderInventoryChange(result.inventory)) return;
       onDefaultModelChange(result.defaultModel);
+      await onProviderConfigurationReloaded(workspaceId);
       notify({
         tone: result.saveWarning ? "warning" : "success",
         message: result.saveWarning ? t("defaultModelSaveWarning") : t("contextWindowSaved"),
@@ -285,8 +289,12 @@ export function SettingsPage({
                   onCancel={() => setProviderSetupOpen(false)}
                   onSaved={(inventory) => {
                     if (!onProviderInventoryChange(inventory)) return;
-                    setProviderSetupOpen(false);
-                    notify({ tone: "success", message: t("providerSetupSaved") });
+                    void onProviderConfigurationReloaded(workspaceId).then(() => {
+                      setProviderSetupOpen(false);
+                      notify({ tone: "success", message: t("providerSetupSaved") });
+                    }).catch(() => {
+                      notify({ tone: "error", message: t("providerSetupRestartFailed") });
+                    });
                   }}
                 />
               </div>

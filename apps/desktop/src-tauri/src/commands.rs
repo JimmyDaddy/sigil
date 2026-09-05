@@ -9,16 +9,17 @@ use sigil_desktop::{
     DesktopCheckpointRestoreRequest, DesktopClientError, DesktopCompactionAdmission,
     DesktopCompactionReview as NativeCompactionReview, DesktopConversationDisplayQuery,
     DesktopConversationQueueCommandRequest, DesktopConversationQueueGeneration,
-    DesktopConversationRecoveryCommandAction, DesktopLaunchError, DesktopLaunchRequest,
-    DesktopPlanDecisionAction, DesktopRunCancelRequest, DesktopRunStartRequest,
-    DesktopSessionCatalogBatchExecuteRequest, DesktopSessionCatalogBatchItem,
-    DesktopSessionCatalogBatchPlanRequest, DesktopSessionCatalogState, DesktopSessionCreateRequest,
-    DesktopSessionDeleteRequest, DesktopSessionInvalidSourceDeleteRequest,
-    DesktopSessionOpenRequest, DesktopSessionQuarantineRequest, DesktopSessionRenameRequest,
-    DesktopStartupFailure, DesktopTaskContinuationRequest, DesktopTaskExecutionBinding,
-    DesktopTimelineTerminalTask, DesktopToolArtifactReadRequest,
-    DesktopToolArtifactSelector as NativeToolArtifactSelector, DesktopTranscriptQuery,
-    DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
+    DesktopConversationRecoveryCommandAction, DesktopHttpClient, DesktopLaunchError,
+    DesktopLaunchRequest, DesktopPlanDecisionAction, DesktopRunCancelRequest,
+    DesktopRunStartRequest, DesktopSessionCatalogBatchExecuteRequest,
+    DesktopSessionCatalogBatchItem, DesktopSessionCatalogBatchPlanRequest,
+    DesktopSessionCatalogState, DesktopSessionCreateRequest, DesktopSessionDeleteRequest,
+    DesktopSessionInvalidSourceDeleteRequest, DesktopSessionOpenRequest,
+    DesktopSessionQuarantineRequest, DesktopSessionRenameRequest, DesktopStartupFailure,
+    DesktopTaskContinuationRequest, DesktopTaskExecutionBinding, DesktopTimelineTerminalTask,
+    DesktopToolArtifactReadRequest, DesktopToolArtifactSelector as NativeToolArtifactSelector,
+    DesktopTranscriptQuery, DesktopWorkspaceManagerError, DesktopWorkspaceOpenRequest,
+    DesktopWorkspaceSummary,
 };
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -202,17 +203,20 @@ pub(crate) async fn desktop_save_provider_setup(
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopProviderSetupSaveSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
-    let client = state
-        .manager
-        .lock()
-        .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
+    let mut manager = state.manager.lock().await;
+    let client = configuration_change_client(&mut manager, &workspace_id).await?;
+    ensure_workspace_restart_safe(&client).await?;
+    state.run_streams.stop_workspace(&workspace_id).await;
+    let result = client
         .save_provider_setup_host_private(input.into_native())
         .await
         .map(Into::into)
-        .map_err(project_client_error)
+        .map_err(project_client_error)?;
+    manager
+        .restart(&workspace_id)
+        .await
+        .map_err(project_manager_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -222,17 +226,20 @@ pub(crate) async fn desktop_save_provider_default_model(
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopProviderDefaultModelSaveSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
-    let client = state
-        .manager
-        .lock()
-        .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
+    let mut manager = state.manager.lock().await;
+    let client = configuration_change_client(&mut manager, &workspace_id).await?;
+    ensure_workspace_restart_safe(&client).await?;
+    state.run_streams.stop_workspace(&workspace_id).await;
+    let result = client
         .save_provider_default_model_host_private(input.into_native())
         .await
         .map(Into::into)
-        .map_err(project_client_error)
+        .map_err(project_client_error)?;
+    manager
+        .restart(&workspace_id)
+        .await
+        .map_err(project_manager_error)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2703,6 +2710,61 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
             DesktopRecoveryAction::ShowDetails,
         ]),
     }
+}
+
+async fn configuration_change_client(
+    manager: &mut sigil_desktop::DesktopWorkspaceManager,
+    workspace_id: &str,
+) -> Result<DesktopHttpClient, DesktopCommandError> {
+    match manager.client(workspace_id) {
+        Ok(client) => Ok(client),
+        Err(DesktopWorkspaceManagerError::WorkspaceUnavailable) => {
+            manager
+                .restart(workspace_id)
+                .await
+                .map_err(project_manager_error)?;
+            manager.client(workspace_id).map_err(project_manager_error)
+        }
+        Err(error) => Err(project_manager_error(error)),
+    }
+}
+
+async fn ensure_workspace_restart_safe(
+    client: &DesktopHttpClient,
+) -> Result<(), DesktopCommandError> {
+    let sessions = match client.list_sessions().await {
+        Ok(sessions) => sessions,
+        // A recovery-only server deliberately rejects the session surface. It is still safe to
+        // save provider setup, because the following supervised restart is what attempts the
+        // first authority boot with the newly published configuration.
+        Err(DesktopClientError::Rejected {
+            status: 503,
+            route_recovery: Some(_),
+            ..
+        }) => return Ok(()),
+        Err(_) => {
+            return Err(DesktopCommandError::new(
+                "workspace_run_state_unavailable",
+                "Active-run state could not be verified before reloading provider configuration.",
+            )
+            .with_recovery_actions([
+                DesktopRecoveryAction::RetryCurrent,
+                DesktopRecoveryAction::OpenAnotherWorkspace,
+                DesktopRecoveryAction::ShowDetails,
+            ]));
+        }
+    };
+    if sessions
+        .sessions
+        .iter()
+        .any(|session| session.foreground_run_id.is_some())
+    {
+        return Err(DesktopCommandError::new(
+            "workspace_active_runs",
+            "Finish the active run before reloading provider configuration.",
+        ));
+    }
+    Ok(())
 }
 
 fn project_task_control_client_error(error: DesktopClientError) -> DesktopCommandError {

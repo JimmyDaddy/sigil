@@ -2,6 +2,8 @@ import { useLayoutEffect, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
+import { useLocale } from "./i18n";
+import { presentArtifactStatus } from "./statusPresentation";
 import type {
   ToolArtifactAvailability,
   ToolArtifactPage,
@@ -73,6 +75,7 @@ export function ToolCard({
   readonly displayId?: string;
   readonly onReadArtifact?: (selector: ToolArtifactSelector) => Promise<ToolArtifactPage>;
 }) {
+  const { t } = useLocale();
   const presentation = presentTool(tool);
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
@@ -90,6 +93,9 @@ export function ToolCard({
     tool.artifactRef !== undefined
     && tool.artifactAvailability === "available"
     && onReadArtifact !== undefined;
+  const artifactPresentation = tool.artifactAvailability === undefined
+    ? undefined
+    : presentArtifactStatus(tool.artifactAvailability, t);
   const readArtifact = async (selector: ToolArtifactSelector) => {
     if (!canReadArtifact || artifactBusy) return;
     setArtifactBusy(true);
@@ -172,6 +178,16 @@ export function ToolCard({
       )}
       {canReadArtifact ? (
         <section className="tool-artifact-retrieval" aria-label={`${presentation.displayName} saved output`}>
+          {artifactPresentation === undefined ? null : (
+            <div className="tool-artifact-status" data-artifact-product-status={artifactPresentation.status}>
+              <strong>{artifactPresentation.message}</strong>
+              <small><strong>{t("nextStepLabel")}:</strong> {artifactPresentation.nextStep}</small>
+              <details>
+                <summary>{t("showDetails")}</summary>
+                <p>{artifactPresentation.technicalDetail}</p>
+              </details>
+            </div>
+          )}
           <div className="tool-artifact-actions">
             <Button
               type="button"
@@ -232,12 +248,21 @@ export function ToolCard({
               Next page
             </Button>
           )}
-          {artifactError ? <small role="alert">Saved output is unavailable or failed its integrity check.</small> : null}
+          {artifactError ? <small role="alert">{t("artifactReadFailed")}</small> : null}
         </section>
-      ) : tool.artifactAvailability !== undefined && tool.artifactHasMore ? (
-        <small className="tool-artifact-unavailable">
-          The complete saved output is no longer available.
-        </small>
+      ) : artifactPresentation !== undefined ? (
+        <section
+          className={`tool-artifact-status tool-status-${artifactPresentation.status}`}
+          data-artifact-product-status={artifactPresentation.status}
+          aria-label={artifactPresentation.label}
+        >
+          <strong>{artifactPresentation.message}</strong>
+          <small><strong>{t("nextStepLabel")}:</strong> {artifactPresentation.nextStep}</small>
+          <details>
+            <summary>{t("showDetails")}</summary>
+            <p><strong>{t("technicalDetailsLabel")}:</strong> {artifactPresentation.technicalDetail}</p>
+          </details>
+        </section>
       ) : null}
     </article>
   );

@@ -58,6 +58,7 @@ pub struct DesktopWorkspaceSummary {
 struct ManagedWorkspace {
     canonical_root: PathBuf,
     display_name: String,
+    launch: DesktopLaunchRequest,
     state: DesktopConnectionState,
     process: DesktopServerProcess,
 }
@@ -87,15 +88,24 @@ impl DesktopWorkspaceManager {
         let canonical_root = tokio::fs::canonicalize(&request.launch.workspace_root)
             .await
             .map_err(|_| DesktopWorkspaceManagerError::InvalidWorkspace)?;
-        if let Some((id, workspace)) = self
+        let existing_id = self
             .workspaces
-            .iter_mut()
+            .iter()
             .find(|(_, workspace)| workspace.canonical_root == canonical_root)
-        {
+            .map(|(id, _)| id.clone());
+        if let Some(id) = existing_id {
+            let workspace = self
+                .workspaces
+                .get_mut(&id)
+                .expect("workspace id found during the same manager operation");
             refresh_workspace(workspace)?;
-            return Ok(summary(id, workspace));
+            if workspace.state == DesktopConnectionState::Ready {
+                return Ok(summary(&id, workspace));
+            }
+            return self.restart(&id).await;
         }
 
+        let launch = request.launch.clone();
         let process = self.launcher.launch(request.launch).await?;
         let id = process.server_info().workspace_id.clone();
         if self.workspaces.contains_key(&id) {
@@ -105,6 +115,7 @@ impl DesktopWorkspaceManager {
         let workspace = ManagedWorkspace {
             canonical_root,
             display_name: request.display_name,
+            launch,
             state: DesktopConnectionState::Ready,
             process,
         };
@@ -138,6 +149,33 @@ impl DesktopWorkspaceManager {
             return Err(DesktopWorkspaceManagerError::WorkspaceUnavailable);
         }
         Ok(workspace.process.client())
+    }
+
+    /// Restarts one workspace server so a configuration saved through the current recovery
+    /// process becomes the configuration used by the long-lived runtime. The workspace identity
+    /// must remain stable across the replacement process.
+    pub async fn restart(
+        &mut self,
+        workspace_id: &str,
+    ) -> Result<DesktopWorkspaceSummary, DesktopWorkspaceManagerError> {
+        let launcher = self.launcher;
+        let workspace = self
+            .workspaces
+            .get_mut(workspace_id)
+            .ok_or(DesktopWorkspaceManagerError::UnknownWorkspace)?;
+        let launch = workspace.launch.clone();
+        workspace.state = DesktopConnectionState::Exited;
+        if workspace.process.is_running() {
+            workspace.process.shutdown_in_place().await?;
+        }
+        let process = launcher.launch(launch).await?;
+        if process.server_info().workspace_id != workspace_id {
+            let _ = process.shutdown().await;
+            return Err(DesktopWorkspaceManagerError::IdentityCollision);
+        }
+        workspace.process = process;
+        workspace.state = DesktopConnectionState::Ready;
+        Ok(summary(workspace_id, workspace))
     }
 
     /// Gracefully closes and removes one workspace-owned process.

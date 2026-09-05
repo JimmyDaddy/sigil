@@ -2,6 +2,7 @@ import { useEffect, useRef, type RefObject } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { useLocale } from "./i18n";
+import { presentDeliveryStatus } from "./statusPresentation";
 import type {
   ApprovalAction,
   SessionGrantUnavailableReasonCode,
@@ -55,6 +56,7 @@ export function ApprovalDock({
     || approval.analysisReasonCodes?.some((code) =>
       code === "unsupported_syntax" || code === "invalid_syntax"
     ) === true;
+  const deliveryPresentation = presentDeliveryStatus(phase, t);
   if (phase !== "pending") {
     return (
       <section
@@ -62,6 +64,7 @@ export function ApprovalDock({
         ref={dockRef}
         aria-live="polite"
         aria-labelledby="approval-title"
+        data-approval-product-status={deliveryPresentation.status}
       >
         <header>
           <div>
@@ -70,10 +73,16 @@ export function ApprovalDock({
             </p>
             <h3 id="approval-title">{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3>
           </div>
+          <span className={`approval-status status-${deliveryPresentation.status}`}>
+            {deliveryPresentation.label}
+          </span>
         </header>
-        <p>
-          {phase === "accepted" ? t("approvalAcceptedDetail") : t("approvalUncertainDetail")}
-        </p>
+        <p>{deliveryPresentation.message}</p>
+        <small><strong>{t("nextStepLabel")}:</strong> {deliveryPresentation.nextStep}</small>
+        <details>
+          <summary>{t("showDetails")}</summary>
+          <p><strong>{t("technicalDetailsLabel")}:</strong> {deliveryPresentation.technicalDetail}</p>
+        </details>
       </section>
     );
   }
@@ -83,6 +92,7 @@ export function ApprovalDock({
       ref={dockRef}
       tabIndex={-1}
       aria-labelledby="approval-title"
+      data-approval-product-status={deliveryPresentation.status}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -94,6 +104,11 @@ export function ApprovalDock({
         <div><p className="eyebrow">{t("approvalRequiredTitle")}</p><h3 id="approval-title">{approval.previewTitle ?? approval.safeSummaryTitle ?? approval.toolName}</h3></div>
         <span className={`risk-badge risk-${approval.risk ?? "unknown"}`}>{approval.risk ?? t("notClassified")}</span>
       </header>
+      <p className="approval-status-copy">
+        <strong>{deliveryPresentation.message}</strong>
+        <br />
+        <small><strong>{t("nextStepLabel")}:</strong> {deliveryPresentation.nextStep}</small>
+      </p>
       <p>{approval.previewSummary ?? approval.safeSummaryDetail ?? t("reviewExactToolAction")}</p>
       {approval.toolInput ? (
         <div className="approval-command">

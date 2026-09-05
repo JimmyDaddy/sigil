@@ -1954,6 +1954,8 @@ export type RouteRecoveryCode =
   | "model_route_not_configured"
   | "connection_config_invalid"
   | "provider_unavailable"
+  | "authority_unavailable"
+  | "authority_journal_corrupted"
   | "session_already_active"
   | "session_writer_busy"
   | "session_stream_invalid";
@@ -1961,6 +1963,7 @@ export type RouteRecoveryCode =
 export type RouteRecoveryAction =
   | "confirm_current_route"
   | "repair_connection"
+  | "repair_authority"
   | "select_replacement"
   | "start_new_session"
   | "retry_provider"

@@ -33,4 +33,36 @@ describe("ConversationRecoveryPanel compaction action", () => {
     await userEvent.click(screen.getByRole("button", { name: "Compact now" }));
     expect(compact).toHaveBeenCalledOnce();
   });
+
+  it("maps loading and failed recovery states and keeps retry explicit", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn();
+    const props = {
+      busy: false,
+      error: false,
+      onRefresh,
+      onCompact: vi.fn(async () => true),
+      onPreview: vi.fn(async () => undefined),
+      onRestore: vi.fn(async () => undefined),
+      onFork: vi.fn(async () => undefined),
+    };
+
+    const { rerender } = render(
+      <LocaleProvider>
+        <ConversationRecoveryPanel {...props} />
+      </LocaleProvider>,
+    );
+    expect(screen.getByTestId("recovery-state").getAttribute("data-recovery-product-status")).toBe("loading");
+    expect(screen.getByText("Loading")).toBeTruthy();
+
+    rerender(
+      <LocaleProvider>
+        <ConversationRecoveryPanel {...props} error />
+      </LocaleProvider>,
+    );
+    expect(screen.getByTestId("recovery-state").getAttribute("data-recovery-product-status")).toBe("failed");
+    expect(screen.getByText("Failed")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRefresh).toHaveBeenCalledOnce();
+  });
 });

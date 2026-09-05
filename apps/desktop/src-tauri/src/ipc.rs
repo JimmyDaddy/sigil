@@ -2419,6 +2419,10 @@ pub(crate) fn desktop_session_route_recovery_summary(
             }
             DesktopSessionRouteRecoveryCode::ConnectionConfigInvalid => "connection_config_invalid",
             DesktopSessionRouteRecoveryCode::ProviderUnavailable => "provider_unavailable",
+            DesktopSessionRouteRecoveryCode::AuthorityUnavailable => "authority_unavailable",
+            DesktopSessionRouteRecoveryCode::AuthorityJournalCorrupted => {
+                "authority_journal_corrupted"
+            }
             DesktopSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
             DesktopSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
             DesktopSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",
@@ -2429,6 +2433,7 @@ pub(crate) fn desktop_session_route_recovery_summary(
             .map(|action| match action {
                 DesktopSessionRouteRecoveryAction::ConfirmCurrentRoute => "confirm_current_route",
                 DesktopSessionRouteRecoveryAction::RepairConnection => "repair_connection",
+                DesktopSessionRouteRecoveryAction::RepairAuthority => "repair_authority",
                 DesktopSessionRouteRecoveryAction::SelectReplacement => "select_replacement",
                 DesktopSessionRouteRecoveryAction::StartNewSession => "start_new_session",
                 DesktopSessionRouteRecoveryAction::RetryProvider => "retry_provider",
@@ -3470,6 +3475,12 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                         DesktopSessionRouteRecoveryCode::ProviderUnavailable => {
                             "provider_unavailable"
                         }
+                        DesktopSessionRouteRecoveryCode::AuthorityUnavailable => {
+                            "authority_unavailable"
+                        }
+                        DesktopSessionRouteRecoveryCode::AuthorityJournalCorrupted => {
+                            "authority_journal_corrupted"
+                        }
                         DesktopSessionRouteRecoveryCode::SessionAlreadyActive => {
                             "session_already_active"
                         }
@@ -3487,6 +3498,9 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                             }
                             DesktopSessionRouteRecoveryAction::RepairConnection => {
                                 "repair_connection"
+                            }
+                            DesktopSessionRouteRecoveryAction::RepairAuthority => {
+                                "repair_authority"
                             }
                             DesktopSessionRouteRecoveryAction::SelectReplacement => {
                                 "select_replacement"

@@ -1,4 +1,5 @@
 import { useLocale } from "./i18n";
+import { presentCleanupStatus } from "./statusPresentation";
 import type {
   TaskIntegrationAcceptance,
   TaskIntegrationReview,
@@ -27,6 +28,7 @@ export function TaskIntegrationInspector({
     acceptance?.promotionCleanupError,
     acceptance?.parentCleanupError,
   ].filter((value): value is string => value !== undefined);
+  const cleanupPresentation = presentCleanupStatus(cleanupErrors, t);
   const continuationReady = acceptance?.canContinue === true
     && acceptance.promotionStatus === "promoted"
     && acceptance.parentVerdict === "passed";
@@ -93,10 +95,19 @@ export function TaskIntegrationInspector({
         </dl>
       </details>
 
-      {cleanupErrors.length === 0 ? null : (
-        <div className="task-integration-cleanup" role="status">
-          <strong>{t("cleanupNeedsAttention")}</strong>
-          {cleanupErrors.map((error) => <span key={error}>{error}</span>)}
+      {cleanupPresentation === undefined ? null : (
+        <div
+          className={`task-integration-cleanup task-status-${cleanupPresentation.status}`}
+          role="status"
+          data-cleanup-product-status={cleanupPresentation.status}
+        >
+          <strong>{cleanupPresentation.message}</strong>
+          <p><strong>{t("nextStepLabel")}:</strong> {cleanupPresentation.nextStep}</p>
+          <details>
+            <summary>{t("showDetails")}</summary>
+            <p><strong>{t("technicalDetailsLabel")}:</strong> {cleanupPresentation.technicalDetail}</p>
+            <ul>{cleanupErrors.map((error) => <li key={error}>{error}</li>)}</ul>
+          </details>
         </div>
       )}
 
