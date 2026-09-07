@@ -115,9 +115,18 @@ impl AppState {
                 self.edit_user_input_text(Some('\n'));
                 Some(None)
             }
-            KeyCode::Enter
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::CONTROL =>
-            {
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                if let Some(form) = self.composer.pending_user_input.as_mut() {
+                    if form.focused_question + 1 < form.view.questions.len() {
+                        form.focused_question += 1;
+                    } else {
+                        form.focus_actions = true;
+                    }
+                }
+                self.reveal_focused_user_input_region();
+                Some(None)
+            }
+            KeyCode::Enter if key.modifiers == KeyModifiers::CONTROL => {
                 if let Some(form) = self.composer.pending_user_input.as_mut() {
                     form.focus_actions = true;
                 }

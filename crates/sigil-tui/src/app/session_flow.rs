@@ -39,9 +39,9 @@ use audit_log::{
     child_verification_parent_recheck_label, evidence_scope_label, plan_approval_permission_label,
     readiness_reason_label, readiness_required_actions_label, receipt_status_label,
     required_action_label, run_status_label, task_child_session_status_label,
-    task_plan_status_label, task_route_status_label, task_run_status_label, task_step_status_label,
-    tool_approval_action_label, tool_execution_status_label, verification_check_run_status_label,
-    verification_stale_reason_label, verification_verdict_label, workspace_trust_label,
+    task_route_status_label, tool_approval_action_label, tool_execution_status_label,
+    verification_check_run_status_label, verification_stale_reason_label,
+    verification_verdict_label, workspace_trust_label,
 };
 use audit_log::{
     render_model_message_line, render_session_log_entry, render_tool_execution_line,
@@ -135,6 +135,8 @@ impl AppState {
             sigil_kernel::PublicPlanAction::Run => retry_preparation,
             sigil_kernel::PublicPlanAction::Revise => revise_plan,
             sigil_kernel::PublicPlanAction::Save | sigil_kernel::PublicPlanAction::Reject => false,
+            sigil_kernel::PublicPlanAction::AdoptCandidate => false,
+            sigil_kernel::PublicPlanAction::RetryReview => false,
         });
         if pending.allowed_actions.is_empty() {
             self.clear_pending_plan_approval();
@@ -446,6 +448,28 @@ impl AppState {
         {
             return;
         }
+        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
+            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
+                .ok()
+                .flatten()
+        });
+        if let Some(review) = sigil_runtime::conversation_display::public_plan_review_from_entries(
+            &self.session_browser.current_entries,
+            current_snapshot.as_deref(),
+        ) && plans.latest_pending_plan().is_none()
+        {
+            if review.candidate.is_some() {
+                self.set_pending_plan_candidate(&review, current_snapshot.as_deref());
+                return;
+            }
+            if review
+                .allowed_actions
+                .contains(&sigil_kernel::PublicPlanAction::RetryReview)
+            {
+                self.set_pending_plan_retry(&review, current_snapshot.as_deref());
+                return;
+            }
+        }
         let Some(draft) = plans.latest_pending_plan().cloned() else {
             return;
         };
@@ -453,11 +477,6 @@ impl AppState {
             .latest_decision(&draft.plan_id)
             .filter(|decision| decision.decision == sigil_kernel::PlanDecision::TaskCreationFailed)
             .and_then(|decision| decision.reason.clone());
-        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
-            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
-                .ok()
-                .flatten()
-        });
         let detail = sigil_kernel::plan_review_detail_from_entries(
             &self.session_browser.current_entries,
             &draft.plan_id,

@@ -94,6 +94,20 @@ impl AppState {
                 plan_id,
                 expected_plan_hash,
             },
+            AppAction::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            } => WorkerCommand::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            },
+            AppAction::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            } => WorkerCommand::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            },
             AppAction::SubmitUserInputDecision {
                 command_id,
                 request_id,
@@ -337,7 +351,6 @@ impl AppState {
                 }
             }
             AppAction::SetupCompleted { .. }
-            | AppAction::StartProviderOnlySafeMode { .. }
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }

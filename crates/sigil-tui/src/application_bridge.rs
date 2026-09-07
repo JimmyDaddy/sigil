@@ -222,8 +222,9 @@ impl TuiApplicationSession {
     }
 
     /// Marks only the public events represented by a successfully committed TUI projection as
-    /// delivered.  This runs on the TUI owner after its application reducer and product state
-    /// have both accepted the projection; a worker-channel enqueue is deliberately not enough.
+    /// delivered. The TUI owner schedules this only after its application reducer and product
+    /// state have both accepted the projection; a worker-channel enqueue is deliberately not
+    /// enough.
     pub(crate) async fn acknowledge_public_events_through(
         &self,
         projection: &ApplicationProjection,
@@ -269,6 +270,8 @@ impl TuiApplicationSession {
                 | AppAction::RejectPlan { .. }
                 | AppAction::SavePlan { .. }
                 | AppAction::RevisePlan { .. }
+                | AppAction::AdoptPlanCandidate { .. }
+                | AppAction::RetryPlanReview { .. }
                 | AppAction::SubmitTask(_)
                 | AppAction::ContinueTask { .. }
                 | AppAction::PauseTask { .. }
@@ -471,6 +474,29 @@ impl TuiApplicationSession {
                 plan_id: sigil_application::SafeText::new(plan_id.clone())?,
                 expected_plan_hash: sigil_application::SafeText::new(expected_plan_hash.clone())?,
             })),
+            AppAction::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            } => Some(ApplicationCommand::PlanTask(
+                PlanTaskCommand::AdoptPlanCandidate {
+                    plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                    expected_candidate_hash: sigil_application::SafeText::new(
+                        expected_candidate_hash.clone(),
+                    )?,
+                },
+            )),
+            AppAction::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            } => Some(ApplicationCommand::PlanTask(
+                PlanTaskCommand::RetryPlanReview {
+                    plan_id: sigil_application::SafeText::new(plan_id.clone())?,
+                    expected_candidate_hash: expected_candidate_hash
+                        .as_ref()
+                        .map(|hash| sigil_application::SafeText::new(hash.clone()))
+                        .transpose()?,
+                },
+            )),
             AppAction::SubmitTask(prompt) => {
                 Some(ApplicationCommand::PlanTask(PlanTaskCommand::SubmitTask {
                     prompt: sigil_application::SafeText::new(prompt.clone())?,
@@ -1422,6 +1448,22 @@ impl TuiWorkerCommandExecutor {
             }) => WorkerCommand::RevisePlan {
                 plan_id: plan_id.as_str().to_owned(),
                 expected_plan_hash: expected_plan_hash.as_str().to_owned(),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            }) => WorkerCommand::AdoptPlanCandidate {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_candidate_hash: expected_candidate_hash.as_str().to_owned(),
+            },
+            ApplicationCommand::PlanTask(PlanTaskCommand::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            }) => WorkerCommand::RetryPlanReview {
+                plan_id: plan_id.as_str().to_owned(),
+                expected_candidate_hash: expected_candidate_hash
+                    .as_ref()
+                    .map(|hash| hash.as_str().to_owned()),
             },
             ApplicationCommand::PlanTask(PlanTaskCommand::SubmitTask { prompt }) => {
                 WorkerCommand::SubmitTask {

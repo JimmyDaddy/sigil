@@ -98,6 +98,19 @@ fn recv_message(message_rx: &mpsc::Receiver<WorkerMessage>) -> Result<WorkerMess
         .map_err(|error| anyhow::anyhow!("timed out waiting for worker message: {error}"))
 }
 
+fn recv_worker_ready(message_rx: &mpsc::Receiver<WorkerMessage>) -> Result<Vec<String>> {
+    let mut startup_notices = Vec::new();
+    loop {
+        match recv_message(message_rx)? {
+            WorkerMessage::Notice(notice) if notice.starts_with("startup: ") => {
+                startup_notices.push(notice);
+            }
+            WorkerMessage::WorkerReady => return Ok(startup_notices),
+            message => anyhow::bail!("unexpected worker startup message: {message:?}"),
+        }
+    }
+}
+
 fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
     fs::write(
         path,
@@ -253,43 +266,17 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
     )?;
-    let ready = recv_message(&message_rx)?;
-    assert!(matches!(ready, WorkerMessage::WorkerReady));
-    command_tx.send(WorkerCommand::Shutdown)?;
-    Ok(())
-}
-
-#[test]
-fn provider_only_safe_worker_starts_without_real_workspace_access() -> Result<()> {
-    let _environment_lock = crate::test_env::lock();
-    let _api_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "test-key");
-    let workspace_root = PathBuf::from("ephemeral://provider-only-test-workspace");
-    let root_config = deepseek_root_config(&workspace_root);
-
-    let spawned = super::super::spawn::spawn_agent_worker_with_start_mode_and_attachment(
-        root_config,
-        PathBuf::from("ephemeral://provider-only/sigil.toml"),
-        PathBuf::from("ephemeral://provider-only/session.jsonl"),
-        workspace_root,
-        sigil_kernel::InteractionMode::Interactive,
-        super::super::spawn::WorkerStartMode::ProviderOnlySafe,
-        super::super::spawn::WorkerSessionRouteDirective::default(),
-        None,
-        None,
-        None,
-    )?;
-    let command_tx = spawned.command_tx;
-    let message_rx = spawned.message_rx;
-    drop(spawned.join_handle);
-
-    loop {
-        match recv_message(&message_rx)? {
-            WorkerMessage::WorkerReady => break,
-            WorkerMessage::Notice(_) => {}
-            message => anyhow::bail!("unexpected safe worker startup message: {message:?}"),
-        }
-    }
-
+    let startup_notices = recv_worker_ready(&message_rx)?;
+    assert!(
+        startup_notices
+            .iter()
+            .any(|notice| notice == "startup: loading provider credentials")
+    );
+    assert!(
+        startup_notices
+            .iter()
+            .any(|notice| notice == "startup: attaching session observers")
+    );
     command_tx.send(WorkerCommand::Shutdown)?;
     Ok(())
 }
@@ -309,10 +296,7 @@ fn second_worker_for_the_same_session_reports_attachment_busy() -> Result<()> {
         workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
     )?;
-    assert!(matches!(
-        recv_message(&owner_rx)?,
-        WorkerMessage::WorkerReady
-    ));
+    let _ = recv_worker_ready(&owner_rx)?;
 
     let contender = spawn_agent_worker(
         root_config,
@@ -364,6 +348,7 @@ fn worker_rebinds_same_origin_route_after_endpoint_correction() -> Result<()> {
     let mut saw_rebind_notice = false;
     loop {
         match recv_message(&message_rx)? {
+            WorkerMessage::Notice(message) if message.starts_with("startup: ") => {}
             WorkerMessage::Notice(message) if message.contains("连接配置已更新") => {
                 saw_rebind_notice = true;
             }
@@ -409,10 +394,7 @@ fn spawn_agent_worker_initializes_v2_route_after_workspace_trust_prelude() -> Re
         sigil_kernel::InteractionMode::Interactive,
     )?;
 
-    assert!(matches!(
-        recv_message(&message_rx)?,
-        WorkerMessage::WorkerReady
-    ));
+    let _ = recv_worker_ready(&message_rx)?;
     let entries = JsonlSessionStore::read_entries(&session_log_path)?;
     let route = entries.iter().find_map(|entry| match entry {
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
@@ -457,8 +439,14 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
         PathBuf::from(&workspace_root),
         sigil_kernel::InteractionMode::Interactive,
     )?;
+    let mut startup_notices = Vec::new();
     let failure = loop {
         let message = recv_message(&message_rx)?;
+        if let WorkerMessage::Notice(notice) = &message
+            && notice.starts_with("startup: ")
+        {
+            startup_notices.push(notice.clone());
+        }
         if matches!(
             message,
             WorkerMessage::McpActivationStatus {
@@ -469,6 +457,17 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
             break message;
         }
     };
+
+    assert!(
+        startup_notices
+            .iter()
+            .any(|notice| notice == "startup: starting MCP server required-eager")
+    );
+    assert!(
+        startup_notices.iter().any(|notice| {
+            notice == "startup: MCP server required-eager unavailable; continuing"
+        })
+    );
 
     assert!(matches!(
         failure,
@@ -545,8 +544,14 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
     let command_tx = spawned.command_tx;
     let message_rx = spawned.message_rx;
     drop(spawned.join_handle);
+    let mut startup_notices = Vec::new();
     let ready = loop {
         let message = recv_message(&message_rx)?;
+        if let WorkerMessage::Notice(notice) = &message
+            && notice.starts_with("startup: ")
+        {
+            startup_notices.push(notice.clone());
+        }
         if matches!(
             message,
             WorkerMessage::McpActivationStatus {
@@ -557,6 +562,17 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
             break message;
         }
     };
+
+    assert!(
+        startup_notices
+            .iter()
+            .any(|notice| notice == "startup: starting MCP server ready-eager")
+    );
+    assert!(
+        startup_notices
+            .iter()
+            .any(|notice| notice == "startup: MCP server ready-eager ready")
+    );
 
     assert!(matches!(
         ready,

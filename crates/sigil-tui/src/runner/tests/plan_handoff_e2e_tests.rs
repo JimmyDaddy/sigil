@@ -578,7 +578,7 @@ fn switch_recovers_managed_plan_review_research_attention_after_session_switched
         workspace_root,
         authority_composition,
     )?;
-    let ready = worker.recv_with_timeout(Duration::from_secs(10))?;
+    let ready = worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
     assert!(matches!(ready, WorkerMessage::WorkerReady));
 
     worker.send(WorkerCommand::SwitchSession {

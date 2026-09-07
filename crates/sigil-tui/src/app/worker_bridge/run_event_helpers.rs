@@ -42,6 +42,7 @@ fn provider_turn_recovery_reason_label(reason: Option<&str>) -> &'static str {
 pub(super) fn notice_is_timeline_worthy(note: &str) -> bool {
     let normalized = note.to_ascii_lowercase();
     [
+        "startup",
         "failed",
         "failure",
         "error",

@@ -37,7 +37,6 @@ pub(in crate::runner) struct WorkerLoopState {
     /// another session immediately after launch is never blocked on maintenance for the session
     /// they are about to abandon.
     pub(in crate::runner) defer_startup_artifact_gc: bool,
-    pub(in crate::runner) provider_only_safe_mode: bool,
 }
 
 impl WorkerLoopState {
@@ -60,7 +59,6 @@ impl WorkerLoopState {
             std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
         >,
         managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
-        provider_only_safe_mode: bool,
     ) -> Self {
         Self::new_with_optional_attachment(
             session_log_path,
@@ -75,7 +73,6 @@ impl WorkerLoopState {
             scratch_control,
             managed_storage_writer,
             managed_artifact_store,
-            provider_only_safe_mode,
         )
     }
 
@@ -97,7 +94,6 @@ impl WorkerLoopState {
             std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
         >,
         managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
-        provider_only_safe_mode: bool,
     ) -> Self {
         let pending_agent_result_continuations =
             pending_agent_result_continuations_from_session(session.as_ref());
@@ -208,7 +204,6 @@ impl WorkerLoopState {
             approval_command_receipt_order: VecDeque::new(),
             last_observed_run_active: false,
             defer_startup_artifact_gc: true,
-            provider_only_safe_mode,
         }
     }
 
@@ -286,9 +281,7 @@ impl WorkerLoopState {
             return Ok(());
         }
         let Some(attachment) = self.session.attachment_lease.as_ref() else {
-            return Err(
-                "session route authority is unavailable in provider-only safe mode".to_owned(),
-            );
+            return Err("session route authority is unavailable".to_owned());
         };
         let authority = attachment
             .route_mutation_authority(session_scope_id)

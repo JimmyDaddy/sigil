@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Result;
 use futures::future::BoxFuture;
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, ApplicationCommandReceipt, ApplicationError,
     ApplicationFrontier, ApplicationPort, ApplicationProjection, ApplicationQueueSurfaceProjection,
@@ -146,6 +147,67 @@ fn snapshot(scope: ApplicationScope) -> ProjectionSnapshot {
         },
         feed: Vec::new(),
     }
+}
+
+#[test]
+fn stale_projection_does_not_hide_an_optimistic_live_run() -> Result<()> {
+    let mut app = crate::app::AppState::from_root_config(
+        Path::new("sigil.toml"),
+        &crate::app::tests::common::test_config(),
+    );
+    app.runtime.is_busy = true;
+    app.runtime.run_phase = crate::app::RunPhase::Thinking;
+
+    let scope = ApplicationScope {
+        application_instance: sigil_application::ApplicationInstanceId::new("tui-live-run")
+            .expect("valid application scope"),
+        authenticated_subject: AuthenticatedSubject::new("local-user")
+            .expect("valid authenticated subject"),
+        workspace: Some(
+            sigil_application::WorkspaceScopeId::new("workspace").expect("valid workspace scope"),
+        ),
+        session: Some(
+            sigil_application::SessionScopeId::new("session").expect("valid session scope"),
+        ),
+    };
+    let mut projection = snapshot(scope).envelope.projection;
+    projection.run.status = SafeText::new("finished").expect("valid run status");
+
+    app.apply_application_projection(&projection);
+
+    assert!(app.runtime.is_busy);
+    assert!(app.live_activity_summary().is_some());
+
+    app.set_terminal_size(120, 30);
+    let surface = crate::surface_adapter::build_surface_model(
+        Rect::new(0, 0, 120, 30),
+        &app,
+        crate::surface::SurfaceState {
+            frame_generation: 1,
+            terminal_epoch: 1,
+        },
+    );
+    assert!(surface.live_panel.progress.is_some());
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30))?;
+    terminal.draw(|frame| crate::ui::render_surface(frame, &surface))?;
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Thinking..."));
+
+    // A refresh started before the worker terminal message may still return the old running
+    // projection. Once the local terminal transition wins, that stale projection must not
+    // resurrect the loading state.
+    app.clear_worker_run_state();
+    projection.run.status = SafeText::new("running").expect("valid run status");
+    app.apply_application_projection(&projection);
+    assert!(!app.runtime.is_busy);
+    Ok(())
 }
 
 fn session(

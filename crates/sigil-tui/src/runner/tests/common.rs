@@ -180,7 +180,10 @@ impl TestWorker {
     }
 
     pub(super) fn recv(&self) -> Result<WorkerMessage> {
-        self.recv_until(|message| !matches!(message, WorkerMessage::WorkerReady))
+        self.recv_until(|message| {
+            !matches!(message, WorkerMessage::WorkerReady)
+                && !matches!(message, WorkerMessage::Notice(notice) if notice.starts_with("startup: "))
+        })
     }
 
     pub(super) fn recv_with_timeout(&self, timeout: Duration) -> Result<WorkerMessage> {
@@ -576,7 +579,6 @@ where
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 Some(managed_storage_writer),
                 Some(managed_artifact_store),
-                false,
             );
         })
         .context("failed to spawn test worker")?;

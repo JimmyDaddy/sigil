@@ -21,7 +21,7 @@ impl AppState {
             self.last_notice = Some(format!(
                 "task {} is already {}",
                 task.task_id.as_str(),
-                super::task_sidebar::task_run_status_label(task.status)
+                task.status.as_str()
             ));
             return None;
         }

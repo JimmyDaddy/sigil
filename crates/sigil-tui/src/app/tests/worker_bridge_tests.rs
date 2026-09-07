@@ -1725,6 +1725,13 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         event.label == "run:finish" && event.detail == "tool_calls=2 final_text_bytes=4"
     }));
 
+    app.handle_worker_message(WorkerMessage::Notice(
+        "startup: loading session state".to_owned(),
+    ))?;
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "startup: loading session state"
+    }));
+
     app.handle_worker_message(WorkerMessage::Notice("worker note".to_owned()))?;
     assert_eq!(app.last_notice(), Some("worker note"));
     assert!(
@@ -6112,6 +6119,76 @@ fn user_input_form_validates_required_text_preserves_spaces_and_submits_exact_id
                     value: "repo scope".to_owned(),
                 },
             }]
+    ));
+    Ok(())
+}
+
+#[test]
+fn user_input_form_enter_advances_through_multiple_questions_before_submit() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut request = pending_text_user_input_request()?;
+    request.questions.extend([
+        sigil_kernel::UserInputQuestionV1 {
+            id: "constraint".to_owned(),
+            header: "Constraint".to_owned(),
+            question: "What constraint matters most?".to_owned(),
+            description: None,
+            required: true,
+            field: sigil_kernel::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 64,
+            },
+        },
+        sigil_kernel::UserInputQuestionV1 {
+            id: "target".to_owned(),
+            header: "Target".to_owned(),
+            question: "Which target should be preserved?".to_owned(),
+            description: None,
+            required: true,
+            field: sigil_kernel::UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 64,
+            },
+        },
+    ]);
+    app.set_pending_user_input(request);
+
+    for character in "scope".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.pending_user_input()
+            .expect("input form")
+            .focused_question,
+        1
+    );
+
+    for character in "constraint".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.pending_user_input()
+            .expect("input form")
+            .focused_question,
+        2
+    );
+
+    for character in "target".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.pending_user_input().expect("input form").focus_actions);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitUserInputDecision {
+            decision: sigil_kernel::UserInputDecisionV1::Submitted { answers },
+            ..
+        }) if answers.iter().map(|answer| answer.question_id.as_str()).collect::<Vec<_>>()
+            == vec!["scope", "constraint", "target"]
     ));
     Ok(())
 }

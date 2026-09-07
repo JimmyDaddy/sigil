@@ -132,8 +132,6 @@ enum Commands {
     Doctor {
         #[arg(long, value_enum, default_value = "text")]
         output: DoctorOutput,
-        #[command(subcommand)]
-        command: Option<DoctorCommand>,
     },
     /// Emit typed JSON Intent Stack automation records for one exact durable session.
     Intent {
@@ -214,6 +212,7 @@ enum PlanDecisionAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -229,16 +228,6 @@ enum DoctorOutput {
     #[default]
     Text,
     Json,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
-enum DoctorCommand {
-    /// Recover a failed authority journal into fresh storage roots and activate them in sigil.toml.
-    ///
-    /// The command preserves the previous roots and journal as evidence, creates fresh
-    /// owner-only roots when the configured roots are not usable, and changes the authority
-    /// epoch only after its operation-bound challenge is typed back exactly.
-    RecoverAuthority,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -474,12 +463,7 @@ async fn run_main(cli: Cli) -> Result<u8> {
                 build.update_metadata(),
             )?;
         }
-        Commands::Doctor { output, command } => match command {
-            Some(DoctorCommand::RecoverAuthority) => {
-                authority_recovery_command(&config_path, &cwd)?
-            }
-            None => doctor_command(&config_path, &cwd, output)?,
-        },
+        Commands::Doctor { output } => doctor_command(&config_path, &cwd, output)?,
         Commands::Intent { session, command } => {
             let exit = intent_cli::execute_intent_command(&config_path, &cwd, &session, command)
                 .write_json();
@@ -720,6 +704,7 @@ fn render_version(info: BuildInfo) -> String {
     )
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn doctor_command(config_path: &Path, launch_cwd: &Path, output: DoctorOutput) -> Result<()> {
     match output {
         DoctorOutput::Text => print!("{}", render_cli_doctor_report(config_path, launch_cwd)),
@@ -728,33 +713,6 @@ fn doctor_command(config_path: &Path, launch_cwd: &Path, output: DoctorOutput) -
             build_cli_doctor_support_report(config_path, launch_cwd)?.to_pretty_json()?
         ),
     }
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn authority_recovery_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {
-    let summary = sigil_runtime::doctor::recover_authority_bootstrap_with_confirmation(
-        config_path,
-        launch_cwd,
-        |challenge| {
-            eprintln!(
-                "Authority recovery will make the failed epoch inert and activate the fresh storage roots in the current config.\nType this exact challenge to continue:\n{challenge}"
-            );
-            let mut supplied = String::new();
-            std::io::stdin()
-                .read_line(&mut supplied)
-                .map_err(|error| error.to_string())?;
-            Ok(supplied)
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
-    println!(
-        "authority recovery complete: epoch {} -> {}, receipt={}, reconciled={}",
-        summary.old_authority_epoch,
-        summary.new_authority_epoch,
-        summary.receipt_hash,
-        summary.reconciled_after_crash
-    );
     Ok(())
 }
 
@@ -774,6 +732,7 @@ fn build_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
     )
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn build_cli_doctor_support_report(
     config_path: &Path,
     launch_cwd: &Path,
@@ -1239,6 +1198,7 @@ async fn plan_decision_command(
         PlanDecisionAction::Save => sigil_runtime::ApplicationPlanAction::Save,
         PlanDecisionAction::Revise => sigil_runtime::ApplicationPlanAction::Revise,
         PlanDecisionAction::Reject => sigil_runtime::ApplicationPlanAction::Reject,
+        PlanDecisionAction::AdoptCandidate => sigil_runtime::ApplicationPlanAction::AdoptCandidate,
     };
     let receipt = sigil_runtime::application_plan_decision(
         &root_config,
@@ -1248,6 +1208,7 @@ async fn plan_decision_command(
         &sigil_runtime::ApplicationPlanDecisionCommand {
             plan_id: plan_id.to_owned(),
             expected_plan_hash: plan_hash.to_owned(),
+            expected_candidate_hash: None,
             action,
             permission_grant: None,
         },
@@ -1262,6 +1223,8 @@ async fn plan_decision_command(
             sigil_runtime::ApplicationPlanAction::Save => "save",
             sigil_runtime::ApplicationPlanAction::Revise => "revise",
             sigil_runtime::ApplicationPlanAction::Reject => "reject",
+            sigil_runtime::ApplicationPlanAction::AdoptCandidate => "adopt_candidate",
+            sigil_runtime::ApplicationPlanAction::RetryReview => "retry_review",
         },
         task_id: receipt.task_id,
         task_phase: receipt.task_phase.map(|phase| phase.as_str().to_owned()),
@@ -1712,9 +1675,6 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
         ApplicationRunPrepareErrorClass::AuthorityUnavailable => {
             MachineErrorCode::AuthorityUnavailable
         }
-        ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => {
-            MachineErrorCode::AuthorityJournalCorrupted
-        }
         ApplicationRunPrepareErrorClass::ModelRouteNotConfigured => {
             MachineErrorCode::ModelRouteNotConfigured
         }
@@ -1775,15 +1735,7 @@ fn machine_error_from_prepare(error: &ApplicationRunPrepareError) -> MachineErro
         ),
         ApplicationRunPrepareErrorClass::AuthorityUnavailable => (
             true,
-            vec![
-                Action::RepairAuthority,
-                Action::StartNewSession,
-                Action::BackToSessionLibrary,
-            ],
-        ),
-        ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => (
-            false,
-            vec![Action::RepairAuthority, Action::BackToSessionLibrary],
+            vec![Action::StartNewSession, Action::BackToSessionLibrary],
         ),
         ApplicationRunPrepareErrorClass::SessionAlreadyActive => (
             true,
@@ -1814,37 +1766,19 @@ fn machine_error_from_boot_authority(
     error: &sigil_runtime::application_host::BootAuthorityErrorV1,
 ) -> MachineError {
     use sigil_kernel::PublicRouteRecoveryAction as Action;
-    use sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1;
-
-    let journal_corrupted = matches!(
-        error,
-        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
-            RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
-                | RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_)
-        )
-    );
-    let (code, retryable, actions, message) = if journal_corrupted {
-        (
-            MachineErrorCode::AuthorityJournalCorrupted,
+    let (code, retryable, actions, message) = match error {
+        sigil_runtime::application_host::BootAuthorityErrorV1::Config(_) => (
+            MachineErrorCode::ConfigurationInvalid,
             false,
-            vec![Action::RepairAuthority, Action::BackToSessionLibrary],
-            "the authority journal is corrupted; repair authority before retrying",
-        )
-    } else {
-        match error {
-            sigil_runtime::application_host::BootAuthorityErrorV1::Config(_) => (
-                MachineErrorCode::ConfigurationInvalid,
-                false,
-                vec![Action::RepairConnection, Action::BackToSessionLibrary],
-                "application configuration is invalid",
-            ),
-            _ => (
-                MachineErrorCode::AuthorityUnavailable,
-                true,
-                vec![Action::RepairAuthority, Action::BackToSessionLibrary],
-                "the authority plane is unavailable; repair authority before retrying",
-            ),
-        }
+            vec![Action::RepairConnection, Action::BackToSessionLibrary],
+            "application configuration is invalid",
+        ),
+        _ => (
+            MachineErrorCode::AuthorityUnavailable,
+            true,
+            vec![Action::StartNewSession, Action::BackToSessionLibrary],
+            "the authority plane is unavailable; start a new session or check configuration",
+        ),
     };
     MachineError::new(code, message, retryable).with_allowed_actions(actions)
 }
@@ -2130,9 +2064,6 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
                 }
                 sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable => {
                     "the authority plane is unavailable and must be repaired"
-                }
-                sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
-                    "the authority journal is corrupted and must be repaired"
                 }
                 sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
                     "the session is already active in another surface"

@@ -1231,12 +1231,6 @@ impl AppState {
     }
 
     pub(super) fn open_config_panel(&mut self) {
-        if self.is_provider_only_safe_mode() {
-            self.last_notice = Some(
-                "provider-only safe mode blocks config changes; repair authority first".to_owned(),
-            );
-            return;
-        }
         let Some(root_config) = self.config_snapshot.as_ref().cloned() else {
             self.last_notice = Some("config is unavailable in setup mode".to_owned());
             return;

@@ -157,7 +157,3 @@ impl App for TuiApplicationAdapter {
 
 /// Compile-time assertion that the adapter's public constructor remains port-only.
 pub fn application_port_type_marker(_port: Arc<dyn ApplicationPort>) {}
-
-#[cfg(test)]
-#[path = "tests/lib_tests.rs"]
-mod tests;

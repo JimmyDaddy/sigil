@@ -97,9 +97,6 @@ mod terminal_control;
 pub(in crate::runner) fn recover_managed_plan_review_research_attention(
     state: &WorkerLoopState,
 ) -> anyhow::Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
-    if state.provider_only_safe_mode {
-        return Ok(None);
-    }
     let Some(session) = state.session.current.as_ref() else {
         return Ok(None);
     };

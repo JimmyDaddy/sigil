@@ -30,7 +30,7 @@ use super::{
 use crate::runner::{WorkerApprovalRouteState, WorkerCommand, WorkerMessage};
 use message_labels::{
     queued_prompt_summary_noun, summarize_queued_prompt, task_run_finish_notice,
-    task_run_status_label, task_run_terminal_timeline_notice,
+    task_run_terminal_timeline_notice,
 };
 use run_event_helpers::notice_is_timeline_worthy;
 #[cfg(test)]
@@ -152,17 +152,6 @@ impl AppState {
         match message {
             WorkerMessage::WorkerReady => {
                 self.worker_ready = true;
-                if self.is_provider_only_safe_mode() {
-                    // The provider-only worker has no authority-backed session and must not
-                    // publish a normal Ready state or persist the route as a recent model.
-                    self.clear_pending_session_route_startup();
-                    self.last_notice = Some(
-                        "provider-only safe mode ready; repair authority before using tools"
-                            .to_owned(),
-                    );
-                    self.push_event("worker", "provider-only-ready");
-                    return Ok(());
-                }
                 if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {
                     self.last_notice = None;
                 }
@@ -221,9 +210,6 @@ impl AppState {
                     }
                     sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable => {
                         "authority is unavailable; repair authority before starting execution"
-                    }
-                    sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
-                        "authority journal is corrupted; repair authority before starting execution"
                     }
                     sigil_kernel::PublicRouteRecoveryCode::SessionAlreadyActive => {
                         "session is open in another Sigil window; close it there, then retry /resume"
@@ -505,20 +491,20 @@ impl AppState {
                 let plan_projection = sigil_kernel::PlanArtifactProjection::from_entries(
                     &self.session_browser.current_entries,
                 );
+                let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
+                    sigil_runtime::plan_handoff_workspace_snapshot_id(
+                        root_config,
+                        &self.workspace_root,
+                    )
+                    .ok()
+                    .flatten()
+                });
+                let public_review =
+                    sigil_runtime::conversation_display::public_plan_review_from_entries(
+                        &self.session_browser.current_entries,
+                        current_snapshot.as_deref(),
+                    );
                 if let Some(draft) = plan_projection.latest_pending_plan() {
-                    let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
-                        sigil_runtime::plan_handoff_workspace_snapshot_id(
-                            root_config,
-                            &self.workspace_root,
-                        )
-                        .ok()
-                        .flatten()
-                    });
-                    let public_review =
-                        sigil_runtime::conversation_display::public_plan_review_from_entries(
-                            &self.session_browser.current_entries,
-                            current_snapshot.as_deref(),
-                        );
                     match sigil_kernel::plan_review_detail_from_entries(
                         &self.session_browser.current_entries,
                         &draft.plan_id,
@@ -542,6 +528,12 @@ impl AppState {
                             self.clear_pending_plan_approval();
                             self.last_notice = Some(format!("plan detail unavailable: {error}"));
                         }
+                    }
+                } else if let Some(review) = public_review.as_ref() {
+                    if review.candidate.is_some() {
+                        self.set_pending_plan_candidate(review, current_snapshot.as_deref());
+                    } else {
+                        self.set_pending_plan_retry(review, current_snapshot.as_deref());
                     }
                 }
                 self.last_notice = if self.pending_plan_approval().is_some() {
@@ -616,9 +608,11 @@ impl AppState {
                 self.restore_durable_attention_surfaces();
                 if continuation_started {
                     self.runtime.is_busy = true;
+                    self.runtime.allow_projection_run_recovery = true;
                     self.last_notice = Some("answer accepted; agent continuing".to_owned());
                 } else {
                     self.runtime.is_busy = false;
+                    self.runtime.allow_projection_run_recovery = false;
                     self.last_notice = Some("input request resolved".to_owned());
                 }
                 self.push_event(
@@ -632,6 +626,7 @@ impl AppState {
             }
             WorkerMessage::PlanRejected { entry, entries } => {
                 self.runtime.is_busy = false;
+                self.runtime.allow_projection_run_recovery = false;
                 self.approval.pending = None;
                 self.clear_pending_plan_approval();
                 self.sync_current_session_state(entries);
@@ -641,6 +636,7 @@ impl AppState {
             }
             WorkerMessage::PlanSaved { entry, entries } => {
                 self.runtime.is_busy = false;
+                self.runtime.allow_projection_run_recovery = false;
                 self.approval.pending = None;
                 self.sync_current_session_state(entries);
                 self.restore_durable_attention_surfaces();
@@ -680,6 +676,7 @@ impl AppState {
                 entries,
             } => {
                 self.runtime.is_busy = false;
+                self.runtime.allow_projection_run_recovery = false;
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 let plan_reopened = self.reopen_plan_workbench_for_task_blocker(&task_id, &blocker);
@@ -713,6 +710,7 @@ impl AppState {
                 entries,
             } => {
                 self.runtime.is_busy = false;
+                self.runtime.allow_projection_run_recovery = false;
                 self.sync_current_session_state(entries);
                 self.restore_durable_attention_surfaces();
                 if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
@@ -747,7 +745,7 @@ impl AppState {
                 }
                 self.push_event(
                     "task:finish",
-                    format!("{task_id} status={}", task_run_status_label(status)),
+                    format!("{task_id} status={}", status.as_str()),
                 );
             }
             WorkerMessage::RunCancellationRequested => {

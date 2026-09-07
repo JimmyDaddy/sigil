@@ -162,7 +162,7 @@ where
     // compaction result -> blocking child continuation -> task guidance -> queued user work
     // -> recovered handoff -> deterministic tool aging -> opportunistic idle compaction
     // -> artifact maintenance.
-    if matches!(
+    let non_durable_work_advanced = matches!(
         advance_compaction_results(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
     ) || matches!(
@@ -192,7 +192,9 @@ where
     ) || matches!(
         advance_artifact_gc_start(context.reborrow()),
         WorkerAdvancementControl::SkipCommandPoll
-    ) || run_advanced
+    );
+    if non_durable_work_advanced
+        || run_advanced
         || terminal_lifecycle_advanced
         || refresh_advanced
         || oauth_advanced

@@ -176,13 +176,10 @@ impl AppState {
         append_setup_startup_recovery_lines(&mut lines, state);
 
         lines.push(String::new());
-        let mut footer =
+        lines.push(
             "Up/Down move · Enter continue · Left/Right change option · Ctrl-S save · Ctrl-C quit"
-                .to_owned();
-        if state.provider_only_safe_mode_config().is_some() {
-            footer.push_str(" · Ctrl-M provider-only safe mode");
-        }
-        lines.push(footer);
+                .to_owned(),
+        );
         lines
     }
 
@@ -196,25 +193,6 @@ impl AppState {
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
-            return Ok(None);
-        }
-        if key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(state) = self.setup_state.as_ref()
-                && let Some(root_config) = state.provider_only_safe_mode_config()
-            {
-                self.last_notice = Some(
-                    "starting provider-only safe mode; repair authority before using tools"
-                        .to_owned(),
-                );
-                return Ok(Some(AppAction::StartProviderOnlySafeMode {
-                    config_path: state.config_path.clone(),
-                    root_config: Box::new(root_config),
-                }));
-            }
-            self.last_notice = Some(
-                "provider-only safe mode is available only after a valid config boot failure"
-                    .to_owned(),
-            );
             return Ok(None);
         }
         if self.has_modal() {
@@ -639,12 +617,8 @@ fn append_setup_startup_recovery_lines(lines: &mut Vec<String>, state: &SetupSta
                 .to_owned(),
         );
         match state.startup_recovery_code {
-            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted) => lines.push(
-                "Recovery action: run `sigil doctor recover-authority` and confirm its exact challenge; then restart Sigil. Ctrl-M remains available for provider-only chat while authority is repaired."
-                    .to_owned(),
-            ),
             Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable) => lines.push(
-                "Recovery action: repair authority with `sigil doctor recover-authority`, then restart Sigil. Ctrl-M remains available for provider-only chat while authority is repaired."
+                "The authority is unavailable; inspect the current configuration and storage permissions, then retry Start."
                     .to_owned(),
             ),
             _ => lines.push(

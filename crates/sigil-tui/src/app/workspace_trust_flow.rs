@@ -1,3 +1,5 @@
+use std::fs;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
@@ -50,7 +52,7 @@ impl AppState {
                 self.last_notice = Some("trusting workspace".to_owned());
                 Ok(Some(AppAction::TrustWorkspace))
             }
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+            KeyCode::Esc => {
                 self.should_quit = true;
                 Ok(None)
             }
@@ -135,17 +137,13 @@ impl AppState {
         {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(&self.session_log_dir) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            let path = entry.path();
-            path.extension().and_then(|value| value.to_str()) == Some("jsonl")
-                && JsonlSessionStore::read_entries(path)
-                    .ok()
-                    .and_then(|entries| workspace_trust_from_entries(&entries, &workspace_id))
-                    == Some(WorkspaceTrust::Trusted)
-        })
+        if legacy_session_logs_hold_workspace_trust(&self.session_log_dir, &workspace_id) {
+            return true;
+        }
+        managed_session_logs_hold_workspace_trust(
+            self.managed_history_writer.as_ref(),
+            &workspace_id,
+        )
     }
 
     pub fn is_workspace_trust_gate_mode(&self) -> bool {
@@ -202,5 +200,49 @@ fn workspace_trust_from_entries(
             Some(decision.trust)
         }
         _ => None,
+    })
+}
+
+fn legacy_session_logs_hold_workspace_trust(
+    session_log_dir: &std::path::Path,
+    workspace_id: &str,
+) -> bool {
+    let Ok(entries) = fs::read_dir(session_log_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && JsonlSessionStore::read_entries(path)
+                .ok()
+                .and_then(|entries| workspace_trust_from_entries(&entries, workspace_id))
+                == Some(WorkspaceTrust::Trusted)
+    })
+}
+
+fn managed_session_logs_hold_workspace_trust(
+    writer: Option<
+        &std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    workspace_id: &str,
+) -> bool {
+    let Some(writer) = writer else {
+        return false;
+    };
+    let Ok(root) = writer.managed_leaf_path(
+        sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+    ) else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path().join("records.jsonl");
+        entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && JsonlSessionStore::read_entries(path)
+                .ok()
+                .and_then(|entries| workspace_trust_from_entries(&entries, workspace_id))
+                == Some(WorkspaceTrust::Trusted)
     })
 }

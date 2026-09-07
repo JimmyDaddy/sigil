@@ -32,17 +32,38 @@ pub(crate) struct WorkerSessionRouteDirective {
     pub(crate) explicit_selection: Option<(String, ResolvedModelRoute)>,
 }
 
-#[cfg_attr(test, allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerStartMode {
-    AuthorityBacked,
-    ProviderOnlySafe,
-}
-
 pub(crate) struct SpawnedAgentWorker {
     pub(crate) command_tx: WorkerCommandSender,
     pub(crate) message_rx: mpsc::Receiver<WorkerMessage>,
     pub(crate) join_handle: thread::JoinHandle<()>,
+}
+
+/// Emits a bounded, non-sensitive startup milestone for the interactive TUI.
+///
+/// The worker is created before it can accept commands, so these milestones make the otherwise
+/// opaque pre-ready interval visible without exposing credentials, paths, or provider request
+/// data.
+pub(in crate::runner) fn send_startup_notice(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    stage: &str,
+) {
+    const MAX_STAGE_CHARS: usize = 160;
+    let mut chars = stage.chars();
+    let bounded_stage: String = chars
+        .by_ref()
+        .take(MAX_STAGE_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let suffix = if chars.next().is_some() { "…" } else { "" };
+    let _ = message_tx.send(WorkerMessage::Notice(format!(
+        "startup: {bounded_stage}{suffix}"
+    )));
 }
 
 #[cfg(test)]
@@ -92,7 +113,6 @@ pub(crate) fn spawn_agent_worker_with_route_directive(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     root_config: RootConfig,
     config_path: PathBuf,
@@ -108,61 +128,17 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
-    spawn_agent_worker_with_start_mode_and_attachment(
-        root_config,
-        config_path,
-        session_log_path,
-        workspace_root,
-        interaction_mode,
-        WorkerStartMode::AuthorityBacked,
-        route_directive,
-        authority_composition,
-        boot_cutover,
-        supplied_attachment,
-    )
-}
-
-pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
-    root_config: RootConfig,
-    config_path: PathBuf,
-    session_log_path: PathBuf,
-    workspace_root: PathBuf,
-    interaction_mode: InteractionMode,
-    start_mode: WorkerStartMode,
-    route_directive: WorkerSessionRouteDirective,
-    authority_composition: Option<
-        std::sync::Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>,
-    >,
-    boot_cutover: Option<std::sync::Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>>,
-    supplied_attachment: Option<
-        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
-    >,
-) -> Result<SpawnedAgentWorker> {
-    let provider_only_safe = matches!(start_mode, WorkerStartMode::ProviderOnlySafe);
-    anyhow::ensure!(
-        !provider_only_safe || authority_composition.is_none(),
-        "provider-only safe mode cannot use authority-backed resources"
-    );
-    anyhow::ensure!(
-        !provider_only_safe || supplied_attachment.is_none(),
-        "provider-only safe mode cannot use a durable session attachment"
-    );
-    let effective_session_log_path = if provider_only_safe {
-        PathBuf::from("ephemeral://provider-only/session.jsonl")
-    } else {
-        session_log_path.clone()
-    };
+    let effective_session_log_path = session_log_path.clone();
     // Production launch must receive the current-schema composition from the boot owner. The
     // no-composition branch is retained only for this crate's unit fixtures; it opens the
     // explicit test session directly and never selects or persists a legacy epoch.
-    let boot_cutover = match (provider_only_safe, authority_composition.is_some()) {
-        (true, _) => None,
-        (false, true) => Some(boot_cutover.ok_or_else(|| {
+    let boot_cutover = match authority_composition.is_some() {
+        true => Some(boot_cutover.ok_or_else(|| {
             anyhow::anyhow!(
                 "current-schema boot cutover is required when authority composition is attached"
             )
         })?),
-        (false, false) => {
+        false => {
             #[cfg(test)]
             {
                 let _ = boot_cutover;
@@ -183,54 +159,35 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
             .map_err(anyhow::Error::new)?;
     }
     let authority_composition = authority_composition;
-    let (attachment_lease, initial_session, provider_name, route, route_rebound) =
-        if provider_only_safe {
-            let (provider_name, route) =
-                sigil_runtime::provider_connections::resolve_default_model_route(&root_config)
-                    .map_err(anyhow::Error::new)
-                    .context(
-                        "model_route_not_configured: complete provider setup before starting",
-                    )?;
-            let initial_session = Session::new_with_route(provider_name.clone(), route.clone());
-            (None, Some(initial_session), provider_name, route, false)
-        } else {
-            let attachment_lease = if let Some(attachment) = supplied_attachment {
-                let store = match boot_cutover.as_ref() {
-                    Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
-                        &effective_session_log_path,
-                        boot_cutover.as_ref(),
-                        session_epoch,
-                    )
-                    .map_err(anyhow::Error::new)?,
-                    None => JsonlSessionStore::new(&effective_session_log_path)?,
-                };
-                anyhow::ensure!(
-                    attachment.session_path() == store.path(),
-                    "transferred worker attachment belongs to another durable session"
-                );
-                attachment
-            } else {
-                Arc::new(
-                    sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
-                        &effective_session_log_path,
-                    )
-                    .map_err(anyhow::Error::new)?,
-                )
-            };
-            let (provider_name, route, route_rebound) = initialize_worker_session_route(
-                &root_config,
+    let attachment_lease = if let Some(attachment) = supplied_attachment {
+        let store = match boot_cutover.as_ref() {
+            Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
                 &effective_session_log_path,
-                &route_directive,
-                attachment_lease.as_ref(),
-            )?;
-            (
-                Some(attachment_lease),
-                None,
-                provider_name,
-                route,
-                route_rebound,
+                boot_cutover.as_ref(),
+                session_epoch,
             )
+            .map_err(anyhow::Error::new)?,
+            None => JsonlSessionStore::new(&effective_session_log_path)?,
         };
+        anyhow::ensure!(
+            attachment.session_path() == store.path(),
+            "transferred worker attachment belongs to another durable session"
+        );
+        attachment
+    } else {
+        Arc::new(
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
+                &effective_session_log_path,
+            )
+            .map_err(anyhow::Error::new)?,
+        )
+    };
+    let (provider_name, route, route_rebound) = initialize_worker_session_route(
+        &root_config,
+        &effective_session_log_path,
+        &route_directive,
+        attachment_lease.as_ref(),
+    )?;
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
@@ -239,40 +196,21 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
     let join_handle = thread::Builder::new()
         .name("sigil-agent-worker".to_owned())
         .spawn(move || {
-            let root_config = if provider_only_safe {
-                let mut safe_config = root_config;
-                safe_config.task.enabled = false;
-                safe_config.task.routing_policy = sigil_kernel::TaskRoutingPolicy::Manual;
-                safe_config.task.multi_agent_mode = sigil_kernel::MultiAgentMode::None;
-                safe_config.memory = sigil_kernel::MemoryConfig::with_enabled(false);
-                safe_config.skills.enabled = false;
-                safe_config.mcp_servers.clear();
-                safe_config
-            } else {
-                root_config
-            };
             tracing::debug!(
                 attached = authority_composition.is_some(),
                 "rfc-0071: authority composition state"
             );
+            send_startup_notice(&message_tx, "initializing agent runtime");
             let Some(runtime) = report_runtime_build_result(build_worker_runtime(), &message_tx)
             else {
                 return;
             };
 
-            let provider = match if provider_only_safe {
-                runtime.block_on(
-                    sigil_runtime::build_provider_for_model_ref_from_environment_async(
-                        &root_config,
-                        &route.model_ref,
-                    ),
-                )
-            } else {
-                runtime.block_on(sigil_runtime::build_provider_for_model_ref_async(
-                    &root_config,
-                    &route.model_ref,
-                ))
-            } {
+            send_startup_notice(&message_tx, "loading provider credentials");
+            let provider = match runtime.block_on(sigil_runtime::build_provider_for_model_ref_async(
+                &root_config,
+                &route.model_ref,
+            )) {
                 Ok(provider) => provider,
                 Err(error) => {
                     tracing::debug!(%error, "provider startup is unavailable");
@@ -290,6 +228,7 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
                     return;
                 }
             };
+            send_startup_notice(&message_tx, "provider ready");
             let mut root_config = root_config;
             if let Err(error) = sigil_runtime::validate_output_token_budget(
                 sigil_runtime::resolve_model_context_window_tokens(
@@ -395,29 +334,27 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
             let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(
                 WorkerMcpRuntimeEventSender::new(event_tx.clone()),
             ));
-            let (session_entries, workspace_trust) = if provider_only_safe {
-                (Vec::new(), WorkspaceTrust::Unknown)
-            } else {
-                match load_session_entries_with_workspace_trust(
-                    &effective_session_log_path,
-                    &workspace_root,
-                ) {
-                    Ok(projection) => projection,
-                    Err(error) => {
-                        tracing::debug!(%error, "session stream startup is unavailable");
-                        send_worker_startup_recovery(
-                            &message_tx,
-                            sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
-                            vec![
-                                sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
-                                sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
-                            ],
-                            false,
-                        );
-                        return;
-                    }
+            send_startup_notice(&message_tx, "loading session state");
+            let (session_entries, workspace_trust) = match load_session_entries_with_workspace_trust(
+                &effective_session_log_path,
+                &workspace_root,
+            ) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    tracing::debug!(%error, "session stream startup is unavailable");
+                    send_worker_startup_recovery(
+                        &message_tx,
+                        sigil_kernel::PublicRouteRecoveryCode::SessionStreamInvalid,
+                        vec![
+                            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                        ],
+                        false,
+                    );
+                    return;
                 }
             };
+            send_startup_notice(&message_tx, "registering tools");
             if route_rebound {
                 let _ = message_tx.send(WorkerMessage::Notice(
                     "连接配置已更新，已使用当前配置继续；服务端上下文缓存已重置。".to_owned(),
@@ -440,57 +377,49 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
                 );
                 return;
             }
-            let (mutation_recorder, egress_recorder) = if provider_only_safe {
-                (None, None)
-            } else {
-                let store_result: Result<JsonlSessionStore> = match boot_cutover.as_ref() {
-                    Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
-                        &effective_session_log_path,
-                        boot_cutover.as_ref(),
-                        session_epoch,
-                    )
-                    .map_err(|error| anyhow::anyhow!(error)),
-                    None => JsonlSessionStore::new(&effective_session_log_path),
-                };
-                let store = match store_result {
-                    Ok(store) => store,
-                    Err(error) => {
-                        tracing::debug!(%error, "session writer startup is unavailable");
-                        send_worker_startup_recovery(
-                            &message_tx,
-                            sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
-                            vec![
-                                sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
-                                sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
-                            ],
-                            true,
-                        );
-                        return;
-                    }
-                };
-                let recorder_session =
-                    Session::new("runtime", "eager-mcp").with_store(store.clone());
-                let egress_recorder = match recorder_session.egress_audit_recorder() {
-                    Ok(recorder) => recorder,
-                    Err(error) => {
-                        tracing::debug!(%error, "session audit writer startup is unavailable");
-                        send_worker_startup_recovery(
-                            &message_tx,
-                            sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
-                            vec![
-                                sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
-                                sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
-                            ],
-                            true,
-                        );
-                        return;
-                    }
-                };
-                (
-                    Some(MutationEventRecorder::new(store)),
-                    Some(egress_recorder),
+            let store_result: Result<JsonlSessionStore> = match boot_cutover.as_ref() {
+                Some(boot_cutover) => sigil_runtime::application_host::guarded_session_open(
+                    &effective_session_log_path,
+                    boot_cutover.as_ref(),
+                    session_epoch,
                 )
+                .map_err(|error| anyhow::anyhow!(error)),
+                None => JsonlSessionStore::new(&effective_session_log_path),
             };
+            let store = match store_result {
+                Ok(store) => store,
+                Err(error) => {
+                    tracing::debug!(%error, "session writer startup is unavailable");
+                    send_worker_startup_recovery(
+                        &message_tx,
+                        sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
+                        vec![
+                            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                        ],
+                        true,
+                    );
+                    return;
+                }
+            };
+            let recorder_session = Session::new("runtime", "eager-mcp").with_store(store.clone());
+            let egress_recorder = match recorder_session.egress_audit_recorder() {
+                Ok(recorder) => recorder,
+                Err(error) => {
+                    tracing::debug!(%error, "session audit writer startup is unavailable");
+                    send_worker_startup_recovery(
+                        &message_tx,
+                        sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
+                        vec![
+                            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                        ],
+                        true,
+                    );
+                    return;
+                }
+            };
+            let mutation_recorder = MutationEventRecorder::new(store);
             let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
             let terminal_lifecycle_factory: Arc<
                 dyn sigil_kernel::TerminalLifecycleSinkFactory,
@@ -508,129 +437,113 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
                         super::egress_disclosure_bridge::AutoAcceptDisclosurePresenter,
                     )
                 };
-            let (registry, context_resolver, terminal_control, scratch_control, managed_artifact_store) =
-                if provider_only_safe {
-                    (
-                        sigil_kernel::ToolRegistry::new(),
-                        sigil_runtime::RequestContextResolver::provider_only(),
-                        None,
-                        None,
-                        None,
-                    )
-                } else {
-                    let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
-                        &root_config,
-                        &provider_capabilities,
-                        workspace_root.clone(),
-                        elicitation_handler.clone(),
-                        mcp_event_handler.clone(),
-                        workspace_trust,
-                        terminal_lifecycle_factory,
-                        managed_extension_execution.clone(),
-                        managed_command_execution.clone(),
+            let surface = match sigil_runtime::build_tool_surface_without_eager_mcp_with_workspace_trust_and_terminal_lifecycle_factory_and_managed_execution(
+                &root_config,
+                &provider_capabilities,
+                workspace_root.clone(),
+                elicitation_handler.clone(),
+                mcp_event_handler.clone(),
+                workspace_trust,
+                terminal_lifecycle_factory,
+                managed_extension_execution.clone(),
+                managed_command_execution.clone(),
+            ) {
+                Ok(surface) => surface,
+                Err(error) => {
+                    tracing::debug!(%error, "tool surface startup is unavailable");
+                    send_worker_startup_recovery(
+                        &message_tx,
+                        sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid,
+                        vec![
+                            sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
+                            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                        ],
+                        false,
+                    );
+                    return;
+                }
+            };
+            let terminal_control = surface.terminal_control.clone();
+            let mut registry = surface.registry;
+            let context_resolver = surface.context_resolver;
+            sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
+                &mut registry,
+                &root_config,
+                &provider_capabilities,
+                workspace_root.clone(),
+                elicitation_handler.clone(),
+                mcp_event_handler.clone(),
+                Arc::clone(&disclosure_presenter),
+                managed_extension_execution.clone(),
+            );
+            if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
+                &mut registry,
+                &root_config,
+                &workspace_root,
+                &session_entries,
+            ) {
+                tracing::debug!(%error, "agent tool startup is unavailable");
+                send_worker_startup_recovery(
+                    &message_tx,
+                    sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid,
+                    vec![
+                        sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
+                        sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                        sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    false,
+                );
+                return;
+            }
+            send_startup_notice(&message_tx, "starting configured MCP servers");
+            spawn_eager_mcp_startup_tasks(
+                &runtime,
+                registry.clone(),
+                &root_config,
+                &provider_capabilities,
+                workspace_root.clone(),
+                &message_tx,
+                elicitation_handler.clone(),
+                mcp_event_handler.clone(),
+                mutation_recorder,
+                egress_recorder,
+                disclosure_presenter,
+                extension_network_admission,
+                managed_extension_execution.clone(),
+            );
+            send_startup_notice(&message_tx, "finalizing agent worker");
+            let managed_artifact_store = match authority_composition.as_ref() {
+                Some(composition)
+                    if composition.declared_channels.contains(
+                        &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
+                    ) && composition.declared_channels.contains(
+                        &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+                    ) => match super::ManagedTuiArtifactStoreLease::acquire(
+                        Arc::clone(&composition.storage_writer),
+                        &effective_session_log_path,
+                        &sigil_kernel::stable_event_uuid(
+                            "sigil-session-path",
+                            &effective_session_log_path.to_string_lossy(),
+                        ),
                     ) {
-                        Ok(surface) => surface,
+                        Ok(lease) => Some(lease),
                         Err(error) => {
-                            tracing::debug!(%error, "tool surface startup is unavailable");
+                            tracing::debug!(%error, "managed TUI artifact storage startup is unavailable");
                             send_worker_startup_recovery(
                                 &message_tx,
-                                sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid,
+                                sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
                                 vec![
-                                    sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
                                     sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
                                     sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
                                 ],
-                                false,
+                                true,
                             );
                             return;
                         }
-                    };
-                    let terminal_control = surface.terminal_control.clone();
-                    let mut registry = surface.registry;
-                    let context_resolver = surface.context_resolver;
-                    sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
-                        &mut registry,
-                        &root_config,
-                        &provider_capabilities,
-                        workspace_root.clone(),
-                        elicitation_handler.clone(),
-                        mcp_event_handler.clone(),
-                        Arc::clone(&disclosure_presenter),
-                        managed_extension_execution.clone(),
-                    );
-                    if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
-                        &mut registry,
-                        &root_config,
-                        &workspace_root,
-                        &session_entries,
-                    ) {
-                        tracing::debug!(%error, "agent tool startup is unavailable");
-                        send_worker_startup_recovery(
-                            &message_tx,
-                            sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid,
-                            vec![
-                                sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
-                                sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
-                                sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
-                            ],
-                            false,
-                        );
-                        return;
-                    }
-                    spawn_eager_mcp_startup_tasks(
-                        &runtime,
-                        registry.clone(),
-                        &root_config,
-                        &provider_capabilities,
-                        workspace_root.clone(),
-                        &message_tx,
-                        elicitation_handler.clone(),
-                        mcp_event_handler.clone(),
-                        mutation_recorder.expect("normal worker has a mutation recorder"),
-                        egress_recorder.expect("normal worker has an egress recorder"),
-                        disclosure_presenter,
-                        extension_network_admission,
-                        managed_extension_execution.clone(),
-                    );
-                    let managed_artifact_store = match authority_composition.as_ref() {
-                        Some(composition)
-                            if composition.declared_channels.contains(
-                                &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStaging,
-                            ) && composition.declared_channels.contains(
-                                &sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
-                            ) => match super::ManagedTuiArtifactStoreLease::acquire(
-                                Arc::clone(&composition.storage_writer),
-                                &effective_session_log_path,
-                                &sigil_kernel::stable_event_uuid(
-                                    "sigil-session-path",
-                                    &effective_session_log_path.to_string_lossy(),
-                                ),
-                            ) {
-                                Ok(lease) => Some(lease),
-                                Err(error) => {
-                                    tracing::debug!(%error, "managed TUI artifact storage startup is unavailable");
-                                    send_worker_startup_recovery(
-                                        &message_tx,
-                                        sigil_kernel::PublicRouteRecoveryCode::SessionWriterBusy,
-                                        vec![
-                                            sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
-                                            sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
-                                        ],
-                                        true,
-                                    );
-                                    return;
-                                }
-                            },
-                        _ => None,
-                    };
-                    (
-                        registry,
-                        context_resolver,
-                        Some(terminal_control),
-                        Some(surface.scratch_control),
-                        managed_artifact_store,
-                    )
-                };
+                    },
+                _ => None,
+            };
             let agent = match sigil_runtime::configured_agent(&root_config, provider, registry) {
                 Ok(agent) => Arc::new(agent),
                 Err(error) => {
@@ -648,28 +561,20 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
                     return;
                 }
             };
+            let scratch_control = surface.scratch_control;
             let mut terminal_runtime =
-                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, terminal_control);
-            if let Some(scratch_control) = scratch_control {
-                terminal_runtime = terminal_runtime.with_scratch_control(scratch_control);
-            }
+                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, Some(terminal_control));
+            terminal_runtime = terminal_runtime.with_scratch_control(scratch_control);
             run_worker_loop(
                 runtime,
                 agent,
                 root_config,
                 config_path,
                 workspace_root,
-                if provider_only_safe {
-                    WorkerLoopSessionAttachment::provider_only(
-                        effective_session_log_path,
-                        initial_session.expect("provider-only worker has an in-memory session"),
-                    )
-                } else {
-                    WorkerLoopSessionAttachment::from_shared(
-                        effective_session_log_path,
-                        attachment_lease.expect("normal worker has a session attachment"),
-                    )
-                },
+                WorkerLoopSessionAttachment::from_shared(
+                    effective_session_log_path,
+                    attachment_lease,
+                ),
                 options,
                 permission_mode_override,
                 (event_tx, event_rx, urgent_rx),
@@ -688,7 +593,6 @@ pub(crate) fn spawn_agent_worker_with_start_mode_and_attachment(
                     .as_ref()
                     .map(|composition| Arc::clone(&composition.storage_writer)),
                 managed_artifact_store,
-                provider_only_safe,
             );
         })
         .context("failed to spawn sigil agent worker")?;
@@ -792,6 +696,7 @@ fn spawn_eager_mcp_startup_tasks(
         .filter(|server| server.startup == McpServerStartup::Eager)
     {
         let server_name = server.name.clone();
+        send_startup_notice(message_tx, &format!("starting MCP server {server_name}"));
         let _ = message_tx.send(WorkerMessage::McpActivationStatus {
             server_name: Some(server_name.clone()),
             status: McpActivationStatus::Activating,
@@ -851,6 +756,7 @@ fn spawn_eager_mcp_startup_tasks(
         });
         match activation {
             Ok(result) => {
+                send_startup_notice(&message_tx, &format!("MCP server {server_name} ready"));
                 let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                     server_name: Some(server_name.clone()),
                     status: McpActivationStatus::Ready {
@@ -862,6 +768,10 @@ fn spawn_eager_mcp_startup_tasks(
                 });
             }
             Err(error) => {
+                send_startup_notice(
+                    &message_tx,
+                    &format!("MCP server {server_name} unavailable; continuing"),
+                );
                 let error = format!("{error:#}");
                 let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                     server_name: Some(server_name.clone()),

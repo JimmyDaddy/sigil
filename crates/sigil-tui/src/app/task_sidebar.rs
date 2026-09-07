@@ -229,7 +229,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
                 .or_else(|| Some(task.objective.clone()))
                 .unwrap_or_else(|| task.task_id.as_str().to_owned())
         ),
-        format!("status: {}", task_run_status_label(task.status)),
+        format!("status: {}", task.status.as_str()),
     ];
     let mut step_lines = Vec::new();
     let mut merge_line_rendered = false;
@@ -437,7 +437,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
     let task = task_for_progress_display(&projection)?;
     let verification = verification_card_view(entries);
     let mut rows = Vec::new();
-    let mut detail = task_run_status_label(task.status).to_owned();
+    let mut detail = task.status.as_str().to_owned();
 
     if let Some(plan_version) = task.latest_plan_version
         && let Some(plan) = task.plans.get(&plan_version)
@@ -453,7 +453,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             .count();
         detail = format!(
             "{} · v{plan_version} · {completed_steps}/{} done",
-            task_run_status_label(task.status),
+            task.status.as_str(),
             plan.steps.len()
         );
         if !task.active_steps.is_empty() {
@@ -505,7 +505,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             .count();
         detail = format!(
             "{} · {completed}/{} done",
-            task_run_status_label(task.status),
+            task.status.as_str(),
             checklist.items.len()
         );
         rows = task_checklist_strip_rows(checklist);
@@ -534,7 +534,7 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
         rows.push(TaskStripRow {
             kind: task_run_status_kind(task.status),
             label: task.objective.clone(),
-            detail: task_run_status_label(task.status).to_owned(),
+            detail: task.status.as_str().to_owned(),
             active: !matches!(
                 task.status,
                 TaskRunStatus::Completed
@@ -1197,18 +1197,6 @@ fn task_sidebar_last_problem_step(
     })
 }
 
-pub(super) fn task_run_status_label(status: TaskRunStatus) -> &'static str {
-    match status {
-        TaskRunStatus::Started => "started",
-        TaskRunStatus::Running => "running",
-        TaskRunStatus::Paused => "paused",
-        TaskRunStatus::Completed => "completed",
-        TaskRunStatus::Failed => "failed",
-        TaskRunStatus::Cancelled => "cancelled",
-        TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
 fn readiness_run_status_label(status: RunStatus) -> &'static str {
     match status {
         RunStatus::Running => "running",
@@ -1235,20 +1223,7 @@ fn task_step_display_label(
     if step.is_some_and(|step| step.is_review_advisory()) && status == TaskStepStatus::Completed {
         return "reviewed";
     }
-    task_step_status_label(status)
-}
-
-fn task_step_status_label(status: TaskStepStatus) -> &'static str {
-    match status {
-        TaskStepStatus::Pending => "pending",
-        TaskStepStatus::Running => "running",
-        TaskStepStatus::Completed => "completed",
-        TaskStepStatus::Failed => "failed",
-        TaskStepStatus::Blocked => "blocked",
-        TaskStepStatus::Cancelled => "cancelled",
-        TaskStepStatus::Interrupted => "interrupted",
-        TaskStepStatus::Superseded => "superseded",
-    }
+    status.as_str()
 }
 
 fn task_step_needs_user_verification(

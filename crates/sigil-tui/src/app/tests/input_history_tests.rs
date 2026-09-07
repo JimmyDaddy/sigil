@@ -151,6 +151,10 @@ fn r71_tui_managed_leaves_reroute_session_and_history_round_trip() -> Result<()>
         .session_log_dir
         .join(format!("session-{session_id}.jsonl"));
     app.sigil_paths.input_history_file = dir.path().join("history/input-history.jsonl");
+    let expected_session_log_path = composition
+        .storage_writer
+        .managed_named_leaf_path(Ch::SessionLog, &format!("session-{session_id}"))?
+        .join("records.jsonl");
     app.set_authority_composition(composition);
 
     // Session log reroutes to the managed named leaf; the store open is guarded.
@@ -159,10 +163,7 @@ fn r71_tui_managed_leaves_reroute_session_and_history_round_trip() -> Result<()>
             .to_string_lossy()
             .contains("/managed/session-log/")
     );
-    assert!(
-        app.session_log_path
-            .ends_with(format!("session-{session_id}/records.jsonl"))
-    );
+    assert_eq!(app.session_log_path, expected_session_log_path);
     // Input history reroutes to its managed leaf and persists through the writer.
     assert!(
         app.input_history_path()

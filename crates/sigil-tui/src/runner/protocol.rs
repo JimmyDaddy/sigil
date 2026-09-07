@@ -296,6 +296,14 @@ pub enum WorkerCommand {
         plan_id: String,
         expected_plan_hash: String,
     },
+    AdoptPlanCandidate {
+        plan_id: String,
+        expected_candidate_hash: String,
+    },
+    RetryPlanReview {
+        plan_id: String,
+        expected_candidate_hash: Option<String>,
+    },
     SubmitUserInputDecision {
         command_id: Option<String>,
         request_id: String,

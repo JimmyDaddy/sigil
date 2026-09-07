@@ -520,7 +520,18 @@ async fn run_app(
     // From this point onward the event stream is the sole reader of terminal input. Full-screen
     // rendering never queries the cursor and never writes transcript rows into native scrollback.
     let mut terminal_events = EventStream::new();
+    // Keep one `EventStream::next()` future alive across worker/projection wakeups. Crossterm's
+    // EventStream has a single background poll task and remembers the first future's waker while
+    // that task is blocked in `poll_internal`. Recreating and dropping the future whenever another
+    // `select!` branch wins leaves the task holding a stale waker, so later key presses never wake
+    // this loop.
+    let mut terminal_event = Box::pin(terminal_events.next());
     let mut needs_render = true;
+    let mut projection_refresh_requested = true;
+    let mut projection_epoch = 1_u64;
+    let mut projection_refresh_task: Option<ProjectionRefreshTask> = None;
+    let mut projection_ack_task: Option<ProjectionAckTask> = None;
+    let mut pending_projection_ack: Option<PendingProjectionAck> = None;
     let mut last_spinner_tick = live_spinner_tick();
     let mut presentation = PresentationSession::new();
     let mut host_effects = SystemHostEffects;
@@ -530,14 +541,65 @@ async fn run_app(
     loop {
         attention.update_config(app.terminal_notification_config());
         let mut dirty = needs_render;
-        dirty |= drain_worker_messages_with_attention(app, worker, &mut attention)?;
-        dirty |= restart_worker_after_session_transition(app, worker, spawn_worker)?;
-        if dirty {
-            dirty |= refresh_application_projection(app, worker).await;
+        let (worker_dirty, worker_projection_refresh) =
+            drain_worker_messages_with_attention(app, worker, &mut attention)?;
+        dirty |= worker_dirty;
+        projection_refresh_requested |= worker_projection_refresh;
+        if restart_worker_after_session_transition(app, worker, spawn_worker)? {
+            projection_epoch = projection_epoch.wrapping_add(1).max(1);
+            if let Some(task) = projection_refresh_task.take() {
+                task.handle.abort();
+            }
+            if let Some(task) = projection_ack_task.take() {
+                task.handle.abort();
+            }
+            pending_projection_ack = None;
+            projection_refresh_requested = true;
+            dirty = true;
+        }
+        if projection_refresh_requested && projection_refresh_task.is_none() {
+            if let Some(application) = worker
+                .as_ref()
+                .and_then(|runtime| runtime.application.as_ref())
+                .cloned()
+            {
+                projection_refresh_requested = false;
+                let task_application = Arc::clone(&application);
+                projection_refresh_task = Some(ProjectionRefreshTask {
+                    epoch: projection_epoch,
+                    application,
+                    handle: tokio::spawn(async move {
+                        refresh_application_projection_task(task_application)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }),
+                });
+            } else {
+                projection_refresh_requested = false;
+            }
+        }
+        if projection_ack_task.is_none()
+            && let Some(pending) = pending_projection_ack.take()
+        {
+            let task_pending = pending.clone();
+            let application = Arc::clone(&task_pending.application);
+            projection_ack_task = Some(ProjectionAckTask {
+                epoch: pending.epoch,
+                handle: tokio::spawn(async move {
+                    application
+                        .acknowledge_public_events_through(&task_pending.projection)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}"))
+                }),
+                pending,
+            });
         }
         attention.emit_pending_nonfatal(terminal.backend_mut());
         dirty |= app.poll_background_tasks();
-        dirty |= flush_pending_worker_commands(app, worker)?;
+        let commands_flushed = flush_pending_worker_commands(app, worker)?;
+        dirty |= commands_flushed;
+        projection_refresh_requested |= commands_flushed;
         if let Some(enable) =
             next_mouse_capture_action(*mouse_capture_active, app.terminal_mouse_capture_enabled())
         {
@@ -600,14 +662,49 @@ async fn run_app(
             Worker(Box<WorkerMessage>),
             WorkerClosed,
             BackgroundPanic(String),
+            Projection(
+                Box<
+                    std::result::Result<
+                        std::result::Result<ProjectionRefreshOutcome, String>,
+                        String,
+                    >,
+                >,
+            ),
+            ProjectionAck(std::result::Result<std::result::Result<(), String>, String>),
             Deadline,
         }
         let wake = {
-            let terminal_event = terminal_events.next();
             let worker_message = next_worker_message(worker);
+            let projection_wake = async {
+                if let Some(task) = projection_refresh_task.as_mut() {
+                    (&mut task.handle)
+                        .await
+                        .map_err(|error| format!("projection refresh task failed: {error}"))
+                } else {
+                    std::future::pending::<
+                        std::result::Result<
+                            std::result::Result<ProjectionRefreshOutcome, String>,
+                            String,
+                        >,
+                    >()
+                    .await
+                }
+            };
+            let projection_ack_wake = async {
+                if let Some(task) = projection_ack_task.as_mut() {
+                    (&mut task.handle)
+                        .await
+                        .map_err(|error| format!("projection ACK task failed: {error}"))
+                } else {
+                    std::future::pending::<
+                        std::result::Result<std::result::Result<(), String>, String>,
+                    >()
+                    .await
+                }
+            };
             match next_wake_deadline(app) {
                 Some(deadline) => tokio::select! {
-                    event = terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
+                    event = &mut terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             "terminal event stream closed",
@@ -620,10 +717,12 @@ async fn run_app(
                     report = background_panics.recv() => WakeEvent::BackgroundPanic(
                         report.unwrap_or_else(|| "background panic channel closed".to_owned()),
                     ),
+                    projection = projection_wake => WakeEvent::Projection(Box::new(projection)),
+                    projection_ack = projection_ack_wake => WakeEvent::ProjectionAck(projection_ack),
                     () = tokio::time::sleep(deadline) => WakeEvent::Deadline,
                 },
                 None => tokio::select! {
-                    event = terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
+                    event = &mut terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
                             "terminal event stream closed",
@@ -636,11 +735,16 @@ async fn run_app(
                     report = background_panics.recv() => WakeEvent::BackgroundPanic(
                         report.unwrap_or_else(|| "background panic channel closed".to_owned()),
                     ),
+                    projection = projection_wake => WakeEvent::Projection(Box::new(projection)),
+                    projection_ack = projection_ack_wake => WakeEvent::ProjectionAck(projection_ack),
                 },
             }
         };
         match wake {
             WakeEvent::Terminal(event) => {
+                // `EventStream::next()` borrows the stream for the duration of the future. The
+                // future is safe to replace only after its result has been selected and consumed.
+                terminal_event = Box::pin(terminal_events.next());
                 let mut next_event = Some(InputEvent::from(event?));
                 let mut batch_damage = Damage::NONE;
                 for processed_events in 0..EVENT_BATCH_LIMIT {
@@ -658,6 +762,7 @@ async fn run_app(
                         &mut host_effects,
                     )?;
                     batch_damage = batch_damage.union(event_damage);
+                    projection_refresh_requested |= event_damage.contains(Damage::ASYNC);
                     if break_batch || processed_events + 1 >= EVENT_BATCH_LIMIT {
                         break;
                     }
@@ -669,16 +774,79 @@ async fn run_app(
                 needs_render |= !batch_damage.is_empty();
             }
             WakeEvent::Worker(message) => {
+                projection_refresh_requested |=
+                    worker_message_requires_projection_refresh(&message);
                 needs_render |=
                     apply_received_worker_message(app, worker, &mut attention, *message)?;
             }
             WakeEvent::WorkerClosed => {
+                projection_epoch = projection_epoch.wrapping_add(1).max(1);
+                if let Some(task) = projection_refresh_task.take() {
+                    task.handle.abort();
+                }
+                if let Some(task) = projection_ack_task.take() {
+                    task.handle.abort();
+                }
+                pending_projection_ack = None;
                 *worker = None;
                 app.handle_worker_message(WorkerMessage::RunFailed(
                     "agent worker disconnected".to_owned(),
                 ))?;
-                recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
                 needs_render = true;
+            }
+            WakeEvent::Projection(result) => {
+                let result = *result;
+                let task_owner = projection_refresh_task
+                    .take()
+                    .map(|task| (task.epoch, task.application));
+                match (task_owner, result) {
+                    (Some((epoch, application)), Ok(Ok(outcome))) if epoch == projection_epoch => {
+                        let projection_changed =
+                            app.apply_application_projection(&outcome.projection);
+                        pending_projection_ack = Some(PendingProjectionAck {
+                            epoch,
+                            application,
+                            projection: outcome.projection,
+                        });
+                        needs_render |= projection_changed;
+                    }
+                    (Some((epoch, _)), Ok(Ok(_))) => {
+                        tracing::debug!(
+                            epoch,
+                            current_epoch = projection_epoch,
+                            "discarded stale TUI application projection"
+                        );
+                    }
+                    (None, Ok(Ok(_))) => {
+                        tracing::debug!("discarded TUI projection result without a task owner");
+                    }
+                    (_, Ok(Err(error))) | (_, Err(error)) => {
+                        tracing::debug!(%error, "application projection refresh unavailable");
+                    }
+                }
+            }
+            WakeEvent::ProjectionAck(result) => {
+                let Some(task) = projection_ack_task.take() else {
+                    tracing::debug!("discarded TUI projection ACK result without a task owner");
+                    continue;
+                };
+                let task_epoch = task.epoch;
+                if let Some(error) = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) | Err(error) => Some(error),
+                } {
+                    tracing::warn!(%error, "TUI public event delivery acknowledgement is pending replay");
+                    if task_epoch == projection_epoch {
+                        pending_projection_ack = Some(task.pending);
+                        if let Err(notice_error) = app.handle_worker_message(WorkerMessage::Notice(
+                            "event delivery acknowledgement is pending; it will replay safely"
+                                .to_owned(),
+                        )) {
+                            tracing::debug!(%notice_error, "failed to surface TUI delivery acknowledgement notice");
+                        }
+                        needs_render = true;
+                    }
+                }
             }
             WakeEvent::BackgroundPanic(report) => anyhow::bail!(report),
             WakeEvent::Deadline => {}
@@ -752,11 +920,7 @@ where
             let action = app.handle_key_event(key.to_crossterm())?;
             let break_batch = matches!(
                 action,
-                Some(
-                    AppAction::TrustWorkspace
-                        | AppAction::SetupCompleted { .. }
-                        | AppAction::StartProviderOnlySafeMode { .. },
-                )
+                Some(AppAction::TrustWorkspace | AppAction::SetupCompleted { .. },)
             );
             let damage = apply_key_action_with_host(
                 app,
@@ -956,33 +1120,12 @@ where
             let startup_error = config_path.exists().then(|| error.to_string());
             // Setup captures the exact source once and classifies it independently from this boot
             // error. Authority/bootstrap failures must not be mistaken for malformed TOML.
-            let mut app = AppState::from_setup_with_recovery(
+            AppState::from_setup_with_recovery(
                 config_path,
                 cwd,
                 startup_error,
                 startup_recovery_code_from_error(&error),
-            );
-            // A valid config plus an authority-only boot failure must not strand the user in the
-            // repair form. Enter the existing provider-only surface automatically after this
-            // explicit launch attempt; it has no authority, filesystem, process, or durable
-            // session capabilities and therefore cannot turn a failed boot into a false Ready.
-            if let Some(setup_draft) = app.setup_state().cloned()
-                && setup_draft.startup_recovery_code.is_some()
-                && let Some(root_config) = setup_draft.provider_only_safe_mode_config()
-            {
-                let setup_draft = app
-                    .take_setup_state()
-                    .expect("setup draft was checked before taking it");
-                enter_provider_only_safe_mode_after_authority_failure(
-                    &mut app,
-                    &mut worker,
-                    root_config,
-                    setup_draft,
-                    error.to_string(),
-                    &mut spawn_worker_fn,
-                )?;
-            }
-            app
+            )
         }
     };
     Ok((app, worker))
@@ -1158,7 +1301,6 @@ where
             let setup_notice = app.last_notice().map(str::to_owned);
             let setup_draft = app.setup_state().cloned();
             let root_config = *root_config;
-            let safe_mode_root_config = root_config.clone();
             let session_route = app.current_session_route();
             let launch_cwd = std::env::current_dir()?;
             let boot_result = {
@@ -1196,27 +1338,13 @@ where
                         let mut post_failure_draft = setup_draft.clone();
                         post_failure_draft.startup_error = Some(startup_error.clone());
                         post_failure_draft.startup_recovery_code = recovery_code;
-                        if post_failure_draft
-                            .provider_only_safe_mode_config()
-                            .is_some()
-                        {
-                            enter_provider_only_safe_mode_after_authority_failure(
-                                app,
-                                worker,
-                                safe_mode_root_config,
-                                post_failure_draft,
-                                startup_error,
-                                &mut spawn_worker_fn,
-                            )?;
-                        } else {
-                            return_to_setup_after_boot_failure_with_draft(
-                                app,
-                                worker,
-                                Some(setup_draft),
-                                startup_error,
-                                recovery_code,
-                            );
-                        }
+                        return_to_setup_after_boot_failure_with_draft(
+                            app,
+                            worker,
+                            Some(post_failure_draft),
+                            startup_error,
+                            recovery_code,
+                        );
                     } else {
                         return_to_setup_after_boot_failure(
                             app,
@@ -1246,33 +1374,6 @@ where
                     app,
                     &format!("setup completed; agent runtime remains unavailable: {error:#}"),
                 )?,
-            }
-        }
-        AppAction::StartProviderOnlySafeMode {
-            config_path,
-            root_config,
-        } => {
-            let safe_mode_notice =
-                "starting provider-only safe mode; repair authority before using tools";
-            let support_build_info = app.support_build_info().clone();
-            let update_build_info = app.update_build_info().clone();
-            let setup_draft = app.take_setup_state();
-            shutdown_and_join_worker(worker);
-            *app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
-            app.set_support_build_info(support_build_info);
-            app.set_update_build_info(update_build_info);
-            app.set_last_notice(safe_mode_notice);
-            app.stash_provider_only_safe_mode_setup(setup_draft);
-            match spawn_worker_fn(*root_config, app) {
-                Ok(runtime) => *worker = Some(runtime),
-                Err(error) => {
-                    let message = format!("provider-only safe mode could not start: {error:#}");
-                    if let Some(setup_draft) = app.take_provider_only_safe_mode_setup() {
-                        return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
-                    } else {
-                        report_worker_unavailable(app, &message)?;
-                    }
-                }
             }
         }
         AppAction::TrustWorkspace => {
@@ -1383,7 +1484,6 @@ where
             };
             let config_path = app.config_path.clone();
             let launch_cwd = std::env::current_dir()?;
-            let safe_mode_root_config = app.root_config_snapshot().cloned();
             shutdown_and_join_worker(worker);
             #[cfg(not(test))]
             app.clear_boot_authority();
@@ -1399,30 +1499,6 @@ where
                     let startup_error =
                         format!("configuration saved but authority reboot failed: {error:#}");
                     let recovery_code = startup_recovery_code_from_error(&error);
-                    if let (Some(root_config), Some(recovery_code)) =
-                        (safe_mode_root_config, recovery_code)
-                    {
-                        let setup_draft = AppState::from_setup_with_recovery(
-                            config_path.clone(),
-                            app.workspace_root.clone(),
-                            Some(startup_error.clone()),
-                            Some(recovery_code),
-                        )
-                        .take_setup_state();
-                        if let Some(setup_draft) = setup_draft
-                            && setup_draft.provider_only_safe_mode_config().is_some()
-                        {
-                            enter_provider_only_safe_mode_after_authority_failure(
-                                app,
-                                worker,
-                                root_config,
-                                setup_draft,
-                                startup_error,
-                                &mut spawn_worker_fn,
-                            )?;
-                            return Ok(());
-                        }
-                    }
                     return_to_setup_after_boot_failure(
                         app,
                         worker,
@@ -1906,41 +1982,80 @@ fn try_execute_application_action(
 }
 
 #[cfg(not(test))]
-async fn refresh_application_projection(
-    app: &mut AppState,
-    worker: &mut Option<WorkerRuntime>,
-) -> bool {
-    let Some(application) = worker
-        .as_ref()
-        .and_then(|runtime| runtime.application.as_ref())
-    else {
-        return false;
-    };
-    match application.refresh().await {
-        Ok(projection) => {
-            let mut changed = app.apply_application_projection(&projection);
-            if let Err(error) = application
-                .acknowledge_public_events_through(&projection)
-                .await
-            {
-                // The TUI reducer and product state have committed, but the durable public-outbox
-                // ACK did not. Leave the exact entries pending for the next refresh/restart;
-                // receiving a worker message was never an acknowledgement.
-                tracing::warn!(%error, "TUI public event delivery acknowledgement is pending replay");
-                if let Err(notice_error) = app.handle_worker_message(WorkerMessage::Notice(
-                    "event delivery acknowledgement is pending; it will replay safely".to_owned(),
-                )) {
-                    tracing::debug!(%notice_error, "failed to surface TUI delivery acknowledgement notice");
-                }
-                changed = true;
-            }
-            changed
+async fn refresh_application_projection_task(
+    application: Arc<application_bridge::TuiApplicationSession>,
+) -> std::result::Result<ProjectionRefreshOutcome, sigil_application::ApplicationError> {
+    let projection = application.refresh().await?;
+    Ok(ProjectionRefreshOutcome { projection })
+}
+
+fn worker_message_requires_projection_refresh(message: &WorkerMessage) -> bool {
+    match message {
+        WorkerMessage::WorkerReady
+        | WorkerMessage::SessionRouteRecoveryRequired { .. }
+        | WorkerMessage::ApprovalCommandReceipt(_)
+        | WorkerMessage::RunStarted { .. }
+        | WorkerMessage::SkillRunStarted { .. }
+        | WorkerMessage::PlanRunStarted { .. }
+        | WorkerMessage::AgentRunStarted { .. }
+        | WorkerMessage::AgentResultContinuationStarted { .. }
+        | WorkerMessage::ConversationQueueUpdated { .. }
+        | WorkerMessage::ConversationQueueDispatchStarted { .. }
+        | WorkerMessage::AgentRunFinished { .. }
+        | WorkerMessage::RunFinished { .. }
+        | WorkerMessage::PlanRunFinished { .. }
+        | WorkerMessage::PlanReviewBlocked { .. }
+        | WorkerMessage::UserInputRequested { .. }
+        | WorkerMessage::RecoveredUserInputAttention { .. }
+        | WorkerMessage::UserInputDecisionApplied { .. }
+        | WorkerMessage::PlanRejected { .. }
+        | WorkerMessage::PlanSaved { .. }
+        | WorkerMessage::TaskCreatedFromPlan { .. }
+        | WorkerMessage::TaskAdmissionBlocked { .. }
+        | WorkerMessage::PlanTaskCreationFailed { .. }
+        | WorkerMessage::TaskRunFinished { .. }
+        | WorkerMessage::TaskRunPaused { .. }
+        | WorkerMessage::TaskRunStarted { .. }
+        | WorkerMessage::RunCancelled { .. }
+        | WorkerMessage::RunInterrupted { .. }
+        | WorkerMessage::TerminalTaskUpdated { .. }
+        | WorkerMessage::AgentThreadClosed { .. }
+        | WorkerMessage::AgentThreadCancelled { .. }
+        | WorkerMessage::SessionSwitched { .. }
+        | WorkerMessage::NewSessionStarted { .. }
+        | WorkerMessage::V2CompactionApplied { .. }
+        | WorkerMessage::StandaloneToolOutputShrinkApplied { .. }
+        | WorkerMessage::IntentDropCompleted { .. }
+        | WorkerMessage::TaskIntegrationAccepted { .. }
+        | WorkerMessage::TaskIntegrationAcceptanceFailed { .. }
+        | WorkerMessage::CheckpointRestoreCompleted { .. }
+        | WorkerMessage::ConversationForked { .. }
+        | WorkerMessage::LocalSessionForked { .. }
+        | WorkerMessage::ToolArtifactPageRead { .. }
+        | WorkerMessage::ToolArtifactPageReadFailed { .. }
+        | WorkerMessage::LocalSessionDeleted { .. }
+        | WorkerMessage::SessionRetentionApplied { .. }
+        | WorkerMessage::RunFailed(_)
+        | WorkerMessage::SessionAttachmentTransferred { .. } => true,
+        WorkerMessage::Event(event) | WorkerMessage::AgentThreadEvent { event, .. } => {
+            run_event_requires_projection_refresh(event)
         }
-        Err(error) => {
-            tracing::debug!(%error, "application projection refresh unavailable");
-            false
-        }
+        _ => false,
     }
+}
+
+fn run_event_requires_projection_refresh(event: &sigil_kernel::RunEvent) -> bool {
+    matches!(
+        event,
+        sigil_kernel::RunEvent::ToolApprovalRequested { .. }
+            | sigil_kernel::RunEvent::ToolApprovalResolved { .. }
+            | sigil_kernel::RunEvent::ToolResult(_)
+            | sigil_kernel::RunEvent::ContinuationState(_)
+            | sigil_kernel::RunEvent::ProviderTurnRecovery(_)
+            | sigil_kernel::RunEvent::ProviderTurnPartialOutputDiscarded(_)
+            | sigil_kernel::RunEvent::Control(_)
+            | sigil_kernel::RunEvent::AssistantMessage(_)
+    )
 }
 
 fn report_application_receipt(
@@ -2024,56 +2139,6 @@ fn process_host_request<H: HostEffects>(
     Ok(())
 }
 
-/// Starts the existing provider-only worker after an explicit launch attempt hit an authority
-/// blocker. The setup draft remains stashed so a later authority repair can return to the same
-/// values, while the normal authority-backed surface remains unavailable and clearly marked.
-fn enter_provider_only_safe_mode_after_authority_failure<F>(
-    app: &mut AppState,
-    worker: &mut Option<WorkerRuntime>,
-    root_config: RootConfig,
-    mut setup_draft: crate::setup::SetupState,
-    startup_error: String,
-    spawn_worker_fn: &mut F,
-) -> Result<()>
-where
-    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
-{
-    let recovery_code = setup_draft
-        .startup_recovery_code
-        .unwrap_or(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable);
-    let config_path = setup_draft.config_path.clone();
-    let support_build_info = app.support_build_info().clone();
-    let update_build_info = app.update_build_info().clone();
-    setup_draft.startup_error = Some(startup_error);
-    setup_draft.startup_recovery_code = Some(recovery_code);
-    setup_draft.save_error = None;
-    shutdown_and_join_worker(worker);
-    *app = AppState::from_root_config_with_mode(&config_path, &root_config, true);
-    app.set_support_build_info(support_build_info);
-    app.set_update_build_info(update_build_info);
-    app.set_last_notice(match recovery_code {
-        sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted => {
-            "authority journal is corrupted; provider-only safe mode started. Run `sigil doctor recover-authority`, then restart to restore tools and durable sessions"
-        }
-        _ => {
-            "authority boot is unavailable; provider-only safe mode started. Repair authority, then restart to restore tools and durable sessions"
-        }
-    });
-    app.stash_provider_only_safe_mode_setup(Some(setup_draft));
-    match spawn_worker_fn(root_config, app) {
-        Ok(runtime) => *worker = Some(runtime),
-        Err(error) => {
-            let message = format!("provider-only safe mode could not start: {error:#}");
-            if let Some(setup_draft) = app.take_provider_only_safe_mode_setup() {
-                return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
-            } else {
-                report_worker_unavailable(app, &message)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Returns the product to the only state that can repair a failed authority boot. A failed
 /// composition is not a provider outage: there is no worker or authority-backed session to
 /// recover, so keeping the normal composer mounted would create a false-ready UI and queue
@@ -2129,36 +2194,6 @@ fn return_to_setup_after_boot_failure_with_draft(
     app.set_update_build_info(update_build_info);
 }
 
-fn return_to_setup_after_safe_mode_failure(
-    app: &mut AppState,
-    worker: &mut Option<WorkerRuntime>,
-    mut setup_draft: crate::setup::SetupState,
-    startup_error: String,
-) {
-    let support_build_info = app.support_build_info().clone();
-    let update_build_info = app.update_build_info().clone();
-    let workspace_root = app.workspace_root.clone();
-    let config_path = setup_draft.config_path.clone();
-    let recovery_code = setup_draft.startup_recovery_code.or(Some(
-        sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable,
-    ));
-    shutdown_and_join_worker(worker);
-    setup_draft.startup_error = Some(startup_error.clone());
-    setup_draft.startup_recovery_code = recovery_code;
-    setup_draft.save_error = Some(startup_error.clone());
-    *app = AppState::from_setup_with_recovery(
-        config_path,
-        workspace_root,
-        Some(startup_error),
-        recovery_code,
-    );
-    // Replace the freshly reconstructed defaults with the exact in-memory draft, including a
-    // staged protected credential that must never be forced back through disk after a failed boot.
-    app.restore_setup_state(setup_draft);
-    app.set_support_build_info(support_build_info);
-    app.set_update_build_info(update_build_info);
-}
-
 fn startup_recovery_code_from_error(
     error: &anyhow::Error,
 ) -> Option<sigil_kernel::PublicRouteRecoveryCode> {
@@ -2166,10 +2201,6 @@ fn startup_recovery_code_from_error(
         cause.downcast_ref::<sigil_runtime::application_host::BootAuthorityErrorV1>()
     })?;
     match boot_error {
-        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
-            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
-            | sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_),
-        ) => Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted),
         sigil_runtime::application_host::BootAuthorityErrorV1::Composition(_)
         | sigil_runtime::application_host::BootAuthorityErrorV1::Cutover(_)
         | sigil_runtime::application_host::BootAuthorityErrorV1::Bootstrap(_) => {
@@ -2221,7 +2252,7 @@ fn live_spinner_tick() -> u128 {
 
 #[cfg(test)]
 fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<bool> {
-    drain_worker_messages_inner(app, worker, None)
+    drain_worker_messages_inner(app, worker, None).map(|(dirty, _)| dirty)
 }
 
 #[cfg(not(test))]
@@ -2229,7 +2260,7 @@ fn drain_worker_messages_with_attention(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     attention: &mut AttentionController,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     drain_worker_messages_inner(app, worker, Some(attention))
 }
 
@@ -2237,23 +2268,27 @@ fn drain_worker_messages_inner(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     mut attention: Option<&mut AttentionController>,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let Some(runtime) = worker.as_mut() else {
-        return Ok(false);
+        return Ok((false, false));
     };
     let mut dirty = false;
+    let mut projection_refresh = false;
     let mut startup_failed = false;
     app.begin_timeline_render_batch();
     while let Some(message) = try_recv_worker_message(runtime) {
+        projection_refresh |= worker_message_requires_projection_refresh(&message);
         startup_failed |= apply_worker_message_state(runtime, attention.as_deref_mut(), &message);
         app.handle_worker_message(message)?;
         dirty = true;
     }
     if startup_failed {
         shutdown_and_join_worker(worker);
-        recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
     }
-    Ok(dirty | app.flush_timeline_render_batch())
+    Ok((
+        dirty | app.flush_timeline_render_batch(),
+        projection_refresh,
+    ))
 }
 
 fn try_recv_worker_message(runtime: &mut WorkerRuntime) -> Option<WorkerMessage> {
@@ -2291,7 +2326,6 @@ fn apply_received_worker_message(
     app.flush_timeline_render_batch();
     if startup_failed {
         shutdown_and_join_worker(worker);
-        recover_provider_only_safe_mode_after_worker_startup_failure(app, worker);
     }
     Ok(true)
 }
@@ -2450,13 +2484,10 @@ where
 fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
     // A failed send/restart can happen after the composer optimistically entered Thinking. Clear
     // that optimistic state before presenting recovery; a dead worker must never leave a stuck
-    // spinner or make a provider-only diagnostic look like an active turn.
+    // spinner.
     app.mark_worker_not_ready();
     app.clear_worker_run_state();
     app.handle_worker_message(WorkerMessage::Notice(message.to_owned()))?;
-    if app.is_provider_only_safe_mode() {
-        return Ok(());
-    }
     app.handle_worker_message(WorkerMessage::SessionRouteRecoveryRequired {
         code: sigil_kernel::PublicRouteRecoveryCode::ProviderUnavailable,
         actions: vec![
@@ -2469,22 +2500,6 @@ fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
         retryable: true,
         target_session: None,
     })
-}
-
-fn recover_provider_only_safe_mode_after_worker_startup_failure(
-    app: &mut AppState,
-    worker: &mut Option<WorkerRuntime>,
-) {
-    if !app.is_provider_only_safe_mode() {
-        return;
-    }
-    let Some(setup_draft) = app.take_provider_only_safe_mode_setup() else {
-        return;
-    };
-    let message = app.last_notice().map(str::to_owned).unwrap_or_else(|| {
-        "provider-only safe mode worker stopped before becoming ready".to_owned()
-    });
-    return_to_setup_after_safe_mode_failure(app, worker, setup_draft, message);
 }
 
 fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
@@ -2594,19 +2609,6 @@ where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
     H: HostEffects,
 {
-    if app.is_provider_only_safe_mode()
-        && !matches!(effect, EventEffect::Ignored | EventEffect::LocalUpdate(_))
-        && !provider_only_safe_effect_allowed(&effect)
-    {
-        app.set_last_notice(
-            "provider-only safe mode blocks this operation; repair authority before using it",
-        );
-        app.handle_worker_message(WorkerMessage::Notice(
-            "Operation blocked in provider-only safe mode; repair authority and restart."
-                .to_owned(),
-        ))?;
-        return Ok(Damage::INPUT);
-    }
     match effect {
         EventEffect::Ignored => Ok(Damage::NONE),
         EventEffect::LocalUpdate(damage) => Ok(damage),
@@ -2625,17 +2627,6 @@ where
             Ok(Damage::HOST_EFFECT)
         }
     }
-}
-
-fn provider_only_safe_effect_allowed(effect: &EventEffect) -> bool {
-    matches!(
-        effect,
-        EventEffect::OpaqueAction(
-            AppAction::SubmitPrompt(_)
-                | AppAction::CancelRun
-                | AppAction::UpdateActiveRunPermissionMode { .. }
-        )
-    )
 }
 
 fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
@@ -2687,10 +2678,37 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(not(test))]
+struct ProjectionRefreshTask {
+    epoch: u64,
+    application: Arc<application_bridge::TuiApplicationSession>,
+    handle: tokio::task::JoinHandle<std::result::Result<ProjectionRefreshOutcome, String>>,
+}
+
+#[cfg(not(test))]
+struct ProjectionRefreshOutcome {
+    projection: sigil_application::ApplicationProjection,
+}
+
+#[cfg(not(test))]
+#[derive(Clone)]
+struct PendingProjectionAck {
+    epoch: u64,
+    application: Arc<application_bridge::TuiApplicationSession>,
+    projection: sigil_application::ApplicationProjection,
+}
+
+#[cfg(not(test))]
+struct ProjectionAckTask {
+    epoch: u64,
+    pending: PendingProjectionAck,
+    handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
+}
+
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
     #[cfg(not(test))]
-    application: Option<application_bridge::TuiApplicationSession>,
+    application: Option<Arc<application_bridge::TuiApplicationSession>>,
     #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
@@ -2735,17 +2753,12 @@ impl WorkerMessageInbox {
 
 #[cfg(not(test))]
 fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime> {
-    let spawned = runner::spawn_agent_worker_with_start_mode_and_attachment(
+    let spawned = runner::spawn_agent_worker_with_route_directive_and_attachment(
         root_config,
         app.config_path.clone(),
         app.session_log_path.clone(),
         app.workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
-        if app.is_provider_only_safe_mode() {
-            runner::WorkerStartMode::ProviderOnlySafe
-        } else {
-            runner::WorkerStartMode::AuthorityBacked
-        },
         runner::WorkerSessionRouteDirective {
             recovery_confirmation: app
                 .pending_session_route_confirmation_binding()
@@ -2756,24 +2769,20 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         app.boot_cutover().cloned(),
         app.worker_session_attachment(),
     )?;
-    let application = if app.is_provider_only_safe_mode() {
-        None
-    } else {
-        Some(
-            match application_bridge::build_for_worker(
-                app,
-                spawned.command_tx.clone(),
-                app.runtime.reasoning_effort.clone(),
-            ) {
-                Ok(application) => application,
-                Err(error) => {
-                    let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
-                    let _ = spawned.join_handle.join();
-                    return Err(error.context("failed to attach TUI application port"));
-                }
-            },
-        )
-    };
+    let application = Some(
+        match application_bridge::build_for_worker(
+            app,
+            spawned.command_tx.clone(),
+            app.runtime.reasoning_effort.clone(),
+        ) {
+            Ok(application) => Arc::new(application),
+            Err(error) => {
+                let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
+                let _ = spawned.join_handle.join();
+                return Err(error.context("failed to attach TUI application port"));
+            }
+        },
+    );
     Ok(WorkerRuntime {
         worker_tx: spawned.command_tx,
         application,

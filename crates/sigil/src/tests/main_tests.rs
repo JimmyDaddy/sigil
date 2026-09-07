@@ -28,9 +28,9 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorCommand, DoctorOutput,
-    HTTP_SERVER_STATE_DIR, RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput,
-    ServeStartupPlan, StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, DoctorOutput, HTTP_SERVER_STATE_DIR,
+    RunOutput, ServeOptions, ServeOwnerChannelWatcher, ServeStartupOutput, ServeStartupPlan,
+    StdoutEventHandler, build_serve_startup_plan, build_session_catalog_service,
     cli_application_run_request, drain_provider_stream, interactive_tui_requested,
     load_serve_root_config, render_cli_doctor_report, render_doctor_report, render_provider_chunk,
     render_run_event, render_serve_startup_json, render_serve_startup_plan, render_update_apply,
@@ -472,6 +472,15 @@ async fn drain_provider_stream_and_stdout_event_handler_accept_supported_events(
         Box::pin(stream::iter(vec![
             Ok(ProviderChunk::TextDelta("hello".to_owned())),
             Ok(ProviderChunk::ReasoningDelta("think".to_owned())),
+            Ok(ProviderChunk::ReasoningSummaryDelta("summary".to_owned())),
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-1".to_owned(),
+                delta: "{}".to_owned(),
+            }),
             Ok(ProviderChunk::Usage(UsageStats {
                 prompt_tokens: 1,
                 completion_tokens: 2,
@@ -675,17 +684,17 @@ fn text_cli_renders_route_recovery_without_private_binding_material() {
 }
 
 #[test]
-fn text_cli_renders_authority_journal_recovery_without_provider_fallback() {
+fn text_cli_renders_authority_recovery_without_provider_fallback() {
     let output = super::render_public_run_event(PublicRunEventKind::RouteRecoveryRequired {
-        code: sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted,
-        actions: vec![sigil_kernel::PublicRouteRecoveryAction::RepairAuthority],
+        code: sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable,
+        actions: vec![sigil_kernel::PublicRouteRecoveryAction::StartNewSession],
         recovery_binding: "opaque-authority-recovery-binding".to_owned(),
         retryable: false,
     });
 
     assert_eq!(
         output.stderr,
-        "[recovery] the authority journal is corrupted and must be repaired\n"
+        "[recovery] the authority plane is unavailable and must be repaired\n"
     );
     assert!(!output.stderr.contains("provider"));
     assert!(!output.stderr.contains("opaque-authority-recovery-binding"));
@@ -851,7 +860,6 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Text,
-            command: None,
         })
     ));
     Ok(())
@@ -865,21 +873,6 @@ fn cli_parses_doctor_json_output() -> Result<()> {
         cli.command,
         Some(Commands::Doctor {
             output: DoctorOutput::Json,
-            command: None,
-        })
-    ));
-    Ok(())
-}
-
-#[test]
-fn cli_parses_authority_recovery_as_doctor_operator_command() -> Result<()> {
-    let cli = Cli::try_parse_from(["sigil", "doctor", "recover-authority"])?;
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Doctor {
-            command: Some(DoctorCommand::RecoverAuthority),
-            ..
         })
     ));
     Ok(())
@@ -1354,17 +1347,6 @@ fn serve_startup_plan_rejects_disabled_auth_and_renders_token_env_fallback() -> 
 }
 
 #[test]
-fn doctor_command_renders_report_for_missing_config() -> Result<()> {
-    let workspace = create_test_workspace("doctor-command");
-
-    super::doctor_command(
-        &workspace.join("missing.toml"),
-        &workspace,
-        DoctorOutput::Text,
-    )
-}
-
-#[test]
 fn doctor_command_report_includes_appearance_warnings() -> Result<()> {
     let workspace = create_test_workspace("doctor-appearance");
     let config_path = workspace.join("sigil.toml");
@@ -1405,32 +1387,6 @@ text_primary = "#101010"
     assert!(output.contains("[warn] appearance:contrast:text-base"));
     assert!(output.contains("text_primary on surface_base"));
     Ok(())
-}
-
-#[tokio::test]
-async fn drain_provider_stream_handles_visible_and_ignored_chunks() -> Result<()> {
-    let mut stream = boxed_chunk_stream(vec![
-        Ok(ProviderChunk::TextDelta("hello".to_owned())),
-        Ok(ProviderChunk::ReasoningDelta("plan".to_owned())),
-        Ok(ProviderChunk::ReasoningSummaryDelta("summary".to_owned())),
-        Ok(ProviderChunk::ToolCallStart {
-            id: "call-1".to_owned(),
-            name: "read_file".to_owned(),
-        }),
-        Ok(ProviderChunk::ToolCallArgsDelta {
-            id: "call-1".to_owned(),
-            delta: "{}".to_owned(),
-        }),
-        Ok(ProviderChunk::Usage(UsageStats {
-            prompt_tokens: 3,
-            completion_tokens: 5,
-            system_fingerprint: Some("fp-test".to_owned()),
-            ..UsageStats::default()
-        })),
-        Ok(ProviderChunk::Done),
-    ]);
-
-    drain_provider_stream(&mut stream).await
 }
 
 #[tokio::test]

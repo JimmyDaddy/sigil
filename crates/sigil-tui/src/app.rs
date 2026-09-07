@@ -70,7 +70,7 @@ use sigil_kernel::{
 use sigil_runtime::{
     BalanceSnapshot, SessionDeletePreview, SessionRetentionPreview, SigilPaths, build_run_options,
     configured_model_context_window_tokens, effective_compaction_config_with_override,
-    ephemeral_sigil_paths, resolve_sigil_paths, support::SupportBuildInfo,
+    resolve_sigil_paths, support::SupportBuildInfo,
 };
 use uuid::Uuid;
 
@@ -305,6 +305,8 @@ pub(crate) enum PlanWorkbenchAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,7 +407,14 @@ pub(crate) enum UserInputDraftValue {
 }
 
 impl PlanWorkbenchAction {
-    pub(crate) const ORDER: [Self; 4] = [Self::Run, Self::Save, Self::Revise, Self::Reject];
+    pub(crate) const ORDER: [Self; 6] = [
+        Self::Run,
+        Self::Save,
+        Self::Revise,
+        Self::Reject,
+        Self::AdoptCandidate,
+        Self::RetryReview,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -413,6 +422,8 @@ impl PlanWorkbenchAction {
             Self::Save => "Save",
             Self::Revise => "Revise",
             Self::Reject => "Reject",
+            Self::AdoptCandidate => "Adopt",
+            Self::RetryReview => "Retry review",
         }
     }
 
@@ -422,6 +433,8 @@ impl PlanWorkbenchAction {
             Self::Save => "S",
             Self::Revise => "V",
             Self::Reject => "X",
+            Self::AdoptCandidate => "A",
+            Self::RetryReview => "T",
         }
     }
 }
@@ -602,13 +615,6 @@ pub struct AppState {
     terminal_keyboard_enhancement_enabled: bool,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
-    /// Keeps the editable Setup draft while provider-only safe mode is running. If the
-    /// provider-only worker cannot start, the launcher can return the user to the same repair
-    /// surface instead of leaving a dead worker with the draft discarded.
-    provider_only_safe_mode_setup: Option<SetupState>,
-    /// Non-persistent escape hatch used only while authority repair is pending. The worker
-    /// enforces the same restriction; this flag is presentation/dispatch state, not authority.
-    provider_only_safe_mode: bool,
     /// Whether the current worker has completed startup and can accept queued commands.
     /// Production starts false; unit-only app fixtures remain immediately usable without a worker.
     worker_ready: bool,
@@ -694,6 +700,14 @@ pub enum AppAction {
     RevisePlan {
         plan_id: String,
         expected_plan_hash: String,
+    },
+    AdoptPlanCandidate {
+        plan_id: String,
+        expected_candidate_hash: String,
+    },
+    RetryPlanReview {
+        plan_id: String,
+        expected_candidate_hash: Option<String>,
     },
     SubmitUserInputDecision {
         command_id: Option<String>,
@@ -909,10 +923,6 @@ pub enum AppAction {
         config_path: PathBuf,
         root_config: Box<RootConfig>,
     },
-    StartProviderOnlySafeMode {
-        config_path: PathBuf,
-        root_config: Box<RootConfig>,
-    },
     ConfigSaved {
         root_config: Box<RootConfig>,
     },
@@ -1051,7 +1061,15 @@ impl AppState {
         projection: &sigil_application::ApplicationProjection,
     ) -> bool {
         let mut changed = false;
-        let is_busy = projection.run.status.as_str() == "running";
+        // A command marks the local state busy before its durable RunStarted event is
+        // projected. During that window the application projection may still say `idle` or
+        // expose the previous run's terminal state; treating that older frontier as terminal
+        // makes the live status band disappear while the provider request is already in flight.
+        // Worker terminal messages own the local transition back to idle, while a projected
+        // running state can still promote a clean local state after recovery.
+        let is_busy = self.runtime.is_busy
+            || (self.runtime.allow_projection_run_recovery
+                && projection.run.status.as_str() == "running");
         if self.runtime.is_busy != is_busy {
             self.runtime.is_busy = is_busy;
             changed = true;
@@ -1160,40 +1178,16 @@ impl AppState {
     }
 
     pub fn from_root_config(config_path: &Path, root_config: &RootConfig) -> Self {
-        Self::from_root_config_with_mode(config_path, root_config, false)
-    }
-
-    pub(crate) fn from_root_config_with_mode(
-        config_path: &Path,
-        root_config: &RootConfig,
-        provider_only_safe_mode: bool,
-    ) -> Self {
-        let (workspace_root, sigil_paths) = if provider_only_safe_mode {
-            (
-                PathBuf::from("ephemeral://provider-only"),
-                ephemeral_sigil_paths(),
-            )
-        } else {
-            let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let workspace_root =
-                resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
-            let sigil_paths =
-                resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-            (workspace_root, sigil_paths)
-        };
-        let recent_model_refs = if provider_only_safe_mode {
-            Vec::new()
-        } else {
-            sigil_runtime::provider_connections::load_recent_model_refs(
-                &sigil_paths.state_root,
-                root_config,
-            )
-        };
-        let session_log_dir = if provider_only_safe_mode {
-            PathBuf::new()
-        } else {
-            sigil_paths.session_log_dir.clone()
-        };
+        let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let workspace_root =
+            resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
+        let sigil_paths =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        let recent_model_refs = sigil_runtime::provider_connections::load_recent_model_refs(
+            &sigil_paths.state_root,
+            root_config,
+        );
+        let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
         let permission_mode = root_config.permission.mode.as_str().to_owned();
         let (configured_provider_name, configured_model_name, configured_model_route) =
@@ -1221,9 +1215,7 @@ impl AppState {
         )
         .reasoning_effort
         .unwrap_or(ReasoningEffort::Max);
-        let workspace_git_status = (!provider_only_safe_mode)
-            .then(|| inspect_workspace_git_status(&workspace_root))
-            .flatten();
+        let workspace_git_status = inspect_workspace_git_status(&workspace_root);
 
         let mut app = Self {
             config_path: config_path.to_path_buf(),
@@ -1258,6 +1250,7 @@ impl AppState {
                 stats: SessionStats::default(),
                 session_delta_stats: SessionStats::default(),
                 is_busy: false,
+                allow_projection_run_recovery: true,
                 mcp_progress: None,
                 reasoning_effort: initial_reasoning_effort,
                 run_phase: RunPhase::Idle,
@@ -1307,8 +1300,6 @@ impl AppState {
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
-            provider_only_safe_mode_setup: None,
-            provider_only_safe_mode,
             worker_ready: cfg!(test),
             workspace_trust_gate_state: None,
             config_state: None,
@@ -1338,28 +1329,20 @@ impl AppState {
             terminal_height: 32,
             slash_selector_index: 0,
         };
-        if provider_only_safe_mode {
-            app.session_log_path = PathBuf::from("ephemeral://provider-only");
-        } else {
-            app.session_log_path = app
-                .session_log_dir
-                .join(format!("session-{}.jsonl", app.session_id));
-            if let Some(path) = app.managed_session_log_path() {
-                app.session_log_path = path;
-            }
-            app.load_input_history();
-            app.seed_connection_inventory_offline(root_config);
-            app.refresh_memory_summary();
+        app.session_log_path = app
+            .session_log_dir
+            .join(format!("session-{}.jsonl", app.session_id));
+        if let Some(path) = app.managed_session_log_path() {
+            app.session_log_path = path;
         }
+        app.load_input_history();
+        app.seed_connection_inventory_offline(root_config);
+        app.refresh_memory_summary();
         app.recompute_compaction_status(false);
-        if !provider_only_safe_mode {
-            app.refresh_session_history();
-        }
+        app.refresh_session_history();
         app.bootstrap();
-        if !provider_only_safe_mode {
-            app.schedule_balance_refresh();
-            app.refresh_usage_sidebar_cache();
-        }
+        app.schedule_balance_refresh();
+        app.refresh_usage_sidebar_cache();
         app
     }
 
@@ -1421,6 +1404,7 @@ impl AppState {
                 stats: SessionStats::default(),
                 session_delta_stats: SessionStats::default(),
                 is_busy: false,
+                allow_projection_run_recovery: true,
                 mcp_progress: None,
                 reasoning_effort: ReasoningEffort::Max,
                 run_phase: RunPhase::Idle,
@@ -1474,8 +1458,6 @@ impl AppState {
                 startup_error.clone(),
                 startup_recovery_code,
             )),
-            provider_only_safe_mode_setup: None,
-            provider_only_safe_mode: false,
             worker_ready: cfg!(test),
             workspace_trust_gate_state: None,
             config_state: None,
@@ -1588,39 +1570,24 @@ impl AppState {
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
         self.events.clear();
-        if !self.provider_only_safe_mode {
-            self.ensure_scratch_dir();
+        self.ensure_scratch_dir();
+        if !self.worker_ready {
+            self.last_notice = Some("sigil starting; waiting for agent worker".to_owned());
         }
-        if self.provider_only_safe_mode {
-            self.push_timeline(
-                TimelineRole::Notice,
-                "provider-only safe mode active; authority repair is required for durable features",
-            );
-            self.push_timeline(
-                TimelineRole::Notice,
-                "provider-only safe mode: external tools and durable workspace state are disabled",
-            );
-        } else {
-            if !self.worker_ready {
-                self.last_notice = Some("sigil starting; waiting for agent worker".to_owned());
-            }
-            self.push_timeline(
-                if self.worker_ready {
-                    TimelineRole::System
-                } else {
-                    TimelineRole::Notice
-                },
-                if self.worker_ready {
-                    "sigil ready."
-                } else {
-                    "sigil starting; waiting for agent worker."
-                },
-            );
-        }
+        self.push_timeline(
+            if self.worker_ready {
+                TimelineRole::System
+            } else {
+                TimelineRole::Notice
+            },
+            if self.worker_ready {
+                "sigil ready."
+            } else {
+                "sigil starting; waiting for agent worker."
+            },
+        );
         self.push_event("session", format!("active {}", self.session_id));
-        if !self.provider_only_safe_mode {
-            self.push_event("workspace", self.workspace_root.display().to_string());
-        }
+        self.push_event("workspace", self.workspace_root.display().to_string());
         self.push_event(
             "model",
             format!("{}/{}", self.runtime.provider_name, self.runtime.model_name),
@@ -1641,13 +1608,8 @@ impl AppState {
             "code_intelligence",
             self.runtime.code_intelligence_status.clone(),
         );
-        if !self.provider_only_safe_mode {
-            self.push_event("session_log", self.session_log_path.display().to_string());
-        }
+        self.push_event("session_log", self.session_log_path.display().to_string());
         self.push_event("focus", self.active_pane.label());
-        if self.provider_only_safe_mode {
-            self.push_event("mode", "provider-only-safe");
-        }
         self.reset_scroll();
     }
 

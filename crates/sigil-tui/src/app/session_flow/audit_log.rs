@@ -511,7 +511,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
         ControlEntry::TaskRun(run) => format!(
             "[ctl] task {} status={}",
             run.task_id.as_str(),
-            task_run_status_label(run.status)
+            run.status.as_str()
         ),
         ControlEntry::TaskRunCancellationScopeBound(entry) => format!(
             "[ctl] task {} cancellation scope={}",
@@ -542,7 +542,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             "[ctl] plan {} v{} status={} steps={}",
             plan.task_id.as_str(),
             plan.plan_version,
-            task_plan_status_label(plan.status),
+            plan.status.as_str(),
             plan.steps.len()
         ),
         ControlEntry::TaskStepContractBoundV2(entry) => format!(
@@ -578,7 +578,7 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             step.task_id.as_str(),
             step.plan_version,
             step.step_id.as_str(),
-            task_step_status_label(step.status)
+            step.status.as_str()
         ),
         ControlEntry::TaskStepCheckpointV2(entry) => format!(
             "[ctl] step checkpoint {} v{}:{} turn={} no_progress={}",
@@ -1050,6 +1050,22 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             attempt.attempt_id.as_str(),
             attempt.status.as_str()
         ),
+        ControlEntry::PlanReviewCandidateRecordedV1(candidate) => format!(
+            "[ctl] plan review candidate {} attempt {} completeness={:?} hash={}",
+            candidate.plan_review_id.as_str(),
+            candidate.attempt_id.as_str(),
+            candidate.completeness,
+            truncate_session_view_text(&candidate.content_hash, 16)
+        ),
+        ControlEntry::PlanReviewResolutionRecordedV1(resolution) => format!(
+            "[ctl] plan review resolution {} attempt {} outcome={:?} actor={:?} hash={} receipt={}",
+            resolution.plan_review_id.as_str(),
+            resolution.attempt_id.as_str(),
+            resolution.outcome,
+            resolution.actor,
+            truncate_session_view_text(&resolution.candidate_hash, 16),
+            truncate_session_view_text(&resolution.receipt_id, 24)
+        ),
         ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
     }
 }
@@ -1357,46 +1373,12 @@ pub(super) fn tool_execution_status_label(
     }
 }
 
-pub(super) fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskRunStatus::Started => "started",
-        sigil_kernel::TaskRunStatus::Running => "running",
-        sigil_kernel::TaskRunStatus::Paused => "paused",
-        sigil_kernel::TaskRunStatus::Completed => "completed",
-        sigil_kernel::TaskRunStatus::Failed => "failed",
-        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-pub(super) fn task_plan_status_label(status: sigil_kernel::TaskPlanStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskPlanStatus::Proposed => "proposed",
-        sigil_kernel::TaskPlanStatus::Accepted => "accepted",
-        sigil_kernel::TaskPlanStatus::Superseded => "superseded",
-        sigil_kernel::TaskPlanStatus::Rejected => "rejected",
-    }
-}
-
 pub(super) fn plan_approval_permission_label(
     permission: sigil_kernel::PlanApprovalPermission,
 ) -> &'static str {
     match permission {
         sigil_kernel::PlanApprovalPermission::Ask => "ask",
         sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
-    }
-}
-
-pub(super) fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskStepStatus::Pending => "pending",
-        sigil_kernel::TaskStepStatus::Running => "running",
-        sigil_kernel::TaskStepStatus::Completed => "completed",
-        sigil_kernel::TaskStepStatus::Failed => "failed",
-        sigil_kernel::TaskStepStatus::Blocked => "blocked",
-        sigil_kernel::TaskStepStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskStepStatus::Interrupted => "interrupted",
-        sigil_kernel::TaskStepStatus::Superseded => "superseded",
     }
 }
 

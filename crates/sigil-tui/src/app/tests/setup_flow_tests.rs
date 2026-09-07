@@ -195,8 +195,8 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
     let mut app = AppState::from_setup_with_recovery(
         config_path.clone(),
         temp.path().to_path_buf(),
-        Some("authority journal requires reconciliation".to_owned()),
-        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityJournalCorrupted),
+        Some("authority state requires reconciliation".to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
     );
     let state = app.setup_state.as_mut().expect("setup state should exist");
     assert_eq!(state.provider_name, "deepseek");
@@ -206,7 +206,7 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
     state.selected_field = SetupField::Save;
     let setup_lines = app.setup_lines().join("\n");
     assert!(setup_lines.contains("current configuration is valid"));
-    assert!(setup_lines.contains("sigil doctor recover-authority"));
+    assert!(setup_lines.contains("inspect the current configuration and storage permissions"));
 
     let action =
         app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?;
@@ -237,7 +237,7 @@ fn setup_exact_cas_failure_stays_visible_and_retryable() -> Result<()> {
     let mut app = AppState::from_setup(
         config_path.clone(),
         temp.path().to_path_buf(),
-        Some("authority journal requires reconciliation".to_owned()),
+        Some("authority state requires reconciliation".to_owned()),
     );
     app.setup_state
         .as_mut()

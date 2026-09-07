@@ -86,13 +86,16 @@ fn managed_worker_lifecycle_service_uses_authority_namespace() -> Result<()> {
     )
     .expect("managed lifecycle service should attach");
     service.set_session_pin(&session_path, true, 1)?;
+    let expected_lifecycle_path = writer
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLifecycleLog,
+            &paths.workspace_id,
+        )?
+        .join("session-lifecycle-v1.jsonl");
     assert!(
-        paths
-            .state_root
-            .join("managed/session-lifecycle-log")
-            .join(&paths.workspace_id)
-            .join("session-lifecycle-v1.jsonl")
-            .is_file()
+        expected_lifecycle_path.is_file(),
+        "managed lifecycle log should use the authority-resolved namespace: {}",
+        expected_lifecycle_path.display()
     );
     Ok(())
 }

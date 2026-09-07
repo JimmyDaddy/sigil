@@ -16,7 +16,11 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 }
 
-const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+// Keep the foreground cancellation deadline below the worker's public terminal wait window.
+// Once this bounded interval elapses we persist `Interrupted` with cleanup uncertainty and drop
+// the join handle; a second synchronous wait would make the TUI unresponsive on a provider or
+// tool that cannot be hard-cancelled.
+const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum ActiveRunStopDisposition {
@@ -166,7 +170,11 @@ pub(in crate::runner) fn cancel_active_run(
         )
     } else {
         handle.abort();
-        let _ = runtime.block_on(handle);
+        // The foreground cancellation path is bounded by RUN_QUIESCENCE_TIMEOUT. Once the
+        // deadline has elapsed, dropping the join handle must not turn the cleanup path into a
+        // second unbounded wait. The cancellation owner remains authoritative for any effects
+        // that are still draining and the interrupted terminal records that uncertainty.
+        drop(handle);
         RunQuiescenceOutcome::TimedOut {
             active_effects: active_run.cancellation_owner.handle().active_effects(),
             active_tasks: active_run.cancellation_owner.handle().active_tasks(),

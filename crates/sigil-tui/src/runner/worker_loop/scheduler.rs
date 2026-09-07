@@ -83,7 +83,6 @@ pub(in crate::runner) struct WorkerLoopSessionAttachment {
     pub(in crate::runner) lease: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
-    pub(in crate::runner) initial_session: Option<Session>,
 }
 
 impl WorkerLoopSessionAttachment {
@@ -95,7 +94,6 @@ impl WorkerLoopSessionAttachment {
         Self {
             log_path,
             lease: Some(Arc::new(lease)),
-            initial_session: None,
         }
     }
 
@@ -108,15 +106,6 @@ impl WorkerLoopSessionAttachment {
         Self {
             log_path,
             lease: Some(lease),
-            initial_session: None,
-        }
-    }
-
-    pub(in crate::runner) fn provider_only(log_path: PathBuf, session: Session) -> Self {
-        Self {
-            log_path,
-            lease: None,
-            initial_session: Some(session),
         }
     }
 }
@@ -139,14 +128,12 @@ pub(in crate::runner) fn run_worker_loop<P>(
         std::sync::Arc<sigil_runtime::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
     managed_artifact_store: Option<ManagedTuiArtifactStoreLease>,
-    provider_only_safe_mode: bool,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
     let WorkerLoopSessionAttachment {
         log_path: session_log_path,
         lease: attachment_lease,
-        initial_session: supplied_initial_session,
     } = session_attachment;
     let provider_capabilities = agent.provider_capabilities();
     let (event_tx, event_rx, urgent_command_rx) = event_inbox;
@@ -165,25 +152,22 @@ pub(in crate::runner) fn run_worker_loop<P>(
         scratch_control,
     } = terminal_runtime;
     let initial_exact_conversation_prompts = ExactConversationPromptStore::new();
+    let attachment_paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
     let default_image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>> =
-        (!provider_only_safe_mode).then(|| {
-            let attachment_paths = sigil_runtime::resolve_sigil_paths(
-                &root_config.storage,
-                &root_config.session,
-                &workspace_root,
-            );
-            Arc::new(sigil_runtime::ControlledImageAttachmentCache::new(
-                attachment_paths.attachments_root,
-            )) as Arc<dyn ImageAttachmentResolver>
-        });
-    let mut initial_session = match supplied_initial_session.map(Ok).unwrap_or_else(|| {
-        load_session_with_runtime_attachments(
-            &root_config.agent.runtime_provider,
-            &root_config.agent.model,
-            &session_log_path,
-            None,
-        )
-    }) {
+        Some(Arc::new(
+            sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
+        ));
+    super::super::spawn::send_startup_notice(&message_tx, "opening durable session");
+    let mut initial_session = match load_session_with_runtime_attachments(
+        &root_config.agent.runtime_provider,
+        &root_config.agent.model,
+        &session_log_path,
+        None,
+    ) {
         Ok(mut session) => {
             if let Some(artifact_store) = managed_artifact_store.as_ref() {
                 session.attach_tool_artifact_store_override(artifact_store.store());
@@ -197,35 +181,38 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 )));
                 return;
             }
-            if !provider_only_safe_mode {
-                match runtime.block_on(
-                    sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
-                        &mut session,
-                        &workspace_root,
-                    ),
-                ) {
-                    Ok(report) if report.inspected > 0 => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            super::super::spawn::send_startup_notice(
+                &message_tx,
+                "checking workspace recovery state",
+            );
+            match runtime.block_on(
+                sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                    &mut session,
+                    &workspace_root,
+                ),
+            ) {
+                Ok(report) if report.inspected > 0 => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
                         report.inspected, report.removed, report.already_missing, report.failed
                     )));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "failed to reconcile isolated task workspaces: {error:#}"
-                        )));
-                        return;
-                    }
                 }
-                match runtime.block_on(
-                    sigil_runtime::integration_lanes::reconcile_integration_promotions(
-                        &mut session,
-                        &workspace_root,
-                    ),
-                ) {
-                    Ok(report) if report.inspected > 0 => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to reconcile isolated task workspaces: {error:#}"
+                    )));
+                    return;
+                }
+            }
+            match runtime.block_on(
+                sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                    &mut session,
+                    &workspace_root,
+                ),
+            ) {
+                Ok(report) if report.inspected > 0 => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
                         report.inspected,
                         report.promoted,
@@ -233,42 +220,40 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         report.failed,
                         report.needs_review
                     )));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                            "failed to reconcile integration promotions: {error:#}"
-                        )));
-                        return;
-                    }
                 }
-                mark_stale_dispatching_conversation_queue_items(
-                    &mut session,
-                    &initial_exact_conversation_prompts,
-                    &message_tx,
-                );
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to reconcile integration promotions: {error:#}"
+                    )));
+                    return;
+                }
             }
-            Some(session)
+            mark_stale_dispatching_conversation_queue_items(
+                &mut session,
+                &initial_exact_conversation_prompts,
+                &message_tx,
+            );
+            session
         }
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
             return;
         }
     };
-    let pending_task_handoffs = match (provider_only_safe_mode, initial_session.as_mut()) {
-        (true, _) => Ok(Vec::new()),
-        (false, Some(session)) => {
-            session_ref_for_log_path(&session_log_path).and_then(|parent_session_ref| {
-                ConversationCoordinator::new(
-                    root_config.task.enabled,
-                    root_config.task.routing_policy,
-                )
-                .reconcile(session, &parent_session_ref, current_unix_time_ms())
-                .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))
-            })
-        }
-        (false, None) => Ok(Vec::new()),
-    };
+    let pending_task_handoffs = {
+        super::super::spawn::send_startup_notice(&message_tx, "reconciling task handoffs");
+        session_ref_for_log_path(&session_log_path)
+    }
+    .and_then(|parent_session_ref| {
+        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+            .reconcile(
+                &mut initial_session,
+                &parent_session_ref,
+                current_unix_time_ms(),
+            )
+            .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))
+    });
     let pending_task_handoffs = match pending_task_handoffs {
         Ok(actions) => actions,
         Err(error) => {
@@ -277,41 +262,31 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }
     };
 
-    let session_entries = initial_session
-        .as_ref()
-        .map(Session::entries)
-        .unwrap_or(&[]);
+    super::super::spawn::send_startup_notice(&message_tx, "loading agent profiles");
+    let session_entries = initial_session.entries();
     let wake_coalescer = WorkerWakeCoalescer::new(
         event_tx.clone(),
-        initial_session
-            .as_ref()
-            .map(|session| session.session_scope_id().to_owned()),
+        Some(initial_session.session_scope_id().to_owned()),
     );
-    let agent_supervisor = match if provider_only_safe_mode {
-        sigil_runtime::AgentProfileRegistry::from_root_config_with_entries(
-            &root_config,
-            session_entries,
-        )
-    } else {
-        sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+    let agent_supervisor =
+        match sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
             &workspace_root,
             session_entries,
-        )
-    } {
-        Ok(registry) => sigil_runtime::AgentSupervisor::new(
-            registry,
-            sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
-            provider_capabilities.clone(),
-        )
-        .with_event_sink(Arc::new(WorkerSupervisorEventSink {
-            wake_coalescer: wake_coalescer.clone(),
-        })),
-        Err(error) => {
-            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-            return;
-        }
-    };
+        ) {
+            Ok(registry) => sigil_runtime::AgentSupervisor::new(
+                registry,
+                sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
+                provider_capabilities.clone(),
+            )
+            .with_event_sink(Arc::new(WorkerSupervisorEventSink {
+                wake_coalescer: wake_coalescer.clone(),
+            })),
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                return;
+            }
+        };
     let background_agent_runs =
         sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
             sender: message_tx.clone(),
@@ -319,7 +294,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         }));
     let mut state = WorkerLoopState::new_with_optional_attachment(
         session_log_path,
-        initial_session,
+        Some(initial_session),
         attachment_lease,
         agent_supervisor,
         background_agent_runs,
@@ -330,7 +305,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
         scratch_control.clone(),
         managed_storage_writer,
         managed_artifact_store,
-        provider_only_safe_mode,
     );
     state.managed_plan_review_child_resources = managed_plan_review_child_resources;
     match super::recover_managed_plan_review_research_attention(&state) {
@@ -355,7 +329,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     // in-memory only, so a fresh worker cannot hold one; expired namespaces from crashed or
     // deleted sessions are reclaimed here, and the sweep never races a live tool or terminal
     // because none exist yet in this process.
-    if !provider_only_safe_mode && let Some(scratch_control) = scratch_control {
+    if let Some(scratch_control) = scratch_control {
         runtime.spawn_blocking(move || {
             match scratch_control.gc_scratch_namespaces(
                 &sigil_tools_builtin::ScratchGcConfig::default(),
@@ -375,9 +349,8 @@ pub(in crate::runner) fn run_worker_loop<P>(
             }
         });
     }
-    if !provider_only_safe_mode
-        && let Err(error) = register_worker_active_projection_observer(&mut state)
-    {
+    super::super::spawn::send_startup_notice(&message_tx, "attaching session observers");
+    if let Err(error) = register_worker_active_projection_observer(&mut state) {
         let _ = message_tx.send(WorkerMessage::RunFailed(error));
         return;
     }
@@ -387,7 +360,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
     loop {
         state.compaction.preparation_tasks.reap_finished();
         state.artifact_gc.tasks.reap_finished();
-        if !provider_only_safe_mode && let Err(error) = state.synchronize_route_execution_owner() {
+        if let Err(error) = state.synchronize_route_execution_owner() {
             let _ = message_tx.send(WorkerMessage::RunFailed(error));
             break;
         }

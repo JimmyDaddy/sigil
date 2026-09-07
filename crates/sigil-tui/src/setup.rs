@@ -7,7 +7,7 @@ use sigil_runtime::{
     new_install_orchestration_rollout_decision_for_config, provider_api_key_env_names,
     provider_connections::{
         CredentialRefConfig, PersistedConfigSnapshot, ProviderFamily, ProviderProtocol,
-        configured_environment_credential_available, load_provider_connections,
+        load_provider_connections,
     },
 };
 
@@ -239,35 +239,6 @@ impl SetupState {
 
     pub(crate) fn is_custom(&self) -> bool {
         self.provider_name == "openai_compat"
-    }
-
-    /// Safe mode is only valid when the persisted config parsed successfully and a later boot
-    /// phase failed. It must never mask malformed or missing configuration.
-    pub(crate) fn provider_only_safe_mode_config(&self) -> Option<sigil_kernel::RootConfig> {
-        if !self.valid_config_boot_retry_required()
-            || !matches!(
-                self.startup_recovery_code,
-                Some(
-                    PublicRouteRecoveryCode::AuthorityUnavailable
-                        | PublicRouteRecoveryCode::AuthorityJournalCorrupted
-                )
-            )
-            || env::var_os("SSL_CERT_FILE").is_some()
-        {
-            return None;
-        }
-        let root_config = self.startup_config.as_ref()?.parsed()?.clone();
-        let loaded = load_provider_connections(&root_config);
-        let model_ref = loaded.default_model.as_ref()?;
-        let connection = loaded.connections.get(&model_ref.connection_id)?;
-        match &connection.config.credential {
-            CredentialRefConfig::Environment { name } => {
-                configured_environment_credential_available(&connection.config, name)
-                    .then_some(root_config)
-            }
-            CredentialRefConfig::None => Some(root_config),
-            CredentialRefConfig::Stored { .. } => None,
-        }
     }
 
     pub(crate) fn cycle_provider(&mut self) {

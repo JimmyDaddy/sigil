@@ -4,24 +4,12 @@ use sigil_kernel::{
 
 use super::super::formatting::summarize_terminal_reason;
 
-pub(super) fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskRunStatus::Started => "started",
-        sigil_kernel::TaskRunStatus::Running => "running",
-        sigil_kernel::TaskRunStatus::Paused => "paused",
-        sigil_kernel::TaskRunStatus::Completed => "completed",
-        sigil_kernel::TaskRunStatus::Failed => "failed",
-        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
 pub(super) fn task_run_finish_notice(
     task_id: &str,
     status: sigil_kernel::TaskRunStatus,
     entries: &[sigil_kernel::SessionLogEntry],
 ) -> String {
-    let label = task_run_status_label(status);
+    let label = status.as_str();
     let reason = entries.iter().rev().find_map(|entry| {
         let sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskRun(run)) = entry else {
             return None;

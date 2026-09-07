@@ -14,40 +14,6 @@ impl AppState {
         if prompt.is_empty() && !has_attachments {
             return Ok(None);
         }
-        if self.is_provider_only_safe_mode() && has_attachments {
-            self.show_image_attachment_notice(
-                "provider-only safe mode does not support image attachments; prompt and attachments kept",
-            );
-            return Ok(None);
-        }
-        if self.is_provider_only_safe_mode()
-            && ((prompt.starts_with('/') && prompt.trim() != "/quit") || prompt.starts_with('@'))
-        {
-            self.last_notice = Some(
-                "provider-only safe mode accepts provider prompts only; repair authority for this command"
-                    .to_owned(),
-            );
-            self.push_event(
-                "safe-mode:blocked",
-                sigil_kernel::safe_persistence_text(&prompt),
-            );
-            return Ok(None);
-        }
-        if self.is_provider_only_safe_mode()
-            && self.runtime.is_busy
-            && !prompt.starts_with('/')
-            && !prompt.trim_start().starts_with('@')
-        {
-            self.last_notice = Some(
-                "provider-only safe mode accepts one provider prompt at a time; follow-up kept until the current turn finishes"
-                    .to_owned(),
-            );
-            self.push_event(
-                "safe-mode:busy",
-                sigil_kernel::safe_persistence_text(&prompt),
-            );
-            return Ok(None);
-        }
         if has_attachments
             && (self.composer.queue_edit_target.is_some()
                 || prompt.starts_with('/')
@@ -146,21 +112,6 @@ impl AppState {
             }));
         }
 
-        // Plan mode is a host-mediated operation and is intentionally unavailable while the
-        // provider-only safe-mode admission fence is active. Reject before changing composer,
-        // timeline, busy, or thinking state so a blocked host action cannot leave a ghost run.
-        if self.is_provider_only_safe_mode() && self.composer.mode == ComposerMode::Plan {
-            self.last_notice = Some(
-                "provider-only safe mode accepts provider prompts only; repair authority for plan mode"
-                    .to_owned(),
-            );
-            self.push_event(
-                "safe-mode:blocked",
-                sigil_kernel::safe_persistence_text(&prompt),
-            );
-            return Ok(None);
-        }
-
         self.clear_pending_plan_approval();
 
         if self.composer.mode == ComposerMode::Plan {
@@ -175,6 +126,7 @@ impl AppState {
             self.active_pane = PaneFocus::Composer;
             self.push_event("focus", current_focus_label(self));
             self.runtime.is_busy = true;
+            self.runtime.allow_projection_run_recovery = true;
             self.runtime.run_phase = RunPhase::Thinking;
             self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
             self.runtime.last_phase_marker = None;
@@ -213,6 +165,7 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Thinking;
         self.last_notice = Some("thinking".to_owned());
         self.runtime.last_phase_marker = None;
@@ -235,17 +188,6 @@ impl AppState {
         command: ResolvedSlashCommand,
         prompt: String,
     ) -> Result<Option<AppAction>> {
-        if self.is_provider_only_safe_mode() && command.canonical != "/quit" {
-            self.last_notice = Some(
-                "provider-only safe mode accepts provider prompts only; repair authority for this command"
-                    .to_owned(),
-            );
-            self.push_event(
-                "safe-mode:blocked",
-                sigil_kernel::safe_persistence_text(&prompt),
-            );
-            return Ok(None);
-        }
         self.composer.input.clear();
         self.composer.input_cursor = 0;
         self.composer.input_paste_spans.clear();
@@ -346,6 +288,7 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Thinking;
         self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
         self.runtime.last_phase_marker = None;
@@ -377,6 +320,7 @@ impl AppState {
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
             self.runtime.is_busy = true;
+            self.runtime.allow_projection_run_recovery = true;
             self.runtime.run_phase = RunPhase::Thinking;
             self.last_notice = Some("continuing task".to_owned());
             self.runtime.last_phase_marker = None;
@@ -399,6 +343,7 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Thinking;
         self.last_notice = Some("planning task".to_owned());
         self.runtime.last_phase_marker = None;
@@ -477,6 +422,7 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Agent(profile_id.clone());
         self.last_notice = Some(format!("waiting for agent @{profile_id}"));
         self.runtime.last_phase_marker = None;
@@ -543,6 +489,7 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = RunPhase::Thinking;
         self.runtime.last_phase_marker = None;
         self.timeline_state.streaming_assistant_index = None;

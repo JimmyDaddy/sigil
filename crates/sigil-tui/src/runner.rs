@@ -35,7 +35,7 @@ pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;
 pub(crate) use spawn::spawn_agent_worker;
 #[cfg(not(test))]
 pub(crate) use spawn::{
-    WorkerSessionRouteDirective, WorkerStartMode, spawn_agent_worker_with_start_mode_and_attachment,
+    WorkerSessionRouteDirective, spawn_agent_worker_with_route_directive_and_attachment,
 };
 #[cfg(test)]
 #[allow(unused_imports)]

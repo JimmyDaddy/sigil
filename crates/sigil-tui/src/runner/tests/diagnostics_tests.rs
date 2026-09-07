@@ -301,7 +301,9 @@ fn check_changed_files_reports_notice_when_no_source_files_changed() -> Result<(
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::CheckChangedFilesDiagnostics)?;
-    let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
+    let notice = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::Notice(text) if text == "no changed source files to check")
+    })?;
 
     assert!(matches!(
         notice,

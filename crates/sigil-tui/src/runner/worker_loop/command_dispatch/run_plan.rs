@@ -31,7 +31,6 @@ where
         managed_verification_execution,
         state,
     } = context;
-
     let plan_review_root_config = Arc::new(root_config.clone());
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
@@ -60,13 +59,6 @@ where
                     } else {
                         ConversationInputKind::Chat
                     };
-                    if state.provider_only_safe_mode {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "provider-only safe mode cannot queue a second prompt while a run is active"
-                                .to_owned(),
-                        ));
-                        continue;
-                    }
                     match queue_conversation_input_and_track_detached(
                         &state.session.log_path,
                         &mut state.session.current,
@@ -87,9 +79,7 @@ where
                     continue;
                 }
 
-                if !state.provider_only_safe_mode
-                    && let Some(current) = state.session.current.as_ref()
-                {
+                if let Some(current) = state.session.current.as_ref() {
                     match sigil_runtime::application_run::application_session_has_unresolved_user_input(
                         &state.session.log_path,
                         current.session_scope_id(),
@@ -120,8 +110,7 @@ where
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
 
-                let pending_session_title = if !state.provider_only_safe_mode
-                    && !cfg!(test)
+                let pending_session_title = if !cfg!(test)
                     && !plan_mode
                     && !prompt.trim().is_empty()
                     && !run_session
@@ -199,17 +188,7 @@ where
                 let task_result_tx = state.run.result_tx.clone();
                 let run_id = state.allocate_run_id();
                 let provider_logical_run_id = format!("foreground-run-{run_id}");
-                let parent_session_ref = if state.provider_only_safe_mode {
-                    // Safe mode deliberately has no physical session path. Keep the typed
-                    // conversation binding usable for a provider-only turn without letting a
-                    // URI-like sentinel become an OS-relative file name.
-                    sigil_kernel::SessionRef::new_relative("provider-only-session.jsonl").map_err(
-                        |error| format!("failed to build provider-only session ref: {error:#}"),
-                    )
-                } else {
-                    session_ref_for_log_path(&state.session.log_path)
-                };
-                let parent_session_ref = match parent_session_ref {
+                let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(session_ref) => session_ref,
                     Err(error) => {
                         state.session.current = Some(run_session);
@@ -256,9 +235,8 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
-                if !state.provider_only_safe_mode
-                    && let Err(error) = state
-                        .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
                 {
                     state.session.current = Some(run_session);
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -1957,6 +1935,249 @@ where
                 let _ = message_tx.send(WorkerMessage::UserInputRequested {
                     request: revised.request,
                     entries: revised.entries,
+                });
+            }
+            RunPlanCommand::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            } => {
+                if state.run.active.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before adopting a Plan candidate".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(current_session) = state.session.current.as_mut() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable for Plan candidate adoption".to_owned(),
+                    ));
+                    continue;
+                };
+                let plan_id = match sigil_kernel::PlanId::new(plan_id.clone()) {
+                    Ok(plan_id) => plan_id,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "Plan candidate adoption failed: invalid plan id: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                let mut handler = sigil_kernel::NoopEventHandler;
+                match sigil_runtime::PlanReviewCoordinator::adopt_plan_review_candidate(
+                    current_session,
+                    &plan_id,
+                    &expected_candidate_hash,
+                    &mut handler,
+                    current_unix_time_ms(),
+                ) {
+                    Ok(_) => {
+                        let entries = current_session.entries().to_vec();
+                        let _ = message_tx.send(WorkerMessage::PlanRunFinished {
+                            result: sigil_kernel::AgentRunResult {
+                                final_text: "Plan candidate adopted".to_owned(),
+                                tool_calls: 0,
+                                final_message_id: None,
+                            },
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "Plan candidate adoption failed: {error:#}"
+                        )));
+                    }
+                }
+            }
+            RunPlanCommand::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            } => {
+                if state.run.active.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before retrying a Plan review".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(retry_scope_id) = state
+                    .session
+                    .current
+                    .as_ref()
+                    .map(|session| session.session_scope_id().to_owned())
+                else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable for Plan review retry".to_owned(),
+                    ));
+                    continue;
+                };
+                let plan_id = match sigil_kernel::PlanId::new(plan_id.clone()) {
+                    Ok(plan_id) => plan_id,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "Plan review retry failed: invalid plan id: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                if let Err(error) = state.acquire_route_execution_owner_for_scope(&retry_scope_id) {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "Plan review retry is unavailable until session authority recovers: {error}"
+                    )));
+                    continue;
+                }
+                let Some(current_session) = state.session.current.as_mut() else {
+                    state.run.route_execution_owner = None;
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable for Plan review retry".to_owned(),
+                    ));
+                    continue;
+                };
+                let retry = sigil_runtime::PlanReviewCoordinator::retry_plan_review_for_plan(
+                    current_session,
+                    &plan_id,
+                    expected_candidate_hash.as_deref(),
+                    current_unix_time_ms(),
+                );
+                let retry = match retry {
+                    Ok(retry) => retry,
+                    Err(error) => {
+                        state.run.route_execution_owner = None;
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "Plan review retry failed: {error:#}"
+                        )));
+                        continue;
+                    }
+                };
+                let run_request = retry.request;
+                let Some(run_session) = state.session.current.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable for Plan review retry".to_owned(),
+                    ));
+                    continue;
+                };
+                let plan_registry = sigil_runtime::build_plan_review_tool_registry(
+                    agent.tool_registry(),
+                    plan_review_root_config.as_ref(),
+                )
+                .into_registry();
+                let run_options = options.clone();
+                let run_agent = Arc::clone(agent);
+                let run_message_tx = message_tx.clone();
+                let run_id = state.allocate_run_id();
+                let cancellation_recorder = match run_session.run_cancellation_recorder() {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        state.session.current = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to create cancellation recorder for Plan review retry: {error}"
+                        )));
+                        continue;
+                    }
+                };
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
+                let url_capability_registrar = run_session.user_url_capability_registrar();
+                let image_attachment_resolver = run_session.image_attachment_resolver();
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error.to_string()));
+                    continue;
+                }
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let task_result_tx = state.run.result_tx.clone();
+                let plan_review_root_config = Arc::clone(&plan_review_root_config);
+                let managed_plan_review_child_resources = state
+                    .managed_plan_review_child_resources
+                    .as_ref()
+                    .map(Arc::clone);
+                let handle = runtime.spawn(async move {
+                    let _run_task_guard = run_task_guard;
+                    let mut run_session = run_session;
+                    let _ = run_message_tx.send(WorkerMessage::PlanRunStarted {
+                        prompt: format!(
+                            "plan review retry {}",
+                            run_request.plan_review_id.as_str()
+                        ),
+                    });
+                    let mut handler = ChannelEventHandler::new(run_message_tx.clone());
+                    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+                    let result = run_prepared_plan_review(
+                        &mut run_session,
+                        &run_request,
+                        run_agent.as_ref(),
+                        &plan_review_root_config,
+                        run_options,
+                        plan_registry,
+                        &mut handler,
+                        &mut approval_handler,
+                        cancellation_handle,
+                        managed_plan_review_child_resources,
+                    )
+                    .await;
+                    let result = preserve_revision_result_after_audit(
+                        result,
+                        append_mcp_elicitation_audits(
+                            &mut run_session,
+                            &run_elicitation_audit_buffer,
+                        ),
+                        &run_message_tx,
+                    );
+                    let payload = match result {
+                        Ok(PlanReviewExecutionResult::Finished(result)) => RunTaskPayload::Chat {
+                            result: Ok(result),
+                            plan_mode: false,
+                            plan_review: true,
+                            queue_id: None,
+                            provider_logical_run_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
+                        },
+                        Ok(PlanReviewExecutionResult::AwaitingUserInput(request)) => {
+                            RunTaskPayload::AwaitingUserInput { request }
+                        }
+                        Ok(PlanReviewExecutionResult::Blocked { reason, paused }) => {
+                            RunTaskPayload::PlanReviewBlocked { reason, paused }
+                        }
+                        Ok(PlanReviewExecutionResult::Cancelled) => {
+                            RunTaskPayload::PlanReviewCancelled
+                        }
+                        Ok(PlanReviewExecutionResult::Interrupted { reason }) => {
+                            RunTaskPayload::PlanReviewInterrupted { reason }
+                        }
+                        Err(error) => RunTaskPayload::Chat {
+                            result: Err(error),
+                            plan_mode: false,
+                            plan_review: true,
+                            queue_id: None,
+                            provider_logical_run_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
+                        },
+                    };
+                    let _ = task_result_tx.send(RunTaskResult {
+                        run_id,
+                        session: run_session,
+                        payload,
+                        post_run_maintenance: None,
+                    });
+                });
+                state.run.active = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                    cancellation_owner,
+                    cancellation_recorder,
+                    cancellation_target: RunCancellationTarget::Run,
+                    revision_terminal_run_id: None,
+                    url_capability_registrar,
+                    image_attachment_resolver,
                 });
             }
         }

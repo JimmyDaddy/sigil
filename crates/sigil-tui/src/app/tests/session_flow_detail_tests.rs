@@ -1135,82 +1135,43 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     let route_id = sigil_kernel::TaskRouteId::new("route_1")?;
     let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
 
+    assert_eq!(sigil_kernel::TaskRunStatus::Started.as_str(), "started");
+    assert_eq!(sigil_kernel::TaskRunStatus::Running.as_str(), "running");
+    assert_eq!(sigil_kernel::TaskRunStatus::Paused.as_str(), "paused");
+    assert_eq!(sigil_kernel::TaskRunStatus::Completed.as_str(), "completed");
+    assert_eq!(sigil_kernel::TaskRunStatus::Failed.as_str(), "failed");
+    assert_eq!(sigil_kernel::TaskRunStatus::Cancelled.as_str(), "cancelled");
     assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Started),
-        "started"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Running),
-        "running"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Paused),
-        "paused"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Completed),
-        "completed"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Failed),
-        "failed"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Cancelled),
-        "cancelled"
-    );
-    assert_eq!(
-        task_run_status_label(sigil_kernel::TaskRunStatus::Interrupted),
+        sigil_kernel::TaskRunStatus::Interrupted.as_str(),
         "interrupted"
     );
 
+    assert_eq!(sigil_kernel::TaskPlanStatus::Proposed.as_str(), "proposed");
+    assert_eq!(sigil_kernel::TaskPlanStatus::Accepted.as_str(), "accepted");
     assert_eq!(
-        task_plan_status_label(sigil_kernel::TaskPlanStatus::Proposed),
-        "proposed"
-    );
-    assert_eq!(
-        task_plan_status_label(sigil_kernel::TaskPlanStatus::Accepted),
-        "accepted"
-    );
-    assert_eq!(
-        task_plan_status_label(sigil_kernel::TaskPlanStatus::Superseded),
+        sigil_kernel::TaskPlanStatus::Superseded.as_str(),
         "superseded"
     );
-    assert_eq!(
-        task_plan_status_label(sigil_kernel::TaskPlanStatus::Rejected),
-        "rejected"
-    );
+    assert_eq!(sigil_kernel::TaskPlanStatus::Rejected.as_str(), "rejected");
 
+    assert_eq!(sigil_kernel::TaskStepStatus::Pending.as_str(), "pending");
+    assert_eq!(sigil_kernel::TaskStepStatus::Running.as_str(), "running");
     assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Pending),
-        "pending"
-    );
-    assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Running),
-        "running"
-    );
-    assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Completed),
+        sigil_kernel::TaskStepStatus::Completed.as_str(),
         "completed"
     );
+    assert_eq!(sigil_kernel::TaskStepStatus::Failed.as_str(), "failed");
+    assert_eq!(sigil_kernel::TaskStepStatus::Blocked.as_str(), "blocked");
     assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Failed),
-        "failed"
-    );
-    assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Blocked),
-        "blocked"
-    );
-    assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Cancelled),
+        sigil_kernel::TaskStepStatus::Cancelled.as_str(),
         "cancelled"
     );
     assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Interrupted),
+        sigil_kernel::TaskStepStatus::Interrupted.as_str(),
         "interrupted"
     );
     assert_eq!(
-        task_step_status_label(sigil_kernel::TaskStepStatus::Superseded),
+        sigil_kernel::TaskStepStatus::Superseded.as_str(),
         "superseded"
     );
 

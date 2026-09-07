@@ -1796,6 +1796,23 @@ impl ManualLoopWorker {
         self.send(WorkerCommand::Shutdown)
     }
 
+    fn wait_until_ready(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow::anyhow!("timed out waiting for worker ready"));
+            }
+            let message = self
+                .message_rx
+                .recv_timeout(remaining)
+                .map_err(|error| anyhow::anyhow!("timed out waiting for worker ready: {error}"))?;
+            if matches!(message, WorkerMessage::WorkerReady) {
+                return Ok(());
+            }
+        }
+    }
+
     fn recv(&self, timeout: Duration) -> Result<WorkerMessage> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -1806,7 +1823,9 @@ impl ManualLoopWorker {
             let message = self.message_rx.recv_timeout(remaining).map_err(|error| {
                 anyhow::anyhow!("timed out waiting for worker message: {error}")
             })?;
-            if !matches!(message, WorkerMessage::WorkerReady) {
+            if !matches!(message, WorkerMessage::WorkerReady)
+                && !matches!(message, WorkerMessage::Notice(ref notice) if notice.starts_with("startup: "))
+            {
                 return Ok(message);
             }
         }
@@ -1907,7 +1926,6 @@ fn spawn_loop_with_shared_agent(
                 WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
                 None,
                 None,
-                false,
             );
         })
         .map_err(|error| anyhow::anyhow!("failed to spawn worker loop: {error}"))?;
@@ -2200,10 +2218,9 @@ fn shutdown_with_active_run_emits_an_honest_cancellation_terminal() -> Result<()
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/shutdown-active.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let agent = Arc::new(Agent::new(
-        PlannedProvider::new(vec![StreamPlan::Pending]),
-        ToolRegistry::new(),
-    ));
+    let (provider, stream_started) =
+        PlannedProvider::new_with_stream_start_signal(vec![StreamPlan::Pending]);
+    let agent = Arc::new(Agent::new(provider, ToolRegistry::new()));
 
     let worker = spawn_loop_with_shared_agent(
         root_config,
@@ -2216,7 +2233,12 @@ fn shutdown_with_active_run_emits_an_honest_cancellation_terminal() -> Result<()
         prompt: "hold forever".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    let _ = worker.recv(Duration::from_secs(3))?;
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunStarted { .. })
+    })?;
+    // Keep the run genuinely in provider I/O before sending urgent shutdown. This prevents the
+    // shutdown command from racing a still-admitting run and accidentally testing idle shutdown.
+    stream_started.recv_timeout(Duration::from_secs(10))?;
 
     worker.send_shutdown()?;
     let timeout_deadline = Instant::now() + Duration::from_secs(3);
@@ -2263,6 +2285,7 @@ fn shutdown_without_active_run_does_not_emit_events() -> Result<()> {
         Arc::clone(&agent),
     )?;
 
+    worker.wait_until_ready(Duration::from_secs(10))?;
     worker.send_shutdown()?;
     let message = worker.recv(Duration::from_millis(200));
     assert!(

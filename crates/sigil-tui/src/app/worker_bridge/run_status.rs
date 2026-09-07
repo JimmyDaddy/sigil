@@ -8,6 +8,7 @@ impl AppState {
         phase_marker: impl Into<String>,
     ) {
         self.runtime.is_busy = true;
+        self.runtime.allow_projection_run_recovery = true;
         self.runtime.run_phase = phase;
         self.runtime.mcp_progress = None;
         self.last_notice = Some(notice.into());
@@ -16,6 +17,7 @@ impl AppState {
 
     pub(crate) fn clear_worker_run_state(&mut self) {
         self.runtime.is_busy = false;
+        self.runtime.allow_projection_run_recovery = false;
         self.runtime.run_phase = RunPhase::Idle;
         self.runtime.mcp_progress = None;
         self.runtime.active_task = None;

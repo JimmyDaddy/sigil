@@ -89,6 +89,8 @@ fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, t
     let action_hint =
         if pending.retrying_materialization && pending.action_allowed(PlanWorkbenchAction::Run) {
             "↑↓/Pg scroll · Tab action · R retry task · V revise · Enter confirm · Esc close"
+        } else if pending.action_allowed(PlanWorkbenchAction::AdoptCandidate) {
+            "↑↓/Pg scroll · A adopt candidate · X dismiss · Enter confirm · Esc close"
         } else {
             "↑↓/Pg scroll · Tab action · R/S/V/X act · Enter confirm · Esc close"
         };
@@ -177,6 +179,13 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
     lines.push(heading("Summary", theme));
     push_multiline(&mut lines, "", &detail.summary);
     lines.push(Line::raw(String::new()));
+    if detail.steps.is_empty()
+        && let Some(candidate) = detail.legacy_markdown.as_deref()
+    {
+        lines.push(heading("Candidate", theme));
+        push_multiline(&mut lines, "", candidate);
+        lines.push(Line::raw(String::new()));
+    }
     lines.push(heading("Steps", theme));
     for (index, step) in detail.steps.iter().enumerate() {
         lines.push(Line::from(vec![

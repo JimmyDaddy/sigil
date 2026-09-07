@@ -16,7 +16,7 @@ use sigil_kernel::{
 use super::{
     readiness_reason_summary, required_action_label, task_completion_progress_live_lines,
     task_completion_progress_sidebar_lines, task_provider_route_live_lines,
-    task_provider_route_sidebar_lines, task_sidebar_lines, task_step_status_label, task_strip_view,
+    task_provider_route_sidebar_lines, task_sidebar_lines, task_strip_view,
     verification_stale_reason_compact_label, verification_verdict_label,
 };
 use crate::app::task_sidebar::VerificationCardAction;
@@ -261,7 +261,7 @@ fn verification_labels_cover_all_sidebar_variants() {
         (TaskStepStatus::Interrupted, "interrupted"),
         (TaskStepStatus::Superseded, "superseded"),
     ] {
-        assert_eq!(task_step_status_label(status), label);
+        assert_eq!(status.as_str(), label);
     }
     for (verdict, label) in [
         (VerificationVerdict::NotEvaluated, "not evaluated"),

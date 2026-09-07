@@ -77,7 +77,7 @@ pub(super) fn render_user_input_form(
             {
                 "Tab fields/actions · Pg scroll · Enter newline · Ctrl-Enter actions · Esc close"
             } else {
-                "Tab fields/actions · ↑↓ choose · Pg scroll · Space toggle · Enter actions · Esc close"
+                "Tab fields/actions · ↑↓ choose · Pg scroll · Space toggle · Enter next field · Ctrl-Enter actions · Esc close"
             },
             styles::muted(&theme.palette),
         )),
@@ -291,8 +291,23 @@ fn render_plan_revision_actions(
     }
     let keyboard_hint = if form.focus_actions {
         "← → choose an action · Enter confirm · ↑ return to editing"
+    } else if form
+        .view
+        .questions
+        .get(form.focused_question)
+        .is_some_and(|question| {
+            matches!(
+                question.field,
+                sigil_kernel::UserInputFieldKindV1::Text {
+                    multiline: true,
+                    ..
+                }
+            )
+        })
+    {
+        "↑↓/Tab next field · Enter newline · Ctrl-Enter actions · Esc close"
     } else {
-        "Enter adds a line · Ctrl-Enter or Tab opens actions · Esc close"
+        "↑↓/Tab next field · Enter next field · Ctrl-Enter actions · Esc close"
     };
     frame.render_widget(
         Paragraph::new(Text::from(vec![
