@@ -88,6 +88,11 @@
 .plan-card-risk { display: grid; gap: 2px; padding: 8px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); }
 .plan-card-risk strong { font-size: 9px; text-transform: uppercase; color: var(--sg-sys-color-on-surface-subtle); }
 .plan-card-risk span { color: var(--sg-sys-color-on-surface-variant); font-size: 11px; line-height: 1.5; }
+.plan-card-candidate { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--sg-sys-color-outline); border-radius: var(--sg-sys-radius-sm); background: var(--sg-sys-color-surface-container); }
+.plan-card-candidate-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--sg-sys-color-on-surface-variant); font-size: 10px; }
+.plan-card-candidate-heading span { color: var(--sg-sys-color-on-surface-subtle); }
+.plan-card-candidate > code { overflow: hidden; color: var(--sg-sys-color-on-surface-subtle); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.plan-card-candidate pre { max-height: 180px; margin: 0; overflow: auto; padding: 7px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-container-low); font: 10px/1.5 var(--sg-sys-font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .plan-card-notice { padding: 7px 9px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-domain-color-on-warning); background: var(--sg-domain-color-warning); font-size: 10px; }
 .plan-card-notice-error { color: var(--sg-domain-color-on-danger); background: var(--sg-domain-color-danger); }
 .plan-card-toolbar { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding-top: 2px; border-top: 1px solid var(--sg-sys-color-outline-variant); }

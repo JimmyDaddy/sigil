@@ -164,7 +164,7 @@ const CANONICAL_REFRESH_RETRY_DELAYS_MS = [
   4_000,
 ] as const;
 const CANONICAL_DISPLAY_RETRY_DELAYS_MS = [75, 150, 300, 600] as const;
-const POST_RUN_CATALOG_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000, 6_000, 12_000, 20_000] as const;
+const POST_RUN_CATALOG_RETRY_DELAYS_MS = [250, 750, 1_500, 3_000, 6_000, 12_000, 20_000, 25_000] as const;
 
 export function ConversationPanel({
   bridge,
@@ -825,6 +825,20 @@ export function ConversationPanel({
         }
       }
     };
+    const reconcileRetainedTerminalRuns = async () => {
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const continuity = await bridge.continuity(workspaceId, session.id);
+        if (disposed) return;
+        hydrateRetainedTerminalRuns(continuity);
+        allowedRecoveryActions = [...continuity.recoveryActions];
+        setContinuityRecoveryActions(allowedRecoveryActions);
+        const hasActiveRetainedTask = continuity.retainedTerminalRuns.some((retained) => (
+          retained.terminalTasks.some((task) => task.status === "starting" || task.status === "running")
+        ));
+        if (!hasActiveRetainedTask) return;
+        await waitForCanonicalProjection(500);
+      }
+    };
     const enterRecovery = (
       message = t("liveControlsUnavailable"),
       error?: unknown,
@@ -1071,7 +1085,14 @@ export function ConversationPanel({
         if (activeRunId === status.runId) setStreamStatus(status);
         if (status.state === "error" && activeRunId === status.runId) {
           liveConnectionFailed = true;
-          enterRecovery(status.message ?? t("liveControlsUnavailable"));
+          void reconcileRetainedTerminalRuns()
+            .then(() => {
+              if (disposed) return;
+              enterRecovery(status.message ?? t("liveControlsUnavailable"));
+            })
+            .catch(() => {
+              enterRecovery(status.message ?? t("liveControlsUnavailable"));
+            });
         }
         if (status.state === "terminal") {
           reportSessionCatalogChange(status.runId);
@@ -1723,13 +1744,19 @@ export function ConversationPanel({
     }
   };
 
-  const continueTask = async (taskId: string, guidance?: string): Promise<boolean> => {
+  const continueTask = async (
+    taskId: string,
+    guidance?: string,
+    allowStaleActiveRun = false,
+  ): Promise<boolean> => {
     if (
-      active
-      || submissionBlocked
+      (!allowStaleActiveRun && active)
+      || (!allowStaleActiveRun && submissionBlocked)
       || taskControlBusy
       || pendingApproval?.approval !== undefined
-    ) return false;
+    ) {
+      return false;
+    }
     setTaskControlBusy(true);
     startRunPendingRef.current = true;
     try {
@@ -1764,13 +1791,14 @@ export function ConversationPanel({
 
   const submitPlanDecision = async (action: PlanDecisionAction) => {
     const review = durablePlanReview;
+    const terminalRecovery = action === "adopt_candidate" || action === "retry_review";
     if (
       review === undefined
       || planDecisionBusy
       || !review.allowedActions.includes(action)
       || (review.stale && (action === "run" || action === "save"))
-      || review.status !== "draft_ready"
-      || review.planHash === undefined
+      || (!terminalRecovery && (review.status !== "draft_ready" || review.planHash === undefined))
+      || (terminalRecovery && review.candidate === undefined)
       || pendingApproval?.approval !== undefined
     ) return;
     setPlanDecisionBusy(true);
@@ -1784,13 +1812,22 @@ export function ConversationPanel({
         : { ...current, allowedActions: [] });
     }
     try {
-      const summary = await bridge.planDecision(
-        workspaceId,
-        session.id,
-        review.planId,
-        review.planHash,
-        action,
-      );
+      const summary = terminalRecovery
+        ? await bridge.planDecisionWithCandidate(
+          workspaceId,
+          session.id,
+          review.planId,
+          review.planHash ?? "",
+          review.candidate?.contentHash,
+          action,
+        )
+        : await bridge.planDecision(
+          workspaceId,
+          session.id,
+          review.planId,
+          review.planHash!,
+          action,
+        );
       if (summary.action === "run") {
         if (summary.taskId === undefined) {
           throw new Error("Run plan decision did not return a task identity.");
@@ -1806,7 +1843,11 @@ export function ConversationPanel({
         // Task continuation path so it gets the same foreground ownership, event attachment,
         // cancellation, and restart semantics as every other Task run.
         setPlanDecisionBlocker(undefined);
-        await continueTask(summary.taskId);
+        // The plan decision is the authoritative terminal transition, but the renderer may still
+        // hold the just-finished review run in its local `active` projection. The typed server
+        // command owns the real foreground gate, so allow this exact post-decision continuation
+        // through that transient stale UI state.
+        await continueTask(summary.taskId, undefined, true);
       }
       if (summary.action === "revise" && summary.revisionRunId !== undefined) {
         notify({ message: t("planRevisionStarted"), tone: "info" });
@@ -2402,9 +2443,7 @@ export function ConversationPanel({
                   ? "routeRecoveryReplacement"
                   : routeRecovery.code === "session_already_active"
                     ? "routeRecoveryBusy"
-                    : routeRecovery.code === "authority_journal_corrupted"
-                      ? "routeRecoveryAuthority"
-                      : routeRecovery.code === "authority_unavailable"
+                    : routeRecovery.code === "authority_unavailable"
                         ? "routeRecoveryAuthorityUnavailable"
                     : "routeRecoverySetup",
             )}</p>
@@ -2456,7 +2495,6 @@ export function ConversationPanel({
             ) : null}
             {routeRecovery.actions.some((action) => (
               action === "repair_connection"
-                || action === "repair_authority"
                 || action === "select_replacement"
             )) ? (
               <Button type="button" variant="quiet" onClick={onOpenSettings}>

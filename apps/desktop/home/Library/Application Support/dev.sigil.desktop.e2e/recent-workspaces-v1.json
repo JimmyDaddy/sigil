@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "id": "desktop-e2e-workspace",
+      "displayName": "desktop-e2e-workspace",
+      "workspaceRoot": "workspace"
+    }
+  ]
+}

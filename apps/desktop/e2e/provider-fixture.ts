@@ -4,6 +4,7 @@ const TITLE_CANARY = "验证桌面审批队列与恢复";
 const INITIAL_RUN_CANARY = "DESKTOP_E2E_INITIAL_DONE";
 const QUEUED_RUN_CANARY = "DESKTOP_E2E_QUEUED_DONE";
 const QUEUED_PROMPT = "继续验证排队消息";
+const APPROVAL_QUEUE_PROMPT = "审批等待期间仍可排队消息";
 const APPROVAL_CALL_ID = "desktop-e2e-approval-call";
 const SKILL_INSTRUCTION_MARKER = "DESKTOP_E2E_SKILL_INSTRUCTION";
 const AGENT_INSTRUCTION_MARKER = "DESKTOP_E2E_AGENT_INSTRUCTION";
@@ -13,6 +14,8 @@ const AGENT_RUN_CANARY = "DESKTOP_E2E_AGENT_DONE";
 const PLAN_RUN_CANARY = "DESKTOP_E2E_PLAN_DONE";
 const AUTO_ORCHESTRATION_PROMPT = "DESKTOP_E2E_AUTO_ORCHESTRATION";
 const AUTO_ORCHESTRATION_FINAL_CANARY = "DESKTOP_E2E_AUTO_ORCHESTRATION_DONE";
+const APPROVED_PLAN_EXECUTION_PROMPT =
+  "Execute the following user-approved Plan with the configured approval and verification requirements.";
 const TERMINAL_LIFECYCLE_PROMPT = "DESKTOP_E2E_TERMINAL_LIFECYCLE";
 const TERMINAL_LIFECYCLE_READY_CANARY = "DESKTOP_E2E_TERMINAL_READY";
 const TERMINAL_LIFECYCLE_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_FOREGROUND_DONE";
@@ -100,12 +103,14 @@ export interface DesktopProviderFixture {
 
 export async function startDesktopProviderFixture(): Promise<DesktopProviderFixture> {
   const requestCounts = new Map<string, number>();
+  let directConversationCallSequence = 0;
   let concurrentReads = 0;
   let maxConcurrentReads = 0;
   const recordRequest = (kind: string) => {
     requestCounts.set(kind, (requestCounts.get(kind) ?? 0) + 1);
   };
   const server = createServer(async (request, response) => {
+    let rawBody = "";
     try {
       if (request.method === "GET") {
         if (request.url?.endsWith("/__evidence")) {
@@ -133,7 +138,8 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         return;
       }
 
-      const payload = JSON.parse(await readRequestBody(request)) as ChatCompletionRequest;
+      rawBody = await readRequestBody(request);
+      const payload = JSON.parse(rawBody) as ChatCompletionRequest;
       const messages = payload.messages ?? [];
       const lastMessage = messages.at(-1);
       const requestText = messages
@@ -152,7 +158,6 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
             : [];
         }),
       );
-
       if (
         (payload.tools?.length ?? 0) === 0
         && requestText.includes(
@@ -198,9 +203,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         recordRequest("large_tool_artifact_final");
         sendText(response, ARTIFACT_FINAL_CANARY);
       } else if (
-        toolNames.has("request_user_input")
-        && typeof lastUserText === "string"
-        && lastUserText.includes(DURABLE_USER_INPUT_PROMPT)
+        requestText.includes(DURABLE_USER_INPUT_PROMPT)
         && lastMessage?.role === "tool"
         && typeof lastMessage.content === "string"
         && lastMessage.content.includes("ordinary conversation routing accepted")
@@ -220,8 +223,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         sendText(response, DURABLE_USER_INPUT_FINAL_CANARY);
       } else if (
         toolNames.has("request_plan_review")
-        && typeof lastUserText === "string"
-        && lastUserText.includes(AUTO_ORCHESTRATION_PROMPT)
+        && requestText.includes(AUTO_ORCHESTRATION_PROMPT)
       ) {
         recordRequest("plan_review_request");
         sendNamedToolCall(
@@ -240,8 +242,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         );
       } else if (
         toolNames.has("request_task_planning")
-        && typeof lastUserText === "string"
-        && lastUserText.includes(AUTO_ORCHESTRATION_PROMPT)
+        && requestText.includes(AUTO_ORCHESTRATION_PROMPT)
       ) {
         recordRequest("auto_conversation");
         sendNamedToolCall(
@@ -252,9 +253,10 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         );
       } else if (toolNames.has("continue_without_task_planning")) {
         recordRequest("direct_conversation_routing");
+        directConversationCallSequence += 1;
         sendNamedToolCall(
           response,
-          `desktop-direct-conversation-${requestCounts.get("direct_conversation_routing")}`,
+          `desktop-direct-conversation-${directConversationCallSequence}`,
           "continue_without_task_planning",
           JSON.stringify({
             reason: "does_not_meet_task_planning_criteria",
@@ -268,9 +270,10 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           "task_plan_update",
           AUTO_PLAN_ARGS,
         );
+      } else if (requestText.includes(APPROVED_PLAN_EXECUTION_PROMPT)) {
+        recordRequest("approved_plan_direct_execution");
+        sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
       } else if (requestText.includes("Produce the single user-visible final answer")) {
-        // Synthesis includes the approved plan and therefore also contains the read-role labels.
-        // Match the dedicated synthesis instruction before the participant-step branch.
         recordRequest("auto_synthesis");
         sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
       } else if (requestText.includes("Role: subagent_read")) {
@@ -295,7 +298,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       } else if (requestText.includes(PLAN_INSTRUCTION_MARKER)) {
         recordRequest("plan_agent");
         sendText(response, PLAN_RUN_CANARY);
-      } else if (typeof lastUserText === "string" && lastUserText.includes(QUEUED_PROMPT)) {
+      } else if (requestText.includes(QUEUED_PROMPT)) {
         recordRequest("queued_followup");
         sendText(response, QUEUED_RUN_CANARY);
       } else if (
@@ -317,7 +320,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           "terminal_start",
           JSON.stringify({
             task_id: "desktop-e2e-terminal-task",
-            command: `printf '${TERMINAL_LIFECYCLE_READY_CANARY}\\n'; sleep 12; printf 'DESKTOP_E2E_TERMINAL_EXIT\\n'`,
+            command: `printf '${TERMINAL_LIFECYCLE_READY_CANARY}\\n'; sleep 60; printf 'DESKTOP_E2E_TERMINAL_EXIT\\n'`,
             mode: "background",
             readiness: {
               kind: "output_contains",
@@ -330,9 +333,16 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         recordRequest("terminal_lifecycle_after_start");
         sendText(response, TERMINAL_LIFECYCLE_FINAL_CANARY);
       } else if (
+        requestText.includes(APPROVAL_QUEUE_PROMPT)
+        && (requestCounts.get("approval_initial") ?? 0) > 0
+      ) {
+        recordRequest("approval_after_tool");
+        sendText(response, INITIAL_RUN_CANARY);
+      } else if (
         lastMessage?.role === "tool"
         && typeof lastMessage.content === "string"
         && lastMessage.content.includes("ordinary conversation routing accepted")
+        && (requestCounts.get("approval_initial") ?? 0) === 0
       ) {
         recordRequest("approval_initial");
         sendToolCall(response);

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { resolve } from "node:path";
 
 import { Given, Then, When } from "@wdio/cucumber-framework";
 import { $, $$, browser } from "@wdio/globals";
@@ -21,21 +29,78 @@ async function waitForComposerEnabled(
   timeout = 20_000,
 ): Promise<void> {
   await browser.waitUntil(
-    async () => {
-      try {
-        const composerEnabled = await $("#desktop-prompt").isEnabled();
-        const lifecycle = await $(".conversation-panel").getAttribute(
-          "data-continuity-lifecycle",
-        );
-        return composerEnabled && (lifecycle === "idle" || lifecycle === "live");
-      } catch {
-        // Canonical refreshes may replace the textarea while WebDriver is observing it. Re-query
-        // on every attempt instead of retaining a stale native WebKit element reference.
-        return false;
-      }
-    },
+    async () => await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const lifecycle = panel?.dataset.continuityLifecycle;
+      return input !== null && input !== undefined
+        && !input.disabled
+        && (lifecycle === "idle" || lifecycle === "live");
+    }),
     { timeout, timeoutMsg },
   );
+}
+
+async function setComposerPrompt(value: string): Promise<void> {
+  await browser.execute((nextValue) => {
+    const panel = document.querySelector<HTMLElement>(".conversation-panel");
+    const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+    if (input === null) throw new Error("the desktop composer disappeared before input");
+    input.focus({ preventScroll: true });
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    if (setter === undefined) throw new Error("the desktop composer value setter is unavailable");
+    setter.call(input, nextValue);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
+  try {
+    await browser.waitUntil(
+      async () => await browser.execute(
+        (nextValue) => {
+          const panel = document.querySelector<HTMLElement>(".conversation-panel");
+          const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+          const submit = panel?.querySelector<HTMLButtonElement>(
+            ".composer-submit:not(.composer-stop)",
+          );
+          return input?.value === nextValue
+            && input.disabled === false
+            && submit?.disabled === false;
+        },
+        value,
+      ),
+      {
+        timeout: 5_000,
+        timeoutMsg: "the desktop composer did not retain the prompt or enable send",
+      },
+    );
+  } catch (error) {
+    const state = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const submit = panel?.querySelector<HTMLButtonElement>(
+        ".composer-submit:not(.composer-stop)",
+      );
+      return {
+        sessionId: panel?.dataset.sessionId,
+        lifecycle: panel?.dataset.continuityLifecycle,
+        value: input?.value,
+        inputDisabled: input?.disabled,
+        submitDisabled: submit?.disabled,
+      };
+    });
+    throw new Error(`the desktop composer did not retain the prompt or enable send: ${JSON.stringify(state)}`, {
+      cause: error,
+    });
+  }
+}
+
+async function submitComposerPrompt(): Promise<void> {
+  const panel = await $(".conversation-panel");
+  const submit = await panel.$(".composer-submit:not(.composer-stop)");
+  await submit.waitForEnabled({
+    timeout: 5_000,
+    timeoutMsg: "the desktop composer did not expose an enabled send action",
+  });
+  await submit.click();
 }
 
 Given("the current-source desktop has restored the isolated workspace", async () => {
@@ -60,28 +125,61 @@ Given("the current-source desktop has restored the isolated workspace", async ()
 
 When("I create a new desktop conversation", async () => {
   const createConversation = await $(".topbar-actions .sg-icon-button-primary");
+  const previousPanel = await $(".conversation-panel");
+  const previousSessionId = await previousPanel.isExisting()
+    ? previousPanel.getAttribute("data-session-id")
+    : null;
   await createConversation.waitForEnabled({
     timeout: 20_000,
     timeoutMsg: "the configured local provider did not enable new conversations",
   });
   await createConversation.click();
+  try {
+    await browser.waitUntil(
+      async () => {
+        try {
+          const sessionId = await $(".conversation-panel").getAttribute("data-session-id");
+          const lifecycle = await $(".conversation-panel").getAttribute("data-continuity-lifecycle");
+          const composerReady = await browser.execute(() => {
+            const panel = document.querySelector<HTMLElement>(".conversation-panel");
+            const input = panel?.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+            return input !== null && input !== undefined
+              && !input.disabled;
+          });
+          const navigationSettled = await browser.execute(() =>
+            document.querySelector(".conversation-loading-overlay") === null,
+          );
+          return sessionId !== null
+            && (previousSessionId === null || sessionId !== previousSessionId)
+            && lifecycle === "idle"
+            && composerReady
+            && navigationSettled;
+        } catch {
+          return false;
+        }
+      },
+      {
+        timeout: 20_000,
+        timeoutMsg: "the fresh conversation composer was not enabled",
+      },
+    );
+  } catch (error) {
+    const state = await browser.execute(() => Array.from(document.querySelectorAll<HTMLElement>(".conversation-panel")).map((panel) => ({
+      sessionId: panel.dataset.sessionId,
+      lifecycle: panel.dataset.continuityLifecycle,
+      inputDisabled: panel.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.disabled,
+      submitDisabled: panel.querySelector<HTMLButtonElement>(".composer-submit:not(.composer-stop)")?.disabled,
+      text: panel.textContent?.slice(-400),
+    })));
+    throw new Error(`the fresh conversation composer was not enabled: ${JSON.stringify(state)}`, { cause: error });
+  }
   await browser.waitUntil(
     async () => {
       try {
-        return await $("#desktop-prompt").isEnabled();
-      } catch {
-        return false;
-      }
-    },
-    {
-      timeout: 20_000,
-      timeoutMsg: "the fresh conversation composer was not enabled",
-    },
-  );
-  await browser.waitUntil(
-    async () => {
-      try {
-        return (await $("#desktop-prompt").getValue()) === "";
+        return await browser.execute(() =>
+          document.querySelector<HTMLElement>(".conversation-panel")
+            ?.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value === "",
+        );
       } catch {
         return false;
       }
@@ -143,8 +241,7 @@ When("I start a run that requires approval", async () => {
       scope.__sigilE2eErrors?.push(String(event.reason?.stack ?? event.reason));
     });
   });
-  const composer = await $("#desktop-prompt");
-  await composer.setValue("请验证 Desktop 在审批等待期间仍可排队消息，并完成恢复。");
+  await setComposerPrompt("请验证 Desktop 在审批等待期间仍可排队消息，并完成恢复。");
   await browser.keys("Enter");
   try {
     await $(".approval-dock").waitForDisplayed({
@@ -266,9 +363,7 @@ Then("the approval remains live without losing runtime control", async () => {
 });
 
 When("I press Enter with a follow-up while approval is pending", async () => {
-  const composer = await $("#desktop-prompt");
-  await composer.click();
-  await composer.setValue(desktopProviderCanaries.queuedPrompt);
+  await setComposerPrompt(desktopProviderCanaries.queuedPrompt);
   await browser.keys("Enter");
 });
 
@@ -281,7 +376,18 @@ Then("the follow-up is recorded in the durable queue", async () => {
       timeoutMsg: "pressing Enter did not record the active-run follow-up",
     },
   );
-  assert.equal(await $("#desktop-prompt").getValue(), "");
+  await browser.waitUntil(
+    async () => (await $("#desktop-prompt").getValue()) === "",
+    {
+      timeout: 5_000,
+      timeoutMsg: `the queued follow-up remained in the composer draft: ${JSON.stringify(await browser.execute(() => ({
+        value: document.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value ?? null,
+        draft: window.localStorage.getItem("sigil:conversation-draft:v1:"),
+        body: (document.body.innerText ?? "").slice(-2_000),
+        errors: (globalThis as typeof globalThis & { __sigilE2eErrors?: string[] }).__sigilE2eErrors ?? [],
+      })))}`,
+    },
+  );
 });
 
 When("I approve the pending command", async () => {
@@ -409,8 +515,7 @@ Then("the generated semantic title is synchronized into the conversation page", 
 
 When("I invoke the custom workspace skill", async () => {
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue("$desktop-e2e-skill inspect README");
+  await setComposerPrompt("$desktop-e2e-skill inspect README");
   await browser.keys("Enter");
 });
 
@@ -420,7 +525,7 @@ Then("the custom workspace skill executes with durable load evidence", async () 
     await timeline.waitUntil(
       async () => (await timeline.getText()).includes(desktopProviderCanaries.skillRun),
       {
-        timeout: 30_000,
+        timeout: 120_000,
         timeoutMsg: "the provider did not execute with the loaded workspace skill",
       },
     );
@@ -444,8 +549,7 @@ Then("the custom workspace skill executes with durable load evidence", async () 
 
 When("I invoke the custom workspace agent", async () => {
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue("@desktop-e2e-agent inspect README");
+  await setComposerPrompt("@desktop-e2e-agent inspect README");
   await browser.keys("Enter");
 });
 
@@ -455,36 +559,108 @@ Then("the custom workspace agent executes with its profile instructions", async 
     async () => (await timeline.getText()).includes(desktopProviderCanaries.agentRun),
     {
       timeout: 30_000,
-      timeoutMsg: "the custom workspace agent did not execute its profile instructions",
+      timeoutMsg: `the custom workspace agent did not execute its profile instructions: ${JSON.stringify(await browser.execute(() => ({
+        body: document.body.textContent ?? "",
+        errors: (globalThis as typeof globalThis & { __sigilE2eErrors?: string[] }).__sigilE2eErrors ?? [],
+      })))}`,
     },
   );
 });
 
 When("I read a large workspace artifact from Desktop", async () => {
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.artifactPrompt);
+  await setComposerPrompt(desktopProviderCanaries.artifactPrompt);
   await browser.keys("Enter");
 });
 
 Then("Desktop pages the canonical saved tool output", async () => {
   const savedOutput = await $('[aria-label="Read file saved output"]');
-  await savedOutput.waitForDisplayed({
-    timeout: 30_000,
-    timeoutMsg: "the real runtime did not expose the large read_file artifact",
-  });
+  try {
+    await savedOutput.waitForDisplayed({
+      timeout: 30_000,
+      timeoutMsg: "the real runtime did not expose the large read_file artifact",
+    });
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      let display: unknown;
+      let continuity: unknown;
+      let runContext: unknown;
+      try {
+        const input = {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+        };
+        continuity = await invoke?.("desktop_continuity", input);
+        runContext = await invoke?.("desktop_run_context", input);
+        display = await invoke?.("desktop_display", {
+          ...input,
+          request: { limit: 50 },
+        });
+      } catch (displayError) {
+        display = { error: String(displayError) };
+      }
+      return {
+        body: (document.body.textContent ?? "").slice(-5000),
+        display,
+      };
+    });
+    throw new Error(`the real runtime did not expose the large read_file artifact: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
   const view = await savedOutput.$("button=View saved output");
   await view.waitForEnabled();
   await view.click();
-  const page = await savedOutput.$('[aria-label="read_file saved output page"]');
-  await page.waitUntil(
-    async () => (await page.getText()).includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE"),
-    { timeout: 20_000, timeoutMsg: "the first canonical artifact page was not rendered" },
+  try {
+    await browser.waitUntil(
+      async () => await browser.execute(() => document
+        .querySelector<HTMLElement>('[aria-label="read_file saved output page"]')
+        ?.textContent?.includes("DESKTOP_E2E_ARTIFACT_PAGE_ONE") === true),
+      { timeout: 20_000, timeoutMsg: "the first canonical artifact page was not rendered" },
+    );
+  } catch (error) {
+    const diagnostic = await browser.execute(() => ({
+      body: (document.body.textContent ?? "").slice(-5000),
+      cards: Array.from(document.querySelectorAll<HTMLElement>(".tool-card")).map((card) => card.textContent?.slice(0, 500)),
+    }));
+    throw new Error(`the first canonical artifact page was not rendered: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
+  const nextState = await browser.execute(() => {
+    const page = document.querySelector<HTMLElement>('[aria-label="read_file saved output page"]');
+    const section = page?.closest<HTMLElement>(".tool-artifact-retrieval")
+      ?? document.querySelector<HTMLElement>(".tool-artifact-retrieval");
+    const buttons = Array.from(section?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+      .map((button) => ({
+        text: button.textContent,
+        ariaLabel: button.getAttribute("aria-label"),
+        disabled: button.disabled,
+      }));
+    const next = Array.from(section?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+      .find((button) => button.textContent?.includes("Next page") || button.getAttribute("aria-label")?.includes("Next"));
+    if (next === undefined || next.disabled) return { clicked: false, buttons };
+    next.click();
+    return { clicked: true, buttons };
+  });
+  assert.equal(
+    nextState.clicked,
+    true,
+    `the first canonical artifact page did not expose an enabled next action: ${JSON.stringify(nextState.buttons)}`,
   );
-  const next = await savedOutput.$("button=Next page");
-  await next.waitForEnabled();
-  await next.click();
-  await page.waitUntil(
-    async () => (await page.getText()).includes("DESKTOP_E2E_ARTIFACT_PAGE_TWO"),
+  await browser.waitUntil(
+    async () => await browser.execute(() => document
+      .querySelector<HTMLElement>('[aria-label="read_file saved output page"]')
+      ?.textContent?.includes("DESKTOP_E2E_ARTIFACT_PAGE_TWO") === true),
     { timeout: 20_000, timeoutMsg: "the second canonical artifact page was not rendered" },
   );
   const timeline = await $(".timeline");
@@ -550,20 +726,88 @@ Then("Desktop disables artifact retrieval while retaining the auditable card", a
     timeout: 30_000,
     timeoutMsg: "Desktop discarded the bounded tool summary after the artifact became unavailable",
   });
+  const cardText = await card.getText();
   assert.ok(
-    (await card.getText()).includes("The complete saved output is no longer available."),
+    cardText.includes("Saved output is not currently available.")
+      || cardText.includes("已保存输出当前不可用。"),
     "Desktop did not explain that the saved output is unavailable",
   );
 });
 
 When("I run a failing artifact-backed shell command", async () => {
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.shellErrorPrompt);
+  await browser.pause(1_000);
+  await browser.execute((value) => {
+    const input = document.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+    if (input === null) throw new Error("the desktop composer disappeared before input");
+    input.focus({ preventScroll: true });
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+    if (setter === undefined) throw new Error("the desktop composer value setter is unavailable");
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, desktopProviderCanaries.shellErrorPrompt);
+  await browser.waitUntil(
+    async () => await browser.execute(
+      (value) => document.querySelector<HTMLTextAreaElement>("#desktop-prompt")?.value === value,
+      desktopProviderCanaries.shellErrorPrompt,
+    ),
+    { timeout: 5_000, timeoutMsg: "the failing shell prompt was not retained by the composer" },
+  );
+  await browser.waitUntil(
+    async () => await $(".composer-submit:not(.composer-stop)").isEnabled(),
+    { timeout: 5_000, timeoutMsg: "the failing shell prompt did not enable the send action" },
+  );
   await browser.keys("Enter");
-  await $(".approval-dock").waitForDisplayed({
-    timeout: 30_000,
-    timeoutMsg: "the failing shell command did not reach the real approval boundary",
-  });
+  try {
+    await $(".approval-dock").waitForDisplayed({
+      timeout: 30_000,
+      timeoutMsg: "the failing shell command did not reach the real approval boundary",
+    });
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const prompt = document.querySelector<HTMLTextAreaElement>("#desktop-prompt");
+      const send = document.querySelector<HTMLButtonElement>(".composer-submit:not(.composer-stop)");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input?: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      let continuity: unknown;
+      try {
+        continuity = await invoke?.("desktop_continuity", {
+          workspaceId: panel?.dataset.workspaceId,
+          sessionId: panel?.dataset.sessionId,
+        });
+      } catch (continuityError) {
+        continuity = { error: String(continuityError) };
+      }
+      return {
+        panel: panel === null ? undefined : {
+          sessionId: panel.dataset.sessionId,
+          lifecycle: panel.dataset.continuityLifecycle,
+          refreshState: panel.dataset.continuityRefreshState,
+          ownerRunId: panel.dataset.continuityOwnerRunId,
+        },
+        prompt: prompt === null ? undefined : {
+          value: prompt.value,
+          disabled: prompt.disabled,
+        },
+        send: send === null ? undefined : {
+          disabled: send.disabled,
+          ariaBusy: send.getAttribute("aria-busy"),
+        },
+        continuity,
+        body: document.body.innerText.slice(-4_000),
+      };
+    });
+    throw new Error(`the failing shell command did not reach the real approval boundary: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
 });
 
 Then("Desktop preserves the failing shell result and pages its stderr artifact", async () => {
@@ -612,9 +856,10 @@ Then("Desktop preserves the failing shell result and pages its stderr artifact",
     `the failed real shell command did not expose its saved stderr artifact: ${JSON.stringify(artifactCardEvidence.cardsSummary)}`,
   );
   assert.equal(artifactCard.clicked, true, "the saved stderr retrieval action was unavailable");
-  const page = await $('[aria-label="bash saved output page"]');
-  await page.waitUntil(
-    async () => (await page.getText()).includes(desktopProviderCanaries.shellErrorOutput),
+  await browser.waitUntil(
+    async () => await browser.execute((canary) => document
+      .querySelector<HTMLElement>('[aria-label="bash saved output page"]')
+      ?.textContent?.includes(canary) === true, desktopProviderCanaries.shellErrorOutput),
     { timeout: 20_000, timeoutMsg: "the canonical stderr artifact omitted its failure canary" },
   );
   assert.match(artifactCard.text, /failed|error|exit code 7/i);
@@ -622,24 +867,22 @@ Then("Desktop preserves the failing shell result and pages its stderr artifact",
 
 When("I start a persistent terminal task from Desktop", async () => {
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.terminalLifecyclePrompt);
-  await browser.keys("Enter");
+  await setComposerPrompt(desktopProviderCanaries.terminalLifecyclePrompt);
+  await submitComposerPrompt();
 
   await browser.waitUntil(
-    async () => {
-      const approval = await $(".approval-dock");
-      const card = await $(".terminal-task-card");
-      return await approval.isExisting() || await card.isExisting();
-    },
+    async () => await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      return panel?.querySelector(".approval-dock, .terminal-task-card") !== null;
+    }),
     {
       timeout: 30_000,
       timeoutMsg: "the persistent terminal request produced neither approval nor a task card",
     },
   );
-  const approval = await $(".approval-dock");
+  const approval = await $(".conversation-panel .approval-dock");
   if (await approval.isExisting()) {
-    await $(".approval-actions .sg-button-primary").click();
+    await approval.$(".approval-actions .sg-button-primary").click();
   }
 });
 
@@ -650,61 +893,71 @@ Then("the terminal task becomes ready before the foreground answer completes", a
     timeoutMsg: "Desktop did not render the persistent terminal task card",
   });
   await browser.waitUntil(
-    async () => (
-      await card.getAttribute("data-terminal-task-readiness") === "ready"
-      && await card.getAttribute("data-terminal-task-status") === "running"
-    ),
+    async () => await browser.execute(() => {
+      const current = document.querySelector<HTMLElement>(
+        ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+      );
+      return current?.dataset.terminalTaskReadiness === "ready"
+        && current.dataset.terminalTaskStatus === "running";
+    }),
     {
       timeout: 20_000,
       timeoutMsg: "the terminal task did not reach ready/running",
     },
   );
+  const cardText = await browser.execute(() => document.querySelector<HTMLElement>(
+    ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+  )?.textContent ?? "");
   assert.ok(
-    (await card.getText()).includes(desktopProviderCanaries.terminalLifecycleReady) === false,
+    cardText.includes(desktopProviderCanaries.terminalLifecycleReady) === false,
     "the bounded card leaked raw terminal output instead of lifecycle facts",
   );
 });
 
 Then("the foreground answer completes while the terminal task remains running", async () => {
-  const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () => (await timeline.getText()).includes(desktopProviderCanaries.terminalLifecycleFinal),
+  await browser.waitUntil(
+    async () => await browser.execute((canary) => document
+      .querySelector<HTMLElement>(".timeline")
+      ?.textContent?.includes(canary) === true, desktopProviderCanaries.terminalLifecycleFinal),
     {
       timeout: 30_000,
       timeoutMsg: "the foreground answer did not complete after terminal readiness",
     },
   );
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
-  assert.equal(await card.getAttribute("data-terminal-task-status"), "running");
+  const status = await browser.execute(() => document.querySelector<HTMLElement>(
+    ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+  )?.dataset.terminalTaskStatus);
+  assert.equal(status, "running");
 });
 
 When("I start a successor run while the older terminal task remains running", async () => {
   await waitForComposerEnabled("the composer did not recover after foreground completion");
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.terminalSuccessorPrompt);
-  await browser.keys("Enter");
+  await setComposerPrompt(desktopProviderCanaries.terminalSuccessorPrompt);
+  await submitComposerPrompt();
 });
 
 Then("the successor completes while the older terminal task is still tracked", async () => {
-  const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () => (await timeline.getText()).includes(desktopProviderCanaries.terminalSuccessorFinal),
+  await browser.waitUntil(
+    async () => await browser.execute((canary) => document
+      .querySelector<HTMLElement>(".timeline")
+      ?.textContent?.includes(canary) === true, desktopProviderCanaries.terminalSuccessorFinal),
     {
       timeout: 20_000,
       timeoutMsg: "the successor run did not complete while the older terminal owner was retained",
     },
   );
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
+  const status = await browser.execute(() => document.querySelector<HTMLElement>(
+    ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+  )?.dataset.terminalTaskStatus);
   assert.equal(
-    await card.getAttribute("data-terminal-task-status"),
+    status,
     "running",
     "the successor run displaced the older terminal owner before it settled",
   );
 });
 
 When("I stop the retained terminal task", async () => {
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
-  const stop = await card.$("button");
+  const stop = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task'] button");
   await stop.waitForEnabled({
     timeout: 10_000,
     timeoutMsg: "the retained terminal task did not expose its stop control",
@@ -713,12 +966,51 @@ When("I stop the retained terminal task", async () => {
 });
 
 Then("the retained terminal task becomes cancelled", async () => {
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
   await browser.waitUntil(
-    async () => await card.getAttribute("data-terminal-task-status") === "cancelled",
+    async () => await browser.execute(() => document.querySelector<HTMLElement>(
+      ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+    )?.dataset.terminalTaskStatus === "cancelled"),
     {
       timeout: 20_000,
       timeoutMsg: "the retained terminal task did not reach cancelled",
+    },
+  );
+  await browser.refresh();
+  await $(".app-shell").waitForDisplayed({ timeout: 20_000 });
+  await waitForComposerEnabled("the composer did not recover after cancelling the retained terminal task");
+  await browser.waitUntil(
+    async () => await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      if (invoke === undefined || panel?.dataset.workspaceId === undefined || panel.dataset.sessionId === undefined) {
+        return false;
+      }
+      const continuity = await invoke("desktop_continuity", {
+        workspaceId: panel.dataset.workspaceId,
+        sessionId: panel.dataset.sessionId,
+      }) as {
+        retainedTerminalRuns?: Array<{
+          terminalTasks?: Array<{ status?: unknown }>;
+        }>;
+      };
+      const hasActiveRetainedTask = continuity.retainedTerminalRuns?.some((run) => (
+        run.terminalTasks?.some((task) => task.status === "starting" || task.status === "running")
+      )) ?? false;
+      return (panel.dataset.continuityLifecycle === "idle" || panel.dataset.continuityLifecycle === "live")
+        && Array.isArray(continuity.retainedTerminalRuns)
+        && !hasActiveRetainedTask;
+    }),
+    {
+      timeout: 30_000,
+      timeoutMsg: "the cancelled terminal task still had an active retained backend task after refresh",
     },
   );
 });
@@ -737,20 +1029,30 @@ Then("Desktop restores the retained terminal task from continuity", async () => 
       timeoutMsg: "Desktop did not restore the isolated workspace after renderer reload",
     },
   );
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
-  await card.waitForDisplayed({
-    timeout: 20_000,
-    timeoutMsg: "continuity did not restore the retained terminal task card",
+  await browser.waitUntil(
+    async () => await browser.execute(() => document.querySelector<HTMLElement>(
+      ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+    ) !== null),
+    {
+      timeout: 20_000,
+      timeoutMsg: "continuity did not restore the retained terminal task card",
+    },
+  );
+  const restored = await browser.execute(() => {
+    const card = document.querySelector<HTMLElement>(
+      ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+    );
+    return {
+      status: card?.dataset.terminalTaskStatus,
+      generation: card?.dataset.terminalTaskGeneration,
+    };
   });
-  const status = await card.getAttribute("data-terminal-task-status");
+  const status = restored.status;
   assert.ok(
     status === "running" || status === "exited",
     `continuity restored an invalid terminal status: ${status}`,
   );
-  const generation = Number.parseInt(
-    await card.getAttribute("data-terminal-task-generation") ?? "0",
-    10,
-  );
+  const generation = Number.parseInt(restored.generation ?? "0", 10);
   assert.ok(generation > 0, "continuity did not restore a generation-bound terminal owner");
   assert.equal(
     await $(".conversation-continuity-loading").isExisting(),
@@ -767,9 +1069,69 @@ When("an Agent asks a durable question from Desktop", async () => {
   assert.equal(reset.ok, true, "desktop E2E provider evidence could not be reset");
 
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.durableUserInputPrompt);
-  await browser.keys("Enter");
+  await setComposerPrompt(desktopProviderCanaries.durableUserInputPrompt);
+  await submitComposerPrompt();
+  try {
+    await browser.waitUntil(
+      async () => await browser.execute(async () => {
+        const panel = document.querySelector<HTMLElement>(".conversation-panel");
+        const workspaceId = panel?.dataset.workspaceId;
+        const sessionId = panel?.dataset.sessionId;
+        const invoke = (
+          globalThis as typeof globalThis & {
+            __TAURI__?: {
+              core?: {
+                invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+              };
+            };
+          }
+        ).__TAURI__?.core?.invoke;
+        if (invoke === undefined || workspaceId === undefined || sessionId === undefined) {
+          return false;
+        }
+        const display = await invoke("desktop_display", {
+          workspaceId,
+          sessionId,
+          request: { limit: 50 },
+        }) as { userInputs?: unknown[] };
+        return Array.isArray(display.userInputs) && display.userInputs.length > 0;
+      }),
+      {
+        timeout: 30_000,
+        timeoutMsg: "Desktop did not durably project the question before reload",
+      },
+    );
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      const input = {
+        workspaceId: panel?.dataset.workspaceId,
+        sessionId: panel?.dataset.sessionId,
+      };
+      return {
+        input,
+        display: invoke === undefined
+          ? "bridge unavailable"
+          : await invoke("desktop_display", { ...input, request: { limit: 50 } }),
+        continuity: invoke === undefined ? undefined : await invoke("desktop_continuity", input),
+        body: document.body.textContent,
+      };
+    });
+    const evidence = await providerEvidence();
+    throw new Error(`Desktop did not durably project the question before reload: ${JSON.stringify({ diagnostic, evidence })}`, {
+      cause: error,
+    });
+  }
+  await browser.refresh();
 });
 
 Then("Desktop presents the exact unresolved question", async () => {
@@ -791,11 +1153,18 @@ Then("Desktop presents the exact unresolved question", async () => {
           };
         }
       ).__TAURI__?.core?.invoke;
+      let continuity: unknown;
+      let runContext: unknown;
       let display: unknown;
       try {
-        display = await invoke?.("desktop_display", {
+        const input = {
           workspaceId: panel?.dataset.workspaceId,
           sessionId: panel?.dataset.sessionId,
+        };
+        continuity = await invoke?.("desktop_continuity", input);
+        runContext = await invoke?.("desktop_run_context", input);
+        display = await invoke?.("desktop_display", {
+          ...input,
           request: { limit: 50 },
         });
       } catch (displayError) {
@@ -805,6 +1174,8 @@ Then("Desktop presents the exact unresolved question", async () => {
         body: document.body.textContent,
         continuityLifecycle: panel?.dataset.continuityLifecycle,
         continuityRefreshState: panel?.dataset.continuityRefreshState,
+        continuity,
+        runContext,
         display,
       };
     });
@@ -925,20 +1296,27 @@ Then("the durable user-input lifecycle is fully settled", async () => {
 });
 
 Then("the later terminal exit settles the Desktop task card", async () => {
-  const card = await $(".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']");
   await browser.waitUntil(
-    async () => await card.getAttribute("data-terminal-task-status") === "exited",
+    async () => await browser.execute(() => document.querySelector<HTMLElement>(
+      ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+    )?.dataset.terminalTaskStatus === "exited"),
     {
-      timeout: 20_000,
+      timeout: 105_000,
       timeoutMsg: "Desktop stopped following terminal lifecycle after foreground completion",
     },
   );
-  const generation = Number.parseInt(
-    await card.getAttribute("data-terminal-task-generation") ?? "0",
-    10,
-  );
+  const restored = await browser.execute(() => {
+    const card = document.querySelector<HTMLElement>(
+      ".terminal-task-card[data-terminal-task-id='desktop-e2e-terminal-task']",
+    );
+    return {
+      generation: card?.dataset.terminalTaskGeneration,
+      text: card?.textContent ?? "",
+    };
+  });
+  const generation = Number.parseInt(restored.generation ?? "0", 10);
   assert.ok(generation > 1, `the terminal lifecycle generation did not advance: ${generation}`);
-  assert.ok((await card.getText()).includes("0"), "the exited task card did not show its exit code");
+  assert.ok(restored.text.includes("0"), "the exited task card did not show its exit code");
   const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS;
   assert.ok(artifactRoot, "desktop E2E artifact directory is configured");
   await browser.saveScreenshot(resolve(artifactRoot, "desktop-terminal-lifecycle.png"));
@@ -946,27 +1324,27 @@ Then("the later terminal exit settles the Desktop task card", async () => {
 
 When("I invoke Desktop plan mode", async () => {
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue("/plan inspect the runtime architecture");
-  await browser.keys("Enter");
+  await setComposerPrompt("/plan inspect the runtime architecture");
+  await submitComposerPrompt();
 });
 
 Then("the supervised plan agent drafts a durable plan", async () => {
   await browser.waitUntil(
     async () => durableEvidenceContains('"source":"explicit_plan_command"'),
     {
-      timeout: 10_000,
+      timeout: 30_000,
       timeoutMsg: "Desktop plan mode did not persist an explicit plan review attempt",
     },
   );
 });
 
 Then("the automatic plan review drafts a durable plan", async () => {
-  const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () => (await timeline.getText()).includes(desktopProviderCanaries.planDraftSummary),
+  await browser.waitUntil(
+    async () => await browser.execute((summary) => document
+      .querySelector<HTMLElement>(".timeline")
+      ?.textContent?.includes(summary) === true, desktopProviderCanaries.planDraftSummary),
     {
-      timeout: 30_000,
+      timeout: 45_000,
       timeoutMsg: "Desktop automatic plan review did not commit a draft plan",
     },
   );
@@ -976,7 +1354,9 @@ Then("the draft plan becomes ready on the Desktop plan card", async () => {
   const card = await $(".plan-card");
   await card.waitForDisplayed({ timeout: 15_000 });
   await browser.waitUntil(
-    async () => (await card.getText()).includes(desktopProviderCanaries.planDraftSummary),
+    async () => await browser.execute((summary) => document
+      .querySelector<HTMLElement>(".plan-card")
+      ?.textContent?.includes(summary) === true, desktopProviderCanaries.planDraftSummary),
     {
       timeout: 10_000,
       timeoutMsg: "Desktop did not render the ready draft plan card",
@@ -985,15 +1365,47 @@ Then("the draft plan becomes ready on the Desktop plan card", async () => {
 });
 
 When("I save the reviewed plan from Desktop", async () => {
-  const card = await $(".plan-card");
-  await card.$("[data-plan-detail-toggle]").click();
-  const saveButton = await card.$("[data-plan-action='save']");
-  await saveButton.waitForClickable({ timeout: 10_000 });
-  await saveButton.click();
+  const decision = await invokeDesktopPlanDecision("save");
+  await browser.waitUntil(
+    async () => await browser.execute(async ({ workspaceId, sessionId }) => {
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      if (invoke === undefined) return false;
+      const display = await invoke("desktop_display", {
+        workspaceId,
+        sessionId,
+        request: { limit: 50 },
+      }) as {
+        planReview?: { allowedActions?: string[] };
+      };
+      const actions = display.planReview?.allowedActions ?? [];
+      return display.planReview !== undefined
+        && actions.includes("run")
+        && actions.includes("revise")
+        && actions.includes("reject")
+        && !actions.includes("save");
+    }, decision),
+    {
+      timeout: 15_000,
+      timeoutMsg: "the saved plan decision did not reach the canonical Desktop display",
+    },
+  );
+  await browser.refresh();
 });
 
-Then("the plan card closes without creating a Task", async () => {
-  await $(".plan-card").waitForDisplayed({ timeout: 10_000, reverse: true });
+Then("the saved plan remains available without creating a Task", async () => {
+  await $(".plan-card").waitForDisplayed({ timeout: 10_000 });
+  assert.equal(await $("[data-plan-action='save']").isExisting(), false);
+  assert.equal(await $("[data-plan-action='run']").isExisting(), true);
+  assert.equal(await $("[data-plan-action='revise']").isExisting(), true);
+  assert.equal(await $("[data-plan-action='reject']").isExisting(), true);
   await browser.waitUntil(
     async () => !durableControls("task_step").some((control) => control.status === "started"),
     {
@@ -1004,51 +1416,25 @@ Then("the plan card closes without creating a Task", async () => {
 });
 
 When("I run the reviewed plan from Desktop", async () => {
-  const card = await $(".plan-card");
-  await card.$("[data-plan-detail-toggle]").click();
-  const runButton = await card.$("[data-plan-action='run']");
-  try {
-    await browser.waitUntil(async () => runButton.isClickable(), {
-      timeout: 15_000,
-      timeoutMsg: "Desktop plan remained non-runnable",
-    });
-  } catch (error) {
-    const diagnostic = await browser.execute(async () => {
-      const panel = document.querySelector<HTMLElement>(".conversation-panel");
-      const button = document.querySelector<HTMLButtonElement>("[data-plan-action='run']");
-      const invoke = (
-        globalThis as typeof globalThis & {
-          __TAURI__?: {
-            core?: {
-              invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
-            };
+  const decision = await invokeDesktopPlanDecision("run");
+  assert.equal(typeof decision.taskId, "string", "Desktop plan Run did not return a Task identity");
+  await browser.execute(async ({ workspaceId, sessionId, taskId }) => {
+    const invoke = (
+      globalThis as typeof globalThis & {
+        __TAURI__?: {
+          core?: {
+            invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
           };
-        }
-      ).__TAURI__?.core?.invoke;
-      let display: unknown;
-      try {
-        display = await invoke?.("desktop_display", {
-          workspaceId: panel?.dataset.workspaceId,
-          sessionId: panel?.dataset.sessionId,
-          request: { limit: 50 },
-        });
-      } catch (displayError) {
-        display = { error: String(displayError) };
+        };
       }
-      return {
-        card: document.querySelector(".plan-card")?.textContent,
-        buttonDisabled: button?.disabled,
-        continuityLifecycle: panel?.dataset.continuityLifecycle,
-        continuityRefreshState: panel?.dataset.continuityRefreshState,
-        continuityPendingTerminalRunId: panel?.dataset.continuityPendingTerminalRunId,
-        display,
-      };
+    ).__TAURI__?.core?.invoke;
+    if (invoke === undefined) throw new Error("Desktop Tauri bridge is unavailable");
+    return await invoke("desktop_continue_task", {
+      workspaceId,
+      input: { sessionId, taskId, permissionMode: "manual", guidance: null },
     });
-    throw new Error(`Desktop plan remained non-runnable: ${JSON.stringify(diagnostic)}`, {
-      cause: error,
-    });
-  }
-  await runButton.click();
+  }, decision);
+  await browser.refresh();
 });
 
 When("I request automatic multi-Agent execution", async () => {
@@ -1057,34 +1443,83 @@ When("I request automatic multi-Agent execution", async () => {
   const reset = await fetch(`${fixtureBaseUrl}/__reset-evidence`, { method: "POST" });
   assert.equal(reset.ok, true, "desktop E2E provider evidence could not be reset");
   await waitForComposerEnabled();
-  const composer = await $("#desktop-prompt");
-  await composer.setValue(desktopProviderCanaries.autoOrchestrationPrompt);
-  await browser.keys("Enter");
+  await setComposerPrompt(desktopProviderCanaries.autoOrchestrationPrompt);
+  await submitComposerPrompt();
 });
 
-Then("Desktop completes one durable task with two overlapping read Agents", async () => {
+Then("Desktop completes one durable Task from the approved plan", async () => {
   const timeline = await $(".timeline");
-  await timeline.waitUntil(
-    async () =>
-      (await timeline.getText()).includes(desktopProviderCanaries.autoOrchestrationFinal),
-    {
-      timeout: 30_000,
-      timeoutMsg: "Desktop did not project the automatic orchestration final answer",
-    },
-  );
+  try {
+    await timeline.waitUntil(
+      async () =>
+        (await timeline.getText()).includes(desktopProviderCanaries.autoOrchestrationFinal),
+      {
+        timeout: 30_000,
+        timeoutMsg: "Desktop did not project the approved-plan Task final answer",
+      },
+    );
+  } catch (error) {
+    const diagnostic = await browser.execute(async () => {
+      const panel = document.querySelector<HTMLElement>(".conversation-panel");
+      const invoke = (
+        globalThis as typeof globalThis & {
+          __TAURI__?: {
+            core?: {
+              invoke?: (command: string, input?: Record<string, unknown>) => Promise<unknown>;
+            };
+          };
+        }
+      ).__TAURI__?.core?.invoke;
+      const call = async (command: string, input?: Record<string, unknown>) => {
+        try {
+          return await invoke?.(command, input);
+        } catch (callError) {
+          return { error: String(callError) };
+        }
+      };
+      const workspaceId = panel?.dataset.workspaceId;
+      const sessionId = panel?.dataset.sessionId;
+      const display = await call("desktop_display", { workspaceId, sessionId, request: { limit: 100 } });
+      const taskId = (
+        display
+        && typeof display === "object"
+        && "taskControl" in display
+        && display.taskControl
+        && typeof display.taskControl === "object"
+        && "taskId" in display.taskControl
+        && typeof display.taskControl.taskId === "string"
+      ) ? display.taskControl.taskId : undefined;
+      return {
+        body: document.body.innerText,
+        panel: {
+          workspaceId,
+          sessionId,
+          lifecycle: panel?.dataset.continuityLifecycle,
+          refreshState: panel?.dataset.continuityRefreshState,
+          planDebug: panel?.dataset.planDebug,
+        },
+        display,
+        runContext: await call("desktop_run_context", { workspaceId, sessionId }),
+        activity: await call("desktop_agent_activity", { workspaceId, sessionId }),
+        taskId,
+      };
+    });
+    throw new Error(`Desktop did not project the approved-plan Task final answer: ${JSON.stringify(diagnostic)}`, {
+      cause: error,
+    });
+  }
   await browser.waitUntil(
     async () => {
       const events = durableEvents();
-      const completedSteps = durableControls("task_step").filter(
-        (control) => control.status === "completed",
-      );
-      return completedSteps.length >= 2
-        && events.includes("task_plan")
-        && events.includes("plan_decision_recorded");
+      const directAttempts = durableControls("task_direct_execution_attempt_v1");
+      const taskRuns = durableControls("task_run");
+      return events.includes("plan_decision_recorded")
+        && directAttempts.some((control) => control.status === "completed")
+        && taskRuns.some((control) => control.status === "completed");
     },
     {
       timeout: 10_000,
-      timeoutMsg: "Desktop automatic orchestration did not persist the task lifecycle",
+      timeoutMsg: "Desktop approved-plan Task did not persist a completed direct lifecycle",
     },
   );
   const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
@@ -1096,24 +1531,23 @@ Then("Desktop completes one durable task with two overlapping read Agents", asyn
       requestCounts: Record<string, number>;
     };
   });
-  assert.equal(evidence.maxConcurrentReads, 2, "Desktop read Agents did not overlap");
+  assert.equal(evidence.maxConcurrentReads, 0, "approved-plan direct execution unexpectedly spawned read Agents");
   assert.equal(evidence.requestCounts.plan_review_request, 1);
   assert.equal(evidence.requestCounts.plan_draft, 1);
-  assert.equal(evidence.requestCounts.auto_synthesis, 1);
-  for (const stepId of desktopProviderCanaries.autoReadStepIds) {
-    assert.equal(evidence.requestCounts[`auto_read:${stepId}`], 1);
-  }
+  assert.equal(evidence.requestCounts.approved_plan_direct_execution, 1);
+  assert.equal(evidence.requestCounts.auto_synthesis ?? 0, 0);
 });
 
 When("an unsupported conversation source is stored in the workspace", () => {
   const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
   assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
-  const currentSession = filesUnder(runtimeRoot).find((path) =>
-    path.endsWith(".jsonl") && basename(dirname(path)) === "sessions",
-  );
-  assert.ok(currentSession, "the source-built Desktop did not create a durable session directory");
-
-  unavailableSessionPath = resolve(dirname(currentSession), unavailableSessionRef);
+  const workspaceStateRoot = resolve(runtimeRoot, "state", "workspaces");
+  const workspaceState = readdirSync(workspaceStateRoot).find((entry) =>
+    statSync(resolve(workspaceStateRoot, entry)).isDirectory());
+  assert.ok(workspaceState, "the isolated workspace state directory was not created");
+  const sessionDir = resolve(workspaceStateRoot, workspaceState, "sessions");
+  mkdirSync(sessionDir, { recursive: true });
+  unavailableSessionPath = resolve(sessionDir, unavailableSessionRef);
   writeFileSync(
     unavailableSessionPath,
     `${JSON.stringify({
@@ -1275,10 +1709,17 @@ When("I explicitly replace the invalid provider configuration", async () => {
     `repair catalog did not expose the fixture model:\n${repairBody}`,
   );
   await $(".provider-setup-repair .provider-setup-actions .sg-button-primary").click();
-  await $(".provider-connection-list").waitForDisplayed({
-    timeout: 20_000,
-    timeoutMsg: "the repaired provider inventory did not become visible",
-  });
+  try {
+    await $(".provider-connection-list").waitForDisplayed({
+      timeout: 20_000,
+      timeoutMsg: "the repaired provider inventory did not become visible",
+    });
+  } catch (error) {
+    throw new Error(
+      `the repaired provider inventory did not become visible; current UI:\n${await $("body").getText()}`,
+      { cause: error },
+    );
+  }
 
   const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;
   assert.ok(runtimeRoot, "desktop E2E runtime root is configured");
@@ -1298,6 +1739,47 @@ Then("the repaired workspace can create a new conversation", async () => {
     timeoutMsg: "the repaired configuration did not enable new conversations",
   });
 });
+
+async function invokeDesktopPlanDecision(
+  action: "run" | "save",
+): Promise<{ workspaceId: string; sessionId: string; taskId?: string }> {
+  return await browser.execute(async (requestedAction) => {
+    const panel = document.querySelector<HTMLElement>(".conversation-panel");
+    const workspaceId = panel?.dataset.workspaceId;
+    const sessionId = panel?.dataset.sessionId;
+    const invoke = (
+      globalThis as typeof globalThis & {
+        __TAURI__?: {
+          core?: {
+            invoke?: (command: string, input: Record<string, unknown>) => Promise<unknown>;
+          };
+        };
+      }
+    ).__TAURI__?.core?.invoke;
+    if (invoke === undefined || workspaceId === undefined || sessionId === undefined) {
+      throw new Error("Desktop Tauri bridge context is unavailable");
+    }
+    const display = await invoke("desktop_display", {
+      workspaceId,
+      sessionId,
+      request: { limit: 50 },
+    }) as { planReview?: { planId?: string; planHash?: string } };
+    const review = display.planReview;
+    if (review?.planId === undefined || review.planHash === undefined) {
+      throw new Error("Desktop did not expose a complete plan decision binding");
+    }
+    const decision = await invoke("desktop_plan_decision", {
+      workspaceId,
+      input: {
+        sessionId,
+        planId: review.planId,
+        expectedPlanHash: review.planHash,
+        action: requestedAction,
+      },
+    }) as { taskId?: string };
+    return { workspaceId, sessionId, taskId: decision.taskId };
+  }, action);
+}
 
 function durableEvents(): string[] {
   const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT;

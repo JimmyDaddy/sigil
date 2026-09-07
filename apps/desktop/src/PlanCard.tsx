@@ -33,11 +33,14 @@ export function PlanCard({
   onDecision,
 }: PlanCardProps) {
   const { t } = useLocale();
-  const actionDisabled = (action: PlanDecisionAction) =>
-    disabled
-    || busy
-    || review.status !== "draft_ready"
-    || (review.stale && (action === "run" || action === "save"));
+  const actionDisabled = (action: PlanDecisionAction) => {
+    const terminalRecovery = action === "adopt_candidate" || action === "retry_review";
+    return disabled
+      || busy
+      || (!terminalRecovery && review.status !== "draft_ready")
+      || (terminalRecovery && review.candidate === undefined)
+      || (review.stale && (action === "run" || action === "save"));
+  };
   const primaryAction: PlanDecisionAction | undefined = review.allowedActions.includes("run")
     ? "run"
     : review.allowedActions[0];
@@ -87,6 +90,17 @@ export function PlanCard({
         </div>
       )}
 
+      {review.candidate === undefined ? null : (
+        <section className="plan-card-candidate" aria-label={t("planReviewCandidate")}>
+          <div className="plan-card-candidate-heading">
+            <strong>{t("planReviewCandidate")}</strong>
+            <span>{t(`planReviewCandidateCompleteness_${review.candidate.completeness}`)}</span>
+          </div>
+          <code>{review.candidate.contentHash}</code>
+          <pre>{review.candidate.content}</pre>
+        </section>
+      )}
+
       {review.stale ? (
         <div className="plan-card-notice" role="status">
           {t("planReviewStale")}
@@ -102,24 +116,26 @@ export function PlanCard({
         </div>
       )}
 
-      {review.planHash === undefined ? null : (
+      {review.planHash === undefined && review.candidate === undefined ? null : (
         <div className="plan-card-toolbar">
-          <div className="plan-card-review-toggle">
-            <Button
-              type="button"
-              variant="quiet"
-              data-plan-detail-toggle
-              disabled={detailBusy}
-              aria-expanded={detailOpen}
-              onClick={detailOpen ? onCloseDetail : onOpenDetail}
-            >
-              {detailBusy
-                ? t("planDetailLoading")
-                : detailOpen
-                  ? t("planDetailClose")
-                  : t("planDetailOpen")}
-            </Button>
-          </div>
+          {review.planHash === undefined ? null : (
+            <div className="plan-card-review-toggle">
+              <Button
+                type="button"
+                variant="quiet"
+                data-plan-detail-toggle
+                disabled={detailBusy}
+                aria-expanded={detailOpen}
+                onClick={detailOpen ? onCloseDetail : onOpenDetail}
+              >
+                {detailBusy
+                  ? t("planDetailLoading")
+                  : detailOpen
+                    ? t("planDetailClose")
+                    : t("planDetailOpen")}
+              </Button>
+            </div>
+          )}
           {blocker !== undefined || review.allowedActions.length === 0 ? null : (
             <div className="plan-card-actions" aria-label={t("planReviewActions")}>
               {review.allowedActions.map((action) => (

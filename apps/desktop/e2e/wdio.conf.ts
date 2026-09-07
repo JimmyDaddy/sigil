@@ -116,6 +116,7 @@ Read the workspace README and return the fixture canary.
 """
 trust = "trusted"
 invocation_policy = "model_allowed"
+user_invocable = true
 allowed_tools = ["read_file"]
 `,
   "utf8",

@@ -52,6 +52,7 @@ const en = {
   providerEnvironmentDetail: "Sigil will read {variable} from the environment that launches the workspace service.",
   noAuthenticationDetail: "Allowed only for a loopback custom endpoint.",
   back: "Back",
+  send: "Send",
   loadingModels: "Loading models…",
   refreshingModels: "Refreshing models…",
   retryModelCatalog: "Retry refresh",
@@ -301,6 +302,7 @@ const en = {
   errorMessage: "Message",
   selectConversation: "Select a conversation",
   selectConversationDetail: "Continue from the list or start a new coding task in this workspace.",
+  assistant: "Assistant: ",
   newConversation: "New conversation",
   browseConversations: "Browse conversations",
   conversationNavigation: "Conversation navigation",
@@ -826,6 +828,10 @@ const en = {
   planReviewOverview: "Plan overview",
   planReviewIdentity: "Plan identity",
   planReviewActions: "Plan actions",
+  planReviewCandidate: "Preserved candidate",
+  planReviewCandidateCompleteness_complete: "Complete",
+  planReviewCandidateCompleteness_partial: "Partial",
+  planReviewCandidateCompleteness_unknown: "Unknown completeness",
   planRisk: "Risk",
   planReviewSource_explicit_plan_command: "Explicit /plan",
   planReviewSource_automatic_conversation_route: "Automatic plan review",
@@ -833,6 +839,8 @@ const en = {
   planDecision_save: "Save",
   planDecision_revise: "Revise",
   planDecision_reject: "Reject",
+  planDecision_adopt_candidate: "Adopt candidate",
+  planDecision_retry_review: "Retry review",
   planDecisionInProgress: "Applying…",
   planRevisionStarted: "Plan revision started; the new draft will appear when it is ready.",
   planReviewStale:
@@ -937,7 +945,7 @@ const en = {
   intentDropCannotUndoExternalEffects: "This cannot compensate or undo external side effects.",
   intentDropCompleted: "The exact intent drop was committed.",
   intentDropChanged: "The Intent Stack or workspace changed. Review a fresh exact preview.",
-  you: "You",
+  you: "You: ",
   toolResult: "Tool result",
   reasoning: "Reasoning",
   progress: "Progress",
@@ -960,8 +968,7 @@ const en = {
   routeRecoveryConfirmation: "This conversation points to a changed network or tenant boundary. Review the connection before continuing.",
   routeRecoveryReplacement: "The saved connection is unavailable. Select or repair a connection before continuing.",
   routeRecoverySetup: "Provider setup must be completed before this conversation can run.",
-  routeRecoveryAuthority: "The authority journal is corrupted. Repair authority before starting another conversation.",
-  routeRecoveryAuthorityUnavailable: "The authority service is unavailable. Repair authority, then retry.",
+  routeRecoveryAuthorityUnavailable: "The authority service is unavailable. Start a new session or review settings, then retry.",
   routeRecoveryBusy: "This conversation is active in another Sigil window. Close it there, then retry without losing your draft.",
   providerRecoveryWaiting: "Reconnecting to the model",
   providerRecoveryRecovering: "Retrying the model request",
@@ -1117,7 +1124,6 @@ const zh: Record<MessageKey, string> = {
   apiKeySecureStoreDetail: "密钥只通过本机原生设置边界传递，不会写入 sigil.toml。",
   providerEnvironmentDetail: "Sigil 会从启动工作区服务的环境中读取 {variable}。",
   noAuthenticationDetail: "仅允许用于本机回环地址上的自定义服务。",
-  back: "返回",
   loadingModels: "正在加载模型…",
   refreshingModels: "正在刷新模型…",
   retryModelCatalog: "重新刷新",
@@ -1367,6 +1373,9 @@ const zh: Record<MessageKey, string> = {
   errorMessage: "消息",
   selectConversation: "选择会话",
   selectConversationDetail: "从列表中继续，或在此工作区开始新的编码任务。",
+  assistant: "助手：",
+  send: "发送",
+  back: "返回",
   newConversation: "新建会话",
   browseConversations: "浏览会话",
   conversationNavigation: "会话导航",
@@ -1892,6 +1901,10 @@ const zh: Record<MessageKey, string> = {
   planReviewOverview: "计划概览",
   planReviewIdentity: "计划标识",
   planReviewActions: "计划操作",
+  planReviewCandidate: "保留的候选内容",
+  planReviewCandidateCompleteness_complete: "完整",
+  planReviewCandidateCompleteness_partial: "部分内容",
+  planReviewCandidateCompleteness_unknown: "完整性未知",
   planRisk: "风险",
   planReviewSource_explicit_plan_command: "显式 /plan",
   planReviewSource_automatic_conversation_route: "自动计划审查",
@@ -1899,6 +1912,8 @@ const zh: Record<MessageKey, string> = {
   planDecision_save: "保存",
   planDecision_revise: "修订",
   planDecision_reject: "拒绝",
+  planDecision_adopt_candidate: "采用候选内容",
+  planDecision_retry_review: "重试审查",
   planDecisionInProgress: "正在应用…",
   planRevisionStarted: "计划修订已开始；新草稿就绪后会显示。",
   planReviewStale: "计划已过期：自创建以来工作区发生了变化。可 Revise 基于当前工作区重新规划，或 Reject 丢弃。",
@@ -2002,7 +2017,7 @@ const zh: Record<MessageKey, string> = {
   intentDropCannotUndoExternalEffects: "此操作不能补偿或撤销外部副作用。",
   intentDropCompleted: "精确意图删除已提交。",
   intentDropChanged: "意图栈或工作区已经变化，请重新审查精确预览。",
-  you: "你",
+  you: "你：",
   toolResult: "工具结果",
   reasoning: "推理",
   progress: "进度",
@@ -2025,8 +2040,7 @@ const zh: Record<MessageKey, string> = {
   routeRecoveryConfirmation: "该会话指向的网络或租户边界已变化，请检查连接后再继续。",
   routeRecoveryReplacement: "已保存的连接不可用，请选择或修复连接后再继续。",
   routeRecoverySetup: "需要先完成 Provider 配置，才能继续运行该会话。",
-  routeRecoveryAuthority: "Authority journal 已损坏，请先修复 authority，再创建或运行会话。",
-  routeRecoveryAuthorityUnavailable: "Authority 服务暂时不可用，请先修复 authority，再重试。",
+  routeRecoveryAuthorityUnavailable: "Authority 服务暂时不可用，请新建会话或检查设置后重试。",
   routeRecoveryBusy: "该会话正在另一个 Sigil 窗口中运行。请先关闭另一处会话，然后重试；当前草稿不会丢失。",
   providerRecoveryWaiting: "正在重新连接模型",
   providerRecoveryRecovering: "正在重试模型请求",
@@ -2136,7 +2150,6 @@ const zh: Record<MessageKey, string> = {
 export interface LocaleContextValue {
   locale: Locale;
   t: (key: MessageKey, values?: Record<string, string | number>) => string;
-  toggleLocale: () => void;
   setLocale: (locale: Locale) => void;
 }
 
@@ -2147,7 +2160,6 @@ export const translateEnglish: Translate = (key, values) => interpolate(en[key],
 const LocaleContext = createContext<LocaleContextValue>({
   locale: "en",
   t: translateEnglish,
-  toggleLocale: () => undefined,
   setLocale: () => undefined,
 });
 
@@ -2164,7 +2176,6 @@ export function LocaleProvider({ children }: { readonly children: ReactNode }) {
   const value = useMemo<LocaleContextValue>(() => ({
     locale,
     t: (key, values) => interpolate((locale === "zh-CN" ? zh : en)[key], values),
-    toggleLocale: () => setLocale((current) => current === "en" ? "zh-CN" : "en"),
     setLocale,
   }), [locale]);
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;

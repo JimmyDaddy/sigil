@@ -1288,7 +1288,13 @@ pub(crate) async fn desktop_plan_decision(
     validate_workspace_id(&workspace_id)?;
     validate_session_id(&input.session_id)?;
     validate_session_id(&input.plan_id)?;
-    if input.expected_plan_hash.is_empty() {
+    if input.expected_plan_hash.is_empty()
+        && !matches!(
+            input.action,
+            DesktopPlanDecisionActionInput::RetryReview
+                | DesktopPlanDecisionActionInput::AdoptCandidate
+        )
+    {
         return Err(DesktopCommandError::new(
             "invalid_plan_decision",
             "The plan decision binding is invalid.",
@@ -1301,15 +1307,22 @@ pub(crate) async fn desktop_plan_decision(
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let receipt = client
-        .plan_decision(
+        .plan_decision_with_candidate(
             &input.session_id,
             &input.plan_id,
             &input.expected_plan_hash,
+            input.expected_candidate_hash.as_deref(),
             match input.action {
                 DesktopPlanDecisionActionInput::Run => DesktopPlanDecisionAction::Run,
                 DesktopPlanDecisionActionInput::Save => DesktopPlanDecisionAction::Save,
                 DesktopPlanDecisionActionInput::Revise => DesktopPlanDecisionAction::Revise,
                 DesktopPlanDecisionActionInput::Reject => DesktopPlanDecisionAction::Reject,
+                DesktopPlanDecisionActionInput::AdoptCandidate => {
+                    DesktopPlanDecisionAction::AdoptCandidate
+                }
+                DesktopPlanDecisionActionInput::RetryReview => {
+                    DesktopPlanDecisionAction::RetryReview
+                }
             },
         )
         .await
@@ -1325,6 +1338,8 @@ pub(crate) async fn desktop_plan_decision(
             DesktopPlanDecisionActionInput::Save => "save",
             DesktopPlanDecisionActionInput::Revise => "revise",
             DesktopPlanDecisionActionInput::Reject => "reject",
+            DesktopPlanDecisionActionInput::AdoptCandidate => "adopt_candidate",
+            DesktopPlanDecisionActionInput::RetryReview => "retry_review",
         },
         task_id: receipt.task_id,
         task_phase: receipt.task_phase,
@@ -1761,7 +1776,7 @@ pub(crate) async fn desktop_create_session(
         .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
-    client
+    let created: DesktopSessionSummary = client
         .create_session(DesktopSessionCreateRequest {
             label: input.label,
             model_ref: input
@@ -1773,7 +1788,8 @@ pub(crate) async fn desktop_create_session(
         })
         .await
         .map(Into::into)
-        .map_err(project_session_open_client_error)
+        .map_err(project_session_open_client_error)?;
+    Ok(created)
 }
 
 #[tauri::command]

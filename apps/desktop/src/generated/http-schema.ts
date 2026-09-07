@@ -3519,7 +3519,7 @@ export interface components {
         };
         PlanDecisionCommandReceipt: {
             /** @enum {string} */
-            action: "run" | "save" | "revise" | "reject";
+            action: "run" | "save" | "revise" | "reject" | "adopt_candidate" | "retry_review";
             candidate_hash?: string | null;
             client_id: string;
             command_id: string;
@@ -3536,7 +3536,8 @@ export interface components {
         };
         PlanDecisionRequest: {
             /** @enum {string} */
-            action: "run" | "save" | "revise" | "reject";
+            action: "run" | "save" | "revise" | "reject" | "adopt_candidate" | "retry_review";
+            expected_candidate_hash?: string | null;
             expected_plan_hash: string;
             permission_grant?: ("ask" | "workspace_edits") | null;
             plan_id: string;
@@ -3549,7 +3550,13 @@ export interface components {
             source: Record<string, never>;
         };
         PlanReview: {
-            allowed_actions: ("run" | "save" | "revise" | "reject")[];
+            allowed_actions: ("run" | "save" | "revise" | "reject" | "adopt_candidate" | "retry_review")[];
+            candidate?: {
+                /** @enum {string} */
+                completeness: "complete" | "partial" | "unknown";
+                content: string;
+                content_hash: string;
+            } | null;
             plan_hash?: string | null;
             plan_id: string;
             revision?: {
@@ -3565,7 +3572,7 @@ export interface components {
             source: "explicit_plan_command" | "automatic_conversation_route";
             stale: boolean;
             /** @enum {string} */
-            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
+            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "compile_failed" | "completed_without_draft" | "blocked" | "paused" | "failed" | "interrupted" | "cancelled";
             step_count?: number | null;
             suggested_check_count?: number | null;
             summary?: string | null;

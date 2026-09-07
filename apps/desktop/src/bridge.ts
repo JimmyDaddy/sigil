@@ -218,6 +218,14 @@ export interface DesktopBridge {
     expectedPlanHash: string,
     action: PlanDecisionAction,
   ): Promise<PlanDecisionSummary>;
+  planDecisionWithCandidate(
+    workspaceId: string,
+    sessionId: string,
+    planId: string,
+    expectedPlanHash: string,
+    expectedCandidateHash: string | undefined,
+    action: PlanDecisionAction,
+  ): Promise<PlanDecisionSummary>;
   planDetail(
     workspaceId: string,
     sessionId: string,
@@ -453,6 +461,24 @@ export const desktopBridge: DesktopBridge = {
     invoke<PlanDecisionSummary>("desktop_plan_decision", {
       workspaceId,
       input: { sessionId, planId, expectedPlanHash, action },
+    }),
+  planDecisionWithCandidate: (
+    workspaceId,
+    sessionId,
+    planId,
+    expectedPlanHash,
+    expectedCandidateHash,
+    action,
+  ) =>
+    invoke<PlanDecisionSummary>("desktop_plan_decision", {
+      workspaceId,
+      input: {
+        sessionId,
+        planId,
+        expectedPlanHash,
+        expectedCandidateHash,
+        action,
+      },
     }),
   planDetail: (workspaceId, sessionId, planId, expectedPlanHash) =>
     invoke<PlanReviewDetail>("desktop_plan_detail", {

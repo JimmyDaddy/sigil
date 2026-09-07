@@ -1988,6 +1988,8 @@ pub(crate) struct DesktopPlanDecisionInput {
     pub(crate) session_id: String,
     pub(crate) plan_id: String,
     pub(crate) expected_plan_hash: String,
+    #[serde(default)]
+    pub(crate) expected_candidate_hash: Option<String>,
     pub(crate) action: DesktopPlanDecisionActionInput,
 }
 
@@ -1998,6 +2000,8 @@ pub(crate) enum DesktopPlanDecisionActionInput {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 #[derive(Debug, Serialize)]
@@ -2046,7 +2050,17 @@ pub(crate) struct DesktopPlanReview {
     pub(crate) source: &'static str,
     pub(crate) stale: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) candidate: Option<DesktopPlanReviewCandidate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision: Option<DesktopPlanRevisionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopPlanReviewCandidate {
+    pub(crate) content_hash: String,
+    pub(crate) content: String,
+    pub(crate) completeness: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2096,6 +2110,8 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                     sigil_desktop::DesktopPlanAction::Save => "save",
                     sigil_desktop::DesktopPlanAction::Revise => "revise",
                     sigil_desktop::DesktopPlanAction::Reject => "reject",
+                    sigil_desktop::DesktopPlanAction::AdoptCandidate => "adopt_candidate",
+                    sigil_desktop::DesktopPlanAction::RetryReview => "retry_review",
                 })
                 .collect(),
             source: match value.source {
@@ -2107,6 +2123,11 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                 }
             },
             stale: value.stale,
+            candidate: value.candidate.map(|candidate| DesktopPlanReviewCandidate {
+                content_hash: candidate.content_hash,
+                content: candidate.content,
+                completeness: candidate.completeness,
+            }),
             revision: value.revision.map(|revision| DesktopPlanRevisionSummary {
                 request_id: revision.request_id,
                 attempt_id: revision.attempt_id,
@@ -2420,9 +2441,6 @@ pub(crate) fn desktop_session_route_recovery_summary(
             DesktopSessionRouteRecoveryCode::ConnectionConfigInvalid => "connection_config_invalid",
             DesktopSessionRouteRecoveryCode::ProviderUnavailable => "provider_unavailable",
             DesktopSessionRouteRecoveryCode::AuthorityUnavailable => "authority_unavailable",
-            DesktopSessionRouteRecoveryCode::AuthorityJournalCorrupted => {
-                "authority_journal_corrupted"
-            }
             DesktopSessionRouteRecoveryCode::SessionAlreadyActive => "session_already_active",
             DesktopSessionRouteRecoveryCode::SessionWriterBusy => "session_writer_busy",
             DesktopSessionRouteRecoveryCode::SessionStreamInvalid => "session_stream_invalid",
@@ -2433,7 +2451,6 @@ pub(crate) fn desktop_session_route_recovery_summary(
             .map(|action| match action {
                 DesktopSessionRouteRecoveryAction::ConfirmCurrentRoute => "confirm_current_route",
                 DesktopSessionRouteRecoveryAction::RepairConnection => "repair_connection",
-                DesktopSessionRouteRecoveryAction::RepairAuthority => "repair_authority",
                 DesktopSessionRouteRecoveryAction::SelectReplacement => "select_replacement",
                 DesktopSessionRouteRecoveryAction::StartNewSession => "start_new_session",
                 DesktopSessionRouteRecoveryAction::RetryProvider => "retry_provider",
@@ -3478,9 +3495,6 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                         DesktopSessionRouteRecoveryCode::AuthorityUnavailable => {
                             "authority_unavailable"
                         }
-                        DesktopSessionRouteRecoveryCode::AuthorityJournalCorrupted => {
-                            "authority_journal_corrupted"
-                        }
                         DesktopSessionRouteRecoveryCode::SessionAlreadyActive => {
                             "session_already_active"
                         }
@@ -3498,9 +3512,6 @@ impl From<DesktopRunContextView> for DesktopRunContext {
                             }
                             DesktopSessionRouteRecoveryAction::RepairConnection => {
                                 "repair_connection"
-                            }
-                            DesktopSessionRouteRecoveryAction::RepairAuthority => {
-                                "repair_authority"
                             }
                             DesktopSessionRouteRecoveryAction::SelectReplacement => {
                                 "select_replacement"

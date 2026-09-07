@@ -739,6 +739,22 @@ export function createCatalogWorkbenchBridge(
       action,
       replayed: false,
     }),
+    planDecisionWithCandidate: async (
+      _workspaceId,
+      sessionId,
+      planId,
+      _planHash,
+      _candidateHash,
+      action,
+    ) => ({
+      commandId: "workbench-plan-decision-command",
+      clientId: "desktop-workbench",
+      sessionId,
+      planId,
+      planHash: `sha256:${"a".repeat(64)}`,
+      action,
+      replayed: false,
+    }),
     userInputRequest: async () => {
       throw new Error("catalog user input is unavailable");
     },

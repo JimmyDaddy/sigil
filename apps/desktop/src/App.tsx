@@ -642,9 +642,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       setSessionActionState("error");
       const routeRecovery = sessionRouteRecoveryFromError(error);
       setSessionMessage(
-        routeRecovery?.code === "authority_journal_corrupted"
-          ? t("routeRecoveryAuthority")
-          : routeRecovery?.code === "authority_unavailable"
+        routeRecovery?.code === "authority_unavailable"
             ? t("routeRecoveryAuthorityUnavailable")
             : t("conversationCreateFailed"),
       );
@@ -1201,14 +1199,15 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 }}
               />
             ) : selectedSession === undefined ? (
-            <div className="conversation-empty">
-              <p className="eyebrow">{activeWorkspace.displayName}</p>
-              <h1>{t("selectConversation")}</h1>
-              <p>{t("selectConversationDetail")}</p>
-            </div>
-          ) : (
+              <div className="conversation-empty">
+                <p className="eyebrow">{activeWorkspace.displayName}</p>
+                <h1>{t("selectConversation")}</h1>
+                <p>{t("selectConversationDetail")}</p>
+              </div>
+            ) : (
             <div className="conversation-surface" inert={conversationNavigation !== undefined || undefined}>
               <ConversationPanel
+                key={selectedSession.id}
                 bridge={bridge}
                 workspaceId={activeWorkspace.id}
                 session={selectedSession}
@@ -1548,7 +1547,6 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
     "connection_config_invalid",
     "provider_unavailable",
     "authority_unavailable",
-    "authority_journal_corrupted",
     "session_already_active",
     "session_writer_busy",
     "session_stream_invalid",
@@ -1556,7 +1554,6 @@ function sessionRouteRecoveryFromError(error: unknown): SessionRouteRecoveryView
   const actions = new Set([
     "confirm_current_route",
     "repair_connection",
-    "repair_authority",
     "select_replacement",
     "start_new_session",
     "retry_provider",

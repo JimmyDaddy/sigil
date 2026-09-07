@@ -4961,7 +4961,9 @@
               "run",
               "save",
               "revise",
-              "reject"
+              "reject",
+              "adopt_candidate",
+              "retry_review"
             ],
             "type": "string"
           },
@@ -5057,9 +5059,18 @@
               "run",
               "save",
               "revise",
-              "reject"
+              "reject",
+              "adopt_candidate",
+              "retry_review"
             ],
             "type": "string"
+          },
+          "expected_candidate_hash": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "expected_plan_hash": {
             "maxLength": 128,
@@ -5131,11 +5142,47 @@
                 "run",
                 "save",
                 "revise",
-                "reject"
+                "reject",
+                "adopt_candidate",
+                "retry_review"
               ],
               "type": "string"
             },
             "type": "array"
+          },
+          "candidate": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "completeness": {
+                    "enum": [
+                      "complete",
+                      "partial",
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  "content": {
+                    "maxLength": 65536,
+                    "type": "string"
+                  },
+                  "content_hash": {
+                    "maxLength": 128,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "content_hash",
+                  "content",
+                  "completeness"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "plan_hash": {
             "maxLength": 128,
@@ -5223,7 +5270,10 @@
               "waiting_for_input",
               "finalizing",
               "draft_ready",
+              "compile_failed",
               "completed_without_draft",
+              "blocked",
+              "paused",
               "failed",
               "interrupted",
               "cancelled"

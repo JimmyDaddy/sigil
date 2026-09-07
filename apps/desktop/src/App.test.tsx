@@ -16,6 +16,7 @@ import type {
   ConversationContinuity,
   ConversationQueueCommandInput,
   DesktopBootstrap,
+  PlanDecisionAction,
   PermissionMode,
   RunContext,
   RunStreamStatus,
@@ -119,6 +120,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
     continueTask,
     continuity,
     attachRun,
+    planDecisionWithCandidate,
     ...remainingOverrides
   } = overrides;
   let simulatedOwner: ConversationContinuity["foregroundOwner"];
@@ -486,6 +488,22 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       action,
       replayed: false,
     }),
+    planDecisionWithCandidate: planDecisionWithCandidate ?? (async (
+      _workspaceId,
+      sessionId,
+      planId,
+      _planHash,
+      _candidateHash,
+      action,
+    ) => ({
+      commandId: "plan-decision-command-test",
+      clientId: "desktop-test",
+      sessionId,
+      planId,
+      planHash: `sha256:${"a".repeat(64)}`,
+      action,
+      replayed: false,
+    })),
     planDetail: async (_workspaceId, _sessionId, planId, expectedPlanHash) => ({
       planId,
       planHash: expectedPlanHash,
@@ -5889,6 +5907,73 @@ describe("desktop workspace and history shell", () => {
     );
     expect(await screen.findByText(/Plan revision started/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reject" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  it("shows a preserved terminal candidate and binds Retry review to its hash", async () => {
+    const user = userEvent.setup();
+    const candidateHash = `sha256:${"f".repeat(64)}`;
+    const planDecisionWithCandidate = vi.fn(async (
+      _workspaceId: string,
+      sessionId: string,
+      planId: string,
+      expectedPlanHash: string,
+      _expectedCandidateHash: string | undefined,
+      action: PlanDecisionAction,
+    ) => ({
+      commandId: "plan-retry-command-1",
+      clientId: "desktop-test",
+      sessionId,
+      planId,
+      planHash: expectedPlanHash,
+      action,
+      replayed: false,
+    }));
+    const bridge = bridgeWith({
+      bootstrap: async () => ({
+        protocolVersion: 2,
+        workspaces: [workspace],
+        recentWorkspaces: [],
+      }),
+      display: async () => ({
+        schemaVersion: 1,
+        requestScope: "http-session-new",
+        throughSessionStreamSequence: "9",
+        totalItems: "0",
+        items: [],
+        hasMore: false,
+        gapFacts: [],
+        planReview: {
+          planId: "plan-review-terminal",
+          status: "paused" as const,
+          summary: "The review stopped before typed completion",
+          summaryTruncated: false,
+          allowedActions: ["retry_review", "adopt_candidate"] as const,
+          source: "automatic_conversation_route" as const,
+          stale: false,
+          candidate: {
+            contentHash: candidateHash,
+            content: "# Preserved plan\n\n1. Inspect the recovery path.",
+            completeness: "complete" as const,
+          },
+        },
+      }),
+      planDecisionWithCandidate,
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByText("The review stopped before typed completion")).toBeTruthy();
+    expect(screen.getByText(/Preserved plan/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Retry review" }));
+    await waitFor(() => expect(planDecisionWithCandidate).toHaveBeenCalledWith(
+      workspace.id,
+      "http-session-new",
+      "plan-review-terminal",
+      "",
+      candidateHash,
+      "retry_review",
+    ));
   });
 
   it("submits a literal single-select option id without colliding with Other", async () => {

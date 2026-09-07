@@ -786,7 +786,13 @@ export type PlanReviewSource =
   | "explicit_plan_command"
   | "automatic_conversation_route";
 
-export type PlanDecisionAction = "run" | "save" | "revise" | "reject";
+export type PlanDecisionAction =
+  | "run"
+  | "save"
+  | "revise"
+  | "reject"
+  | "adopt_candidate"
+  | "retry_review";
 
 export type PlanRevisionStatus =
   | "awaiting_guidance"
@@ -811,6 +817,11 @@ export interface ConversationPlanReview {
   allowedActions: PlanDecisionAction[];
   source: PlanReviewSource;
   stale: boolean;
+  candidate?: {
+    contentHash: string;
+    content: string;
+    completeness: "complete" | "partial" | "unknown";
+  };
   revision?: {
     requestId: string;
     attemptId?: string;
@@ -1955,7 +1966,6 @@ export type RouteRecoveryCode =
   | "connection_config_invalid"
   | "provider_unavailable"
   | "authority_unavailable"
-  | "authority_journal_corrupted"
   | "session_already_active"
   | "session_writer_busy"
   | "session_stream_invalid";
@@ -1963,7 +1973,6 @@ export type RouteRecoveryCode =
 export type RouteRecoveryAction =
   | "confirm_current_route"
   | "repair_connection"
-  | "repair_authority"
   | "select_replacement"
   | "start_new_session"
   | "retry_provider"

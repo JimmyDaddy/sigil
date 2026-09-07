@@ -73,6 +73,8 @@ Feature: Desktop workbench remains usable
     And the foreground answer completes while the terminal task remains running
     When I reload Desktop while the retained terminal task is owned by the session
     Then Desktop restores the retained terminal task from continuity
+    When I stop the retained terminal task
+    Then the retained terminal task becomes cancelled
 
   @durable-input
   Scenario: Restore and answer a durable Agent question after a renderer reload
@@ -93,16 +95,16 @@ Feature: Desktop workbench remains usable
     Then the supervised plan agent drafts a durable plan
     And the draft plan becomes ready on the Desktop plan card
     When I save the reviewed plan from Desktop
-    Then the plan card closes without creating a Task
+    Then the saved plan remains available without creating a Task
 
-  Scenario: Automatically review and run a draft plan with parallel Agents
+  Scenario: Automatically review and run a draft plan as a durable Task
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
     And I request automatic multi-Agent execution
     Then the automatic plan review drafts a durable plan
     And the draft plan becomes ready on the Desktop plan card
     When I run the reviewed plan from Desktop
-    Then Desktop completes one durable task with two overlapping read Agents
+    Then Desktop completes one durable Task from the approved plan
 
   Scenario: Delete a conversation source that the current runtime cannot open
     Given the current-source desktop has restored the isolated workspace
