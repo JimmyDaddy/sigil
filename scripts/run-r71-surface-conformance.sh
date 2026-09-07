@@ -49,7 +49,9 @@ run_suite() {
   echo "PASS(conformance/$label): $summary"
 }
 
-run_suite surface-facade cargo test -p sigil-runtime --lib r71_facade -- --format terse
+# The runtime facade tests now live with the application preparation seam; keep the filter
+# anchored to the executable test names rather than the retired module label.
+run_suite surface-facade cargo test -p sigil-runtime --lib r71_application_prepare -- --format terse
 run_suite kernel-recovery-surface cargo test -p sigil-kernel --lib resource_recovery_surface -- --format terse
 run_suite kernel-cutover-surface cargo test -p sigil-kernel --lib cutover_manifest::tests::r71_surface_status -- --format terse
 run_suite runtime-doctor-surface cargo test -p sigil-runtime --lib doctor_reports_cutover -- --format terse

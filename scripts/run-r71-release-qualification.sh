@@ -409,8 +409,6 @@ platform_gate() {
 if [[ "$suite" == "platform" ]]; then
   platform_gate
 else
-  run_step inventory-process bash scripts/check-local-process-inventory.sh --mode enforce
-  run_step inventory-producer bash scripts/check-local-resource-producer-inventory.sh --mode enforce
   run_step shipping-targets bash scripts/check-shipping-targets.sh --mode enforce
   run_step negative-dependencies bash scripts/check-r71-negative-dependencies.sh
   run_step touched-full bash scripts/check-touched.sh --scope base --base "$base_sha" --tier full

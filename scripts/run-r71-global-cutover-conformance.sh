@@ -58,7 +58,9 @@ run_suite sandbox-managed-execution cargo test -p sigil-sandbox --lib r71_manage
 # Runtime: application-global cutover coordinator + boot seam fail-closed behavior.
 run_suite runtime-global-cutover cargo test -p sigil-runtime --lib resource_global_cutover -- --format terse
 # Runtime: managed storage writer seam (admit -> owner-only leaf -> append -> finalize receipt).
-run_suite runtime-storage-writer cargo test -p sigil-runtime --lib r71_sw -- --format terse
+# The storage-writer seam tests are now grouped in the concrete adapter module; the retired
+# `r71_sw` filter would silently select zero tests after the module cleanup.
+run_suite runtime-storage-writer cargo test -p sigil-runtime --lib managed_storage_writer -- --format terse
 if [[ "$EPOCH" == "current" ]]; then
   echo "--epoch current: running the R71.6 full-composition gate (red until every adapter is wired)"
   run_suite full-composition-gate cargo test -p sigil-runtime --lib r71_full_composition_gate -- --ignored --format terse

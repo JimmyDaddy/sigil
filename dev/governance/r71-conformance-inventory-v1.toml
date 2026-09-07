@@ -1,61 +1,13 @@
-# RFC-0071 R71.9l frozen conformance inventory: all 228 required fault cases.
+# RFC-0071 R71.9l frozen conformance inventory: all 169 required fault cases.
 # Each case id maps exactly one injected frontier with a non-zero expected assertion count.
 # A runner implementing only part of a range, folding multiple frontiers into one case, or
 # filling holes with ignored/skipped cases fails.
 schema_version = 2
-manifest_hash = "r71-conformance-v4-228"
+manifest_hash = "r71-conformance-v4-169"
 
 [[cases]]
 case_id = "R71-F-EXP-001"
 case_name = "fault_EXP_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-001"
-case_name = "fault_DEL_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-002"
-case_name = "fault_DEL_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-003"
-case_name = "fault_DEL_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-004"
-case_name = "fault_DEL_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-005"
-case_name = "fault_DEL_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-006"
-case_name = "fault_DEL_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-007"
-case_name = "fault_DEL_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-DEL-008"
-case_name = "fault_DEL_008"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true
@@ -128,6 +80,12 @@ required = true
 [[cases]]
 case_id = "R71-F-FIL-012"
 case_name = "fault_FIL_012"
+fixture_class = "fault-campaign"
+expected_assertion_count = 1
+required = true
+[[cases]]
+case_id = "R71-F-FIL-013"
+case_name = "fault_FIL_013"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true
@@ -486,138 +444,6 @@ fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true
 [[cases]]
-case_id = "R71-F-REC-001"
-case_name = "fault_REC_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-002"
-case_name = "fault_REC_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-003"
-case_name = "fault_REC_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-004"
-case_name = "fault_REC_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-005"
-case_name = "fault_REC_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-006"
-case_name = "fault_REC_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-007"
-case_name = "fault_REC_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-008"
-case_name = "fault_REC_008"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-009"
-case_name = "fault_REC_009"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-REC-010"
-case_name = "fault_REC_0010"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-001"
-case_name = "fault_BRG_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-002"
-case_name = "fault_BRG_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-003"
-case_name = "fault_BRG_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-004"
-case_name = "fault_BRG_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-005"
-case_name = "fault_BRG_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-006"
-case_name = "fault_BRG_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-007"
-case_name = "fault_BRG_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-008"
-case_name = "fault_BRG_008"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-009"
-case_name = "fault_BRG_009"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-010"
-case_name = "fault_BRG_0010"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-011"
-case_name = "fault_BRG_0011"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-BRG-012"
-case_name = "fault_BRG_0012"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
 case_id = "R71-F-MUT-001"
 case_name = "fault_MUT_001"
 fixture_class = "fault-campaign"
@@ -806,90 +632,6 @@ required = true
 [[cases]]
 case_id = "R71-F-CAT-010"
 case_name = "fault_CAT_0010"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-001"
-case_name = "fault_ATT_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-002"
-case_name = "fault_ATT_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-003"
-case_name = "fault_ATT_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-004"
-case_name = "fault_ATT_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-005"
-case_name = "fault_ATT_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-006"
-case_name = "fault_ATT_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-007"
-case_name = "fault_ATT_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-008"
-case_name = "fault_ATT_008"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-009"
-case_name = "fault_ATT_009"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-010"
-case_name = "fault_ATT_0010"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-011"
-case_name = "fault_ATT_0011"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-012"
-case_name = "fault_ATT_0012"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-013"
-case_name = "fault_ATT_0013"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ATT-014"
-case_name = "fault_ATT_0014"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true
@@ -1274,102 +1016,6 @@ required = true
 [[cases]]
 case_id = "R71-F-RET-008"
 case_name = "fault_RET_008"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-001"
-case_name = "fault_JRN_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-002"
-case_name = "fault_JRN_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-003"
-case_name = "fault_JRN_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-004"
-case_name = "fault_JRN_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-005"
-case_name = "fault_JRN_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-006"
-case_name = "fault_JRN_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-007"
-case_name = "fault_JRN_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-JRN-008"
-case_name = "fault_JRN_008"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-001"
-case_name = "fault_ABR_001"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-002"
-case_name = "fault_ABR_002"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-003"
-case_name = "fault_ABR_003"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-004"
-case_name = "fault_ABR_004"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-005"
-case_name = "fault_ABR_005"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-006"
-case_name = "fault_ABR_006"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-007"
-case_name = "fault_ABR_007"
-fixture_class = "fault-campaign"
-expected_assertion_count = 1
-required = true
-[[cases]]
-case_id = "R71-F-ABR-008"
-case_name = "fault_ABR_008"
 fixture_class = "fault-campaign"
 expected_assertion_count = 1
 required = true

@@ -31,9 +31,15 @@ generated_types="${tmp_dir}/http-schema.ts"
 
 cd "${repo_root}"
 cargo run --quiet -p sigil-http --example export_openapi >"${generated_snapshot}"
-pnpm --dir "${desktop_root}" exec openapi-typescript \
+# Resolve the package manager from the desktop package's checked-in
+# `packageManager` field. Running from the repository root lets Corepack select
+# an unrelated default version when this script is called from an isolated
+# gate, which makes nested `pnpm` invocations non-reproducible.
+cd "${desktop_root}"
+pnpm exec openapi-typescript \
   "${generated_snapshot}" \
   --output "${generated_types}"
+cd "${repo_root}"
 
 if [[ "${mode}" == "--write" ]]; then
   mkdir -p "$(dirname "${snapshot}")" "$(dirname "${generated}")"

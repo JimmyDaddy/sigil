@@ -1,6 +1,8 @@
 # RFC-0071：Unified Resource Authority, Execution Sandbox and Lifecycle Recovery V1
 
-状态：单路径整改实施中（2026-08-31）。2026-08-28的Implemented/Frozen与R71.9q exact-SHA local full/five-platform qualification保留为历史证据；不代表本次修订或后续代码已资格化。
+状态：`historical / superseded`（2026-09-07）。本文保留 authority/sandbox 设计与历史证据；其中旧资源 journal、epoch repair、provider-only safe mode 与全局恢复链的约束已由 RFC-0071 执行计划完成不兼容清退，不再是当前生产契约。
+
+> 当前实现与验收记录见 `.repo-local-dev/rfcs/0071-resource-journal-removal-execution-plan.md`；本机旧数据处理见 `.repo-local-dev/rfcs/0071-local-sigil-data-reset-checklist.md`。阅读本文时不得把历史 journal/recovery 段落解释为仍存在的可执行入口。
 
 > 当前审查覆盖、逐项回应与历史 exact-SHA evidence 见 `.repo-local-dev/review/rfc-0071-implementation-completeness-review-2026-08-25.md`。第三十三轮曾在 `441243dfdffaaba27ea5a59225d64c6f4405387c` 冻结；第三十四轮真实用户 journal 又暴露 pending source-bound grant rollover、sequence-only broker proof 重用、legacy marker alias 与多 composer snapshot 覆盖缺陷。第三十五轮 session `70c1896d-02a8-4c62-b273-3e43aeeb95aa` 进一步证明：shipping composition 创建空 borrowed-subject registry，却没有 production workspace registration/onboarding；plan-review child/finalizer 也没有 authority-managed ArtifactStaging/ArtifactStore resource bundle。现有 full gate 使用忽略真实 `ToolContext` 的 inspection fixture，无法证明实际 `ls/grep/read_file` 产品链。第三十四轮 qualification candidate 判定和更早 freeze 均被本段 supersede；完成 R71.9 implementation、真实 current-schema E2E 与新 clean exact-SHA full/five-platform qualification 前不得恢复 Candidate/Frozen，也不得启动或继续 RFC-0070 implementation。
 
@@ -7351,7 +7353,7 @@ pub struct ResourceProducerInventoryEntryV1 {
 
 五类eligibility固定如下：
 
-0. `AuthorityBootstrapInternal(class)`只允许`crates/sigil-resource-authority/src/{bootstrap,journal}.rs`的exact site，owner=`AuthorityBootstrap`、child access=`None`、admission/lifecycle/receipt分别是三个AuthorityBootstrap variant。`StateAnchor/CacheAnchor`的root source必须是`ConfiguredPlatformBootstrapLocation`，`ExecutionTempAnchor`必须是`VerifiedSystemTempParent`，只有manifest/lock/journal/reserve children可使用已验证的`AuthorityBootstrapAnchor`；anchor不能以自身作为root proof。它覆盖自举特例，不是`ResourceKindV1`、不接受agent input、不能被其他crate或普通managed producer复用。
+0. `AuthorityBootstrapInternal(class)`只允许`crates/sigil-resource-authority/src/{bootstrap,journal}.rs`的exact site，owner=`AuthorityBootstrap`、child access=`None`、admission/lifecycle/receipt分别是三个AuthorityBootstrap variant。`StateAnchor/CacheAnchor`的root source必须是`ConfiguredPlatformBootstrapLocation`，`ExecutionTempAnchor`默认必须是`VerifiedSystemTempParent`；唯一例外是下述显式 doctor 恢复 exact site，它由 authority 在全新 cache root 下创建 execution-temp anchor，并在配置发布前绑定 fresh root selection，不接受 model/extension 输入。只有manifest/lock/journal/reserve children可使用已验证的`AuthorityBootstrapAnchor`；anchor不能以自身作为root proof。它覆盖自举特例，不是`ResourceKindV1`、不接受agent input、不能被其他crate或普通managed producer复用。
 1. `Managed(kind)`必须指向§8.4 execution、§8.6 storage或§10.2 maintenance的exact admission/lease/receipt，且`kind`、owner、root、lifecycle能逐项对账；不能只因路径位于Sigil目录下就标Managed。
 2. `BorrowedUserContent(class)`必须绑定opaque approved subject、对应用户/permission/config/release authority、descriptor-relative mutation与receipt；Resource Authority不拥有、不chmod、不GC内容。`ReleaseEvaluationOutput`只允许release-owner显式提供的output path，`UserSelectedSupportExport`/`SessionExportExternal`只允许native/CLI明确确认的exact destination；它们都不得顺便授权parent sibling。
 3. `TrustedProductState(class)`只允许上述closed exact variant与下表site family：固定product-plane crate/owner；root只能来自Tauri/platform product config/cache/log anchor；object key/relative location不能来自model、workspace、extension或user config；不接收/复用agent grant；child manifest不可访问；各owner有owner-only allocation、bounded payload、atomic/lifecycle与receipt。`SignedUpdaterCache`由transport-neutral `ProductUpdaterState`拥有，因为同一producer同时被CLI、TUI与Desktop调用，不能冒充Desktop私有状态；它仍属于独立product trust plane，不能消费agent Resource Authority grant。新增的`NativeSaveMutationJournal`与`ConfigurationMutationJournal`只存§9.6 borrowed mutation的bounded hash-chain envelope，不能保存destination path或用户内容。session/control/plan/provider state、writable memory、input history、cache、artifact/staging、support/session export、workspace派生helper一律禁止分类为TrustedProductState。新增variant必须修改本RFC/治理schema并经架构评审，不能由manifest作者自行加字符串。
@@ -7363,6 +7365,7 @@ checker使用下列class compatibility matrix做total match；验证轴固定为
 |---|---|---|---|---|---|---|
 | `AuthorityBootstrapInternal(StateAnchor|CacheAnchor)` | `AuthorityBootstrap / ConfiguredPlatformBootstrapLocation` | exact bootstrap site map；anchor不能引用自身 | `None`或显式root时`UserConfiguration` | `None` | `AuthorityBootstrapAdmission` | matching `AuthorityBootstrapObject(class) / AuthorityBootstrapLifecycle / AuthorityBootstrapReceipt` |
 | `AuthorityBootstrapInternal(ExecutionTempAnchor)` | `AuthorityBootstrap / VerifiedSystemTempParent` | exact bootstrap site map | `None` | `None` | `AuthorityBootstrapAdmission` | matching `AuthorityBootstrapObject(ExecutionTempAnchor) / AuthorityBootstrapLifecycle / AuthorityBootstrapReceipt` |
+| `AuthorityBootstrapInternal(ExecutionTempAnchor)` 显式 doctor 恢复 | `AuthorityBootstrap / ConfiguredPlatformBootstrapLocation` | 仅 `AuthorityBootstrapRecoveryServiceV1::prepare_replacement_roots` 的冻结 `create_dir_all` locator；必须在本次全新 cache root 内，locator 漂移失败关闭 | `UserConfiguration` | `None` | `AuthorityBootstrapAdmission` | `AuthorityBootstrapObject(ExecutionTempAnchor) / AuthorityBootstrapLifecycle / AuthorityBootstrapReceipt` |
 | `AuthorityBootstrapInternal(BootstrapManifest|WriterLock|ResourceJournalShard|EmergencyReserve)` | `AuthorityBootstrap / AuthorityBootstrapAnchor` | exact bootstrap/journal site map | `None` | `None` | `AuthorityBootstrapAdmission` | matching `AuthorityBootstrapObject(class) / AuthorityBootstrapLifecycle / AuthorityBootstrapReceipt` |
 | `Managed(kind)` via execution | `ResourceAuthority / AuthorityBootstrapAnchor` | exact kind/site map | `None`（content taint不等于location taint） | manifest有matching child grant时`ExactManagedGrant`，否则`None` | `ManagedExecutionLease { source }`且source/lifetime exact | `ManagedGeneration(same kind) / AuthorityLeaseAndJournal / ManagedResourceReceipt` |
 | `Managed(kind)` via storage | `ManagedStorage(owner) / AuthorityBootstrapAnchor` | exact owner/kind/site map | `None` | `None` | `ManagedStorageNamespace { same owner, allowed family/source/purpose }` | `ManagedGeneration(same kind) / AuthorityLeaseAndJournal / ManagedResourceReceipt` |
@@ -10939,3 +10942,16 @@ fixed `r71-release-candidate` 已通过 `--force-with-lease` 精确指向该 can
 历史 failed candidate/run（包括 Windows cleanup race、Linux hosted clippy 暴露的 portable mask、以及其后的修复前候选）继续作为不可变审计事实保留，未被继承为资格。真实 `/Users/jimmydaddy/.sigil/authority-bootstrap-v1` 的 `301` 个 opaque namespace 未被 qualification 删除、GC 或 rewrite；资格 wrapper 使用 marker-owned temporary HOME。由此 RFC-0071 状态正式为 **Implemented / Frozen**。RFC-0070 的前置条件已清除，但 RFC-0070 实施不属于本 RFC，本次未启动。
 
 本节后的 docs-only 收尾 commit 只同步 review、handoff、execution plan 与 RFC 状态，不改变 qualified implementation SHA。若后续修改 R71.9q production code，必须以新 exact SHA 从 local full 开始并重新取得 hosted evidence。
+
+
+### 2026-09-05 模块消融补充：恢复目录与验证职责
+
+`AuthorityBootstrapRecoveryServiceV1::prepare_replacement_roots` 接管 runtime doctor 原有的 state/cache/执行临时根创建与失败清理。配置父目录在创建前 canonicalize，scratch 仅允许 normal 相对组件，全部新根与目录链收紧权限。StateAnchor/CacheAnchor 和显式恢复 ExecutionTempAnchor 的三个生产 IO locator 在 inventory generator 中单独冻结；它们使用 ConfiguredPlatformBootstrapLocation/UserConfiguration，不能继承普通 bootstrap child 的 AuthorityBootstrapAnchor/None 或被称为 BootstrapMetadata。配置发布前 guard 自动清理；配置可能已引用或 staged intent 不能退回时保留，后续恢复仍验证确认、授权、quiescence、CAS、fresh identity 和 receipt。
+
+本次共用 inventory 扫描与声明核对，删除 release qualification 对同一 inventory 的重复调用。RFC-0070 已有独立 topology/host ownership/migration gates，R71 不再保留禁止任何 `sigil_application` 引用的实施顺序 marker；物理 authority 的依赖、注册和所有权负例继续由 R71 验证。此补充不重写此前 exact-SHA qualification 证据，也不声称新增修改已经完成跨平台发布资格化。
+
+### 2026-09-06 Resource Authority 消融与证据边界
+
+当前代码删除无生产或测试调用者的 `provider_registry.rs` 类型骨架；`consumer_ports`、`semantic_matrix`、`lease`、`reconcile` 及 lifecycle re-export 只在 `cfg(test)` 中保留。历史契约 fixture 和 conformance filter 继续存在，但这些模型没有生产调用，不能证明本 RFC 的 registry、完整 admission matrix、generation lifecycle 或 recovery 要求已落地。上述目标设计和封闭注册要求继续有效，删除空骨架不等同于完成其实现。
+
+`AuthorityStorageGrantTableV1` 删除无读写的 `consumed_capabilities` 空表；实际 admission/finalize 与 durable quota/journal 状态保持。专项消融补充 process inventory HMAC、snapshot writer exclusion 和 storage authority epoch/instance 的服务路径回归，防止已有测试全绿被误解为这些保护可删除。当前源码快照、变体与日志见[模块消融设计](../module-ablation.md)所列证据目录；本次不改变 RFC 的验收状态，也不替代 exact-SHA 或五平台 qualification。

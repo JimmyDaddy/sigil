@@ -209,13 +209,20 @@ def original_user_home(source: Mapping[str, str], platform: str | None = None) -
 
 
 def toolchain_roots(source: Mapping[str, str], platform: str | None = None) -> dict[str, str]:
-    """Return preserved or original-identity-derived cargo/rustup roots.
+    """Return preserved or original-identity-derived toolchain roots.
 
     Existing values are deliberately returned byte-for-byte.  Missing values
     are derived from the original user identity, never from the fake HOME.
+    These roots contain reusable toolchain packages, not Sigil state or user
+    credentials; Corepack is included so an isolated Desktop check can honor
+    the checked-in packageManager version without an implicit network fetch.
     """
     roots: dict[str, str] = {}
-    for name, relative in (("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")):
+    for name, relative in (
+        ("CARGO_HOME", ".cargo"),
+        ("RUSTUP_HOME", ".rustup"),
+        ("COREPACK_HOME", ".cache/node/corepack"),
+    ):
         existing = _get_env(source, name)
         if existing is not None:
             roots[name] = existing
@@ -293,7 +300,7 @@ def build_isolated_environment(
     preserved_toolchains = toolchain_roots(source, selected)
     # Windows treats environment names case-insensitively.  Remove a possible
     # lower-case duplicate before restoring canonical spellings.
-    _drop_env_names(environment, {"CARGO_HOME", "RUSTUP_HOME"})
+    _drop_env_names(environment, {"CARGO_HOME", "RUSTUP_HOME", "COREPACK_HOME"})
     environment.update(preserved_toolchains)
     environment[ACTIVE_ROOT_ENV] = str(root)
     environment["SIGIL_ISOLATED_TESTS_PLATFORM"] = selected
@@ -380,8 +387,8 @@ def active_isolation_root(source: Mapping[str, str]) -> Path | None:
         return _path_is_within(value, root)
 
     # HOME and platform identity roots must remain in the runner-owned root.
-    # CARGO_HOME/RUSTUP_HOME are intentionally excluded because they are the
-    # documented reusable toolchain inputs.
+    # CARGO_HOME/RUSTUP_HOME/COREPACK_HOME are intentionally excluded because
+    # they are the documented reusable toolchain inputs.
     selected = normalize_platform(_get_env(source, "SIGIL_ISOLATED_TESTS_PLATFORM"))
     identity_names = {
         "HOME",

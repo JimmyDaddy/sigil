@@ -1,6 +1,8 @@
 # RFC-0072：启动可靠性、Setup 恢复与 Provider-only Safe Mode V1
 
-状态：可靠性改造文档同步（2026-09-01；本 RFC 不代表 RFC-0069 或 RFC-0071 已整体验收完成）
+状态：`superseded`（2026-09-07；保留为历史设计记录，不代表当前产品契约）
+
+> 当前实现已按 RFC-0071 执行计划移除 provider-only safe mode、旧资源 journal recovery 和对应 repair 入口。本 RFC 的状态机、safe mode 与 journal corruption 章节只保留历史决策背景；当前代码/验收以 [RFC-0071 执行计划](../../../.repo-local-dev/rfcs/0071-resource-journal-removal-execution-plan.md) 及[本机 reset 清单](../../../.repo-local-dev/rfcs/0071-local-sigil-data-reset-checklist.md)为准。
 
 本文是 RFC-0069 的失败隔离与恢复边界、RFC-0071 的 authority bootstrap/journal 约束的增量补充。它固化启动阶段的产品状态映射，以及 authority 故障时可以向用户暴露的最小 provider-only 安全面；不改写 RFC-0069 既有历史内容、执行 ledger 或验收结论。本文描述的是跨 Desktop/TUI/CLI/HTTP 的共同语义；各产品表面可以有不同的布局和提示，但不得改变以下状态与故障边界。
 

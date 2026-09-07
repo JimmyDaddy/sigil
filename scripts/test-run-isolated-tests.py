@@ -70,6 +70,7 @@ class IsolatedRunnerTests(unittest.TestCase):
             "TEMP": "/caller/tmp",
             "CARGO_HOME": "/caller/cargo",
             "RUSTUP_HOME": "/caller/rustup",
+            "COREPACK_HOME": "/caller/corepack",
             "SIGIL_API_KEY": "secret-value",
             "OPENAI_API_KEY": "secret-value",
             "HTTPS_PROXY": "http://proxy.invalid",
@@ -82,6 +83,7 @@ class IsolatedRunnerTests(unittest.TestCase):
         self.assertEqual(mapped["KEEP_THIS"], "yes")
         self.assertEqual(mapped["CARGO_HOME"], "/caller/cargo")
         self.assertEqual(mapped["RUSTUP_HOME"], "/caller/rustup")
+        self.assertEqual(mapped["COREPACK_HOME"], "/caller/corepack")
         for name in (
             "SIGIL_STATE_HOME",
             "SIGIL_CACHE_HOME",
@@ -105,6 +107,9 @@ class IsolatedRunnerTests(unittest.TestCase):
             mapped = RUNNER.build_isolated_environment(source, Path(temporary))
             self.assertEqual(mapped["CARGO_HOME"], "/caller/original-user/.cargo")
             self.assertEqual(mapped["RUSTUP_HOME"], "/caller/original-user/.rustup")
+            self.assertEqual(
+                mapped["COREPACK_HOME"], "/caller/original-user/.cache/node/corepack"
+            )
             self.assertNotIn(str(Path(temporary).resolve()), mapped["CARGO_HOME"])
 
     def test_default_writes_land_under_fake_home_and_root_is_cleaned(self) -> None:
@@ -466,6 +471,7 @@ class IsolatedRunnerTests(unittest.TestCase):
             "HOMEDRIVE": "C:",
             "HOMEPATH": r"\\Users\\caller",
             "CARGO_HOME": r"C:\\toolchain\\cargo",
+            "COREPACK_HOME": r"C:\\toolchain\\corepack",
         }
         with tempfile.TemporaryDirectory(prefix="sigil-isolated-test-") as temporary:
             root = Path(temporary)
@@ -477,6 +483,7 @@ class IsolatedRunnerTests(unittest.TestCase):
             self.assertEqual(Path(mapped["APPDATA"]), fake_home / "AppData" / "Roaming")
             self.assertEqual(Path(mapped["LOCALAPPDATA"]), fake_home / "AppData" / "Local")
             self.assertEqual(mapped["CARGO_HOME"], r"C:\\toolchain\\cargo")
+            self.assertEqual(mapped["COREPACK_HOME"], r"C:\\toolchain\\corepack")
             self.assertTrue(mapped["XDG_RUNTIME_DIR"].startswith(str(fake_home)))
             self.assertEqual(mapped["HOMEDRIVE"], ntpath.splitdrive(str(fake_home))[0])
             self.assertTrue(mapped["HOMEPATH"].startswith("\\"))

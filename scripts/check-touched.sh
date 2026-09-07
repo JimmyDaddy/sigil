@@ -180,7 +180,10 @@ run_cmd python3 "${ROOT}/scripts/test-run-isolated-tests.py"
 run_cmd python3 "${ROOT}/scripts/test-isolated-test-entrypoints.py"
 
 if [[ "${desktop_changed}" == "1" ]]; then
-  run_isolated_test_cmd pnpm --dir apps/desktop check
+  # Keep Corepack in the desktop package context so it honors the checked-in
+  # `pnpm@10.30.3` declaration. A root-level invocation has no package
+  # manifest and can select a different ambient pnpm version.
+  run_isolated_test_cmd bash -c 'cd apps/desktop && pnpm check'
 fi
 
 if [[ "${docs_changed}" == "1" && "${rust_changed}" == "0" ]]; then

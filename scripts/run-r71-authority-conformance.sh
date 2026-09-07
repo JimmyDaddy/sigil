@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # RFC-0071 R71.2: authority conformance runner.
 # Runs the isolated-harness authority fixtures (bootstrap fail-closed, lifecycle matrix,
-# journal genesis/chain, quota atomic reservation and current authority services). Refuses
-# zero-case success and does not invoke removed legacy allocator modules.
+# current storage state, quota atomic reservation and current authority services). Refuses
+# zero-case success and does not invoke removed journal/reconcile modules.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,13 +42,12 @@ run_suite() {
 run_suite authority-bootstrap cargo test -p sigil-resource-authority --lib bootstrap -- --format terse
 run_suite authority-arena cargo test -p sigil-resource-authority --lib arena -- --format terse
 run_suite authority-lifecycle cargo test -p sigil-resource-authority --lib lease -- --format terse
-run_suite authority-journal cargo test -p sigil-resource-authority --lib journal -- --format terse
+run_suite authority-storage-current cargo test -p sigil-resource-authority --lib storage -- --format terse
 run_suite authority-quota cargo test -p sigil-resource-authority --lib quota -- --format terse
 run_suite authority-identity cargo test -p sigil-resource-authority --lib identity -- --format terse
 run_suite authority-maintenance cargo test -p sigil-resource-authority --lib maintenance -- --format terse
 run_suite authority-borrowed cargo test -p sigil-resource-authority --lib borrowed -- --format terse
-run_suite authority-reconcile cargo test -p sigil-resource-authority --lib reconcile -- --format terse
-run_suite authority-storage cargo test -p sigil-resource-authority --lib storage -- --format terse
+run_suite authority-session-scratch cargo test -p sigil-resource-authority --lib session_scratch -- --format terse
 run_suite authority-factory cargo test -p sigil-resource-authority --lib factory -- --format terse
 run_suite authority-file-access cargo test -p sigil-resource-authority --lib file_access -- --format terse
 echo "r71-authority-conformance: all fixtures passed"

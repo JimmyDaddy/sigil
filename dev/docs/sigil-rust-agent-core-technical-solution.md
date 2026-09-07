@@ -118,6 +118,12 @@ Desktop 与 TUI 作为并列的一等产品表面共享同一套任务、审批�
 
 当前 provider 边界已经进一步收敛：`sigil-runtime` 统一持有 provider-specific config parsing、provider-neutral config draft DTO、provider status request DTO、provider status refresh task manager、API key env label、DeepSeek 余额/模型列表请求、隐藏 DeepSeek prefix / FIM developer debug adapter 和 provider/model context-window metadata resolver；`sigil` binary 和 `sigil-tui` 只消费这些 runtime DTO/view/result/adapter，不直接依赖 provider crate 或 HTTP client。后续新增 provider 或 provider 状态面时，先扩展 runtime 表面，再让入口层消费 provider-neutral 结果。
 
+2026-09-05 的[模块消融设计](module-ablation.md)进一步收敛无逻辑转发、重复角色 scope、
+同源会话查询和同一 snapshot 的重复校验；各 owner 的权限、恢复、协议与平台边界继续保留。
+2026-09-06 的 Resource Authority 专项消融进一步删除未使用的 provider registry 骨架和
+恒空 capability 表，并将四个仅供契约测试使用的模型限制为 `cfg(test)`；这些模型的测试
+不构成生产 admission、spawn 或 recovery 保证，详见同一[消融设计](module-ablation.md)。
+
 ```text
 sigil/
   Cargo.toml
@@ -154,7 +160,6 @@ sigil/
     sigil-provider-deepseek/
       src/
         capabilities.rs
-        client.rs
         config.rs
         endpoint.rs
         errors.rs
@@ -177,7 +182,6 @@ sigil/
     sigil-provider-openai-compat/
       src/
         capabilities.rs
-        client.rs
         config.rs
         errors.rs
         lib.rs
@@ -191,7 +195,6 @@ sigil/
     sigil-provider-openai-responses/
       src/
         capabilities.rs
-        client.rs
         config.rs
         errors.rs
         lib.rs
@@ -205,7 +208,6 @@ sigil/
     sigil-provider-anthropic/
       src/
         capabilities.rs
-        client.rs
         config.rs
         errors.rs
         lib.rs
@@ -219,7 +221,6 @@ sigil/
     sigil-provider-gemini/
       src/
         capabilities.rs
-        client.rs
         config.rs
         errors.rs
         lib.rs
@@ -1241,6 +1242,11 @@ workbench 提供完整审阅。research 与 submit-only finalizer 使用隔离 c
 research tool history/continuation，只消费 bounded evidence bundle，非 `submit_plan_draft` 调用在 dispatch
 前以 typed protocol violation 终止。
 
+后续修复设计见 [RFC-0073：Plan Review 上下文连续性、结果保全与可恢复收口](rfcs/0073-plan-review-continuity-and-recovery-v1.md)
+（2026-09-07，设计提案，尚未实施）。该方案覆盖父会话讨论与澄清回答交接、完整候选保全、typed draft/no-plan、
+有效纠错、研究预算、资源结算与领域终态分离，以及普通 Plan/revision 的共享恢复；不重建 Task DAG 前置或资源 journal。
+实施状态与验收证据以该 RFC 的执行计划为准，不能把本段设计入口解释为当前行为已经改变。
+
 RFC-0064 定义普通 agent、PlanReview 与 interactive planner 的 durable user-input protocol。模型只能通过
 bounded `request_user_input` typed tool 创建问题；host 先 append `UserInputRequestedV1`，再以
 `AgentRunDisposition::AwaitingUserInput` 结束 physical worker并保留 suspended logical ownership。
@@ -1709,7 +1715,7 @@ MCP 规范本身是按日期版本演进的，`sigil` 需要把协议版本协�
 
 当前已支持：
 
-- MCP server 默认 `required = true`、`startup = "eager"`；严格 registry 构建保持“配置即必须可用”的行为，TUI worker 则先启动内置工具/code-intel 基础 registry，并把 eager MCP 放到后台激活
+- MCP server 默认 `required = true`、`startup = "eager"`；严格 registry 构建保持“配置即必须可用”的行为，TUI worker 则先启动内置工具/code-intel 基础 registry，并把 eager MCP 放到后台激活。TUI worker 在 runtime、provider、session、tool registry、MCP activation 和 observer 等启动阶段向 timeline 发出有界的 `startup:` notice；notice 只描述阶段，不携带凭据、路径或 provider 请求内容
 - `required = false` 的 eager server 启动或 `tools/list` 失败时记录 warning 并跳过，不阻断其它 server
 - `startup = "lazy"` 的 server 在普通 registry 构建时不启动、不注册工具；显式 activation API 会启动 lazy server、执行 `tools/list`，成功后把真实工具加入 registry，失败按 required / optional 策略处理
 - TUI `/config` 的 MCP section 提供 Theme 风格的 `Server` 选择行；`Enter` 循环切换当前查看对象且不修改配置，`Down` 进入 footer 后由 `activate` action 对当前项执行 activate/refresh，`PageUp/PageDown` 保留为选择兼容别名；worker 空闲时可对已保存的 lazy server 执行 activation，并把真实工具加入当前 agent registry，运行中 activation 会被拒绝；模型也可通过 `mcp_activate_server` 工具按需启动指定 lazy server，成功后下一轮 request 会看到真实 MCP tools；eager MCP 启动失败或超时时只更新对应 server 的 `failed` lifecycle，不阻断普通 chat、`/plan` 或内置工具；lifecycle summary 会展示 `deferred`、`activating`、`ready` 或 `failed` 运行态
@@ -2608,7 +2614,6 @@ crates/
       lib.rs
       provider.rs
       config.rs
-      client.rs
       endpoint.rs
       models.rs
       request.rs
@@ -2637,7 +2642,7 @@ crates/
 
 - `config.rs`：DeepSeek provider 配置结构与默认值
 - `provider.rs`：`DeepSeekProvider` 主对象与 `Provider` trait 实现入口
-- `client.rs`：底层 HTTP client 包装、鉴权头、公共请求发送
+- HTTP client 构造直接复用 `sigil-provider-http`；鉴权头和 provider 请求发送继续由 `provider.rs` 持有
 - `endpoint.rs`：`Primary / Beta / AnthropicCompat` 分流
 - `models.rs`：DeepSeek API 侧的原始请求/响应 DTO
 - `request.rs`：从 kernel `CompletionRequest` 到 DeepSeek 请求体的组装
@@ -2861,6 +2866,30 @@ pub fn prepare_tools(
 5. 如果要做 JSON mode，优先在 `request.rs` 里作为 DeepSeek request shaping，而不是新建公共 kernel 能力
 
 这个顺序的好处是，先把主链路打通，再加 DeepSeek 专项增强，不会一开始就把 Beta 能力和 repair 分支缠成一团。
+
+## RFC-0071 provider-only safe mode capability boundary（历史设计，已于 2026-09-07 superseded）
+
+以下内容记录曾经评估的 provider-only safe mode 方案。该方案没有保留在当前生产实现中；当前代码不再提供 provider-only repair/chat 路径，也不再以资源 journal 作为启动恢复前置条件。请以 `.repo-local-dev/rfcs/0071-resource-journal-removal-execution-plan.md` 的实绩记录为准。
+
+RFC-0071 补充提案的 provider-only safe mode 已落到共享 kernel/runtime 契约和两个产品
+adapter。`AgentRunOptions::workspace_capability()` 与 `Session::persistence_capability()`
+显式区分可用工作区/可持久化 session 与不可用能力；后者使用空路径和内存 session，不把
+URI、cwd 或临时文件名塞进 `PathBuf`。readiness、task guidance、conversation queue、
+compaction、后台恢复和 tool pressure 只在 durable 能力成立时运行，因此回答不会在输出后
+再次触发无关 workspace canonicalize 或持久化故障。
+
+TUI safe worker 和 HTTP `POST /v1/provider-only/chat` 共享
+`build_provider_only_run_options`、同一能力提示和空 `ToolRegistry`。HTTP 路径只在 authority
+不可用的显式恢复上下文开放，仍要求认证，不加入 durable session registry；Desktop 通过
+allowlisted Tauri command 调用同一路径，并把 `saved=false`、`fileOperationsAvailable=false`
+投影为临时对话。健康 authority 不会静默降级；用户须修复 authority 后重启以恢复 durable
+session 和工具。真实 provider SSE、两轮对话、取消/退出、HTTP 认证与无落盘回归位于
+`sigil-tui`、`sigil-http` 和 Desktop App tests，执行台账见
+`.repo-local-dev/rfcs/0071-resource-authority-failure-containment-and-ablation-plan-execution.md`。
+
+该 safe mode 是受限故障隔离路径，不是对 RA 物理资源 authority 的替代，也不允许借此执行
+文件、终端、MCP 或其他副作用工具；Desktop 当前请求为有界同步交互，TUI 覆盖协作式取消和
+worker join，跨平台/真实 Tauri GUI 资格化仍按 release gate 单独执行。
 
 ## RFC-0071 R71.9 current implementation boundary（2026-08-26）
 

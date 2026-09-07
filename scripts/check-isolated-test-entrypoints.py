@@ -22,7 +22,7 @@ RUNNER = "run-isolated-tests.py"
 REQUIRED_SCRIPT_MARKERS: dict[str, tuple[str, ...]] = {
     "check-touched.sh": (
         "run_isolated_test_cmd",
-        "run_isolated_test_cmd pnpm --dir apps/desktop check",
+        "run_isolated_test_cmd bash -c 'cd apps/desktop && pnpm check'",
     ),
     "coverage.sh": (RUNNER,),
     "check-orchestration-deterministic.sh": ("run_isolated_test",),

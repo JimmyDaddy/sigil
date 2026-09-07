@@ -7,6 +7,8 @@ import importlib.util
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -193,6 +195,35 @@ def test_registration_invariant_rejects_normal_build_plugin_backend() -> None:
         assert any("legacy ExecutionBackend seam" in finding for finding in findings)
 
 
+def test_source_accepts_application_contract_type_import() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "crates/sigil-http/src/application_bridge.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "use sigil_application::ApplicationProjection;\n"
+            "fn project() -> Option<ApplicationProjection> { None }\n",
+            encoding="utf-8",
+        )
+        assert scanner.check_source(root) == []
+
+
+def test_source_rejects_authority_import_outside_allowlist() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "crates/sigil-runtime/src/invalid_authority_import.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "use sigil_resource_authority::Authority;\n",
+            encoding="utf-8",
+        )
+        findings = scanner.check_source(root)
+        assert any(
+            "concrete authority/sandbox import outside allowlist" in finding
+            for finding in findings
+        )
+
+
 def test_source_rejects_plan_review_generation_inventor() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -237,8 +268,34 @@ def test_registration_invariant_rejects_non_test_legacy_runner() -> None:
         assert any("test/test-support-only" in finding for finding in findings)
 
 
+def test_inventory_check_invokes_one_shared_all_enforce_command() -> None:
+    root = Path("/r71-inventory-fixture")
+    with patch.object(
+        scanner.subprocess,
+        "run",
+        return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+    ) as run:
+        assert scanner.check_inventory(root) == []
+
+    run.assert_called_once()
+    assert run.call_args.args[0] == [
+        sys.executable,
+        str(root / "scripts" / "check-r71-inventories.py"),
+        "--kind",
+        "all",
+        "--mode",
+        "enforce",
+    ]
+    assert run.call_args.kwargs == {
+        "cwd": root,
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_"):
             function()
-    print("r71 negative dependency scanner tests: 9 passed")
+    print("r71 negative dependency scanner tests: 12 passed")

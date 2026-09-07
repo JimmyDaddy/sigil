@@ -150,6 +150,8 @@ V1 bounds：
 - question id 1–48 ASCII 字符且 request 内唯一；header 1–32 Unicode scalar；question 1–512；
   description 0–512；
 - select 2–12 个 option；option id 1–48 ASCII 且 field 内唯一；label 1–80；description 0–240；
+- `single_select.allow_other` 在模型请求中可省略，host 按 `false` 归一化；durable normalized request
+  始终写出显式布尔值；
 - text `max_chars` 为 1–4096；multi-select `max_selected` 为 1–options.len；
 - normalized request JSON、answer JSON 与 public projection 分别受显式 byte cap；超过上限拒绝整个请求，
   不静默截断 schema 或 answer；

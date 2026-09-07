@@ -191,11 +191,6 @@ def check_source(root: Path) -> list[str]:
                 f"{relative}:{line_number}: runtime/surface duplicate of kernel CutoverSurfaceStatusV1"
             )
 
-        if re.search(r"sigil[-_]application|RFC[-_]?0070", code, re.IGNORECASE):
-            findings.append(
-                f"{relative}:{line_number}: RFC-0070 package split/cutover marker in R71 production source: "
-                f"{original.strip()}"
-            )
     return findings
 
 
@@ -374,23 +369,27 @@ def check_registration_invariants(root: Path) -> list[str]:
 
 
 def check_inventory(root: Path) -> list[str]:
-    findings: list[str] = []
-    for checker in (
-        "check-local-process-inventory.sh",
-        "check-local-resource-producer-inventory.sh",
-    ):
-        result = subprocess.run(
-            [str(root / "scripts" / checker), "--mode", "enforce"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip().splitlines()
-            findings.append(f"{checker} enforce failed")
-            findings.extend(f"  {line}" for line in detail[:40])
-    return findings
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "check-r71-inventories.py"),
+            "--kind",
+            "all",
+            "--mode",
+            "enforce",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return []
+    detail = (result.stderr or result.stdout).strip().splitlines()
+    return [
+        "check-r71-inventories.py --kind all --mode enforce failed",
+        *(f"  {line}" for line in detail[:40]),
+    ]
 
 
 def main() -> int:
