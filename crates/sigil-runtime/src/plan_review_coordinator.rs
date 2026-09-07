@@ -7,22 +7,22 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sigil_kernel::{
-    Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose,
-    AgentRunTerminalReason, ControlEntry, ConversationRoute, ConversationRouteDecisionProjection,
-    ConversationTurnRef, EventHandler, JsonlSessionStore, ModelMessage, PlanApprovalPermission,
-    PlanApprovalScope, PlanCompileInputV1, PlanDecision, PlanDecisionActor,
-    PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanPermissionGrantedEntry,
-    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewId,
-    PlanReviewProjection, PlanReviewSource, PlanReviewTerminalReason, PlanSourceRef,
-    PlanTaskStartMode, ProviderPhysicalAttemptOutcome, PublicEventOutboxEntryV1, PublicRunEvent,
-    PublicRunEventKind, RunEvent, Session, SessionLogEntry, SessionRef, StartPlanReviewAction,
-    TaskCreatedFromPlanEntry, TaskId, TaskRunEntry, TaskRunStatus, TaskStepId,
-    build_workspace_snapshot, plan_review_attempt_id_for_review,
+    Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose, ControlEntry,
+    ConversationRoute, ConversationRouteDecisionProjection, ConversationTurnRef, EventHandler,
+    JsonlSessionStore, ModelMessage, PlanApprovalPermission, PlanApprovalScope, PlanCompileInputV1,
+    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
+    PlanPermissionGrantedEntry, PlanReviewAttemptEntry, PlanReviewAttemptId,
+    PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
+    PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
+    PublicEventOutboxEntryV1, PublicRunEvent, PublicRunEventKind, RunEvent, Session,
+    SessionLogEntry, SessionRef, StartPlanReviewAction, TaskCreatedFromPlanEntry, TaskId,
+    TaskRunEntry, TaskRunStatus, TaskStepId, build_workspace_snapshot,
+    plain_text_plan_draft_entry_with_plan_id, plan_review_attempt_id_for_review,
     plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
     plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
     plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
-    plan_review_system_prompt_contract_material, plan_task_input_from_draft, safe_persistence_text,
-    stable_event_uuid, stable_workspace_id, task_id_from_plan_draft,
+    plan_review_system_prompt_contract_material, plan_task_input_from_draft, plan_text_hash,
+    safe_persistence_text, stable_event_uuid, stable_workspace_id, task_id_from_plan_draft,
 };
 
 use sigil_kernel::ApprovalHandler;
@@ -42,7 +42,6 @@ use crate::managed_storage_writer::{
 };
 use crate::{RootConfig, attach_session_url_capability_store};
 
-const PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS: usize = 4;
 const PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS: usize = 1;
 const MAX_MANAGED_PLAN_REVIEW_RECOVERY_LOG_BYTES: usize = 16 * 1024 * 1024;
 
@@ -108,6 +107,35 @@ pub struct PlanReviewRunRequest {
     /// Exact workspace snapshot the draft will be bound to; direct promotion requires the
     /// workspace to be unchanged between review and `Run plan`.
     pub workspace_snapshot_id: Option<String>,
+}
+
+/// Exact compare-and-swap admission for resuming a terminal Plan review attempt.
+///
+/// Adapters may carry this value opaquely, but the runtime rechecks every binding against the
+/// durable parent before allocating a successor. A candidate hash is required when the current
+/// terminal attempt has a complete preserved candidate; a retry cannot silently replace that
+/// body with a newly generated result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewRetryCommand {
+    pub command_id: String,
+    pub plan_review_id: PlanReviewId,
+    pub expected_attempt_id: PlanReviewAttemptId,
+    pub expected_status: PlanReviewAttemptStatus,
+    pub expected_durable_frontier: u64,
+    pub expected_context_digest: String,
+    pub candidate_hash: Option<String>,
+    pub blocker_id: Option<String>,
+    pub workspace_snapshot_id: Option<String>,
+}
+
+/// Receipt for one retry CAS. Replaying the same command returns the same successor request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanReviewRetryReceipt {
+    pub command_id: String,
+    pub predecessor_attempt_id: PlanReviewAttemptId,
+    pub successor_attempt_id: PlanReviewAttemptId,
+    pub request: PlanReviewRunRequest,
+    pub idempotent_replay: bool,
 }
 
 /// Current-schema child resource scope. Parent session stores, artifact stores and writer leases
@@ -398,7 +426,13 @@ fn combine_child_resource_settlement<T>(result: Result<T>, settlement: Result<()
     match (result, settlement) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Err(error)) => {
+            // The Plan outcome is the domain owner. Releasing a child lease is a separate
+            // resource concern and must not rewrite a confirmed draft/no-plan result into a
+            // provider failure. The resource owner retains the failure in its own diagnostics.
+            tracing::error!(%error, "plan-review child resource settlement failed after domain outcome");
+            Ok(value)
+        }
         (Err(error), Err(settlement_error)) => Err(error.context(format!(
             "plan-review child resource settlement also failed: {settlement_error:#}"
         ))),
@@ -1195,12 +1229,15 @@ impl PlanReviewCoordinator {
         if decision.source_turn != action.source_turn {
             bail!("plan review action source turn conflicts with its route decision");
         }
-        let objective = source_turn_objective(session, &action.source_turn).ok_or_else(|| {
-            anyhow!(
-                "plan review source user turn {} is not present",
-                action.source_turn.message_id
-            )
-        })?;
+        let objective = session
+            .source_user_message(&action.source_turn.message_id)
+            .map(|message| message.content.clone().unwrap_or_default())
+            .ok_or_else(|| {
+                anyhow!(
+                    "plan review source user turn {} is not present",
+                    action.source_turn.message_id
+                )
+            })?;
         let review_projection = PlanReviewProjection::from_entries(session.entries());
         if review_projection.has_conflicts() {
             bail!("plan review projection contains conflicts");
@@ -1299,11 +1336,13 @@ impl PlanReviewCoordinator {
 
     /// Runs the read-only plan review child session.
     ///
-    /// The run uses the read-only tool registry, never writes to the parent session, and closes
-    /// with a validated typed draft. Research is bounded independently from an ordinary agent run.
-    /// If research reaches that bound, finishes without a draft, or loses a provider stream at a
-    /// typed recoverable boundary, the host starts one submit-only finalization turn. A draft-less
-    /// finalization closes with `CompletedWithoutDraft`.
+    /// The child uses the read-only tool registry and keeps provider/tool controls isolated. A
+    /// complete untyped response is copied as bounded candidate evidence to the parent, while a
+    /// typed draft is committed later by the normal parent coordinator. Research uses the
+    /// caller's ordinary `AgentRunOptions` budget without a Plan-specific turn clamp. If research
+    /// finishes without a typed draft or loses a provider stream at a typed recoverable boundary,
+    /// the host starts one submit-only finalization turn. An unclassified finalization pauses with
+    /// its candidate available for explicit adoption.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_plan_review<H, A>(
@@ -1414,6 +1453,12 @@ impl PlanReviewCoordinator {
             None => None,
         };
 
+        // Freeze the parent provider-visible discussion before the first child dispatch. The
+        // child session is intentionally isolated, so its empty durable history cannot provide
+        // the conversation that led to this review. The source user turn itself is appended by
+        // the run input below; older turns remain in their original provider-neutral roles.
+        let parent_context = plan_review_parent_context(parent_session, request)?;
+
         // A revision's `Started` record remains owned by its revision execution protocol. An
         // ordinary parent attempt instead crosses the supplied handler commit boundary so an
         // application bridge can atomically append its source and public outbox entry.
@@ -1441,6 +1486,7 @@ impl PlanReviewCoordinator {
             plan_id: request.plan_id.clone(),
             source: request.plan_source_ref(),
             workspace_snapshot_id: request.workspace_snapshot_id.clone(),
+            candidate_content: None,
         };
         if cancellation.is_cancel_requested() {
             return Ok(PlanReviewRunOutcome::Cancelled);
@@ -1464,6 +1510,8 @@ impl PlanReviewCoordinator {
                 .max_by_key(|candidate| candidate.requested_at_unix_ms)
                 .and_then(|candidate| projection.request(&candidate.identity).cloned())
         };
+        let mut research_candidate_text =
+            plan_review_candidate_content(&child_session, request)?;
         if let Some(state) = existing_research_input.as_ref()
             && state.status == sigil_kernel::UserInputStatusV1::Requested
         {
@@ -1483,18 +1531,10 @@ impl PlanReviewCoordinator {
             return complete_plan_review_run(&cancellation, PlanReviewRunOutcome::Cancelled);
         }
 
-        let configured_max_turns = options.max_turns;
-        let host_imposed_research_cap = configured_max_turns
-            .is_none_or(|max_turns| max_turns > PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS);
         let mut research_options = options.clone();
         if let Some(bundle) = child_bundle.as_ref() {
             research_options = research_options.with_tool_authority(bundle.tool_authority());
         }
-        research_options.max_turns = Some(
-            configured_max_turns
-                .unwrap_or(PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS)
-                .min(PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS),
-        );
         let mut continuation_resolution = None;
         let mut research_logical_run_id = request.child_logical_run_id();
         let skip_research_cause = existing_research_input.as_ref().and_then(|state| {
@@ -1559,9 +1599,19 @@ impl PlanReviewCoordinator {
                     &draft_context,
                     &cancellation,
                     &prepared.continuation,
+                    &parent_context,
                 )
             } else {
-                plan_review_run_input(request, &draft_context, &cancellation, None, 0)
+                plan_review_run_input(
+                    request,
+                    &draft_context,
+                    &cancellation,
+                    &parent_context,
+                    None,
+                    None,
+                    None,
+                    0,
+                )
             };
             let mut child_handler = PlanReviewChildEventHandler { inner: handler };
             Some(
@@ -1606,7 +1656,75 @@ impl PlanReviewCoordinator {
                     Ok(_) if cancellation.is_cancel_requested() => {
                         return Ok(PlanReviewRunOutcome::Cancelled);
                     }
-                    Ok(output) => match output.disposition {
+                    Ok(output) => {
+                        if output.disposition == AgentRunDisposition::FinalAnswer
+                            && !output.result.final_text.trim().is_empty()
+                        {
+                            let source_event_id = output.result.final_message_id.clone();
+                            research_candidate_text = match record_plan_review_candidate(
+                                &mut child_session,
+                                request,
+                                &output.result.final_text,
+                                source_event_id.clone(),
+                                sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
+                                now_ms(),
+                            ) {
+                                Ok(candidate) => candidate,
+                                Err(error) => {
+                                    handler.handle(RunEvent::Notice(format!(
+                                        "Plan review candidate could not be durably preserved: {error:#}"
+                                    )))?;
+                                    return complete_plan_review_run(
+                                        &cancellation,
+                                        PlanReviewRunOutcome::Paused(
+                                            "Plan review candidate requires durable managed storage before confirmation"
+                                                .to_owned(),
+                                        ),
+                                    );
+                                }
+                            };
+                            if let Some(content) = research_candidate_text.as_deref()
+                                && let Err(error) = record_plan_review_candidate_in_parent(
+                                    parent_session,
+                                    request,
+                                    content,
+                                    source_event_id,
+                                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
+                                    handler,
+                                    now_ms(),
+                                )
+                            {
+                                handler.handle(RunEvent::Notice(format!(
+                                    "Plan review candidate could not be mirrored to the parent session: {error:#}"
+                                )))?;
+                                return complete_plan_review_run(
+                                    &cancellation,
+                                    PlanReviewRunOutcome::Paused(
+                                        "Plan review candidate requires durable parent storage before confirmation"
+                                            .to_owned(),
+                                    ),
+                                );
+                            }
+                        }
+                        if let Some(reason) = plan_review_no_plan_reason(&child_session) {
+                            record_plan_review_candidate_in_parent(
+                                parent_session,
+                                request,
+                                &reason,
+                                None,
+                                sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                                handler,
+                                now_ms(),
+                            )?;
+                            handler.handle(RunEvent::Notice(format!(
+                                "Plan review completed without a draft: {reason}"
+                            )))?;
+                            return complete_plan_review_run(
+                                &cancellation,
+                                PlanReviewRunOutcome::CompletedWithoutDraft,
+                            );
+                        }
+                        match output.disposition {
                         AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
                             let outcome =
                                 plan_review_draft_ready_outcome(&child_session, &action.plan_id)?;
@@ -1636,16 +1754,6 @@ impl PlanReviewCoordinator {
                                     request: Box::new(request),
                                 },
                             );
-                        }
-                        AgentRunDisposition::Interrupted
-                            if host_imposed_research_cap
-                                && output.outcome.terminal_reason
-                                    == AgentRunTerminalReason::MaxTurns =>
-                        {
-                            handler.handle(RunEvent::Notice(format!(
-                        "Plan review research reached its {PLAN_REVIEW_RESEARCH_MAX_MODEL_TURNS}-turn bound; continuing with one submit-only finalization turn."
-                    )))?;
-                            None
                         }
                         AgentRunDisposition::Interrupted => {
                             return complete_plan_review_run(
@@ -1683,7 +1791,8 @@ impl PlanReviewCoordinator {
                                 ),
                             );
                         }
-                    },
+                        }
+                    }
                     Err(error) => {
                         if cancellation.is_cancel_requested() {
                             return Ok(PlanReviewRunOutcome::Cancelled);
@@ -1735,7 +1844,25 @@ impl PlanReviewCoordinator {
             )?;
         }
         let evidence = plan_review_finalizer_evidence_bundle(request, &child_session);
+        let research_model_turns = child_session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, SessionLogEntry::Assistant(_)))
+            .count();
+        if options
+            .max_turns
+            .is_some_and(|max_turns| research_model_turns >= max_turns)
+        {
+            return complete_plan_review_run(
+                &cancellation,
+                PlanReviewRunOutcome::Paused(
+                    "plan review reached the configured model-turn budget before result confirmation"
+                        .to_owned(),
+                ),
+            );
+        }
         let mut last_violation = None;
+        let mut last_violation_digest = None;
         for corrective_ordinal in 1..=2 {
             if cancellation.is_cancel_requested() {
                 return Ok(PlanReviewRunOutcome::Cancelled);
@@ -1775,12 +1902,24 @@ impl PlanReviewCoordinator {
                 finalization_options =
                     finalization_options.with_tool_authority(bundle.tool_authority());
             }
-            finalization_options.max_turns = Some(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS);
+            finalization_options.max_turns = Some(
+                options
+                    .max_turns
+                    .map(|max_turns| {
+                        max_turns
+                            .saturating_sub(research_model_turns)
+                            .min(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS)
+                    })
+                    .unwrap_or(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS),
+            );
             let finalization_input = plan_review_run_input(
                 request,
                 &draft_context,
                 &cancellation,
+                &parent_context,
                 Some(&evidence),
+                research_candidate_text.as_deref(),
+                last_violation.as_deref(),
                 corrective_ordinal,
             );
             let mut child_handler = PlanReviewChildEventHandler { inner: handler };
@@ -1814,12 +1953,79 @@ impl PlanReviewCoordinator {
                     return Err(error.context(context));
                 }
             };
+            if output.disposition == AgentRunDisposition::FinalAnswer
+                && !output.result.final_text.trim().is_empty()
+            {
+                let source_event_id = output.result.final_message_id.clone();
+                if let Err(error) = record_plan_review_candidate(
+                    &mut finalizer_session,
+                    request,
+                    &output.result.final_text,
+                    source_event_id.clone(),
+                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                    now_ms(),
+                ) {
+                    handler.handle(RunEvent::Notice(format!(
+                        "Plan review finalizer candidate could not be durably preserved: {error:#}"
+                    )))?;
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Paused(
+                            "Plan review candidate requires durable managed storage before confirmation"
+                                .to_owned(),
+                        ),
+                    )
+                    .map(Some);
+                }
+                if let Err(error) = record_plan_review_candidate_in_parent(
+                    parent_session,
+                    request,
+                    &output.result.final_text,
+                    source_event_id,
+                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                    handler,
+                    now_ms(),
+                ) {
+                    handler.handle(RunEvent::Notice(format!(
+                        "Plan review finalizer candidate could not be mirrored to the parent session: {error:#}"
+                    )))?;
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Paused(
+                            "Plan review candidate requires durable parent storage before confirmation"
+                                .to_owned(),
+                        ),
+                    )
+                    .map(Some);
+                }
+            }
+            if let Some(reason) = plan_review_no_plan_reason(&finalizer_session) {
+                record_plan_review_candidate_in_parent(
+                    parent_session,
+                    request,
+                    &reason,
+                    None,
+                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                    handler,
+                    now_ms(),
+                )?;
+                handler.handle(RunEvent::Notice(format!(
+                    "Plan review completed without a draft: {reason}"
+                )))?;
+                return complete_plan_review_run(
+                    &cancellation,
+                    PlanReviewRunOutcome::CompletedWithoutDraft,
+                )
+                .map(Some);
+            }
             if finalizer_session.entries().iter().any(|entry| {
                 matches!(
                     entry,
                     SessionLogEntry::Assistant(message)
                         if message.tool_calls.iter().any(|call| {
-                            call.name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
+                        call.name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
+                                && call.name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
+                                && call.name != sigil_kernel::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
                         })
                 )
             }) {
@@ -1838,6 +2044,18 @@ impl PlanReviewCoordinator {
                 ).map(Some);
             }
             if let Some(reason) = invalid_plan_draft_submission_reason(&finalizer_session) {
+                let digest = sigil_kernel::stable_event_hash(reason.as_bytes());
+                if last_violation_digest.as_deref() == Some(digest.as_str()) {
+                    return complete_plan_review_run(
+                        &cancellation,
+                        PlanReviewRunOutcome::Paused(
+                            "plan finalization repeated the same validation error; retry requires an explicit new allowance"
+                                .to_owned(),
+                        ),
+                    )
+                    .map(Some);
+                }
+                last_violation_digest = Some(digest);
                 last_violation = Some(reason.clone());
                 if corrective_ordinal == 1 {
                     handler.handle(RunEvent::Notice(
@@ -1845,15 +2063,6 @@ impl PlanReviewCoordinator {
                             .to_owned(),
                     ))?;
                     return Ok(None);
-                }
-                if let Some(outcome) =
-                    plain_text_plan_review_outcome(request, &output.result.final_text, now_ms())?
-                {
-                    handler.handle(RunEvent::Notice(
-                        "The model could not satisfy the structured Plan schema; preserved its complete text as the reviewable Plan instead."
-                            .to_owned(),
-                    ))?;
-                    return complete_plan_review_run(&cancellation, outcome).map(Some);
                 }
                 return complete_plan_review_run(
                     &cancellation,
@@ -1865,8 +2074,10 @@ impl PlanReviewCoordinator {
                     plan_review_draft_ready_outcome(&finalizer_session, &action.plan_id)?
                 }
                 AgentRunDisposition::FinalAnswer => {
-                    plain_text_plan_review_outcome(request, &output.result.final_text, now_ms())?
-                        .unwrap_or(PlanReviewRunOutcome::CompletedWithoutDraft)
+                    PlanReviewRunOutcome::Paused(
+                        "a complete Plan candidate was preserved and awaits explicit confirmation"
+                            .to_owned(),
+                    )
                 }
                 AgentRunDisposition::AwaitingUserInput(_) => PlanReviewRunOutcome::Failed(
                     "plan review finalization exposed an unsupported user-input suspension"
@@ -1942,6 +2153,30 @@ impl PlanReviewCoordinator {
             );
         }
         validate_plan_review_child_draft(draft, request)?;
+        let controls = Self::plan_review_draft_terminal_controls(parent, draft, request, now_ms)?;
+        if !controls.is_empty() {
+            handler.commit_controls(parent, controls)?;
+        }
+        Ok(())
+    }
+
+    /// Builds the exact durable controls for a successful ordinary Plan review draft. The
+    /// returned vector is pure with respect to persistence: callers can include it in a larger
+    /// terminal writer bundle without first committing a partial attempt transition.
+    pub fn plan_review_draft_terminal_controls(
+        parent: &Session,
+        draft: &PlanDraftCreatedEntry,
+        request: &PlanReviewRunRequest,
+        now_ms: u64,
+    ) -> Result<Vec<ControlEntry>> {
+        validate_plan_review_request_lineage(request)?;
+        validate_plan_review_request_objective(parent, request)?;
+        if request.revision_request_id.is_some() {
+            bail!(
+                "revision draft completion requires the atomic revision terminal and public outbox"
+            );
+        }
+        validate_plan_review_child_draft(draft, request)?;
         let projection = parent.plan_artifact_projection();
         let draft_missing = match projection.plans.get(&request.plan_id) {
             Some(existing) if existing == draft => false,
@@ -1957,6 +2192,11 @@ impl PlanReviewCoordinator {
         if draft_missing {
             controls.push(ControlEntry::PlanDraftCreated(draft.clone()));
         }
+        if let Some(resolution) =
+            plan_review_resolution_for_draft_candidate(parent, request, draft, now_ms)?
+        {
+            controls.push(ControlEntry::PlanReviewResolutionRecordedV1(resolution));
+        }
         if let Some(attempt_entry) = plan_review_attempt_status_entry(
             parent,
             request,
@@ -1966,12 +2206,7 @@ impl PlanReviewCoordinator {
         )? {
             controls.push(ControlEntry::PlanReviewAttempt(attempt_entry));
         }
-        if controls.is_empty() {
-            Ok(())
-        } else {
-            handler.commit_controls(parent, controls)?;
-            Ok(())
-        }
+        Ok(controls)
     }
 
     /// Builds the pure, deterministic compile input for one plan review attempt (RFC-0067 7.2).
@@ -2221,15 +2456,41 @@ impl PlanReviewCoordinator {
         if request.revision_request_id.is_some() {
             bail!("revision completion requires the atomic revision terminal and public outbox");
         }
-        append_attempt_status(
+        let controls = Self::plan_review_no_draft_terminal_controls(session, request, now_ms)?;
+        if !controls.is_empty() {
+            handler.commit_controls(session, controls)?;
+        }
+        Ok(())
+    }
+
+    /// Builds the exact durable controls for an ordinary Plan review that completed without a
+    /// draft, allowing the attempt closure to share the enclosing conversation terminal batch.
+    pub fn plan_review_no_draft_terminal_controls(
+        session: &Session,
+        request: &PlanReviewRunRequest,
+        now_ms: u64,
+    ) -> Result<Vec<ControlEntry>> {
+        validate_plan_review_request_lineage(request)?;
+        validate_plan_review_request_objective(session, request)?;
+        if request.revision_request_id.is_some() {
+            bail!("revision completion requires the atomic revision terminal and public outbox");
+        }
+        let mut controls = Vec::new();
+        if let Some(resolution) =
+            plan_review_resolution_for_no_plan_candidate(session, request, now_ms)?
+        {
+            controls.push(ControlEntry::PlanReviewResolutionRecordedV1(resolution));
+        }
+        if let Some(attempt) = plan_review_attempt_status_entry(
             session,
             request,
-            handler,
             PlanReviewAttemptStatus::CompletedWithoutDraft,
             Some(PlanReviewTerminalReason::NoDraftAfterRetry),
             now_ms,
-        )?;
-        Ok(())
+        )? {
+            controls.push(ControlEntry::PlanReviewAttempt(attempt));
+        }
+        Ok(controls)
     }
 
     /// Prepares a revision attempt for an existing plan review lifecycle.
@@ -2739,6 +3000,244 @@ impl PlanReviewCoordinator {
         Ok(Some(request))
     }
 
+    /// Resumes an ordinary or revision Plan review through one exact terminal-frontier CAS.
+    ///
+    /// The predecessor remains terminal forever. The deterministic successor identity is derived
+    /// from the command receipt, so a replay returns the same request while a concurrent command
+    /// with a different receipt observes a stale frontier and cannot dispatch a second owner.
+    pub fn retry_plan_review(
+        session: &mut Session,
+        command: &PlanReviewRetryCommand,
+        now_ms: u64,
+    ) -> Result<PlanReviewRetryReceipt> {
+        if command.command_id.trim().is_empty()
+            || safe_persistence_text(&command.command_id) != command.command_id
+        {
+            bail!("plan review retry command id is not bounded safe text");
+        }
+        let projection = PlanReviewProjection::from_entries(session.entries());
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        let latest = projection
+            .latest_attempt(&command.plan_review_id)
+            .cloned()
+            .context("plan review retry has no durable attempt")?;
+        let successor_id = sigil_kernel::plan_review_attempt_id_for_retry(
+            &command.plan_review_id,
+            &command.expected_attempt_id,
+            &command.command_id,
+        );
+        if latest.attempt_id == successor_id {
+            let request = plan_review_request_from_attempt(session, &latest)?;
+            return Ok(PlanReviewRetryReceipt {
+                command_id: command.command_id.clone(),
+                predecessor_attempt_id: command.expected_attempt_id.clone(),
+                successor_attempt_id: successor_id,
+                request,
+                idempotent_replay: true,
+            });
+        }
+        if command.expected_durable_frontier != session.durable_frontier_sequence() {
+            bail!(
+                "plan review retry frontier is stale (expected {}, current {})",
+                command.expected_durable_frontier,
+                session.durable_frontier_sequence()
+            );
+        }
+        if latest.attempt_id != command.expected_attempt_id {
+            bail!(
+                "plan review retry expected attempt {} but current attempt is {}",
+                command.expected_attempt_id.as_str(),
+                latest.attempt_id.as_str()
+            );
+        }
+        if latest.status != command.expected_status {
+            bail!(
+                "plan review retry expected status {} but current status is {}",
+                command.expected_status.as_str(),
+                latest.status.as_str()
+            );
+        }
+        if !matches!(
+            latest.status,
+            PlanReviewAttemptStatus::Paused
+                | PlanReviewAttemptStatus::Blocked
+                | PlanReviewAttemptStatus::Interrupted
+                | PlanReviewAttemptStatus::Failed
+        ) {
+            bail!(
+                "plan review retry requires a terminal paused, blocked, interrupted, or failed attempt"
+            );
+        }
+        let request = plan_review_request_from_attempt(session, &latest)?;
+        let context_digest = plan_review_context_digest(session, &latest, &request.objective)?;
+        if context_digest != command.expected_context_digest {
+            bail!("plan review retry context binding is stale");
+        }
+        let candidate = session.entries().iter().rev().find_map(|entry| {
+            let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+                entry
+            else {
+                return None;
+            };
+            (candidate.plan_review_id == latest.plan_review_id
+                && candidate.attempt_id == latest.attempt_id
+                && candidate.plan_id == latest.plan_id)
+                .then(|| (**candidate).clone())
+        });
+        if let Some(candidate_hash) = command.candidate_hash.as_deref() {
+            let Some(candidate) = candidate.as_ref() else {
+                bail!("plan review retry supplied a candidate hash but no candidate is durable");
+            };
+            if candidate.content_hash != candidate_hash {
+                bail!("plan review retry candidate hash is stale");
+            }
+        } else if candidate.as_ref().is_some_and(|candidate| {
+            candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete
+        }) {
+            bail!("plan review retry must bind the complete preserved candidate hash");
+        }
+        let successor_plan_id =
+            plan_review_plan_id_for_attempt(&latest.plan_review_id, &successor_id);
+        let successor_request = PlanReviewRunRequest {
+            plan_review_id: latest.plan_review_id.clone(),
+            attempt_id: successor_id.clone(),
+            plan_id: successor_plan_id,
+            source: latest.source,
+            source_turn: latest.source_turn.clone(),
+            route_decision_id: latest.route_decision_id.clone(),
+            child_session_ref: plan_review_child_session_ref(&latest.plan_review_id, &successor_id),
+            finalizer_session_ref: plan_review_finalizer_session_ref(
+                &latest.plan_review_id,
+                &successor_id,
+                1,
+            ),
+            revision_request_id: latest.revision_request_id.clone(),
+            attempt_ordinal: latest.attempt_ordinal.saturating_add(1),
+            base_plan_id: latest.base_plan_id.clone(),
+            base_plan_hash: latest.base_plan_hash.clone(),
+            explicit_objective: latest.explicit_objective.clone(),
+            objective: request.objective,
+            workspace_snapshot_id: command.workspace_snapshot_id.clone(),
+        };
+        validate_plan_review_request_lineage(&successor_request)?;
+        let successor_attempt = PlanReviewAttemptEntry {
+            plan_review_id: successor_request.plan_review_id.clone(),
+            attempt_id: successor_request.attempt_id.clone(),
+            plan_id: successor_request.plan_id.clone(),
+            source: successor_request.source,
+            source_turn: successor_request.source_turn.clone(),
+            route_decision_id: successor_request.route_decision_id.clone(),
+            child_session_ref: successor_request.child_session_ref.clone(),
+            finalizer_session_ref: Some(successor_request.finalizer_session_ref.clone()),
+            revision_request_id: successor_request.revision_request_id.clone(),
+            attempt_ordinal: successor_request.attempt_ordinal,
+            base_plan_id: successor_request.base_plan_id.clone(),
+            base_plan_hash: successor_request.base_plan_hash.clone(),
+            explicit_objective: successor_request.explicit_objective.clone(),
+            workspace_snapshot_id: successor_request.workspace_snapshot_id.clone(),
+            pending_user_input: None,
+            status: PlanReviewAttemptStatus::Started,
+            terminal_reason: None,
+            recorded_at_ms: now_ms,
+        };
+        projection.validate_append(&successor_attempt)?;
+        session.append_controls(vec![ControlEntry::PlanReviewAttempt(successor_attempt)])?;
+        Ok(PlanReviewRetryReceipt {
+            command_id: command.command_id.clone(),
+            predecessor_attempt_id: command.expected_attempt_id.clone(),
+            successor_attempt_id: successor_id,
+            request: successor_request,
+            idempotent_replay: false,
+        })
+    }
+
+    /// Builds and applies a retry CAS for the latest terminal attempt bound to one public Plan
+    /// identity. Product adapters that only retain the bounded public `plan_id` use this helper;
+    /// it derives the private review/attempt binding and candidate requirement from the durable
+    /// session before appending the deterministic successor.
+    pub fn retry_plan_review_for_plan(
+        session: &mut Session,
+        plan_id: &PlanId,
+        expected_candidate_hash: Option<&str>,
+        now_ms: u64,
+    ) -> Result<PlanReviewRetryReceipt> {
+        let projection = PlanReviewProjection::from_entries(session.entries());
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        let attempt = projection
+            .attempt_for_plan(plan_id)
+            .cloned()
+            .or_else(|| {
+                projection
+                    .reviews()
+                    .flat_map(|review| review.attempts.iter().rev())
+                    .find(|attempt| {
+                        attempt.base_plan_id.as_ref() == Some(plan_id)
+                            && attempt.status.is_terminal()
+                    })
+                    .cloned()
+            })
+            .context("plan review retry has no durable attempt for the requested plan")?;
+        let candidate = session.entries().iter().rev().find_map(|entry| {
+            let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+                entry
+            else {
+                return None;
+            };
+            (candidate.plan_review_id == attempt.plan_review_id
+                && candidate.attempt_id == attempt.attempt_id
+                && candidate.plan_id == attempt.plan_id)
+                .then(|| (**candidate).clone())
+        });
+        let candidate_hash = match (candidate.as_ref(), expected_candidate_hash) {
+            (Some(candidate), Some(expected)) if candidate.content_hash == expected => {
+                Some(expected.to_owned())
+            }
+            (Some(candidate), Some(expected)) => {
+                bail!(
+                    "plan review retry candidate hash is stale (expected {}, current {})",
+                    expected,
+                    candidate.content_hash
+                )
+            }
+            (Some(candidate), None)
+                if candidate.completeness
+                    == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete =>
+            {
+                bail!("plan review retry must bind the complete preserved candidate hash")
+            }
+            (_, Some(expected)) if !expected.trim().is_empty() => {
+                bail!("plan review retry supplied a candidate hash but no candidate is durable")
+            }
+            _ => None,
+        };
+        let command_id = sigil_kernel::stable_event_uuid(
+            "sigil-plan-review-retry-command-v1",
+            &format!(
+                "{}|{}|{}|{}",
+                session.session_scope_id(),
+                attempt.plan_review_id.as_str(),
+                attempt.attempt_id.as_str(),
+                expected_candidate_hash.unwrap_or_default()
+            ),
+        );
+        let command = PlanReviewRetryCommand {
+            command_id,
+            plan_review_id: attempt.plan_review_id.clone(),
+            expected_attempt_id: attempt.attempt_id.clone(),
+            expected_status: attempt.status,
+            expected_durable_frontier: session.durable_frontier_sequence(),
+            expected_context_digest: plan_review_context_digest_for_attempt(session, &attempt)?,
+            candidate_hash,
+            blocker_id: None,
+            workspace_snapshot_id: attempt.workspace_snapshot_id.clone(),
+        };
+        Self::retry_plan_review(session, &command, now_ms)
+    }
+
     /// Accepts a user-input decision owned by the read-only research child and returns the exact
     /// plan-review attempt that must be resumed under a supervisor.
     ///
@@ -3085,6 +3584,116 @@ impl PlanReviewCoordinator {
         };
         session.append_control(ControlEntry::PlanDecisionRecorded(entry.clone()))?;
         Ok(entry)
+    }
+
+    /// Explicitly adopts one complete, immutable plain-text candidate preserved by a Plan review.
+    ///
+    /// Adoption is a user-owned presentation decision. It creates the normal Plan draft and
+    /// DraftReady attempt transition, but never approves execution or creates a Task.
+    pub fn adopt_plan_review_candidate<H>(
+        session: &mut Session,
+        plan_id: &PlanId,
+        expected_candidate_hash: &str,
+        handler: &mut H,
+        now_ms: u64,
+    ) -> Result<PlanDraftCreatedEntry>
+    where
+        H: EventHandler + ?Sized,
+    {
+        let candidate = session
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(
+                    candidate,
+                )) if &candidate.plan_id == plan_id
+                    && candidate.content_hash == expected_candidate_hash
+                    && candidate.completeness
+                        == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete =>
+                {
+                    Some((**candidate).clone())
+                }
+                _ => None,
+            })
+            .context("the requested Plan review candidate is not available")?;
+        if let Some(existing) = session.plan_artifact_projection().plans.get(plan_id) {
+            if existing.plan_hash == expected_candidate_hash {
+                return Ok(existing.clone());
+            }
+            bail!("plan {} already has a durable draft", plan_id.as_str());
+        }
+        let projection = PlanReviewProjection::from_entries(session.entries());
+        let attempt = projection
+            .latest_attempt(&candidate.plan_review_id)
+            .filter(|attempt| {
+                attempt.attempt_id == candidate.attempt_id && attempt.plan_id == *plan_id
+            })
+            .cloned()
+            .context("the requested Plan review candidate lost its attempt")?;
+        if !attempt.status.is_terminal() {
+            bail!(
+                "the requested Plan review candidate belongs to active attempt {}",
+                attempt.attempt_id.as_str()
+            );
+        }
+        let candidate_content = candidate_body_from_record(session, &candidate)?;
+        let draft = plain_text_plan_draft_entry_with_plan_id(
+            plan_id.clone(),
+            &candidate_content,
+            candidate.source,
+            now_ms,
+            attempt.workspace_snapshot_id.clone(),
+        )?
+        .context("the requested Plan review candidate is not valid Plan text")?;
+        // Candidate adoption is a user-owned resolution of a terminal physical attempt. Keep the
+        // original attempt immutable and append a deterministic successor so a replayed command
+        // cannot rewrite the old paused/blocked/unknown lifecycle into DraftReady in place.
+        let command_id = sigil_kernel::stable_event_uuid(
+            "sigil-plan-review-candidate-adopt-command-v1",
+            &format!(
+                "{}|{}|{}|{}",
+                session.session_scope_id(),
+                candidate.plan_review_id.as_str(),
+                candidate.attempt_id.as_str(),
+                expected_candidate_hash
+            ),
+        );
+        let successor_attempt_id = sigil_kernel::plan_review_attempt_id_for_retry(
+            &candidate.plan_review_id,
+            &candidate.attempt_id,
+            &command_id,
+        );
+        let mut ready_attempt = attempt.clone();
+        ready_attempt.attempt_id = successor_attempt_id;
+        ready_attempt.attempt_ordinal = attempt.attempt_ordinal.saturating_add(1);
+        ready_attempt.child_session_ref = sigil_kernel::plan_review_child_session_ref(
+            &candidate.plan_review_id,
+            &ready_attempt.attempt_id,
+        );
+        ready_attempt.finalizer_session_ref = None;
+        ready_attempt.status = PlanReviewAttemptStatus::DraftReady;
+        ready_attempt.terminal_reason = None;
+        ready_attempt.recorded_at_ms = now_ms;
+        let resolution = sigil_kernel::PlanReviewResolutionRecordedV1 {
+            schema_version: sigil_kernel::PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION,
+            plan_review_id: candidate.plan_review_id.clone(),
+            attempt_id: candidate.attempt_id.clone(),
+            candidate_hash: expected_candidate_hash.to_owned(),
+            outcome: sigil_kernel::PlanReviewResultOutcome::Draft,
+            actor: sigil_kernel::PlanReviewResolutionActorV1::User,
+            receipt_id: command_id,
+            recorded_at_ms: now_ms,
+        };
+        handler.commit_controls(
+            session,
+            vec![
+                ControlEntry::PlanDraftCreated(draft.clone()),
+                ControlEntry::PlanReviewResolutionRecordedV1(resolution),
+                ControlEntry::PlanReviewAttempt(ready_attempt),
+            ],
+        )?;
+        Ok(draft)
     }
 
     /// Creates a durable task from an accepted plan through the shared RFC-0018 handoff.
@@ -3680,6 +4289,7 @@ fn invalid_plan_draft_submission_reason(session: &Session) -> Option<String> {
             return None;
         };
         if result.tool_name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
+            && result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
             || result.facts.status != "error"
         {
             return None;
@@ -3694,6 +4304,344 @@ fn invalid_plan_draft_submission_reason(session: &Session) -> Option<String> {
             "submit-only finalizer produced an invalid draft: {detail}"
         ))
     })
+}
+
+/// Reads a successful typed `no_plan` result from the child session's durable tool projection.
+/// The result content is a bounded JSON envelope, so recovery never infers the outcome from
+/// natural-language text or from an in-memory disposition alone.
+fn plan_review_no_plan_reason(session: &Session) -> Option<String> {
+    session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::ToolResultV3(result) = entry else {
+            return None;
+        };
+        if result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
+            || result.facts.status != "ok"
+        {
+            return None;
+        }
+        let envelope =
+            sigil_kernel::decode_plan_review_result(&result.initial_model_view.preview).ok()?;
+        (envelope.outcome == sigil_kernel::PlanReviewResultOutcome::NoPlan)
+            .then_some(envelope.content)
+    })
+}
+
+fn plan_review_candidate_content(
+    session: &Session,
+    request: &PlanReviewRunRequest,
+) -> Result<Option<String>> {
+    let candidate = session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+            entry
+        else {
+            return None;
+        };
+        (candidate.plan_review_id == request.plan_review_id
+            && candidate.attempt_id == request.attempt_id
+            && candidate.plan_id == request.plan_id
+            && candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
+            .then(|| (**candidate).clone())
+    });
+    candidate
+        .as_ref()
+        .map(|candidate| candidate_body_from_record(session, candidate))
+        .transpose()
+}
+
+/// Builds the model-resolution receipt when a typed draft confirms a previously preserved
+/// complete candidate. Typed drafts that have no candidate are already self-describing and do
+/// not need a second evidence record; candidate-backed drafts must retain the exact hash and
+/// source receipt so recovery can distinguish confirmation from regeneration.
+fn plan_review_resolution_for_draft_candidate(
+    parent: &Session,
+    request: &PlanReviewRunRequest,
+    draft: &PlanDraftCreatedEntry,
+    recorded_at_ms: u64,
+) -> Result<Option<sigil_kernel::PlanReviewResolutionRecordedV1>> {
+    let candidate = parent.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+            entry
+        else {
+            return None;
+        };
+        (candidate.plan_review_id == request.plan_review_id
+            && candidate.attempt_id == request.attempt_id
+            && candidate.plan_id == request.plan_id
+            && candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete
+            && candidate.content_hash == draft.plan_hash)
+            .then(|| (**candidate).clone())
+    });
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    if parent.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewResolutionRecordedV1(existing))
+                if existing.plan_review_id == request.plan_review_id
+                    && existing.attempt_id == request.attempt_id
+                    && existing.candidate_hash == candidate.content_hash
+                    && existing.outcome == sigil_kernel::PlanReviewResultOutcome::Draft
+        )
+    }) {
+        return Ok(None);
+    }
+    let receipt_id = candidate.source_event_id.clone().unwrap_or_else(|| {
+        sigil_kernel::stable_event_uuid(
+            "sigil-plan-review-model-resolution-v1",
+            &format!("{}|{}", request.attempt_id.as_str(), candidate.content_hash),
+        )
+    });
+    Ok(Some(sigil_kernel::PlanReviewResolutionRecordedV1 {
+        schema_version: sigil_kernel::PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION,
+        plan_review_id: request.plan_review_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        candidate_hash: candidate.content_hash,
+        outcome: sigil_kernel::PlanReviewResultOutcome::Draft,
+        actor: sigil_kernel::PlanReviewResolutionActorV1::Model,
+        receipt_id,
+        recorded_at_ms,
+    }))
+}
+
+fn plan_review_resolution_for_no_plan_candidate(
+    parent: &Session,
+    request: &PlanReviewRunRequest,
+    recorded_at_ms: u64,
+) -> Result<Option<sigil_kernel::PlanReviewResolutionRecordedV1>> {
+    let candidate = parent.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+            entry
+        else {
+            return None;
+        };
+        (candidate.plan_review_id == request.plan_review_id
+            && candidate.attempt_id == request.attempt_id
+            && candidate.plan_id == request.plan_id
+            && candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
+            .then(|| (**candidate).clone())
+    });
+    let Some(candidate) = candidate else {
+        return Ok(None);
+    };
+    if parent.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewResolutionRecordedV1(existing))
+                if existing.plan_review_id == request.plan_review_id
+                    && existing.attempt_id == request.attempt_id
+                    && existing.candidate_hash == candidate.content_hash
+                    && existing.outcome == sigil_kernel::PlanReviewResultOutcome::NoPlan
+        )
+    }) {
+        return Ok(None);
+    }
+    let receipt_id = candidate.source_event_id.clone().unwrap_or_else(|| {
+        sigil_kernel::stable_event_uuid(
+            "sigil-plan-review-model-no-plan-resolution-v1",
+            &format!("{}|{}", request.attempt_id.as_str(), candidate.content_hash),
+        )
+    });
+    Ok(Some(sigil_kernel::PlanReviewResolutionRecordedV1 {
+        schema_version: sigil_kernel::PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION,
+        plan_review_id: request.plan_review_id.clone(),
+        attempt_id: request.attempt_id.clone(),
+        candidate_hash: candidate.content_hash,
+        outcome: sigil_kernel::PlanReviewResultOutcome::NoPlan,
+        actor: sigil_kernel::PlanReviewResolutionActorV1::Model,
+        receipt_id,
+        recorded_at_ms,
+    }))
+}
+
+fn candidate_body_from_record(
+    session: &Session,
+    candidate: &sigil_kernel::PlanReviewCandidateRecordedV1,
+) -> Result<String> {
+    let content = if let Some(artifact) = candidate.content_artifact.as_ref() {
+        let store = session
+            .tool_artifact_store()
+            .context("plan review candidate body requires its managed artifact store")?;
+        let bytes = store.read_all(artifact)?;
+        String::from_utf8(bytes).context("plan review candidate artifact is not UTF-8")?
+    } else {
+        candidate.content.clone()
+    };
+    let content = safe_persistence_text(content.trim());
+    if plan_text_hash(&content) != candidate.content_hash {
+        bail!("plan review candidate body hash does not match its durable record");
+    }
+    Ok(content)
+}
+
+fn candidate_preview(content: &str) -> String {
+    let mut preview = String::new();
+    for character in content.chars() {
+        if preview.len() + character.len_utf8()
+            > sigil_kernel::PLAN_REVIEW_CANDIDATE_PREVIEW_MAX_BYTES
+        {
+            break;
+        }
+        preview.push(character);
+    }
+    preview
+}
+
+fn candidate_record_for_session(
+    session: &Session,
+    request: &PlanReviewRunRequest,
+    content: &str,
+    source_event_id: Option<String>,
+    completeness: sigil_kernel::PlanReviewCandidateCompletenessV1,
+    recorded_at_ms: u64,
+) -> Result<sigil_kernel::PlanReviewCandidateRecordedV1> {
+    let safe = safe_persistence_text(content.trim());
+    if safe.len() <= sigil_kernel::PLAN_REVIEW_CANDIDATE_PREVIEW_MAX_BYTES {
+        return sigil_kernel::plan_review_candidate_recorded_entry(
+            request.plan_review_id.clone(),
+            request.attempt_id.clone(),
+            request.plan_id.clone(),
+            request.plan_source_ref(),
+            source_event_id,
+            &safe,
+            completeness,
+            recorded_at_ms,
+        );
+    }
+    let store = session.tool_artifact_store().context(
+        "plan review candidate exceeds inline limit and requires managed artifact storage",
+    )?;
+    let artifact = store.capture_text(
+        &format!("plan-review-candidate:{}", request.attempt_id.as_str()),
+        "plan_review_candidate",
+        &safe,
+        sigil_kernel::ToolArtifactSensitivity::Ordinary,
+    )?;
+    if !matches!(
+        artifact.completeness,
+        sigil_kernel::ToolArtifactCompleteness::Complete
+    ) {
+        bail!("plan review candidate managed artifact was truncated");
+    }
+    sigil_kernel::plan_review_candidate_recorded_entry_with_artifact(
+        request.plan_review_id.clone(),
+        request.attempt_id.clone(),
+        request.plan_id.clone(),
+        request.plan_source_ref(),
+        source_event_id,
+        &candidate_preview(&safe),
+        artifact,
+        completeness,
+        recorded_at_ms,
+    )
+}
+
+fn record_plan_review_candidate(
+    session: &mut Session,
+    request: &PlanReviewRunRequest,
+    content: &str,
+    source_event_id: Option<String>,
+    completeness: sigil_kernel::PlanReviewCandidateCompletenessV1,
+    recorded_at_ms: u64,
+) -> Result<Option<String>> {
+    let safe_content = safe_persistence_text(content.trim());
+    if safe_content.is_empty() {
+        return Ok(None);
+    }
+    let content_hash = plan_text_hash(&safe_content);
+    if let Some(existing) = session
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate))
+                if candidate.plan_review_id == request.plan_review_id
+                    && candidate.attempt_id == request.attempt_id
+                    && candidate.plan_id == request.plan_id
+                    && candidate.content_hash == content_hash
+                    && candidate.completeness == completeness =>
+            {
+                Some((**candidate).clone())
+            }
+            _ => None,
+        })
+    {
+        return (completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
+            .then(|| candidate_body_from_record(session, &existing))
+            .transpose();
+    }
+    let candidate = candidate_record_for_session(
+        session,
+        request,
+        &safe_content,
+        source_event_id,
+        completeness,
+        recorded_at_ms,
+    )?;
+    if !session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(existing))
+                if existing.plan_review_id == request.plan_review_id
+                    && existing.attempt_id == request.attempt_id
+                    && existing.content_hash == candidate.content_hash
+        )
+    }) {
+        session.append_control(ControlEntry::PlanReviewCandidateRecordedV1(Box::new(
+            candidate.clone(),
+        )))?;
+    }
+    (completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
+        .then(|| candidate_body_from_record(session, &candidate))
+        .transpose()
+}
+
+fn record_plan_review_candidate_in_parent<H>(
+    parent: &mut Session,
+    request: &PlanReviewRunRequest,
+    content: &str,
+    source_event_id: Option<String>,
+    completeness: sigil_kernel::PlanReviewCandidateCompletenessV1,
+    handler: &mut H,
+    recorded_at_ms: u64,
+) -> Result<()>
+where
+    H: EventHandler + ?Sized,
+{
+    let safe_content = safe_persistence_text(content.trim());
+    if safe_content.is_empty() {
+        return Ok(());
+    }
+    let content_hash = plan_text_hash(&safe_content);
+    if parent.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(existing))
+                if existing.plan_review_id == request.plan_review_id
+                    && existing.attempt_id == request.attempt_id
+                    && existing.plan_id == request.plan_id
+                    && existing.content_hash == content_hash
+                    && existing.completeness == completeness
+        )
+    }) {
+        return Ok(());
+    }
+    let candidate = candidate_record_for_session(
+        parent,
+        request,
+        &safe_content,
+        source_event_id,
+        completeness,
+        recorded_at_ms,
+    )?;
+    handler
+        .commit_controls(
+            parent,
+            vec![ControlEntry::PlanReviewCandidateRecordedV1(Box::new(
+                candidate,
+            ))],
+        )
+        .map(|_| ())
 }
 
 /// Typed plan rejection command shared by TUI, HTTP, and Desktop surfaces.
@@ -4060,22 +5008,70 @@ fn plan_review_attempt_status_entry(
     Ok(Some(entry))
 }
 
+/// Captures the provider-visible parent discussion at the review boundary.
+///
+/// Automatic reviews already carry the source user message as the explicit objective, so the
+/// context snapshot stops immediately before that message to avoid turning one user instruction
+/// into two separate turns. Explicit `/plan` requests use a synthetic source-turn identity and
+/// therefore retain the complete current parent projection before appending their objective.
+fn plan_review_parent_context(
+    parent_session: &Session,
+    request: &PlanReviewRunRequest,
+) -> Result<Vec<ModelMessage>> {
+    let projection = parent_session
+        .try_context_projection_from_durable()?
+        .unwrap_or_else(|| parent_session.context_projection());
+    let mut entries = projection.retained_entries;
+    if request.source == PlanReviewSource::AutomaticConversationRoute {
+        if let Some(source_index) = entries
+            .iter()
+            .position(|entry| entry.message.id == request.source_turn.message_id)
+        {
+            entries.truncate(source_index);
+        } else {
+            // A compacted source may no longer have a standalone entry. Remove an unlikely
+            // duplicate defensively if a provider projection still carries that message id.
+            entries.retain(|entry| entry.message.id != request.source_turn.message_id);
+        }
+    }
+    Ok(entries.into_iter().map(|entry| entry.message).collect())
+}
+
 fn plan_review_run_input(
     request: &PlanReviewRunRequest,
     draft_context: &sigil_kernel::PlanReviewDraftContext,
     cancellation: &sigil_kernel::RunCancellationHandle,
+    parent_context: &[ModelMessage],
     finalizer_evidence: Option<&str>,
+    candidate_text: Option<&str>,
+    validation_feedback: Option<&str>,
     finalizer_ordinal: u32,
 ) -> AgentRunInput {
     let mut transient = vec![ModelMessage::system(
         plan_review_system_prompt_contract_material(),
     )];
+    if !parent_context.is_empty() {
+        transient.push(ModelMessage::system(
+            "Frozen parent conversation context follows; preserve its roles and ordering when forming the Plan.",
+        ));
+        transient.extend(parent_context.iter().cloned());
+    }
     if let Some(evidence) = finalizer_evidence {
         transient.push(ModelMessage::system(
             plan_review_no_draft_retry_contract_material(),
         ));
         transient.push(ModelMessage::user(format!(
             "Bounded host evidence bundle (do not perform more research):\n{evidence}"
+        )));
+    }
+    if let Some(candidate) = candidate_text {
+        transient.push(ModelMessage::user(format!(
+            "Complete Plan candidate from the read-only research phase (preserve this text exactly while classifying or repairing it):\n{candidate}"
+        )));
+    }
+    if let Some(feedback) = validation_feedback {
+        transient.push(ModelMessage::user(format!(
+            "Previous submit-only attempt was rejected by host validation. Correct this exact issue and submit one valid typed result; do not use research tools:\n{feedback}"
         )));
     }
     transient.push(ModelMessage::user(request.objective.clone()));
@@ -4098,11 +5094,18 @@ fn plan_review_run_input(
                 route_decision_id: request.route_decision_id.clone(),
             },
         ))
-        .with_plan_review_draft(draft_context.clone());
+        .with_plan_review_draft({
+            let mut context = draft_context.clone();
+            context.candidate_content = candidate_text.map(ToOwned::to_owned);
+            context
+        });
     if finalizer_evidence.is_some() {
         input.with_plan_review_submit_only()
     } else {
-        input
+        input.with_soft_checkpoint(
+            8,
+            "Reassess the evidence gathered so far. Decide whether it supports a typed Plan result or a clarification request; continue using the advertised read-only tools when more evidence is needed.",
+        )
     }
 }
 
@@ -4111,27 +5114,36 @@ fn plan_review_continuation_input(
     draft_context: &sigil_kernel::PlanReviewDraftContext,
     cancellation: &sigil_kernel::RunCancellationHandle,
     continuation: &sigil_kernel::UserInputContinuationStartedV1,
+    parent_context: &[ModelMessage],
 ) -> AgentRunInput {
-    AgentRunInput::without_persisted_user_message(vec![ModelMessage::system(
+    let mut transient = vec![ModelMessage::system(
         plan_review_system_prompt_contract_material(),
-    )])
-    .with_logical_run_id(continuation.continuation_logical_run_id.as_str())
-    .with_user_input_continuation_context(
-        continuation.identity.root_logical_run_id.as_str(),
-        continuation.identity.source_thread_id.clone(),
-    )
-    .with_initial_provider_physical_attempt_id(continuation.physical_attempt_id.clone())
-    .with_child_cancellation(cancellation.clone())
-    .with_run_purpose(AgentRunPurpose::PlanReview(
-        sigil_kernel::PlanReviewPurposeContext {
-            plan_review_id: request.plan_review_id.clone(),
-            attempt_id: request.attempt_id.clone(),
-            plan_id: request.plan_id.clone(),
-            source_turn: request.source_turn.clone(),
-            route_decision_id: request.route_decision_id.clone(),
-        },
-    ))
-    .with_plan_review_draft(draft_context.clone())
+    )];
+    if !parent_context.is_empty() {
+        transient.push(ModelMessage::system(
+            "Frozen parent conversation context follows; preserve its roles and ordering when forming the Plan.",
+        ));
+        transient.extend(parent_context.iter().cloned());
+    }
+    transient.push(ModelMessage::user(request.objective.clone()));
+    AgentRunInput::without_persisted_user_message(transient)
+        .with_logical_run_id(continuation.continuation_logical_run_id.as_str())
+        .with_user_input_continuation_context(
+            continuation.identity.root_logical_run_id.as_str(),
+            continuation.identity.source_thread_id.clone(),
+        )
+        .with_initial_provider_physical_attempt_id(continuation.physical_attempt_id.clone())
+        .with_child_cancellation(cancellation.clone())
+        .with_run_purpose(AgentRunPurpose::PlanReview(
+            sigil_kernel::PlanReviewPurposeContext {
+                plan_review_id: request.plan_review_id.clone(),
+                attempt_id: request.attempt_id.clone(),
+                plan_id: request.plan_id.clone(),
+                source_turn: request.source_turn.clone(),
+                route_decision_id: request.route_decision_id.clone(),
+            },
+        ))
+        .with_plan_review_draft(draft_context.clone())
 }
 
 fn plan_review_draft_ready_outcome(
@@ -4152,23 +5164,6 @@ fn plan_review_draft_ready_outcome(
     Ok(PlanReviewRunOutcome::DraftReady {
         draft: Box::new(draft),
     })
-}
-
-fn plain_text_plan_review_outcome(
-    request: &PlanReviewRunRequest,
-    final_text: &str,
-    created_at_ms: u64,
-) -> Result<Option<PlanReviewRunOutcome>> {
-    Ok(sigil_kernel::plain_text_plan_draft_entry_with_plan_id(
-        request.plan_id.clone(),
-        final_text,
-        request.plan_source_ref(),
-        created_at_ms,
-        request.workspace_snapshot_id.clone(),
-    )?
-    .map(|draft| PlanReviewRunOutcome::DraftReady {
-        draft: Box::new(draft),
-    }))
 }
 
 fn complete_plan_review_run(
@@ -4332,6 +5327,45 @@ fn plan_review_request_from_attempt(
     })
 }
 
+/// Computes the retry binding digest for one exact durable attempt and objective.
+///
+/// This is intentionally derived from stable identity and source fields rather than transient
+/// provider state. Callers must capture it together with the durable frontier immediately before
+/// issuing a retry command.
+pub fn plan_review_context_digest_for_attempt(
+    session: &Session,
+    attempt: &PlanReviewAttemptEntry,
+) -> Result<String> {
+    let request = plan_review_request_from_attempt(session, attempt)?;
+    plan_review_context_digest(session, attempt, &request.objective)
+}
+
+fn plan_review_context_digest(
+    session: &Session,
+    attempt: &PlanReviewAttemptEntry,
+    objective: &str,
+) -> Result<String> {
+    let payload = serde_json::json!({
+        "session_scope_id": session.session_scope_id(),
+        "plan_review_id": attempt.plan_review_id,
+        "attempt_id": attempt.attempt_id,
+        "plan_id": attempt.plan_id,
+        "source": attempt.source,
+        "source_turn": attempt.source_turn,
+        "route_decision_id": attempt.route_decision_id,
+        "revision_request_id": attempt.revision_request_id,
+        "attempt_ordinal": attempt.attempt_ordinal,
+        "base_plan_id": attempt.base_plan_id,
+        "base_plan_hash": attempt.base_plan_hash,
+        "explicit_objective": attempt.explicit_objective,
+        "objective": objective,
+        "workspace_snapshot_id": attempt.workspace_snapshot_id,
+    });
+    Ok(sigil_kernel::stable_event_hash(&serde_json::to_vec(
+        &payload,
+    )?))
+}
+
 /// Reads the immutable initial objective from the one durable source that owns it. Explicit
 /// `/plan` attempts have no provider-visible user message, while automatic reviews must never
 /// persist a duplicate copy of their user turn. Missing or mixed-source records are corrupt and
@@ -4349,11 +5383,11 @@ fn plan_review_original_objective_from_attempt(
         (PlanReviewSource::ExplicitPlanCommand, _) => {
             bail!("explicit plan review attempt lost its durable source objective")
         }
-        (PlanReviewSource::AutomaticConversationRoute, None) => {
-            source_turn_objective(parent_session, &attempt.source_turn)
-                .filter(|objective| !objective.trim().is_empty())
-                .context("plan review attempt lost its durable source objective")
-        }
+        (PlanReviewSource::AutomaticConversationRoute, None) => parent_session
+            .source_user_message(&attempt.source_turn.message_id)
+            .map(|message| message.content.clone().unwrap_or_default())
+            .filter(|objective| !objective.trim().is_empty())
+            .context("plan review attempt lost its durable source objective"),
         (PlanReviewSource::AutomaticConversationRoute, Some(_)) => {
             bail!("automatic plan review attempt carries an explicit objective")
         }
@@ -4373,11 +5407,11 @@ fn plan_review_original_objective_from_request(
         (PlanReviewSource::ExplicitPlanCommand, _) => {
             bail!("explicit plan review request lost its durable source objective")
         }
-        (PlanReviewSource::AutomaticConversationRoute, None) => {
-            source_turn_objective(parent_session, &request.source_turn)
-                .filter(|objective| !objective.trim().is_empty())
-                .context("plan review request lost its durable source objective")
-        }
+        (PlanReviewSource::AutomaticConversationRoute, None) => parent_session
+            .source_user_message(&request.source_turn.message_id)
+            .map(|message| message.content.clone().unwrap_or_default())
+            .filter(|objective| !objective.trim().is_empty())
+            .context("plan review request lost its durable source objective"),
         (PlanReviewSource::AutomaticConversationRoute, Some(_)) => {
             bail!("automatic plan review request carries an explicit objective")
         }
@@ -4602,26 +5636,6 @@ fn plan_review_finalizer_evidence_bundle(
     evidence
 }
 
-fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -> Option<String> {
-    session.entries().iter().find_map(|entry| match entry {
-        SessionLogEntry::User(message) if message.id == source_turn.message_id => {
-            Some(message.content.clone().unwrap_or_default())
-        }
-        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
-            if promoted.durable_user_message.id == source_turn.message_id =>
-        {
-            Some(
-                promoted
-                    .durable_user_message
-                    .content
-                    .clone()
-                    .unwrap_or_default(),
-            )
-        }
-        _ => None,
-    })
-}
-
 fn validate_plan_review_child_draft(
     draft: &PlanDraftCreatedEntry,
     request: &PlanReviewRunRequest,
@@ -4670,6 +5684,8 @@ fn ensure_plan_action_allowed(
                 sigil_kernel::PublicPlanAction::Save => "save",
                 sigil_kernel::PublicPlanAction::Revise => "revise",
                 sigil_kernel::PublicPlanAction::Reject => "reject",
+                sigil_kernel::PublicPlanAction::AdoptCandidate => "adopt_candidate",
+                sigil_kernel::PublicPlanAction::RetryReview => "retry_review",
             },
             review.plan_id,
             review.plan_hash.as_deref().unwrap_or("none"),
@@ -4751,6 +5767,11 @@ pub struct ApplicationPlanDecisionCommand {
     pub plan_id: String,
     pub expected_plan_hash: String,
     pub action: ApplicationPlanAction,
+    /// Exact preserved candidate hash required when retrying a terminal review that captured a
+    /// complete plain-text candidate.  The field is optional for compatibility with terminal
+    /// attempts that have no candidate or only a partial/unknown candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_candidate_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_grant: Option<PlanApprovalPermission>,
 }
@@ -4762,6 +5783,8 @@ pub enum ApplicationPlanAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5903,17 +6926,84 @@ pub fn application_plan_decision(
         .plans
         .get(&plan_id)
         .cloned()
-        .ok_or_else(|| anyhow!("plan {} is not present in this session", plan_id.as_str()))?;
-    if draft.plan_hash != command.expected_plan_hash {
-        bail!(
-            "plan {} is stale: expected {}, current {}",
-            plan_id.as_str(),
-            command.expected_plan_hash,
-            draft.plan_hash
-        );
+        .ok_or_else(|| anyhow!("plan {} is not present in this session", plan_id.as_str()));
+    if !matches!(
+        command.action,
+        ApplicationPlanAction::AdoptCandidate | ApplicationPlanAction::RetryReview
+    ) {
+        let draft = draft.as_ref().map_err(|error| anyhow!("{error}"))?;
+        if draft.plan_hash != command.expected_plan_hash {
+            bail!(
+                "plan {} is stale: expected {}, current {}",
+                plan_id.as_str(),
+                command.expected_plan_hash,
+                draft.plan_hash
+            );
+        }
     }
+    let draft = draft.ok();
     let parent_session_ref = session_ref_for_log_path(session_log_path)?;
     let receipt = match command.action {
+        ApplicationPlanAction::AdoptCandidate => {
+            // New adapters bind the preserved candidate explicitly. Keep accepting the legacy
+            // field as a compatibility fallback for callers that used `expected_plan_hash` for
+            // candidate adoption before the dedicated binding existed.
+            let expected_candidate_hash = command
+                .expected_candidate_hash
+                .as_deref()
+                .filter(|hash| !hash.trim().is_empty())
+                .or_else(|| {
+                    (!command.expected_plan_hash.trim().is_empty())
+                        .then_some(command.expected_plan_hash.as_str())
+                })
+                .context("plan candidate adoption requires an exact candidate hash")?;
+            let mut handler = sigil_kernel::NoopEventHandler;
+            let adopted = PlanReviewCoordinator::adopt_plan_review_candidate(
+                &mut session,
+                &plan_id,
+                expected_candidate_hash,
+                &mut handler,
+                now_ms(),
+            )?;
+            ApplicationPlanDecisionReceipt {
+                plan_id: command.plan_id.clone(),
+                plan_hash: adopted.plan_hash.clone(),
+                action: ApplicationPlanAction::AdoptCandidate,
+                task_id: None,
+                task_title: None,
+                candidate_hash: Some(expected_candidate_hash.to_owned()),
+                task_phase: None,
+                task_blocker: None,
+                user_input_request: None,
+                revision_request: None,
+            }
+        }
+        ApplicationPlanAction::RetryReview => {
+            let expected_candidate_hash = command
+                .expected_candidate_hash
+                .as_deref()
+                .filter(|hash| !hash.trim().is_empty());
+            let retry = PlanReviewCoordinator::retry_plan_review_for_plan(
+                &mut session,
+                &plan_id,
+                expected_candidate_hash,
+                now_ms(),
+            )?;
+            ApplicationPlanDecisionReceipt {
+                plan_id: command.plan_id.clone(),
+                // A terminal review may not have a draft hash.  Preserve the exact candidate
+                // binding in the dedicated receipt field and leave this legacy field empty.
+                plan_hash: String::new(),
+                action: ApplicationPlanAction::RetryReview,
+                task_id: None,
+                task_title: None,
+                candidate_hash: expected_candidate_hash.map(str::to_owned),
+                task_phase: None,
+                task_blocker: None,
+                user_input_request: None,
+                revision_request: Some(retry.request),
+            }
+        }
         ApplicationPlanAction::Run => {
             let plan_id = PlanId::new(command.plan_id.clone())
                 .map_err(|error| anyhow!("invalid plan id for decision: {error}"))?;
@@ -5973,7 +7063,7 @@ pub fn application_plan_decision(
                 };
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
-                plan_hash: draft.plan_hash,
+                plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
                 action: ApplicationPlanAction::Run,
                 task_id: Some(approved.task_id.as_str().to_owned()),
                 task_title: Some(approved.task_title),
@@ -5996,7 +7086,7 @@ pub fn application_plan_decision(
             )?;
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
-                plan_hash: draft.plan_hash,
+                plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
                 action: ApplicationPlanAction::Save,
                 task_id: None,
                 task_title: None,
@@ -6038,7 +7128,7 @@ pub fn application_plan_decision(
             };
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
-                plan_hash: draft.plan_hash,
+                plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
                 action: ApplicationPlanAction::Revise,
                 task_id: None,
                 task_title: None,
@@ -6059,7 +7149,7 @@ pub fn application_plan_decision(
             )?;
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
-                plan_hash: draft.plan_hash,
+                plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
                 action: ApplicationPlanAction::Reject,
                 task_id: None,
                 task_title: None,

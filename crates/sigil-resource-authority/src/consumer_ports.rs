@@ -1,8 +1,7 @@
-//! RFC-0071 section 9.5 / R71.4: consumer port contract conformance.
+//! Test-only RFC-0071 section 9.5 / R71.4 consumer port contract model.
 //!
-//! Locks the exact mandatory-adapter seams that every process and file-producing subsystem must
-//! consume by cutover time. This module is contract-only (no production consumer switch); it
-//! proves the ports exist and reject cross-purpose swaps before any consumer migration.
+//! Models the mandatory adapter mapping for conformance fixtures. Production consumers do not
+//! call this table; these tests alone do not prove shipping admission or migration coverage.
 
 use sigil_kernel::managed_execution::ExecutionPurposeV1;
 use sigil_kernel::managed_file_access::ManagedFileOperationV1;

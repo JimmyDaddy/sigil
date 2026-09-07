@@ -309,10 +309,10 @@ fn application_client_acknowledges_only_reducer_commits() {
         payload,
     }));
     let port = Arc::new(FeedPort {
-        snapshot: ProjectionSnapshot {
+        snapshot: Mutex::new(ProjectionSnapshot {
             envelope: base,
             feed: vec![feed],
-        },
+        }),
         acknowledgements: Arc::new(AtomicUsize::new(0)),
     });
     let acknowledgements = Arc::clone(&port.acknowledgements);
@@ -331,7 +331,7 @@ fn application_client_acknowledges_only_reducer_commits() {
 }
 
 struct FeedPort {
-    snapshot: ProjectionSnapshot,
+    snapshot: Mutex<ProjectionSnapshot>,
     acknowledgements: Arc<AtomicUsize>,
 }
 
@@ -340,8 +340,12 @@ impl ApplicationPort for FeedPort {
         &self,
         _request: OpenProjectionRequest,
     ) -> BoxFuture<'static, Result<ProjectionSnapshot, ApplicationError>> {
-        let snapshot = self.snapshot.clone();
-        Box::pin(async move { Ok(snapshot) })
+        let snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)
+            .map(|snapshot| snapshot.clone());
+        Box::pin(async move { snapshot })
     }
 
     fn page(
@@ -372,6 +376,112 @@ impl ApplicationPort for FeedPort {
     ) -> BoxFuture<'static, Result<ApplicationCommandReceipt, ApplicationError>> {
         Box::pin(async { Err(ApplicationError::Unavailable) })
     }
+}
+
+fn application_client_for_snapshot(
+    envelope: ProjectionSnapshotEnvelope,
+) -> (ApplicationClient, Arc<FeedPort>) {
+    let port = Arc::new(FeedPort {
+        snapshot: Mutex::new(ProjectionSnapshot {
+            envelope,
+            feed: Vec::new(),
+        }),
+        acknowledgements: Arc::new(AtomicUsize::new(0)),
+    });
+    let application_port: Arc<dyn ApplicationPort> = port.clone();
+    let client = ApplicationClient::new(
+        application_port,
+        scope(),
+        9,
+        1,
+        HostConnectionInstanceId::new("connection").expect("valid id"),
+    )
+    .expect("client");
+    (client, port)
+}
+
+fn assert_client_has_no_committed_snapshot(client: &ApplicationClient, port: &FeedPort) {
+    assert_eq!(client.current_projection().expect("projection state"), None);
+    assert_eq!(client.current_frontier().expect("frontier state"), None);
+    assert_eq!(port.acknowledgements.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn application_client_rejects_corrupt_snapshot_before_acknowledgement_or_commit() {
+    let mut corrupt = snapshot();
+    corrupt.projection.frontier.writer_generation = 2;
+    let (client, port) = application_client_for_snapshot(corrupt);
+
+    assert!(matches!(
+        futures::executor::block_on(client.refresh()),
+        Err(ApplicationError::CorruptProjection(_))
+    ));
+    assert_client_has_no_committed_snapshot(&client, &port);
+}
+
+#[test]
+fn application_client_rejects_mismatched_snapshot_scope_before_acknowledgement_or_commit() {
+    let mut mismatched = snapshot();
+    let mut other_scope = scope();
+    other_scope.session = Some(SessionScopeId::new("other-session").expect("valid id"));
+    mismatched.scope = other_scope.clone();
+    mismatched.cut.scope = other_scope.clone();
+    mismatched.projection.scope = other_scope.clone();
+    mismatched.projection.frontier.scope = other_scope.clone();
+    mismatched.projection.session.session_id = other_scope.session.clone();
+    let (client, port) = application_client_for_snapshot(mismatched);
+
+    assert_eq!(
+        futures::executor::block_on(client.refresh()),
+        Err(ApplicationError::ScopeMismatch)
+    );
+    assert_client_has_no_committed_snapshot(&client, &port);
+}
+
+#[test]
+fn application_client_rejects_mismatched_snapshot_observer_before_acknowledgement_or_commit() {
+    let mut mismatched = snapshot();
+    mismatched.observer_generation = 10;
+    mismatched.projection.observer_generation = 10;
+    let (client, port) = application_client_for_snapshot(mismatched);
+
+    assert_eq!(
+        futures::executor::block_on(client.refresh()),
+        Err(ApplicationError::ScopeMismatch)
+    );
+    assert_client_has_no_committed_snapshot(&client, &port);
+}
+
+#[test]
+fn application_client_rejects_mismatched_resume_before_acknowledgement_or_commit() {
+    let initial = snapshot();
+    let initial_projection = initial.projection.clone();
+    let initial_frontier = initial.cut.clone();
+    let (client, port) = application_client_for_snapshot(initial);
+    futures::executor::block_on(client.refresh()).expect("initial refresh");
+
+    let mut mismatched = snapshot();
+    mismatched.cut.through_sequence = 1;
+    mismatched.cut.durable_cursor = "cursor-1".to_owned();
+    mismatched.projection.frontier = mismatched.cut.clone();
+    *port.snapshot.lock().expect("snapshot state") = ProjectionSnapshot {
+        envelope: mismatched,
+        feed: Vec::new(),
+    };
+
+    assert_eq!(
+        futures::executor::block_on(client.refresh()),
+        Err(ApplicationError::ResetRequired)
+    );
+    assert_eq!(
+        client.current_projection().expect("projection state"),
+        Some(initial_projection)
+    );
+    assert_eq!(
+        client.current_frontier().expect("frontier state"),
+        Some(initial_frontier)
+    );
+    assert_eq!(port.acknowledgements.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -44,7 +44,10 @@ fn r71_shadow_planner_is_side_effect_free_and_stable() {
         "hash must be deterministic"
     );
     assert_eq!(first.argv_digest, second.argv_digest);
-    assert_eq!(first.attempt_journal_scope, second.attempt_journal_scope);
+    assert_eq!(
+        first.attempt_authority_scope,
+        second.attempt_authority_scope
+    );
 }
 
 #[test]

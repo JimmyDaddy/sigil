@@ -1031,7 +1031,3 @@ fn configure_mcp_process_group(_command: &mut Command) {
     #[cfg(unix)]
     _command.process_group(0);
 }
-
-#[cfg(test)]
-#[path = "tests/process_tests.rs"]
-mod tests;

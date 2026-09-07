@@ -1,8 +1,8 @@
-//! RFC-0071 section 9.5 / R71.1: frozen owner x kind x capability x source x purpose matrix.
+//! Test-only RFC-0071 section 9.5 / R71.1 owner x kind x capability x source x purpose model.
 //!
-//! The matrix is the single closed admission authority for managed storage namespaces. Any
-//! unknown combination fails closed before a namespace or primitive lease is granted; golden
-//! positive and negative fixtures are generated from this table.
+//! This historical matrix is exercised by contract fixtures, not by the shipping storage service.
+//! Production admission validates its issued grant and request in `storage`; passing this model's
+//! tests does not establish that the full RFC matrix is enforced by production admission.
 
 use sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1;
 use sigil_kernel::resource::{
@@ -49,7 +49,7 @@ pub fn frozen_matrix() -> &'static [MatrixCellV1] {
         },
         MatrixCellV1 {
             owner: "DurableMemory",
-            family: JournaledAtomicProjection,
+            family: AtomicProjection,
             source: ToolDecisionInProcessStorage,
             purpose: DurablePayload,
             kind: ResourceKindV1::RuntimeState,

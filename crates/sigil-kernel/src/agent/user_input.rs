@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -47,8 +47,10 @@ pub(super) fn handle_request_user_input_call<H>(
 where
     H: EventHandler + Send,
 {
-    let args = serde_json::from_str::<RequestUserInputArgsV1>(&call.args_json)
-        .context("request_user_input arguments do not match the typed schema")?;
+    let args =
+        serde_json::from_str::<RequestUserInputArgsV1>(&call.args_json).map_err(|error| {
+            anyhow!("request_user_input arguments do not match the typed schema: {error}")
+        })?;
     reject_credential_collection(&args)?;
 
     let assistant_message_id = session

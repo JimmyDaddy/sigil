@@ -1,6 +1,5 @@
 mod capabilities;
 mod catalog;
-mod client;
 mod config;
 mod errors;
 mod hosted_search;
@@ -24,10 +23,6 @@ pub use provider::GeminiProvider;
 #[cfg(test)]
 #[path = "tests/catalog_tests.rs"]
 mod catalog_tests;
-#[cfg(test)]
-#[path = "tests/client_tests.rs"]
-mod client_tests;
-
 #[cfg(test)]
 pub(crate) mod test_env {
     use std::sync::{Mutex, MutexGuard, OnceLock};

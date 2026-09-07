@@ -3,9 +3,9 @@ use serde_json::json;
 
 use crate::{
     CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-    ContinueDurableTaskAction, ControlEntry, ConversationTurnRef, EventHandler,
-    KEEP_PENDING_PLAN_TOOL_NAME, PendingPlanDecisionRequiredAction, PlanReviewAttemptStatus,
-    PlanReviewHandoffBinding, REQUEST_TASK_PLANNING_TOOL_NAME, RUN_PENDING_PLAN_TOOL_NAME,
+    ContinueDurableTaskAction, ControlEntry, EventHandler, KEEP_PENDING_PLAN_TOOL_NAME,
+    PendingPlanDecisionRequiredAction, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
+    REQUEST_TASK_PLANNING_TOOL_NAME, RUN_PENDING_PLAN_TOOL_NAME,
     RecoverableTaskGuidanceReviewAuthority, RunPendingPlanAction, Session, SessionLogEntry,
     StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
     TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
@@ -162,7 +162,10 @@ fn validate_pending_plan_binding<'a>(
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("pending plan decision belongs to another session");
     }
-    if source_turn_objective(session, &binding.source_turn).is_none() {
+    if session
+        .source_user_message(&binding.source_turn.message_id)
+        .is_none()
+    {
         bail!("pending plan decision source turn is no longer present");
     }
     let pending = binding
@@ -870,12 +873,15 @@ fn validate_binding_against_session(
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("task handoff source belongs to a different session");
     }
-    let objective = source_turn_objective(session, &binding.source_turn).ok_or_else(|| {
-        anyhow!(
-            "task handoff source user turn {} is not present",
-            binding.source_turn.message_id
-        )
-    })?;
+    let objective = session
+        .source_user_message(&binding.source_turn.message_id)
+        .map(|message| message.content.clone().unwrap_or_default())
+        .ok_or_else(|| {
+            anyhow!(
+                "task handoff source user turn {} is not present",
+                binding.source_turn.message_id
+            )
+        })?;
     if objective != binding.objective {
         bail!("task handoff objective does not match the persisted source turn");
     }
@@ -892,7 +898,10 @@ fn validate_task_continuation_binding(
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("task continuation source belongs to a different session");
     }
-    if source_turn_objective(session, &binding.source_turn).is_none() {
+    if session
+        .source_user_message(&binding.source_turn.message_id)
+        .is_none()
+    {
         bail!(
             "task continuation source user turn {} is not present",
             binding.source_turn.message_id
@@ -927,26 +936,6 @@ fn validate_task_continuation_binding(
         bail!("task continuation target changed after routing was frozen");
     }
     Ok(())
-}
-
-fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -> Option<String> {
-    session.entries().iter().find_map(|entry| match entry {
-        SessionLogEntry::User(message) if message.id == source_turn.message_id => {
-            Some(message.content.clone().unwrap_or_default())
-        }
-        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
-            if promoted.durable_user_message.id == source_turn.message_id =>
-        {
-            Some(
-                promoted
-                    .durable_user_message
-                    .content
-                    .clone()
-                    .unwrap_or_default(),
-            )
-        }
-        _ => None,
-    })
 }
 
 fn ensure_task_started<H>(

@@ -912,7 +912,7 @@ impl ToolContext {
                     crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
                 )
             })?
-            .execute_v3_file_operation(plan, decision, operation, input)
+            .execute_v3_file_operation(plan, decision, operation, input, self.mutation_recorder.clone())
     }
 
     /// Reads bounded preview data through the authority without touching the host filesystem in
@@ -1792,9 +1792,49 @@ impl ToolErrorKind {
 
 /// Typed infrastructure failure at the boundary between an admitted tool and its effect receipt.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ToolExecutionGuardError {
+pub enum ToolExecutionGuardError {
     #[error("tool effect requires reconciliation before it can be replayed or accepted")]
     EffectReconciliationRequired,
+    #[error("managed file operation failed: {message}")]
+    ManagedFile {
+        kind: ToolErrorKind,
+        message: String,
+    },
+}
+
+impl ToolExecutionGuardError {
+    /// Preserves the managed-file domain classification across the builtin tool boundary. The
+    /// executor returns an anyhow error, but the agent loop can still project this typed kind.
+    pub fn managed_file(error: crate::managed_file_access::ManagedFileAccessErrorV1) -> Self {
+        use crate::managed_file_access::ManagedFileAccessErrorV1 as E;
+        let kind = match &error {
+            E::AdmissionMismatch | E::OperationNotPermitted | E::TokenReplay => {
+                ToolErrorKind::PermissionDenied
+            }
+            E::SubjectIdentityDrift | E::PlanStale => ToolErrorKind::StalePreparedMutation,
+            E::AliasCollision => ToolErrorKind::PathOutsideWorkspace,
+            E::ResourcePreconditionUnavailable => ToolErrorKind::ResourceExhausted,
+            E::ReconciliationRequired { .. } => ToolErrorKind::EffectReconciliationRequired,
+            E::PhysicalExecutionFailed(_) => ToolErrorKind::Io,
+        };
+        Self::ManagedFile {
+            kind,
+            message: error.to_string(),
+        }
+    }
+
+    /// Preserves a kernel tool-authority refusal produced by the V3 facade.
+    pub fn tool_authority(error: crate::tool_authority::KernelToolAuthorityErrorV1) -> Self {
+        match error {
+            crate::tool_authority::KernelToolAuthorityErrorV1::Access(error) => {
+                Self::managed_file(error)
+            }
+            other => Self::ManagedFile {
+                kind: ToolErrorKind::Internal,
+                message: other.to_string(),
+            },
+        }
+    }
 }
 
 pub(crate) fn tool_result_from_execution_error(
@@ -1806,6 +1846,7 @@ pub(crate) fn tool_result_from_execution_error(
         Some(ToolExecutionGuardError::EffectReconciliationRequired) => {
             ToolErrorKind::EffectReconciliationRequired
         }
+        Some(ToolExecutionGuardError::ManagedFile { kind, .. }) => *kind,
         None => ToolErrorKind::Internal,
     };
     ToolResult::error(call_id, tool_name, kind, error.to_string()).with_error_details(
@@ -1814,6 +1855,9 @@ pub(crate) fn tool_result_from_execution_error(
             "recovery_blocker": kind.is_recovery_blocker(),
             "recovery_action": match kind {
                 ToolErrorKind::WorkspaceConflict => "reread_or_rebase",
+                ToolErrorKind::StalePreparedMutation => "reread_or_reprepare",
+                ToolErrorKind::DurabilityRequired => "restore_durability",
+                ToolErrorKind::ResourceExhausted => "release_resources_or_retry",
                 ToolErrorKind::EffectReconciliationRequired => "reconcile_effect",
                 _ => "inspect",
             },

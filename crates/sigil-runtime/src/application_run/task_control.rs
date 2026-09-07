@@ -599,7 +599,7 @@ pub(super) fn application_task_continuation_terminal(
             PublicRunEventKind::RunBlocked {
                 reason: format!(
                     "Task continuation stopped with durable status {}",
-                    task_status_label(status)
+                    status.as_str()
                 ),
             },
         )),
@@ -610,17 +610,5 @@ pub(super) fn application_task_continuation_terminal(
                 error: "Task continuation failed".to_owned(),
             },
         )),
-    }
-}
-
-fn task_status_label(status: TaskRunStatus) -> &'static str {
-    match status {
-        TaskRunStatus::Started => "started",
-        TaskRunStatus::Running => "running",
-        TaskRunStatus::Paused => "paused",
-        TaskRunStatus::Completed => "completed",
-        TaskRunStatus::Failed => "failed",
-        TaskRunStatus::Cancelled => "cancelled",
-        TaskRunStatus::Interrupted => "interrupted",
     }
 }

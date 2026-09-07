@@ -144,10 +144,8 @@ pub enum ApplicationRunPrepareErrorClass {
     ConnectionConfigInvalid,
     /// The configured provider could not become ready.
     ProviderUnavailable,
-    /// The authority plane is unavailable; this is not a provider failure.
+    /// The authority plane could not be composed or verified.
     AuthorityUnavailable,
-    /// The authority journal failed integrity validation; repair is required before durable use.
-    AuthorityJournalCorrupted,
     /// No saved or explicit compound model route was available.
     ModelRouteNotConfigured,
     /// The current connection target needs an exact-bound user confirmation.
@@ -196,11 +194,6 @@ pub enum ApplicationRunPrepareError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("authority journal is corrupted")]
-    AuthorityJournalCorrupted {
-        #[source]
-        source: anyhow::Error,
-    },
     /// Headless startup cannot choose a provider/model route without an explicit user decision.
     #[error("model route is not configured")]
     ModelRouteNotConfigured,
@@ -246,9 +239,6 @@ impl ApplicationRunPrepareError {
             }
             Self::AuthorityUnavailable { .. } => {
                 ApplicationRunPrepareErrorClass::AuthorityUnavailable
-            }
-            Self::AuthorityJournalCorrupted { .. } => {
-                ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted
             }
             Self::ModelRouteNotConfigured => {
                 ApplicationRunPrepareErrorClass::ModelRouteNotConfigured
@@ -419,7 +409,6 @@ pub enum ApplicationSessionRouteRecoveryCode {
     ConnectionConfigInvalid,
     ProviderUnavailable,
     AuthorityUnavailable,
-    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -429,7 +418,6 @@ pub enum ApplicationSessionRouteRecoveryCode {
 pub enum ApplicationSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
-    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -590,7 +578,9 @@ impl ApplicationSessionLeaseManager {
             if attachment_path != canonical {
                 active.remove(&canonical);
                 return Err(ApplicationSessionLeaseError::Unavailable(anyhow!(
-                    "supplied session attachment belongs to another durable session"
+                    "supplied session attachment belongs to another durable session: attachment={}, canonical={}",
+                    attachment_path.display(),
+                    canonical.display()
                 )));
             }
             attachment
@@ -985,6 +975,21 @@ pub trait ApplicationRunEventHandler {
     fn public_event_adapter_id(&self) -> &'static str {
         "application"
     }
+
+    /// Commits an ordinary Plan review terminal bundle before delivering any of its public
+    /// events. Implementations owning the application session may atomically persist the plan
+    /// controls, assistant final answer, conversation lifecycle terminal, and terminal outbox;
+    /// compatibility handlers return `false` so the caller can retain the older split path.
+    fn commit_plan_review_terminal(
+        &mut self,
+        _session: &mut Session,
+        _entries: Vec<SessionLogEntry>,
+        _publications: Vec<SessionPublicEventProjectionV1>,
+        _terminal: ConversationRunFinalizedEntryV1,
+        _terminal_event: PublicRunEventKind,
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// Prepared application run and its root cancellation authority.
@@ -999,6 +1004,19 @@ impl PreparedApplicationRun {
     #[must_use]
     pub fn terminal_control(&self) -> ApplicationTerminalTaskControl {
         self.terminal_control.clone()
+    }
+
+    /// Returns the authority-admitted artifact facade already owned by this foreground run.
+    ///
+    /// Adapters may use this clone for read-only projections while the run is still active. It
+    /// shares the runtime backend and does not attempt to acquire a second physical namespace
+    /// lease.
+    #[must_use]
+    pub fn tool_artifact_store(&self) -> Option<ToolArtifactStore> {
+        self.execution
+            .managed_artifact_store
+            .as_ref()
+            .map(ManagedApplicationArtifactStoreLease::store)
     }
 
     /// Separates the execution payload from its root cancellation authority.
@@ -1768,7 +1786,7 @@ impl ApplicationRunControl {
         if let Some(task_stop) = task_stop.as_ref() {
             bridge.emit(PublicRunEventKind::TaskRunFinished {
                 task_id: task_stop.task_id().as_str().to_owned(),
-                status: application_task_run_status_label(task_stop.status()).to_owned(),
+                status: task_stop.status().as_str().to_owned(),
             })?;
         }
         Ok(task_stop)
@@ -1964,10 +1982,7 @@ impl ManagedApplicationSessionLogLease {
         key: &str,
     ) -> Result<Self> {
         let lease = writer
-            .acquire_named(
-                crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
-                key,
-            )
+            .acquire_session_log_key(key)
             .map_err(|error| anyhow!("managed session-log namespace admission failed: {error}"))?;
         Ok(Self {
             writer,
@@ -2396,6 +2411,8 @@ impl ApplicationRunExecution {
                     &mut bridge,
                     approval_handler,
                     &self.cancellation_handle,
+                    &self.run_id,
+                    &self.redactor,
                 )
                 .await
             }
@@ -2492,6 +2509,8 @@ impl ApplicationRunExecution {
                             &mut bridge,
                             approval_handler,
                             &self.cancellation_handle,
+                            &self.run_id,
+                            &self.redactor,
                         )
                         .await
                     }
@@ -2550,15 +2569,17 @@ impl ApplicationRunExecution {
                 let final_message_id = (terminal_status == ApplicationRunTerminalStatus::Succeeded)
                     .then(|| agent_output.result.final_message_id.clone())
                     .flatten();
-                bridge.emit_conversation_terminal(
-                    &self.conversation_lifecycle,
-                    &self.run_id,
-                    terminal_status,
-                    final_message_id,
-                    summary.as_deref(),
-                    &self.redactor,
-                    terminal_event,
-                )?;
+                if !bridge.conversation_terminal_committed()? {
+                    bridge.emit_conversation_terminal(
+                        &self.conversation_lifecycle,
+                        &self.run_id,
+                        terminal_status,
+                        final_message_id,
+                        summary.as_deref(),
+                        &self.redactor,
+                        terminal_event,
+                    )?;
+                }
                 if let Some(managed_session_log) = self.managed_session_log.take() {
                     managed_session_log
                         .finalize()
@@ -3013,9 +3034,11 @@ async fn continue_application_plan_review<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: &RunCancellationHandle,
+    run_id: &str,
+    redactor: &sigil_kernel::SecretRedactor,
 ) -> Result<AgentRunOutput>
 where
-    H: EventHandler + Send,
+    H: EventHandler + ApplicationRunEventHandler + Send,
     A: ApprovalHandler + Send,
 {
     let AgentRunDisposition::StartPlanReview(action) = output.disposition.clone() else {
@@ -3038,6 +3061,8 @@ where
         handler,
         approval_handler,
         cancellation_handle,
+        run_id,
+        redactor,
     )
     .await
 }
@@ -3050,9 +3075,11 @@ async fn run_application_plan_review_request<H, A>(
     handler: &mut H,
     approval_handler: &mut A,
     cancellation_handle: &RunCancellationHandle,
+    run_id: &str,
+    redactor: &sigil_kernel::SecretRedactor,
 ) -> Result<AgentRunOutput>
 where
-    H: EventHandler + Send,
+    H: EventHandler + ApplicationRunEventHandler + Send,
     A: ApprovalHandler + Send,
 {
     if request.revision_request_id.is_some() {
@@ -3067,14 +3094,6 @@ where
         ..
     } = runtime;
     let plan_review_workspace_root = options.workspace_root.clone();
-    // Commit Started before entering the outcome mapper so an outbox append failure is returned
-    // as the authority failure it is, rather than being rewritten as a plan-review failure.
-    crate::PlanReviewCoordinator::ensure_attempt_started(
-        session,
-        &request,
-        handler,
-        current_unix_time_ms(),
-    )?;
     let outcome = match child_resource_provisioner {
         Some(provisioner) => {
             crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
@@ -3169,17 +3188,56 @@ where
                 &plan_review_workspace_root,
                 &request,
             )?;
-            crate::PlanReviewCoordinator::commit_draft_from_child(
+            let final_text = format!("Plan ready: {}", draft.summary);
+            let recorded_at_ms = current_unix_time_ms();
+            let controls = crate::PlanReviewCoordinator::plan_review_draft_terminal_controls(
                 session,
                 &draft,
                 &request,
-                &compile_input,
-                handler,
-                current_unix_time_ms(),
+                recorded_at_ms,
             )?;
-            let final_text = format!("Plan ready: {}", draft.summary);
-            let final_message_id =
-                append_application_final_answer(session, handler, final_text.clone())?;
+            let mut message =
+                ModelMessage::assistant(Some(safe_persistence_text(&final_text)), Vec::new());
+            message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
+            let mut final_message_id = message.id.clone();
+            let terminal = ConversationRunFinalizedEntryV1::new(
+                run_id,
+                ApplicationRunTerminalStatus::Succeeded,
+                Some(final_message_id.clone()),
+                None,
+                recorded_at_ms,
+                redactor,
+            )?;
+            let terminal_event = PublicRunEventKind::RunFinished {
+                final_text: final_text.clone(),
+            };
+            let mut entries = controls
+                .iter()
+                .cloned()
+                .map(SessionLogEntry::Control)
+                .collect::<Vec<_>>();
+            entries.push(SessionLogEntry::Assistant(message.clone()));
+            if !handler.commit_plan_review_terminal(
+                session,
+                entries,
+                vec![SessionPublicEventProjectionV1::assistant_message(
+                    controls.len(),
+                    message,
+                )],
+                terminal,
+                terminal_event,
+            )? {
+                crate::PlanReviewCoordinator::commit_draft_from_child(
+                    session,
+                    &draft,
+                    &request,
+                    &compile_input,
+                    handler,
+                    recorded_at_ms,
+                )?;
+                final_message_id =
+                    append_application_final_answer(session, handler, final_text.clone())?;
+            }
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
                     final_text,
@@ -3191,17 +3249,55 @@ where
             })
         }
         crate::PlanReviewRunOutcome::CompletedWithoutDraft => {
-            crate::PlanReviewCoordinator::complete_without_draft(
-                session,
-                &request,
-                handler,
-                current_unix_time_ms(),
-            )?;
             let final_text =
                 "Plan review closed without a draft; no task was created. Send a more specific request or use /plan with explicit steps."
                     .to_owned();
-            let final_message_id =
-                append_application_final_answer(session, handler, final_text.clone())?;
+            let recorded_at_ms = current_unix_time_ms();
+            let controls = crate::PlanReviewCoordinator::plan_review_no_draft_terminal_controls(
+                session,
+                &request,
+                recorded_at_ms,
+            )?;
+            let mut message =
+                ModelMessage::assistant(Some(safe_persistence_text(&final_text)), Vec::new());
+            message.assistant_kind = Some(AssistantMessageKind::FinalAnswer);
+            let mut final_message_id = message.id.clone();
+            let terminal = ConversationRunFinalizedEntryV1::new(
+                run_id,
+                ApplicationRunTerminalStatus::Succeeded,
+                Some(final_message_id.clone()),
+                None,
+                recorded_at_ms,
+                redactor,
+            )?;
+            let terminal_event = PublicRunEventKind::RunFinished {
+                final_text: final_text.clone(),
+            };
+            let mut entries = controls
+                .iter()
+                .cloned()
+                .map(SessionLogEntry::Control)
+                .collect::<Vec<_>>();
+            entries.push(SessionLogEntry::Assistant(message.clone()));
+            if !handler.commit_plan_review_terminal(
+                session,
+                entries,
+                vec![SessionPublicEventProjectionV1::assistant_message(
+                    controls.len(),
+                    message,
+                )],
+                terminal,
+                terminal_event,
+            )? {
+                crate::PlanReviewCoordinator::complete_without_draft(
+                    session,
+                    &request,
+                    handler,
+                    recorded_at_ms,
+                )?;
+                final_message_id =
+                    append_application_final_answer(session, handler, final_text.clone())?;
+            }
             Ok(AgentRunOutput {
                 result: sigil_kernel::AgentRunResult {
                     final_text,
@@ -4325,10 +4421,7 @@ pub fn bind_application_session_with_model_ref_and_attachment_and_managed_writer
         let key = application_session_log_key(&writer, &requested_path)
             .map_err(ApplicationRunPrepareError::execution)?;
         let managed_path = writer
-            .managed_named_leaf_path(
-                crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
-                &key,
-            )
+            .session_log_path_for_key(&key)
             .map_err(ApplicationRunPrepareError::execution)?
             .join("records.jsonl");
         let lease = ManagedApplicationSessionLogLease::acquire(writer, &key)
@@ -5637,10 +5730,13 @@ fn application_session_log_key(
     let managed_root = writer
         .managed_leaf_path(crate::managed_storage_writer::StorageWriterChannelV1::SessionLog)
         .map_err(|error| anyhow!("managed session-log root is unavailable: {error}"))?;
+    let requested_parent = requested_path
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok());
     let key = if requested_path.file_name().and_then(|value| value.to_str())
         == Some("records.jsonl")
-        && requested_path
-            .parent()
+        && requested_parent
+            .as_deref()
             .and_then(|parent| parent.strip_prefix(&managed_root).ok())
             .is_some_and(|relative| relative.components().count() == 1)
     {
@@ -5804,10 +5900,7 @@ fn prepare_application_run_blocking_with_writer(
             let key = application_session_log_key(&writer, &requested_session_path)
                 .map_err(ApplicationRunPrepareError::execution)?;
             let managed_path = writer
-                .managed_named_leaf_path(
-                    crate::managed_storage_writer::StorageWriterChannelV1::SessionLog,
-                    &key,
-                )
+                .session_log_path_for_key(&key)
                 .map_err(ApplicationRunPrepareError::execution)?
                 .join("records.jsonl");
             let lease = ManagedApplicationSessionLogLease::acquire(writer, &key)
@@ -6192,13 +6285,6 @@ fn application_authority_prepare_error(
             ApplicationRunPrepareError::AuthorityUnavailable {
                 source: anyhow::Error::new(
                     sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable,
-                ),
-            }
-        }
-        sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityJournalCorrupted => {
-            ApplicationRunPrepareError::AuthorityJournalCorrupted {
-                source: anyhow::Error::new(
-                    sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityJournalCorrupted,
                 ),
             }
         }
@@ -7051,18 +7137,6 @@ fn is_terminal_public_run_event(event: &PublicRunEventKind) -> bool {
     )
 }
 
-fn application_task_run_status_label(status: TaskRunStatus) -> &'static str {
-    match status {
-        TaskRunStatus::Started => "started",
-        TaskRunStatus::Running => "running",
-        TaskRunStatus::Paused => "paused",
-        TaskRunStatus::Completed => "completed",
-        TaskRunStatus::Failed => "failed",
-        TaskRunStatus::Cancelled => "cancelled",
-        TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
 /// One application-surface revision execution and its optional durable terminal outbox.
 ///
 /// A waiting research-input suspension is not a revision finalizer: the same attempt can resume,
@@ -7484,6 +7558,14 @@ where
         )
     }
 
+    fn conversation_terminal_committed(&self) -> Result<bool> {
+        self.events
+            .state
+            .lock()
+            .map(|state| state.terminal)
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))
+    }
+
     fn prepare_plan_review_revision_terminal(
         &self,
         event: PublicRunEventKind,
@@ -7514,6 +7596,77 @@ where
     ) -> Result<()> {
         self.events
             .deliver_plan_review_revision_waiting(self.handler, event, public_event_id)
+    }
+
+    fn commit_plan_review_terminal_bundle(
+        &mut self,
+        session: &mut Session,
+        entries: Vec<SessionLogEntry>,
+        publications: Vec<SessionPublicEventProjectionV1>,
+        terminal: ConversationRunFinalizedEntryV1,
+        terminal_event: PublicRunEventKind,
+    ) -> Result<bool> {
+        self.events
+            .ensure_pending_replayed_before_live(self.handler)?;
+        if session.session_scope_id() != self.events.session_id {
+            bail!("application plan-review terminal belongs to another durable session");
+        }
+        if session.store_path() != Some(self.events.outbox_store.path()) {
+            bail!("application plan-review terminal uses a different durable session store");
+        }
+        let mut state = self
+            .events
+            .state
+            .lock()
+            .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+        if state.terminal {
+            bail!("application run event stream is already terminal");
+        }
+        let next_sequence = state
+            .sequence
+            .checked_add(1)
+            .context("application run event sequence exhausted")?;
+        let mut staged_task_events = self.task_events.clone();
+        for entry in &entries {
+            if let SessionLogEntry::Control(control) = entry {
+                staged_task_events
+                    .project_control(control)
+                    .map_err(|source| {
+                        anyhow::Error::new(ApplicationPublicOutboxAppendError { source })
+                    })?;
+            }
+        }
+        let (_events, outbox) = session
+            .append_session_entries_with_terminal_outbox(
+                entries,
+                publications,
+                terminal,
+                terminal_event,
+                &self.events.run_id,
+                next_sequence,
+            )
+            .map_err(|source| anyhow::Error::new(ApplicationPublicOutboxAppendError { source }))?;
+        self.task_events = staged_task_events;
+        let terminal_id = outbox
+            .last()
+            .map(|entry| entry.public_event_id.clone())
+            .context("terminal plan-review bundle has no public terminal")?;
+        if let Some(last) = outbox.last() {
+            state.sequence = last.sequence;
+        }
+        state.terminal = true;
+        for entry in outbox {
+            let delivered = self.events.deliver_committed(
+                &mut state,
+                self.handler,
+                entry.event,
+                &entry.public_event_id,
+            );
+            if entry.public_event_id == terminal_id {
+                state.terminal_delivered = delivered;
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -7740,6 +7893,36 @@ where
             &entry.public_event_id,
         );
         Ok(())
+    }
+}
+
+impl<H> ApplicationRunEventHandler for PublicApplicationEventBridge<'_, H>
+where
+    H: ApplicationRunEventHandler,
+{
+    fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+        self.handler.handle_public_event(event)
+    }
+
+    fn public_event_adapter_id(&self) -> &'static str {
+        self.handler.public_event_adapter_id()
+    }
+
+    fn commit_plan_review_terminal(
+        &mut self,
+        session: &mut Session,
+        entries: Vec<SessionLogEntry>,
+        publications: Vec<SessionPublicEventProjectionV1>,
+        terminal: ConversationRunFinalizedEntryV1,
+        terminal_event: PublicRunEventKind,
+    ) -> Result<bool> {
+        self.commit_plan_review_terminal_bundle(
+            session,
+            entries,
+            publications,
+            terminal,
+            terminal_event,
+        )
     }
 }
 

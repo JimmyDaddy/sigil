@@ -2381,6 +2381,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
             ],
             source: HttpPlanReviewSource::AutomaticConversationRoute,
             stale: false,
+            candidate: None,
             revision: None,
         }),
         user_inputs: Vec::new(),
@@ -2405,6 +2406,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
         HttpPlanDecisionRequest {
             plan_id: "plan-review-1".to_owned(),
             expected_plan_hash: plan_hash.clone(),
+            expected_candidate_hash: None,
             action: HttpPlanDecisionAction::Run,
             permission_grant: None,
         },
@@ -2459,6 +2461,7 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
         HttpPlanDecisionRequest {
             plan_id: "plan-review-1".to_owned(),
             expected_plan_hash: plan_hash,
+            expected_candidate_hash: None,
             action: HttpPlanDecisionAction::Save,
             permission_grant: None,
         },

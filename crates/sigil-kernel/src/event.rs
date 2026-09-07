@@ -202,6 +202,7 @@ durable_event_types! {
     TaskAdmissionAttempted => ("task_admission_attempted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    PlanReviewResolutionRecorded => ("plan_review_resolution_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     UserInputLifecycleChanged => ("user_input_lifecycle_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskCreatedFromPlan => ("task_created_from_plan", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     MutationPrepared => ("mutation_prepared", RecoveryCritical, Critical, DirectJson, "mutation_prepared"),
@@ -1473,7 +1474,6 @@ pub enum PublicRouteRecoveryCode {
     ConnectionConfigInvalid,
     ProviderUnavailable,
     AuthorityUnavailable,
-    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -1484,7 +1484,6 @@ pub enum PublicRouteRecoveryCode {
 pub enum PublicRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
-    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -1888,6 +1887,8 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
             "conversation_route_decision_recorded"
         }
         ControlEntry::PlanReviewAttempt(_) => "plan_review_attempt",
+        ControlEntry::PlanReviewCandidateRecordedV1(_) => "plan_review_candidate_recorded_v1",
+        ControlEntry::PlanReviewResolutionRecordedV1(_) => "plan_review_resolution_recorded_v1",
         ControlEntry::ExecutablePlanCandidatePreparedV1(_) => "plan_execution_candidate_prepared",
         ControlEntry::PlanReadyCommittedV1(_) => "plan_ready_committed",
         ControlEntry::PlanCompileFailedV1(_) => "plan_compile_failed",

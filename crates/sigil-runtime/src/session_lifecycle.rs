@@ -413,6 +413,12 @@ impl LocalSessionLifecycleService {
         }
     }
 
+    /// Returns the workspace identity bound to this lifecycle service.
+    #[must_use]
+    pub fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
     /// RFC-0071 R71.6: relocates the lifecycle journal under the composition's
     /// authority-declared session-lifecycle namespace and routes every journal append through
     /// one admitted namespace per record batch (reads keep the same leaf).

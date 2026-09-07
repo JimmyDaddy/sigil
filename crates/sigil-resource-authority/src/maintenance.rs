@@ -1,6 +1,6 @@
 //! RFC-0071 section 10.2: maintenance plan / proof / one-shot token.
 //!
-//! Maintenance plans select only journal-known managed resource refs and never return host paths.
+//! Maintenance plans select only authority-known managed resource refs and never return host paths.
 //! The kernel lifecycle/retention/recovery validator is the only issuer of the sealed proof; the
 //! authority consumes the opaque one-shot capability, compares the exact plan / source /
 //! selection / generation, then constructs the private token. Borrowed resources never enter the
@@ -153,7 +153,7 @@ pub enum ResourceMaintenanceIntentV1 {
         lifecycle_event_digest: CanonicalHash,
     },
     RetentionSweep {
-        journal_scope: sigil_kernel::resource::ResourceJournalScopeV1,
+        authority_scope: sigil_kernel::resource::ResourceAuthorityScopeV1,
         policy_digest: CanonicalHash,
         eligibility_frontier: u64,
     },

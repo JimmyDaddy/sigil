@@ -22,7 +22,7 @@ use sigil_kernel::managed_storage::{
 use sigil_kernel::resource::{
     AdapterDurableStateClassV1, AuthorityGeneration, CanonicalHash,
     ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1, MemoryScopeClassV1,
-    OpaqueSessionId, ResourceAccessV1, ResourceBlockerScopeV1, ResourceJournalScopeV1,
+    OpaqueSessionId, ResourceAccessV1, ResourceAuthorityScopeV1, ResourceBlockerScopeV1,
     ResourceKindV1, ResourceLeaseLifetimeV1, ResourceOwnerScopeV1, ResourcePurposeV1,
 };
 use sigil_kernel::resource_recovery::ResourceBlockerAdmissionKeyV1;
@@ -116,7 +116,7 @@ fn storage_channels() -> &'static [(
         (
             MandatoryAdapterKindV1::StorageMemory,
             ManagedStorageSemanticOwnerV1::DurableMemory(MemoryScopeClassV1::ProjectFact),
-            ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+            ManagedStorageCapabilityFamilyV1::AtomicProjection,
         ),
         (
             MandatoryAdapterKindV1::StorageSessionCatalog,
@@ -163,7 +163,8 @@ fn storage_family_probe(
         owner_scope: ResourceOwnerScopeV1::Session(OpaqueSessionId::new(
             "startup-probe".to_owned(),
         )),
-        journal_scope: ResourceJournalScopeV1::Application,
+        authority_scope: ResourceAuthorityScopeV1::Application,
+        namespace_key_hash: CanonicalHash::from_bytes([0x5a; 32]),
     };
     let passed = match services.storage.admit_namespace(
         request,

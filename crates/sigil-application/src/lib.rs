@@ -547,6 +547,15 @@ pub enum PlanTaskCommand {
         plan_id: SafeText,
         expected_plan_hash: SafeText,
     },
+    AdoptPlanCandidate {
+        plan_id: SafeText,
+        expected_candidate_hash: SafeText,
+    },
+    RetryPlanReview {
+        plan_id: SafeText,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_candidate_hash: Option<SafeText>,
+    },
     SubmitTask {
         prompt: SafeText,
     },
@@ -1784,19 +1793,18 @@ impl ApplicationClient {
                 resume_from: resume_from.clone(),
             })
             .await?;
-        snapshot.envelope.validate()?;
-        if snapshot.envelope.scope != self.scope
-            || snapshot.envelope.observer_generation != self.observer_generation
+        let mut reducer = ProjectionReducer::open(snapshot.envelope)?;
+        if reducer.frontier().scope != self.scope
+            || reducer.observer_generation != self.observer_generation
         {
             return Err(ApplicationError::ScopeMismatch);
         }
         if let Some(resume_from) = resume_from
-            && !snapshot.envelope.cut.same_cut(&resume_from)
+            && !reducer.frontier().same_cut(&resume_from)
         {
             return Err(ApplicationError::ResetRequired);
         }
 
-        let mut reducer = ProjectionReducer::open(snapshot.envelope)?;
         for item in snapshot.feed {
             let ProjectionFeedItem::Event(event) = item else {
                 return Err(ApplicationError::ResetRequired);

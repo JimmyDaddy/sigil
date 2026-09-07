@@ -233,15 +233,12 @@ impl ConversationCoordinator {
                     "continuation_plan_version",
                     continuation_plan_version.as_deref().unwrap_or("none"),
                 ),
-                (
-                    "continuation_status",
-                    task_run_status_name(continuation.task_status),
-                ),
+                ("continuation_status", continuation.task_status.as_str()),
                 (
                     "continuation_plan_status",
                     continuation
                         .plan_status
-                        .map(task_plan_status_name)
+                        .map(TaskPlanStatus::as_str)
                         .unwrap_or("none"),
                 ),
             ]);
@@ -1152,29 +1149,10 @@ fn task_continuation_candidate(
     })
 }
 
-fn task_run_status_name(status: TaskRunStatus) -> &'static str {
-    match status {
-        TaskRunStatus::Started => "started",
-        TaskRunStatus::Running => "running",
-        TaskRunStatus::Paused => "paused",
-        TaskRunStatus::Completed => "completed",
-        TaskRunStatus::Failed => "failed",
-        TaskRunStatus::Cancelled => "cancelled",
-        TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-fn task_plan_status_name(status: TaskPlanStatus) -> &'static str {
-    match status {
-        TaskPlanStatus::Proposed => "proposed",
-        TaskPlanStatus::Accepted => "accepted",
-        TaskPlanStatus::Superseded => "superseded",
-        TaskPlanStatus::Rejected => "rejected",
-    }
-}
-
 fn validate_existing_source_turn(session: &Session, source: &ConversationSourceTurn) -> Result<()> {
-    let durable_objective = source_turn_objective_by_id(session, &source.message_id)
+    let durable_objective = session
+        .source_user_message(&source.message_id)
+        .map(|message| message.content.clone().unwrap_or_default())
         .ok_or_else(|| anyhow!("coordinated source user turn is not present in the session"))?;
     if durable_objective != source.objective {
         bail!("coordinated source objective conflicts with the durable user turn");
@@ -1462,7 +1440,9 @@ fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -
     if source_turn.session_scope_id != session.session_scope_id() {
         return None;
     }
-    source_turn_objective_by_id(session, &source_turn.message_id)
+    session
+        .source_user_message(&source_turn.message_id)
+        .map(|message| message.content.clone().unwrap_or_default())
 }
 
 fn recover_explicit_source_turn(
@@ -1485,26 +1465,6 @@ fn recover_explicit_source_turn(
     user_message.id = request.source_turn.message_id.clone();
     session.append_user_message(user_message)?;
     Ok(objective)
-}
-
-fn source_turn_objective_by_id(session: &Session, message_id: &str) -> Option<String> {
-    session.entries().iter().find_map(|entry| match entry {
-        SessionLogEntry::User(message) if message.id == message_id => {
-            Some(message.content.clone().unwrap_or_default())
-        }
-        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
-            if promoted.durable_user_message.id == message_id =>
-        {
-            Some(
-                promoted
-                    .durable_user_message
-                    .content
-                    .clone()
-                    .unwrap_or_default(),
-            )
-        }
-        _ => None,
-    })
 }
 
 fn handoff_id_for_source(source_turn: &ConversationTurnRef) -> Result<TaskHandoffId> {

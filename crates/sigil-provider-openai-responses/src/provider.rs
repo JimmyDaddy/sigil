@@ -21,7 +21,6 @@ use sigil_kernel::{
 
 use crate::{
     capabilities::{openai_responses_capabilities, openai_responses_context_capabilities},
-    client::build_http_client,
     config::OpenAiResponsesProviderConfig,
     errors::{OpenAiResponsesProviderError, classify_status},
     mapper::StreamMapper,
@@ -70,7 +69,11 @@ impl OpenAiResponsesProvider {
         config: OpenAiResponsesProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
-        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+        Self::new_exact_with_client(
+            config,
+            timeouts,
+            sigil_provider_http::build_provider_http_client()?,
+        )
     }
 
     /// Builds an exact provider with a caller-owned HTTP client.

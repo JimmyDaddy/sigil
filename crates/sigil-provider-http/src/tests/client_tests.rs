@@ -16,9 +16,3 @@ fn rejects_missing_or_malformed_explicit_ca_bundle() -> Result<()> {
     assert!(build_provider_http_client_with_ca_bundle(Some(malformed.as_os_str())).is_err());
     Ok(())
 }
-
-#[test]
-fn default_client_keeps_builtin_roots() -> Result<()> {
-    let _client = build_provider_http_client_with_ca_bundle(None)?;
-    Ok(())
-}

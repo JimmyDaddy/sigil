@@ -2,6 +2,8 @@
 use std::fs::{self, File};
 #[cfg(test)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(not(test))]
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -75,6 +77,153 @@ fn managed_access_receipt_value(
         .map_err(|error| anyhow::anyhow!("failed to encode managed file access receipt: {error}"))
 }
 
+#[cfg(not(test))]
+async fn execute_managed_file_operation(
+    ctx: ToolContext,
+    operation: sigil_kernel::managed_file_access::ManagedFileOperationV1,
+    input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
+) -> Result<sigil_kernel::managed_file_access::ManagedFileExecutionOutcomeV1> {
+    use sigil_kernel::{ToolErrorKind, ToolExecutionGuardError};
+
+    let cancellation = ctx.cancellation_handle();
+    if cancellation
+        .as_ref()
+        .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+    {
+        return Err(anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+            kind: ToolErrorKind::Interrupted,
+            message: "managed file operation was cancelled before execution".to_owned(),
+        }));
+    }
+    let task_guard = cancellation
+        .as_ref()
+        .map(sigil_kernel::RunCancellationHandle::register_task)
+        .transpose()
+        .map_err(|error| {
+            anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+                kind: ToolErrorKind::Interrupted,
+                message: error.to_string(),
+            })
+        })?;
+    let timeout = Duration::from_secs(ctx.timeout_secs.max(1));
+    let operation_task = tokio::task::spawn_blocking(move || {
+        let _task_guard = task_guard;
+        ctx.execute_v3_file_operation(operation, input)
+    });
+    match tokio::time::timeout(timeout, operation_task).await {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(error))) => Err(anyhow::Error::new(ToolExecutionGuardError::tool_authority(
+            error,
+        ))),
+        Ok(Err(error)) => Err(anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+            kind: ToolErrorKind::Internal,
+            message: format!("managed file worker failed: {error}"),
+        })),
+        Err(_) => {
+            let cancellation_requested = cancellation
+                .as_ref()
+                .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested);
+            if cancellation_requested && let Some(cancellation) = cancellation.as_ref() {
+                cancellation.mark_cleanup_incomplete();
+            }
+            let (kind, message) = if cancellation_requested {
+                (
+                    ToolErrorKind::Interrupted,
+                    "managed file operation cancellation deadline exceeded; cleanup remains owned by the run"
+                        .to_owned(),
+                )
+            } else {
+                (
+                    ToolErrorKind::Timeout,
+                    "managed file operation exceeded its bounded execution deadline".to_owned(),
+                )
+            };
+            let error = if matches!(
+                operation,
+                sigil_kernel::managed_file_access::ManagedFileOperationV1::Write
+                    | sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit
+                    | sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete
+                    | sigil_kernel::managed_file_access::ManagedFileOperationV1::Rename
+            ) {
+                ToolExecutionGuardError::EffectReconciliationRequired
+            } else {
+                ToolExecutionGuardError::ManagedFile { kind, message }
+            };
+            Err(anyhow::Error::new(error))
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn preview_managed_file_operation(
+    ctx: ToolContext,
+    logical_path: String,
+    operation: sigil_kernel::managed_file_access::ManagedFileOperationV1,
+    max_bytes: usize,
+) -> Result<sigil_kernel::managed_file_access::ManagedFilePreviewOutcomeV1> {
+    use sigil_kernel::{ToolErrorKind, ToolExecutionGuardError};
+
+    let cancellation = ctx.cancellation_handle();
+    if cancellation
+        .as_ref()
+        .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested)
+    {
+        return Err(anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+            kind: ToolErrorKind::Interrupted,
+            message: "managed file preview was cancelled before execution".to_owned(),
+        }));
+    }
+    let task_guard = cancellation
+        .as_ref()
+        .map(sigil_kernel::RunCancellationHandle::register_task)
+        .transpose()
+        .map_err(|error| {
+            anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+                kind: ToolErrorKind::Interrupted,
+                message: error.to_string(),
+            })
+        })?;
+    let timeout = Duration::from_secs(ctx.timeout_secs.max(1));
+    let preview_task = tokio::task::spawn_blocking(move || {
+        let _task_guard = task_guard;
+        ctx.preview_managed_file_operation(logical_path, operation, max_bytes)
+    });
+    match tokio::time::timeout(timeout, preview_task).await {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(error))) => Err(anyhow::Error::new(ToolExecutionGuardError::tool_authority(
+            error,
+        ))),
+        Ok(Err(error)) => Err(anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+            kind: ToolErrorKind::Internal,
+            message: format!("managed file preview worker failed: {error}"),
+        })),
+        Err(_) => {
+            let cancellation_requested = cancellation
+                .as_ref()
+                .is_some_and(sigil_kernel::RunCancellationHandle::is_cancel_requested);
+            if cancellation_requested && let Some(cancellation) = cancellation.as_ref() {
+                cancellation.mark_cleanup_incomplete();
+            }
+            let (kind, message) = if cancellation_requested {
+                (
+                    ToolErrorKind::Interrupted,
+                    "managed file preview cancellation deadline exceeded; cleanup remains owned by the run"
+                        .to_owned(),
+                )
+            } else {
+                (
+                    ToolErrorKind::Timeout,
+                    "managed file preview exceeded its bounded execution deadline".to_owned(),
+                )
+            };
+            Err(anyhow::Error::new(ToolExecutionGuardError::ManagedFile {
+                kind,
+                message,
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 enum ReadFileLoad {
     File {
@@ -104,16 +253,16 @@ async fn execute_managed_grep(
     let limit = optional_usize(&args, "limit")?
         .unwrap_or(DEFAULT_GREP_LIMIT)
         .min(HARD_GREP_LIMIT);
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Grep,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Grep {
-                pattern,
-                limit,
-                max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
-            },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Grep,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Grep {
+            pattern,
+            limit,
+            max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
+        },
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     let payload = outcome.payload;
     let bytes = payload.len() as u64;
@@ -131,6 +280,7 @@ async fn execute_managed_grep(
             details: json!({
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -179,6 +329,17 @@ impl Tool for ReadFileTool {
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = required_string(args, "path")?;
+        let offset = optional_usize(args, "offset")?.unwrap_or(0);
+        let limit = optional_usize(args, "limit")?
+            .unwrap_or(DEFAULT_READ_LIMIT_LINES)
+            .min(HARD_READ_LIMIT_LINES);
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Read {
+                offset,
+                limit,
+                max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
+            }
+            .operation_scope();
         let spec = self.spec();
         declared_tool_permission_plan(
             &spec,
@@ -192,7 +353,7 @@ impl Tool for ReadFileTool {
                 managed_file_access: Some(file_access_ref(
                     ctx,
                     path,
-                    "read-file",
+                    &operation_scope,
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
                 )?),
             },
@@ -223,16 +384,16 @@ async fn execute_managed_read(
     let limit = optional_usize(&args, "limit")?
         .unwrap_or(DEFAULT_READ_LIMIT_LINES)
         .min(HARD_READ_LIMIT_LINES);
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Read {
-                offset,
-                limit,
-                max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
-            },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Read,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Read {
+            offset,
+            limit,
+            max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
+        },
+    )
+    .await?;
     let mut details = serde_json::Map::new();
     details.insert("path".to_owned(), json!(path));
     details.insert("offset".to_owned(), json!(offset));
@@ -544,6 +705,11 @@ impl Tool for WriteFileTool {
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let content = required_string(args, "content")?;
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Write {
+                content: content.to_owned(),
+            }
+            .operation_scope();
         let path = required_string(args, "path")?;
         let operation = write_file_permission_operation(ctx, args)?;
         let mut effects = BTreeSet::from([ToolPermissionEffect::FileWrite]);
@@ -583,7 +749,7 @@ impl Tool for WriteFileTool {
             managed_file_access: Some(file_access_ref(
                 ctx,
                 path,
-                "write-file",
+                &operation_scope,
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
             )?),
         })
@@ -605,14 +771,14 @@ impl Tool for WriteFileTool {
         {
             let path = required_string(&args, "path")?.to_owned();
             let content = required_string(&args, "content")?.to_owned();
-            let current = ctx
-                .preview_managed_file_operation(
-                    path.clone(),
-                    sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
-                    HARD_TEXT_LIMIT_BYTES,
-                )
-                .map_err(|error| anyhow::anyhow!("managed file preview refused: {error}"))?
-                .payload;
+            let current = preview_managed_file_operation(
+                ctx,
+                path.clone(),
+                sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
+                HARD_TEXT_LIMIT_BYTES,
+            )
+            .await?
+            .payload;
             let diff = render_unified_diff(
                 &current,
                 &content,
@@ -677,12 +843,12 @@ async fn execute_managed_write(
 ) -> Result<ToolResult> {
     let path = required_string(&args, "path")?.to_owned();
     let content = required_string(&args, "content")?.to_owned();
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Write { content },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file write refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Write,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Write { content },
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
@@ -694,6 +860,7 @@ async fn execute_managed_write(
                 "path": path,
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -729,6 +896,12 @@ impl Tool for EditFileTool {
         let old_text = required_string(args, "old_text")?;
         let new_text = required_string(args, "new_text")?;
         let path = required_string(args, "path")?;
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Edit {
+                old_text: old_text.to_owned(),
+                new_text: new_text.to_owned(),
+            }
+            .operation_scope();
         let mut semantic_scope = ToolSemanticScope::new("workspace:file_edit", 1);
         semantic_scope.qualifiers.insert(
             "replacement_sha256".to_owned(),
@@ -759,7 +932,7 @@ impl Tool for EditFileTool {
             managed_file_access: Some(file_access_ref(
                 ctx,
                 path,
-                "edit-file",
+                &operation_scope,
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
             )?),
         })
@@ -784,14 +957,14 @@ impl Tool for EditFileTool {
             let new_text = required_string(&args, "new_text")?.to_owned();
             let old_len = old_text.chars().count();
             let new_len = new_text.chars().count();
-            let original = ctx
-                .preview_managed_file_operation(
-                    path.clone(),
-                    sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
-                    HARD_TEXT_LIMIT_BYTES,
-                )
-                .map_err(|error| anyhow::anyhow!("managed file preview refused: {error}"))?
-                .payload;
+            let original = preview_managed_file_operation(
+                ctx,
+                path.clone(),
+                sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
+                HARD_TEXT_LIMIT_BYTES,
+            )
+            .await?
+            .payload;
             let occurrences = original.matches(&old_text).count();
             if occurrences == 0 {
                 bail!("old_text not found in {path}");
@@ -870,15 +1043,12 @@ async fn execute_managed_edit(
     let path = required_string(&args, "path")?.to_owned();
     let old_text = required_string(&args, "old_text")?.to_owned();
     let new_text = required_string(&args, "new_text")?.to_owned();
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Edit {
-                old_text,
-                new_text,
-            },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file edit refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Edit,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Edit { old_text, new_text },
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
@@ -890,6 +1060,7 @@ async fn execute_managed_edit(
                 "path": path,
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -946,7 +1117,8 @@ impl Tool for DeleteFileTool {
             managed_file_access: Some(file_access_ref(
                 ctx,
                 path,
-                "delete-file",
+                &sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Delete
+                    .operation_scope(),
                 sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
             )?),
         })
@@ -967,14 +1139,14 @@ impl Tool for DeleteFileTool {
         #[cfg(not(test))]
         {
             let path = required_string(&args, "path")?.to_owned();
-            let current = ctx
-                .preview_managed_file_operation(
-                    path.clone(),
-                    sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
-                    HARD_TEXT_LIMIT_BYTES,
-                )
-                .map_err(|error| anyhow::anyhow!("managed file preview refused: {error}"))?
-                .payload;
+            let current = preview_managed_file_operation(
+                ctx,
+                path.clone(),
+                sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
+                HARD_TEXT_LIMIT_BYTES,
+            )
+            .await?
+            .payload;
             let diff = render_unified_diff(
                 &current,
                 "",
@@ -1030,12 +1202,12 @@ async fn execute_managed_delete(
     args: Value,
 ) -> Result<ToolResult> {
     let path = required_string(&args, "path")?.to_owned();
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Delete,
-        )
-        .map_err(|error| anyhow::anyhow!("managed file delete refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Delete,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Delete,
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
@@ -1046,6 +1218,7 @@ async fn execute_managed_delete(
                 "path": path,
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -1083,6 +1256,25 @@ impl Tool for ListTool {
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
         let path = optional_string(args, "path").unwrap_or(".");
+        let recursive = args
+            .get("recursive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let limit = optional_usize(args, "limit")?
+            .unwrap_or(if recursive {
+                DEFAULT_RECURSIVE_LIST_LIMIT
+            } else {
+                DEFAULT_LIST_LIMIT
+            })
+            .min(HARD_LIST_LIMIT);
+        let max_depth = optional_usize(args, "max_depth")?.unwrap_or(DEFAULT_RECURSIVE_MAX_DEPTH);
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::List {
+                recursive,
+                limit,
+                max_depth,
+            }
+            .operation_scope();
         let spec = self.spec();
         declared_tool_permission_plan(
             &spec,
@@ -1096,7 +1288,7 @@ impl Tool for ListTool {
                 managed_file_access: Some(file_access_ref(
                     ctx,
                     path,
-                    "list-dir",
+                    &operation_scope,
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::List,
                 )?),
             },
@@ -1134,16 +1326,16 @@ async fn execute_managed_list(
         })
         .min(HARD_LIST_LIMIT);
     let max_depth = optional_usize(&args, "max_depth")?.unwrap_or(DEFAULT_RECURSIVE_MAX_DEPTH);
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::List,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::List {
-                recursive,
-                limit,
-                max_depth,
-            },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::List,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::List {
+            recursive,
+            limit,
+            max_depth,
+        },
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
@@ -1157,6 +1349,7 @@ async fn execute_managed_list(
             details: json!({
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -1192,7 +1385,16 @@ impl Tool for GlobTool {
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
-        required_string(args, "pattern")?;
+        let pattern = required_string(args, "pattern")?;
+        let limit = optional_usize(args, "limit")?
+            .unwrap_or(DEFAULT_GLOB_LIMIT)
+            .min(HARD_GLOB_LIMIT);
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Glob {
+                pattern: pattern.to_owned(),
+                limit,
+            }
+            .operation_scope();
         let spec = self.spec();
         declared_tool_permission_plan(
             &spec,
@@ -1206,7 +1408,7 @@ impl Tool for GlobTool {
                 managed_file_access: Some(file_access_ref(
                     ctx,
                     ".",
-                    "glob-pattern",
+                    &operation_scope,
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Glob,
                 )?),
             },
@@ -1236,12 +1438,12 @@ async fn execute_managed_glob(
     let limit = optional_usize(&args, "limit")?
         .unwrap_or(DEFAULT_GLOB_LIMIT)
         .min(HARD_GLOB_LIMIT);
-    let outcome = ctx
-        .execute_v3_file_operation(
-            sigil_kernel::managed_file_access::ManagedFileOperationV1::Glob,
-            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Glob { pattern, limit },
-        )
-        .map_err(|error| anyhow::anyhow!("managed file access refused: {error}"))?;
+    let outcome = execute_managed_file_operation(
+        ctx,
+        sigil_kernel::managed_file_access::ManagedFileOperationV1::Glob,
+        sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Glob { pattern, limit },
+    )
+    .await?;
     let managed_access_receipt = managed_access_receipt_value(&outcome)?;
     Ok(ToolResult::ok(
         call_id,
@@ -1255,6 +1457,7 @@ async fn execute_managed_glob(
             details: json!({
                 "managed_access_receipt": managed_access_receipt,
             }),
+            changed_files: outcome.changed_files.clone(),
             ..ToolResultMeta::default()
         },
     ))
@@ -1291,8 +1494,18 @@ impl Tool for GrepTool {
     }
 
     fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
-        required_string(args, "pattern")?;
+        let pattern = required_string(args, "pattern")?;
         let path = optional_string(args, "path").unwrap_or(".");
+        let limit = optional_usize(args, "limit")?
+            .unwrap_or(DEFAULT_GREP_LIMIT)
+            .min(HARD_GREP_LIMIT);
+        let operation_scope =
+            sigil_kernel::managed_file_access::ManagedFileExecutionInputV1::Grep {
+                pattern: pattern.to_owned(),
+                limit,
+                max_bytes: DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES),
+            }
+            .operation_scope();
         let spec = self.spec();
         declared_tool_permission_plan(
             &spec,
@@ -1306,7 +1519,7 @@ impl Tool for GrepTool {
                 managed_file_access: Some(file_access_ref(
                     ctx,
                     path,
-                    "grep-subject",
+                    &operation_scope,
                     sigil_kernel::managed_file_access::ManagedFileOperationV1::Grep,
                 )?),
             },

@@ -9,12 +9,11 @@ fn record() -> ManagedGenerationRecordV1 {
             epoch: 1,
             instance_hash: CanonicalHash::from_bytes([0u8; 32]),
         },
-        journal_scope: ResourceJournalScopeV1::Application,
+        authority_scope: ResourceAuthorityScopeV1::Application,
         physical_attempt_id: None,
         bound_manifest_hash: None,
         holder_count: 0,
         cleanup_status: ResourceCleanupStatusV1::NotStarted,
-        journal_frontier_hash: CanonicalHash::from_bytes([0u8; 32]),
     }
 }
 

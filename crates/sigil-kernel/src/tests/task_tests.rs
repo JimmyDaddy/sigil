@@ -397,6 +397,57 @@ fn task_role_and_status_labels_are_stable() {
 }
 
 #[test]
+fn task_status_as_str_matches_serde_wire_values() -> Result<()> {
+    for (status, expected) in [
+        (TaskRunStatus::Started, "started"),
+        (TaskRunStatus::Running, "running"),
+        (TaskRunStatus::Paused, "paused"),
+        (TaskRunStatus::Completed, "completed"),
+        (TaskRunStatus::Failed, "failed"),
+        (TaskRunStatus::Cancelled, "cancelled"),
+        (TaskRunStatus::Interrupted, "interrupted"),
+    ] {
+        assert_eq!(status.as_str(), expected);
+        assert_eq!(
+            serde_json::to_value(status)?,
+            serde_json::Value::String(expected.to_owned())
+        );
+    }
+
+    for (status, expected) in [
+        (TaskPlanStatus::Proposed, "proposed"),
+        (TaskPlanStatus::Accepted, "accepted"),
+        (TaskPlanStatus::Superseded, "superseded"),
+        (TaskPlanStatus::Rejected, "rejected"),
+    ] {
+        assert_eq!(status.as_str(), expected);
+        assert_eq!(
+            serde_json::to_value(status)?,
+            serde_json::Value::String(expected.to_owned())
+        );
+    }
+
+    for (status, expected) in [
+        (TaskStepStatus::Pending, "pending"),
+        (TaskStepStatus::Running, "running"),
+        (TaskStepStatus::Completed, "completed"),
+        (TaskStepStatus::Failed, "failed"),
+        (TaskStepStatus::Blocked, "blocked"),
+        (TaskStepStatus::Cancelled, "cancelled"),
+        (TaskStepStatus::Interrupted, "interrupted"),
+        (TaskStepStatus::Superseded, "superseded"),
+    ] {
+        assert_eq!(status.as_str(), expected);
+        assert_eq!(
+            serde_json::to_value(status)?,
+            serde_json::Value::String(expected.to_owned())
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn task_pause_request_binds_exact_task_and_plan_version() -> Result<()> {
     let mut request = TaskPauseRequest::new(task_id("task_1")?, 3);
 

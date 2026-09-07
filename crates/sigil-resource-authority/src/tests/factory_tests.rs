@@ -1,28 +1,29 @@
-use super::*;
-use sigil_kernel::resource::CanonicalHash;
+use std::sync::Arc;
 
 #[test]
-fn r71_factory_exposes_exactly_five_ra_owned_verifiers() {
+fn factory_exposes_only_current_authority_facets() {
+    let generation = sigil_kernel::resource::AuthorityGeneration {
+        epoch: 1,
+        instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([1; 32]),
+    };
     let storage = Arc::new(crate::storage::AuthorityManagedStorageServiceV1::new(
         crate::storage::AuthorityStorageGrantTableV1::new(),
-        AuthorityGeneration {
-            epoch: 1,
-            instance_hash: CanonicalHash::from_bytes([0u8; 32]),
-        },
+        generation,
     ));
-    let file_access = crate::file_access_stub::stub_file_access_service();
-    let factory = ResourceAuthorityServiceFactoryV1::new(
-        AuthorityGeneration {
-            epoch: 2,
-            instance_hash: CanonicalHash::from_bytes([1u8; 32]),
-        },
-        storage,
-        file_access,
+    let file_access = Arc::new(
+        crate::file_access::AuthorityManagedFileAccessServiceV1::new(Arc::new(
+            std::sync::Mutex::new(crate::borrowed::BorrowedSubjectRegistryV1::new()),
+        )),
     );
-    let bundle = factory.build_bundle();
-    assert_eq!(bundle.verifiers.len(), 5, "exactly five RA-owned verifiers");
-    let kinds: Vec<_> = bundle.verifiers.iter().map(|v| v.kind).collect();
-    assert!(kinds.contains(&RaOwnedVerifierKindV1::StorageActivation));
-    assert!(kinds.contains(&RaOwnedVerifierKindV1::RecoveryPreparedSettled));
-    assert!(!bundle.journal_coordinator.journal_instance_hash.is_empty());
+    let bundle =
+        crate::factory::ResourceAuthorityServiceFactoryV1::new(generation, storage, file_access)
+            .build_bundle();
+    assert_eq!(bundle.verifiers.len(), 2);
+    assert!(
+        bundle
+            .verifiers
+            .iter()
+            .any(|verifier| verifier.kind
+                == crate::factory::RaOwnedVerifierKindV1::StorageActivation)
+    );
 }

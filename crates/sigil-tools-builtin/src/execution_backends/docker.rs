@@ -201,18 +201,14 @@ impl DockerContainerCleanup {
         let deadline = TokioInstant::now()
             .checked_add(max_wait)
             .unwrap_or_else(TokioInstant::now);
-        let mut last_error = None;
         loop {
             match self.read_container_id().await {
                 Ok(Some(container_id)) => return Ok(Some(container_id)),
                 Ok(None) => {}
-                Err(error) => last_error = Some(error),
+                Err(error) => return Err(error),
             }
             if TokioInstant::now() >= deadline {
-                return match last_error {
-                    Some(error) => Err(error),
-                    None => Ok(None),
-                };
+                return Ok(None);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

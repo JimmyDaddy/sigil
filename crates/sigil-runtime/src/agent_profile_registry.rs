@@ -17,9 +17,8 @@ mod names;
 mod paths;
 mod profiles;
 mod wire;
-use builtin::{
-    BuiltinProfileSpec, builtin_profile, capture_profile_snapshot, read_only_role_tool_scope,
-};
+use crate::run_options::read_only_role_tool_scope;
+use builtin::{BuiltinProfileSpec, builtin_profile, capture_profile_snapshot};
 use discovery::{
     discover_child_session_skill_profiles, discover_codex_agent_profiles,
     discover_plugin_agent_profiles, discover_workspace_agent_profiles,

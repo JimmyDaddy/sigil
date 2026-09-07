@@ -368,7 +368,7 @@ async fn r71_current_boot_command_route_starts_terminal_with_durable_inventory()
 }
 
 #[test]
-fn r71_bootstrap_metadata_missing_requires_typed_reconciliation() {
+fn r71_bootstrap_metadata_missing_is_typed_corruption() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let config = dir.path().join("sigil.toml");
@@ -387,14 +387,14 @@ fn r71_bootstrap_metadata_missing_requires_typed_reconciliation() {
     assert!(matches!(
         result,
         Err(BootAuthorityErrorV1::Bootstrap(
-            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
         ))
     ));
     std::fs::remove_dir_all(bootstrap.root()).expect("cleanup bootstrap fixture");
 }
 
 #[test]
-fn r71_process_inventory_partial_or_legacy_existing_state_requires_reconciliation() {
+fn r71_process_inventory_partial_or_legacy_existing_state_is_typed_corruption() {
     let _environment_guard = crate::test_env::lock();
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
@@ -491,7 +491,7 @@ fn r71_process_inventory_partial_or_legacy_existing_state_requires_reconciliatio
     assert!(matches!(
         boot_current_schema(&legacy_config, &legacy_dir),
         Err(BootAuthorityErrorV1::Bootstrap(
-            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
         ))
     ));
     assert_eq!(
@@ -502,7 +502,7 @@ fn r71_process_inventory_partial_or_legacy_existing_state_requires_reconciliatio
 }
 
 #[test]
-fn r71_process_inventory_boot_error_mapping_preserves_corruption_and_recovery_classes() {
+fn r71_process_inventory_boot_error_mapping_preserves_corruption_classes() {
     use sigil_resource_authority::AuthorityProcessInventoryErrorV1 as InventoryError;
 
     assert!(matches!(
@@ -521,7 +521,7 @@ fn r71_process_inventory_boot_error_mapping_preserves_corruption_and_recovery_cl
         assert!(matches!(
             map_process_inventory_boot_error(error),
             BootAuthorityErrorV1::Bootstrap(
-                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
             )
         ));
     }
@@ -531,7 +531,7 @@ fn r71_process_inventory_boot_error_mapping_preserves_corruption_and_recovery_cl
             sigil_kernel::process_observation::ProcessObservationErrorV1::NotObservable,
         )),
         BootAuthorityErrorV1::Bootstrap(
-            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(_)
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(_)
         )
     ));
 
@@ -1034,14 +1034,10 @@ fn r71_reopen_recovers_pending_v2_admission_after_source_bound_grant_rollover() 
         planner,
         &[Ch::SessionLog],
     );
-    assert!(matches!(
-        second,
-        Err(
-            crate::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(
-                _
-            )
-        )
-    ));
+    assert!(
+        second.is_ok(),
+        "current authority must reopen without history replay"
+    );
     assert_eq!(
         std::fs::read(pending_path.join("records.jsonl")).expect("records retained"),
         records_before

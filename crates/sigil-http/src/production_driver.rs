@@ -71,7 +71,7 @@ use sigil_runtime::application_run::{
     rerun_application_verification_with_attachment,
 };
 use sigil_runtime::conversation_display::{
-    ConversationDisplayProjectionError, conversation_display_page_with_artifact_store,
+    ConversationDisplayProjectionError, conversation_display_page_with_optional_artifact_store,
 };
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
@@ -269,6 +269,13 @@ impl HttpPreparedApplicationRun {
         }
     }
 
+    fn tool_artifact_store(&self) -> Option<sigil_kernel::ToolArtifactStore> {
+        match self {
+            Self::Conversation(prepared) => prepared.tool_artifact_store(),
+            Self::Task(_) => None,
+        }
+    }
+
     fn into_parts(self) -> (HttpApplicationRunExecution, ApplicationRunControl) {
         match self {
             Self::Conversation(prepared) => {
@@ -334,6 +341,8 @@ pub struct HttpProductionRunDriver {
         Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
     active_runs_ready: Arc<Condvar>,
+    active_artifact_stores: Arc<Mutex<BTreeMap<String, sigil_kernel::ToolArtifactStore>>>,
+    artifact_access: Arc<ArtifactAccessCoordinator>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
@@ -455,6 +464,126 @@ struct HttpExactQueuePromptKey {
 struct HttpExactQueuePrompt {
     prompt_hash: String,
     exact_prompt: SecretString,
+}
+
+#[derive(Default)]
+struct ArtifactAccessState {
+    readers: usize,
+    preparing: bool,
+}
+
+/// Coordinates the short read leases used by HTTP projections with the exclusive artifact lease
+/// acquired while a foreground run is being prepared. The authority remains the final owner of
+/// the namespace reservation; this process-local barrier only prevents two local callers from
+/// racing the authority for the same session namespace.
+struct ArtifactAccessCoordinator {
+    states: Mutex<BTreeMap<String, ArtifactAccessState>>,
+    ready: Condvar,
+}
+
+impl ArtifactAccessCoordinator {
+    fn begin_read(self: &Arc<Self>, key: &str) -> ArtifactReadPermit {
+        let mut states = self
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let state = states.entry(key.to_owned()).or_default();
+            if !state.preparing {
+                state.readers = state.readers.saturating_add(1);
+                return ArtifactReadPermit {
+                    coordinator: Arc::clone(self),
+                    key: key.to_owned(),
+                };
+            }
+            states = self
+                .ready
+                .wait(states)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn begin_preparation(self: &Arc<Self>, key: &str) -> ArtifactPreparationPermit {
+        let mut states = self
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            let state = states.entry(key.to_owned()).or_default();
+            if !state.preparing && state.readers == 0 {
+                state.preparing = true;
+                return ArtifactPreparationPermit {
+                    coordinator: Arc::clone(self),
+                    key: key.to_owned(),
+                    completed: false,
+                };
+            }
+            states = self
+                .ready
+                .wait(states)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn release_read(&self, key: &str) {
+        let mut states = self
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = states.get_mut(key) {
+            state.readers = state.readers.saturating_sub(1);
+            if state.readers == 0 && !state.preparing {
+                states.remove(key);
+            }
+        }
+        self.ready.notify_all();
+    }
+
+    fn release_preparation(&self, key: &str) {
+        let mut states = self
+            .states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = states.get_mut(key) {
+            state.preparing = false;
+            if state.readers == 0 {
+                states.remove(key);
+            }
+        }
+        self.ready.notify_all();
+    }
+}
+
+struct ArtifactReadPermit {
+    coordinator: Arc<ArtifactAccessCoordinator>,
+    key: String,
+}
+
+impl Drop for ArtifactReadPermit {
+    fn drop(&mut self) {
+        self.coordinator.release_read(&self.key);
+    }
+}
+
+struct ArtifactPreparationPermit {
+    coordinator: Arc<ArtifactAccessCoordinator>,
+    key: String,
+    completed: bool,
+}
+
+impl ArtifactPreparationPermit {
+    fn complete(mut self) {
+        self.completed = true;
+        self.coordinator.release_preparation(&self.key);
+    }
+}
+
+impl Drop for ArtifactPreparationPermit {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.coordinator.release_preparation(&self.key);
+        }
+    }
 }
 
 struct HttpQueuedRunPreparation {
@@ -1077,20 +1206,7 @@ impl HttpProductionRunDriver {
                     authority_recovery_code = HttpSessionRouteRecoveryCode::ConnectionConfigInvalid;
                     (services, false)
                 }
-                Err(error) => {
-                    eprintln!("HTTP BOOT ERROR: {error:?}");
-                    if matches!(
-                        &error,
-                        sigil_runtime::application_host::BootAuthorityErrorV1::Composition(
-                            sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::JournalCorrupted(_)
-                            | sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(_)
-                        )
-                    ) {
-                        authority_recovery_code =
-                            HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted;
-                    }
-                    (services, false)
-                }
+                Err(_error) => (services, false),
             };
         let mut options = options;
         let current_schema = services.cutover().is_some_and(|cutover| {
@@ -1101,6 +1217,13 @@ impl HttpProductionRunDriver {
             && let Some(composition) = services.authority_composition()
             && let Some(lifecycle) = options.session_lifecycle.take()
         {
+            let lifecycle_namespace_key = lifecycle.workspace_id().to_owned();
+            let lifecycle = lifecycle
+                .with_managed_writer(
+                    Arc::clone(&composition.storage_writer),
+                    lifecycle_namespace_key,
+                )
+                .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
             let managed_session_log_root = composition
                 .storage_writer
                 .managed_leaf_path(
@@ -1158,6 +1281,11 @@ impl HttpProductionRunDriver {
             application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
+            active_artifact_stores: Arc::new(Mutex::new(BTreeMap::new())),
+            artifact_access: Arc::new(ArtifactAccessCoordinator {
+                states: Mutex::new(BTreeMap::new()),
+                ready: Condvar::new(),
+            }),
             terminal_owners: Arc::new(Mutex::new(BTreeMap::new())),
             exact_queue_prompts: Arc::new(Mutex::new(BTreeMap::new())),
             pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1196,16 +1324,16 @@ impl HttpProductionRunDriver {
                 ],
                 false,
             ),
-            HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted => (
+            HttpSessionRouteRecoveryCode::AuthorityUnavailable => (
                 vec![
-                    crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                    crate::HttpSessionRouteRecoveryAction::StartNewSession,
                     crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
                 ],
                 false,
             ),
             _ => (
                 vec![
-                    crate::HttpSessionRouteRecoveryAction::RepairAuthority,
+                    crate::HttpSessionRouteRecoveryAction::StartNewSession,
                     crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
                 ],
                 true,
@@ -1218,13 +1346,7 @@ impl HttpProductionRunDriver {
             // the public recovery contract still requires a bounded opaque binding. Keep it
             // path-free and stable so Desktop can safely project the recovery instead of
             // dropping it as malformed.
-            recovery_binding: format!(
-                "authority-recovery-{}",
-                match self.authority_recovery_code {
-                    HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted => "corrupt",
-                    _ => "unavailable",
-                }
-            ),
+            recovery_binding: "authority-recovery-unavailable".to_owned(),
             retryable,
         }
     }
@@ -1771,6 +1893,8 @@ impl HttpProductionRunDriver {
             session_attachment,
             queued,
             exact_queue_prompts: Arc::clone(&self.exact_queue_prompts),
+            active_artifact_stores: Arc::clone(&self.active_artifact_stores),
+            artifact_access: Arc::clone(&self.artifact_access),
             terminal_owners: Arc::clone(&self.terminal_owners),
             cancel_receiver,
             post_run_maintenance: Arc::clone(&post_run_maintenance),
@@ -1778,6 +1902,7 @@ impl HttpProductionRunDriver {
         let task = self.runtime.spawn(supervisor.run(preprepared));
         let active_runs = Arc::clone(&self.active_runs);
         let active_runs_ready = Arc::clone(&self.active_runs_ready);
+        let active_artifact_stores = Arc::clone(&self.active_artifact_stores);
         let terminal_owners = Arc::clone(&self.terminal_owners);
         let registry = Arc::downgrade(&registry);
         let run_id = start.run.id;
@@ -1822,6 +1947,9 @@ impl HttpProductionRunDriver {
             if let Ok(mut runs) = active_runs.lock() {
                 runs.remove(&run_id);
                 active_runs_ready.notify_all();
+            }
+            if let Ok(mut stores) = active_artifact_stores.lock() {
+                stores.remove(&run_id);
             }
             if let Some(registry) = registry.upgrade() {
                 let _ = registry.record_run_released(&run_id);
@@ -2106,6 +2234,21 @@ fn authority_artifact_store_for_session(
     services: &ApplicationRunServices,
     session: &crate::HttpSessionSnapshot,
 ) -> Option<AuthorityArtifactStoreLease> {
+    let key = authority_artifact_store_key(services, session)?;
+    let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
+        Arc::clone(&services.authority_composition()?.storage_writer),
+        &key,
+        &session.durable_session_scope_id,
+        Path::new(&session.session_log_path).to_path_buf(),
+    )
+    .ok()?;
+    Some(AuthorityArtifactStoreLease::managed(lease))
+}
+
+fn authority_artifact_store_key(
+    services: &ApplicationRunServices,
+    session: &crate::HttpSessionSnapshot,
+) -> Option<String> {
     let current_schema = services.cutover().is_some_and(|cutover| {
         cutover.manifest().selected_epoch
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
@@ -2119,17 +2262,26 @@ fn authority_artifact_store_for_session(
     {
         return None;
     }
-    let key = Path::new(&session.session_log_path)
-        .file_stem()
-        .and_then(|value| value.to_str())?;
-    let lease = sigil_runtime::managed_artifact_store::ManagedArtifactStoreLeaseV1::acquire_with_session_path(
-        Arc::clone(&composition.storage_writer),
-        key,
-        &session.durable_session_scope_id,
-        Path::new(&session.session_log_path).to_path_buf(),
-    )
-    .ok()?;
-    Some(AuthorityArtifactStoreLease::managed(lease))
+    let session_log_path = Path::new(&session.session_log_path);
+    let managed_session_log_root = composition
+        .storage_writer
+        .managed_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+        )
+        .ok()?
+        .canonicalize()
+        .ok()?;
+    let canonical_session_log_path = session_log_path.canonicalize().ok()?;
+    let key = canonical_session_log_path
+        .strip_prefix(&managed_session_log_root)
+        .ok()
+        .and_then(|relative| {
+            let mut components = relative.components();
+            let key = components.next()?.as_os_str().to_str()?;
+            let leaf = components.next()?.as_os_str().to_str()?;
+            (components.next().is_none() && leaf == "records.jsonl").then_some(key)
+        });
+    key.map(ToOwned::to_owned)
 }
 
 struct AuthorityArtifactStoreLease {
@@ -2394,7 +2546,6 @@ impl HttpRunDriver for HttpProductionRunDriver {
             | HttpSessionRouteRecoveryCode::ConnectionConfigInvalid
             | HttpSessionRouteRecoveryCode::ProviderUnavailable
             | HttpSessionRouteRecoveryCode::AuthorityUnavailable
-            | HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted
             | HttpSessionRouteRecoveryCode::SessionAlreadyActive
             | HttpSessionRouteRecoveryCode::SessionWriterBusy
             | HttpSessionRouteRecoveryCode::SessionStreamInvalid => false,
@@ -2734,16 +2885,19 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
                 })
                 .flatten();
-        let artifact_lease = authority_artifact_store_for_session(&self.services, session)
-            .ok_or(HttpConversationDisplayDriverError::Unavailable)?;
-        let artifact_store = artifact_lease.store();
-        let page = conversation_display_page_with_artifact_store(
+        let _artifact_read_permit = authority_artifact_store_key(&self.services, session)
+            .map(|key| self.artifact_access.begin_read(&key));
+        let artifact_lease = authority_artifact_store_for_session(&self.services, session);
+        let artifact_store = artifact_lease
+            .as_ref()
+            .map(AuthorityArtifactStoreLease::store);
+        let page = conversation_display_page_with_optional_artifact_store(
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
             cursor,
             limit,
             current_workspace_snapshot_id.as_deref(),
-            &artifact_store,
+            artifact_store.as_ref(),
         )
         .map_err(|error| match error {
             ConversationDisplayProjectionError::InvalidCursor { .. } => {
@@ -2789,40 +2943,60 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
 
         let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
+        let active_store = session.foreground_run_id.as_deref().and_then(|run_id| {
+            self.active_artifact_stores
+                .lock()
+                .ok()
+                .and_then(|stores| stores.get(run_id).cloned())
+        });
+        let read_from_store = |store: sigil_kernel::ToolArtifactStore| {
+            let descriptor = store
+                .resolve(&artifact_ref)
+                .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+            validate_projected_tool_artifact_descriptor(&binding, &descriptor)?;
+            if descriptor.encoding != ToolArtifactEncoding::Utf8
+                && matches!(
+                    &request.selector,
+                    crate::HttpToolArtifactSelector::LinePage { .. }
+                        | crate::HttpToolArtifactSelector::SearchLiteral { .. }
+                )
+            {
+                return Err(HttpToolArtifactReadDriverError::InvalidSelector);
+            }
+            match store.availability(&descriptor) {
+                ToolArtifactAvailability::Available => {}
+                ToolArtifactAvailability::HashMismatch => {
+                    return Err(HttpToolArtifactReadDriverError::Corrupt);
+                }
+                ToolArtifactAvailability::PolicyRevoked => {
+                    return Err(HttpToolArtifactReadDriverError::PolicyRevoked);
+                }
+                ToolArtifactAvailability::Expired
+                | ToolArtifactAvailability::Missing
+                | ToolArtifactAvailability::Unavailable => {
+                    return Err(HttpToolArtifactReadDriverError::Unavailable);
+                }
+            }
+            let page = store
+                .read_page(&artifact_ref, request.selector.clone().into())
+                .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+            Ok(HttpToolArtifactPage::from_kernel(&session.id, page))
+        };
+        if let Some(store) = active_store {
+            match read_from_store(store) {
+                Ok(page) => return Ok(page),
+                Err(HttpToolArtifactReadDriverError::Unavailable) => {
+                    if let Some(run_id) = session.foreground_run_id.as_deref() {
+                        let _ =
+                            self.wait_for_run_release(run_id, DEFAULT_HTTP_CANCELLATION_TIMEOUT);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let artifact_lease = authority_artifact_store_for_session(&self.services, session)
             .ok_or(HttpToolArtifactReadDriverError::Unavailable)?;
-        let store = artifact_lease.store();
-        let descriptor = store
-            .resolve(&artifact_ref)
-            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
-        validate_projected_tool_artifact_descriptor(&binding, &descriptor)?;
-        if descriptor.encoding != ToolArtifactEncoding::Utf8
-            && matches!(
-                &request.selector,
-                crate::HttpToolArtifactSelector::LinePage { .. }
-                    | crate::HttpToolArtifactSelector::SearchLiteral { .. }
-            )
-        {
-            return Err(HttpToolArtifactReadDriverError::InvalidSelector);
-        }
-        match store.availability(&descriptor) {
-            ToolArtifactAvailability::Available => {}
-            ToolArtifactAvailability::HashMismatch => {
-                return Err(HttpToolArtifactReadDriverError::Corrupt);
-            }
-            ToolArtifactAvailability::PolicyRevoked => {
-                return Err(HttpToolArtifactReadDriverError::PolicyRevoked);
-            }
-            ToolArtifactAvailability::Expired
-            | ToolArtifactAvailability::Missing
-            | ToolArtifactAvailability::Unavailable => {
-                return Err(HttpToolArtifactReadDriverError::Unavailable);
-            }
-        }
-        let page = store
-            .read_page(&artifact_ref, request.selector.clone().into())
-            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
-        Ok(HttpToolArtifactPage::from_kernel(&session.id, page))
+        read_from_store(artifact_lease.store())
     }
 
     fn run_context_view(
@@ -3002,7 +3176,6 @@ impl HttpRunDriver for HttpProductionRunDriver {
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ConnectionConfigInvalid => crate::HttpSessionRouteRecoveryCode::ConnectionConfigInvalid,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::ProviderUnavailable => crate::HttpSessionRouteRecoveryCode::ProviderUnavailable,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::AuthorityUnavailable => crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::AuthorityJournalCorrupted => crate::HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionAlreadyActive => crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionWriterBusy => crate::HttpSessionRouteRecoveryCode::SessionWriterBusy,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryCode::SessionStreamInvalid => crate::HttpSessionRouteRecoveryCode::SessionStreamInvalid,
@@ -3010,7 +3183,6 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     allowed_actions: recovery.allowed_actions.into_iter().map(|action| match action {
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::ConfirmCurrentRoute => crate::HttpSessionRouteRecoveryAction::ConfirmCurrentRoute,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RepairConnection => crate::HttpSessionRouteRecoveryAction::RepairConnection,
-                        sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RepairAuthority => crate::HttpSessionRouteRecoveryAction::RepairAuthority,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::SelectReplacement => crate::HttpSessionRouteRecoveryAction::SelectReplacement,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::StartNewSession => crate::HttpSessionRouteRecoveryAction::StartNewSession,
                         sigil_runtime::application_run::ApplicationSessionRouteRecoveryAction::RetryProvider => crate::HttpSessionRouteRecoveryAction::RetryProvider,
@@ -4684,23 +4856,11 @@ fn public_preparation_failure_event(error: &anyhow::Error) -> PublicRunEventKind
                 return PublicRunEventKind::RouteRecoveryRequired {
                     code: PublicRouteRecoveryCode::AuthorityUnavailable,
                     actions: vec![
-                        PublicRouteRecoveryAction::RepairAuthority,
                         PublicRouteRecoveryAction::StartNewSession,
                         PublicRouteRecoveryAction::BackToSessionLibrary,
                     ],
                     recovery_binding,
                     retryable: true,
-                };
-            }
-            sigil_runtime::application_run::ApplicationRunPrepareErrorClass::AuthorityJournalCorrupted => {
-                return PublicRunEventKind::RouteRecoveryRequired {
-                    code: PublicRouteRecoveryCode::AuthorityJournalCorrupted,
-                    actions: vec![
-                        PublicRouteRecoveryAction::RepairAuthority,
-                        PublicRouteRecoveryAction::BackToSessionLibrary,
-                    ],
-                    recovery_binding,
-                    retryable: false,
                 };
             }
             sigil_runtime::application_run::ApplicationRunPrepareErrorClass::SessionAlreadyActive => {
@@ -4845,6 +5005,8 @@ struct HttpRunSupervisor {
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     queued: Option<HttpQueuedRunPreparation>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
+    active_artifact_stores: Arc<Mutex<BTreeMap<String, sigil_kernel::ToolArtifactStore>>>,
+    artifact_access: Arc<ArtifactAccessCoordinator>,
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
     post_run_maintenance: Arc<Mutex<Option<ApplicationPostRunMaintenance>>>,
@@ -4937,6 +5099,9 @@ impl HttpRunSupervisor {
         let task_continuation = self.start.task_continuation.clone();
         let expected_session_scope_id = self.start.session.durable_session_scope_id.clone();
         let queued = self.queued.take();
+        let artifact_preparation_permit =
+            authority_artifact_store_key(&self.services, &self.start.session)
+                .map(|key| self.artifact_access.begin_preparation(&key));
         let mut preparation = Box::pin(async move {
             if let Some(prepared) = preprepared {
                 if queued.is_some() || task_continuation.is_some() {
@@ -5102,6 +5267,14 @@ impl HttpRunSupervisor {
                     control: prepared.terminal_control(),
                 },
             );
+        if let Some(store) = prepared.tool_artifact_store()
+            && let Ok(mut stores) = self.active_artifact_stores.lock()
+        {
+            stores.insert(self.start.run.id.clone(), store);
+        }
+        if let Some(permit) = artifact_preparation_permit {
+            permit.complete();
+        }
         let (execution, control) = prepared.into_parts();
         let control = Arc::new(control);
         let event_handler = HttpProductionEventHandler {
@@ -5541,6 +5714,9 @@ impl HttpRunSupervisor {
                     break 'run;
                 }
             }
+        }
+        if let Ok(mut stores) = self.active_artifact_stores.lock() {
+            stores.remove(&self.start.run.id);
         }
         self.broker.cancel_all();
         Ok(())
@@ -7700,19 +7876,10 @@ fn http_route_recovery_from_prepare_error(
         Class::AuthorityUnavailable => (
             crate::HttpSessionRouteRecoveryCode::AuthorityUnavailable,
             vec![
-                crate::HttpSessionRouteRecoveryAction::RepairAuthority,
                 crate::HttpSessionRouteRecoveryAction::StartNewSession,
                 crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
             ],
             true,
-        ),
-        Class::AuthorityJournalCorrupted => (
-            crate::HttpSessionRouteRecoveryCode::AuthorityJournalCorrupted,
-            vec![
-                crate::HttpSessionRouteRecoveryAction::RepairAuthority,
-                crate::HttpSessionRouteRecoveryAction::BackToSessionLibrary,
-            ],
-            false,
         ),
         Class::SessionAlreadyActive => (
             crate::HttpSessionRouteRecoveryCode::SessionAlreadyActive,

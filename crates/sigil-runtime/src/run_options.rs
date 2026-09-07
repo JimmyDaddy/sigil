@@ -228,7 +228,7 @@ fn agent_tool_scope() -> ToolRegistryScope {
     )
 }
 
-fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
+pub(crate) fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
     let configured = &root_config.task.role_config(role).tools;
     if configured_allowlist_is_empty(configured) {
         default_role_tool_scope(root_config, role)
@@ -282,7 +282,7 @@ fn default_role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolReg
     }
 }
 
-fn read_only_role_tool_scope() -> ToolRegistryScope {
+pub(crate) fn read_only_role_tool_scope() -> ToolRegistryScope {
     ToolRegistryScope::from_names_and_prefixes(
         [
             "read_file",
@@ -309,14 +309,5 @@ fn workspace_partition_key(workspace_root: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
-mod plan_review_scope_tests {
-    use super::*;
-
-    #[test]
-    fn plan_review_deny_scope_uses_registered_web_tool_names() {
-        let scope = plan_review_deny_scope();
-
-        assert!(scope.allows("webfetch"));
-        assert!(scope.allows("websearch"));
-    }
-}
+#[path = "tests/run_options_tests.rs"]
+mod run_options_tests;

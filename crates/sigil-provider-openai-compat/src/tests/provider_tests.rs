@@ -47,6 +47,21 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
     Ok(())
 }
 
+#[test]
+fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set_many(&[(
+        "SSL_CERT_FILE",
+        "/definitely/missing/sigil-provider-ca.pem",
+    )]);
+    assert!(OpenAiCompatibleProvider::new(
+        OpenAiCompatibleProviderConfig::default(),
+        ModelRequestTimeouts::default(),
+    )
+    .is_err());
+    Ok(())
+}
+
 #[tokio::test]
 async fn provider_allows_unauthenticated_loopback_without_authorization_header() -> Result<()> {
     let server = TinySseServer::start(

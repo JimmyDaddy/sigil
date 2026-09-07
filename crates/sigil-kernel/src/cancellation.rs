@@ -103,8 +103,8 @@ struct InMemoryCancellationState {
     records: BTreeMap<String, DurableRunCancellationRecord>,
 }
 
-/// Cloneable cancellation recorder backed by the session's linear writer, or by a process-local
-/// state for provider-only safe sessions that deliberately have no durable store.
+/// Cloneable cancellation recorder backed by the session's linear writer, or by process-local
+/// state for sessions that deliberately have no durable store.
 #[derive(Debug, Clone)]
 pub struct RunCancellationRecorder {
     backend: RunCancellationRecorderBackend,
@@ -123,9 +123,9 @@ impl RunCancellationRecorder {
         }
     }
 
-    /// Creates a process-local recorder for an in-memory provider-only session.
+    /// Creates a process-local recorder for an in-memory session.
     ///
-    /// Safe sessions must retain cancellation's ordering and idempotency semantics while
+    /// In-memory sessions must retain cancellation's ordering and idempotency semantics while
     /// intentionally avoiding JSONL, locks, and authority side effects. The records disappear
     /// with the process and are never presented as durable session history.
     #[must_use]

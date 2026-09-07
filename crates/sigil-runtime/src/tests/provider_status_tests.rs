@@ -9,10 +9,9 @@ use crate::ProviderStatusConfig;
 
 use super::{
     BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
-    build_provider_status_client, fetch_provider_balance_snapshot, fetch_remote_model_ids,
-    parse_balance_snapshot, parse_remote_model_ids, provider_request_timeout_secs,
-    provider_status_request_parts, provider_status_url, require_provider_auth,
-    resolve_provider_api_key,
+    fetch_provider_balance_snapshot, fetch_remote_model_ids, parse_balance_snapshot,
+    parse_remote_model_ids, provider_request_timeout_secs, provider_status_request_parts,
+    provider_status_url, require_provider_auth, resolve_provider_api_key,
 };
 
 fn spawn_mock_http_server(
@@ -560,9 +559,4 @@ async fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
     assert!(snapshot.available);
     assert_eq!(snapshot.status, "CNY 18.50");
     let _ = server.join();
-}
-
-#[test]
-fn build_provider_status_client_accepts_small_timeout_values() {
-    build_provider_status_client(1, "balance").expect("expected provider status client");
 }

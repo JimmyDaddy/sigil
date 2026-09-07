@@ -5891,7 +5891,9 @@ name = "sigil-resource-authority"
 version = "0.0.1-beta.4"
 dependencies = [
  "fs2",
+ "globset",
  "hmac",
+ "ignore",
  "libc",
  "regex",
  "ring",

@@ -101,48 +101,6 @@ pub async fn build_provider_for_model_ref_async(
     .await
 }
 
-/// Builds an exact provider for provider-only recovery without opening any configured
-/// credential store or caller-supplied CA bundle. This path is intentionally limited to
-/// environment and no-auth connections; a stored credential cannot be recovered without a
-/// physical credential-store read and must be repaired through the normal durable setup flow.
-pub async fn build_provider_for_model_ref_from_environment_async(
-    root_config: &RootConfig,
-    model_ref: &sigil_kernel::ModelRef,
-) -> Result<Box<dyn Provider>> {
-    anyhow::ensure!(
-        std::env::var_os("SSL_CERT_FILE").is_none(),
-        "provider-only safe mode cannot read SSL_CERT_FILE; unset it or repair authority first"
-    );
-    let loaded = crate::provider_connections::load_provider_connections(root_config);
-    let connection = loaded
-        .connections
-        .get(&model_ref.connection_id)
-        .ok_or_else(|| anyhow!("connection_not_found"))?;
-    anyhow::ensure!(
-        matches!(
-            &connection.credential,
-            crate::provider_connections::LoadedCredentialRef::Config(
-                crate::provider_connections::CredentialRefConfig::Environment { .. }
-                    | crate::provider_connections::CredentialRefConfig::None
-            )
-        ),
-        "provider-only safe mode requires an environment or no-auth credential; repair the stored credential through Setup"
-    );
-    let client = reqwest::Client::builder()
-        .build()
-        .context("failed to build provider-only safe HTTP client")?;
-    let credential_store = EnvironmentOnlyCredentialStore;
-    let environment = crate::provider_connections::ProcessCredentialEnvironment;
-    build_provider_for_model_ref_with_credentials_and_client(
-        root_config,
-        model_ref,
-        &credential_store,
-        &environment,
-        Some(client),
-    )
-    .await
-}
-
 /// Synchronous compatibility wrapper for exact-route owners already running on a blocking thread.
 pub fn build_provider_for_model_ref(
     root_config: &RootConfig,
@@ -283,45 +241,6 @@ async fn build_provider_for_model_ref_with_credentials_and_client(
             }))
         }
         _ => Err(anyhow!("unsupported provider connection protocol")),
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct EnvironmentOnlyCredentialStore;
-
-#[async_trait::async_trait]
-impl crate::provider_connections::ProviderCredentialStore for EnvironmentOnlyCredentialStore {
-    async fn load(
-        &self,
-        _credential_id: &crate::provider_connections::CredentialId,
-    ) -> Result<
-        Option<crate::provider_connections::ProviderCredentialRecord>,
-        crate::provider_connections::ProviderCredentialError,
-    > {
-        Err(crate::provider_connections::ProviderCredentialError::new(
-            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
-            "provider-only safe mode does not access a credential store",
-        ))
-    }
-
-    async fn store(
-        &self,
-        _record: &crate::provider_connections::ProviderCredentialRecord,
-    ) -> Result<(), crate::provider_connections::ProviderCredentialError> {
-        Err(crate::provider_connections::ProviderCredentialError::new(
-            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
-            "provider-only safe mode does not access a credential store",
-        ))
-    }
-
-    async fn delete(
-        &self,
-        _credential_id: &crate::provider_connections::CredentialId,
-    ) -> Result<bool, crate::provider_connections::ProviderCredentialError> {
-        Err(crate::provider_connections::ProviderCredentialError::new(
-            crate::provider_connections::ProviderCredentialErrorCode::CredentialStoreUnavailable,
-            "provider-only safe mode does not access a credential store",
-        ))
     }
 }
 

@@ -435,5 +435,8 @@ mod provider_native_compaction_tests;
 #[path = "session/tests/recovery_blocker_tests.rs"]
 mod recovery_blocker_tests;
 #[cfg(test)]
+#[path = "session/tests/source_user_message_tests.rs"]
+mod source_user_message_tests;
+#[cfg(test)]
 #[path = "tests/session_tests.rs"]
 mod tests;

@@ -22,8 +22,8 @@ use crate::resource::{
     OpaqueManagedFileAccessPlanId, OpaqueManagedStoragePlanId, OpaquePermissionSubjectRef,
     OpaqueRequirementId, OpaqueResourceId, OpaqueRunId, OpaqueSessionId,
     OpaqueStorageOperationAttemptId, OpaqueWorkspaceId, PhysicalAttemptId, RequestedEnforcementV1,
-    ResourceAccessV1, ResourceBlockerScopeV1, ResourceCleanupPolicyV1, ResourceContractError,
-    ResourceJournalScopeV1, ResourceKindV1, ResourceLeaseLifetimeV1, ResourceOwnerScopeV1,
+    ResourceAccessV1, ResourceAuthorityScopeV1, ResourceBlockerScopeV1, ResourceCleanupPolicyV1,
+    ResourceContractError, ResourceKindV1, ResourceLeaseLifetimeV1, ResourceOwnerScopeV1,
     ResourcePurposeV1, ResourceQuotaClassV1, ResourceQuotaProfileV1, ResourceRequirementKeyV1,
     ResourceRequirementSetV1, ResourceRequirementV1, ResourceRetentionPolicyV1,
     ResourceVisibilityV1,
@@ -127,7 +127,7 @@ fn exec_draft() -> ManagedExecutionPlanDraftRefV1 {
         draft_id: OpaqueExecutionPlanDraftId::new("draft-1".to_owned()),
         draft_hash: one_hash(),
         resource_plan_hash: zero_hash(),
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope_hash: zero_hash(),
     }
 }
 
@@ -139,7 +139,7 @@ fn storage_plan(owner: ManagedStorageSemanticOwnerV1) -> ManagedStoragePlanRefV1
         capability_family: ManagedStorageCapabilityFamilyV1::AtomicObject,
         requirement_set_hash: zero_hash(),
         operation_digest: one_hash(),
-        journal_scope_hash: zero_hash(),
+        authority_scope_hash: zero_hash(),
         plan_hash: one_hash(),
     }
 }
@@ -181,10 +181,10 @@ fn r71_v3_closed_envelope_exactly_four_shapes() {
         execution_plan_drafts: vec![exec_draft()],
         managed_storage_plans: Vec::new(),
         managed_file_access_plan: None,
-        attempt_journal_scope: ResourceJournalScopeV1::Workspace(OpaqueWorkspaceId::new(
+        attempt_authority_scope: ResourceAuthorityScopeV1::Workspace(OpaqueWorkspaceId::new(
             "w1".to_owned(),
         )),
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -202,8 +202,8 @@ fn r71_v3_closed_envelope_exactly_four_shapes() {
             crate::resource::MemoryScopeClassV1::UserPreference,
         ))],
         managed_file_access_plan: None,
-        attempt_journal_scope: ResourceJournalScopeV1::Application,
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope: ResourceAuthorityScopeV1::Application,
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -219,10 +219,10 @@ fn r71_v3_closed_envelope_exactly_four_shapes() {
         execution_plan_drafts: Vec::new(),
         managed_storage_plans: Vec::new(),
         managed_file_access_plan: Some(file_plan()),
-        attempt_journal_scope: ResourceJournalScopeV1::Workspace(OpaqueWorkspaceId::new(
+        attempt_authority_scope: ResourceAuthorityScopeV1::Workspace(OpaqueWorkspaceId::new(
             "w1".to_owned(),
         )),
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -241,10 +241,10 @@ fn r71_v3_closed_envelope_exactly_four_shapes() {
             storage_plan(ManagedStorageSemanticOwnerV1::SessionLifecycleLog),
         ],
         managed_file_access_plan: Some(file_plan()),
-        attempt_journal_scope: ResourceJournalScopeV1::Workspace(OpaqueWorkspaceId::new(
+        attempt_authority_scope: ResourceAuthorityScopeV1::Workspace(OpaqueWorkspaceId::new(
             "w1".to_owned(),
         )),
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -263,8 +263,8 @@ fn r71_v3_cross_swap_shapes_are_rejected() {
         execution_plan_drafts: vec![exec_draft()],
         managed_storage_plans: Vec::new(),
         managed_file_access_plan: Some(file_plan()),
-        attempt_journal_scope: ResourceJournalScopeV1::Application,
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope: ResourceAuthorityScopeV1::Application,
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -281,8 +281,8 @@ fn r71_v3_cross_swap_shapes_are_rejected() {
         execution_plan_drafts: vec![exec_draft()],
         managed_storage_plans: vec![storage_plan(ManagedStorageSemanticOwnerV1::SessionLog)],
         managed_file_access_plan: None,
-        attempt_journal_scope: ResourceJournalScopeV1::Application,
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope: ResourceAuthorityScopeV1::Application,
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };
@@ -356,8 +356,8 @@ fn r71_v3_plan_hash_is_updated_by_implicit_requirement_change() {
         execution_plan_drafts: vec![exec_draft()],
         managed_storage_plans: Vec::new(),
         managed_file_access_plan: None,
-        attempt_journal_scope: ResourceJournalScopeV1::Application,
-        attempt_journal_scope_hash: zero_hash(),
+        attempt_authority_scope: ResourceAuthorityScopeV1::Application,
+        attempt_authority_scope_hash: zero_hash(),
         requested_enforcement: requested_enforcement(),
         plan_hash: one_hash(),
     };

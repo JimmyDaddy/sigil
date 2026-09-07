@@ -123,6 +123,21 @@ fn custom_route_does_not_inherit_exact_cache_or_trusted_pricing_from_model_name(
     Ok(())
 }
 
+#[test]
+fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
+    crate::test_env::with_clean_provider_env(|| {
+        unsafe {
+            std::env::set_var("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");
+        }
+        assert!(DeepSeekProvider::new(
+            crate::DeepSeekProviderConfig::default(),
+            ModelRequestTimeouts::default(),
+        )
+        .is_err());
+        Ok(())
+    })
+}
+
 #[tokio::test]
 #[ignore = "requires explicit real-provider opt-in, secret, and local cost admission"]
 async fn real_provider_three_exact_prefix_turns_report_cache_hit_and_miss_usage() -> Result<()> {

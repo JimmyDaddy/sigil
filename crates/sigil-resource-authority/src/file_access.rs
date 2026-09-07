@@ -14,10 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString};
 #[cfg(any(unix, windows))]
 use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::io::SeekFrom;
-#[cfg(any(unix, windows))]
-use std::io::{Read, Seek, Write};
+use std::io::Read;
+#[cfg(windows)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -40,13 +39,8 @@ use sigil_kernel::managed_file_access::{
 use sigil_kernel::resource::{
     AuthorityGeneration, CanonicalHash, OpaquePermissionSubjectRef, ResourceAccessV1,
 };
-#[cfg(unix)]
-use sigil_kernel::secure_private_path_permissions;
 
 use crate::borrowed::{BorrowedSubjectClassV1, BorrowedSubjectRegistryV1};
-#[cfg(unix)]
-use crate::journal::{ResourceJournalEventV1, ResourceJournalFileIdentityV1};
-use crate::journal::{ResourceJournalFileV1, ResourceJournalHeaderV1, ResourceJournalRecordV1};
 
 /// Closed access class for a closed file operation.
 pub fn access_class_for(operation: ManagedFileOperationV1) -> ResourceAccessV1 {
@@ -81,29 +75,36 @@ pub struct AuthorityManagedFileAccessServiceV1 {
     registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
     consumed: Mutex<BTreeSet<String>>,
     plans: Mutex<BTreeMap<String, PlannedFileAccessV1>>,
-    file_delete: Option<Arc<FileDeleteAuthorityStateV1>>,
 }
 
-/// Authority-private state for the Unix delete protocol. The arena is rooted below the
-/// authority's owner-only state anchor, never below the user-writable workspace. Its pathname is
-/// not included in any child request or sandbox binding; recovery uses only the journal's opaque
-/// operation id and the authority-provided arena root.
-#[cfg_attr(not(unix), allow(dead_code))]
-struct FileDeleteAuthorityStateV1 {
-    arena_root: PathBuf,
-    journal: Mutex<ResourceJournalFileV1>,
-}
+/// Hard ceiling for directory entries inspected by one list/glob/grep operation. The public
+/// result marks a scan truncated once this work budget is reached; `limit` only bounds the
+/// returned projection and must not be mistaken for a work budget.
+const MAX_DIRECTORY_SCAN_ENTRIES: usize = 100_000;
+
+/// Hard ceiling for recursive directory depth. Callers may request a smaller depth, but never
+/// enlarge the authority's work budget by passing `usize::MAX`.
+const MAX_DIRECTORY_SCAN_DEPTH: usize = 64;
+
+/// Hard ceiling for bytes read by one direct file read. This keeps offset paging and preview
+/// operations bounded even when the requested page is beyond a very large file.
+const MAX_READ_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Hard ceiling for bytes read by one recursive grep scan. A bounded scan may return a partial
+/// match set with `truncated=true`, but it never reads an unbounded file tree into memory.
+const MAX_GREP_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct PlannedFileAccessV1 {
     subject_ref: OpaquePermissionSubjectRef,
-    #[cfg(not(unix))]
     root: PathBuf,
     logical_path: String,
+    operation_scope: String,
     physical_path: PathBuf,
     #[cfg(any(unix, windows))]
     root_handle: Arc<std::fs::File>,
     expected_physical_identity: Option<CanonicalHash>,
+    expected_content_digest: Option<CanonicalHash>,
     operation: ManagedFileOperationV1,
     operation_digest: CanonicalHash,
     authority_generation: AuthorityGeneration,
@@ -119,91 +120,12 @@ impl AuthorityManagedFileAccessServiceV1 {
             registry,
             consumed: Mutex::new(BTreeSet::new()),
             plans: Mutex::new(BTreeMap::new()),
-            file_delete: None,
         }
-    }
-
-    /// Creates the production delete owner. The arena and journal are both under an authority
-    /// state anchor, and the constructor refuses a corrupt/mismatched journal before the service
-    /// can be published to any tool surface.
-    pub fn new_with_journal(
-        registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
-        arena_root: PathBuf,
-        journal_path: PathBuf,
-        bootstrap_manifest_hash: CanonicalHash,
-        journal_instance_hash: CanonicalHash,
-    ) -> Result<Self, ManagedFileAccessErrorV1> {
-        let header = ResourceJournalHeaderV1 {
-            schema_version: 1,
-            shard_name: "file-delete".to_owned(),
-            bootstrap_manifest_hash,
-            journal_instance_hash,
-            header_hash: file_delete_header_hash(&arena_root, &journal_path),
-        };
-        let journal =
-            ResourceJournalFileV1::open(journal_path, header).map_err(|error| match error {
-                error @ (crate::journal::JournalErrorV1::PreconditionMismatch
-                | crate::journal::JournalErrorV1::HashChainBroken
-                | crate::journal::JournalErrorV1::InstanceMismatch
-                | crate::journal::JournalErrorV1::FirstRecordNotBootstrapBound
-                | crate::journal::JournalErrorV1::Corrupt(_)) => {
-                    ManagedFileAccessErrorV1::JournalCorrupted(error.to_string())
-                }
-                error @ (crate::journal::JournalErrorV1::JournalFull
-                | crate::journal::JournalErrorV1::Filesystem(_)
-                | crate::journal::JournalErrorV1::DurabilityUncertain(_)) => {
-                    ManagedFileAccessErrorV1::JournalUnavailable(error.to_string())
-                }
-            })?;
-        Ok(Self {
-            registry,
-            consumed: Mutex::new(BTreeSet::new()),
-            plans: Mutex::new(BTreeMap::new()),
-            file_delete: Some(Arc::new(FileDeleteAuthorityStateV1 {
-                arena_root,
-                journal: Mutex::new(journal),
-            })),
-        })
-    }
-
-    /// Reconciles every non-terminal delete prefix after workspace activation. A pending rename
-    /// is never guessed away: the authority either observes the expected object and completes
-    /// the already-authorized deletion, restores it without replacement, or leaves a typed
-    /// reconciliation blocker.
-    pub fn reconcile_file_delete_journal(&self) -> Result<(), ManagedFileAccessErrorV1> {
-        #[cfg(unix)]
-        {
-            let Some(state) = self.file_delete.as_ref() else {
-                return Ok(());
-            };
-            reconcile_file_delete_journal(state, &self.registry)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn new_for_test_with_journal(
-        registry: Arc<Mutex<BorrowedSubjectRegistryV1>>,
-        arena_root: PathBuf,
-        journal_path: PathBuf,
-    ) -> Self {
-        Self::new_with_journal(
-            registry,
-            arena_root,
-            journal_path,
-            CanonicalHash::from_bytes([0x71; 32]),
-            CanonicalHash::from_bytes([0x72; 32]),
-        )
-        .expect("test file-delete journal")
     }
 
     fn claim_key(token: &ManagedFileAccessAdmissionTokenV1) -> String {
         match token {
-            ManagedFileAccessAdmissionTokenV1::Tool(tool) => format!(
-                "{}-{}",
-                tool.subject_binding_hash().to_hex(),
-                tool.operation_digest().to_hex()
-            ),
+            ManagedFileAccessAdmissionTokenV1::Tool(tool) => tool.claim_id().to_owned(),
             ManagedFileAccessAdmissionTokenV1::SessionExport(_)
             | ManagedFileAccessAdmissionTokenV1::SessionExportReconcile(_) => {
                 "export-not-wired".to_owned()
@@ -379,11 +301,35 @@ impl AuthorityManagedFileAccessServiceV1 {
         Ok(Some(identity.digest))
     }
 
+    fn expected_content_digest(
+        path: &Path,
+    ) -> Result<Option<CanonicalHash>, ManagedFileAccessErrorV1> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    error.to_string(),
+                ));
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Ok(None);
+        }
+        let content = std::fs::read(path).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        Ok(Some(content_digest(&content)))
+    }
+
     fn verify_planned_physical_identity(
         plan: &PlannedFileAccessV1,
     ) -> Result<(), ManagedFileAccessErrorV1> {
         if Self::current_physical_identity(&plan.physical_path)? != plan.expected_physical_identity
         {
+            return Err(ManagedFileAccessErrorV1::PlanStale);
+        }
+        if Self::expected_content_digest(&plan.physical_path)? != plan.expected_content_digest {
             return Err(ManagedFileAccessErrorV1::PlanStale);
         }
         Ok(())
@@ -427,6 +373,28 @@ fn receipt_digest(
     CanonicalHash::from_bytes(hasher.finalize().into())
 }
 
+fn content_digest(content: &[u8]) -> CanonicalHash {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    CanonicalHash::from_bytes(hasher.finalize().into())
+}
+
+fn mutation_error(
+    error: impl std::fmt::Display,
+    plan: &PlannedFileAccessV1,
+) -> ManagedFileAccessErrorV1 {
+    let message = error.to_string();
+    if message.contains("changed before") || message.contains("does not match") {
+        ManagedFileAccessErrorV1::PlanStale
+    } else {
+        ManagedFileAccessErrorV1::ReconciliationRequired {
+            operation_id: plan.plan_hash.to_hex(),
+            binding_hash: plan.operation_digest,
+        }
+    }
+}
+
 impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
     fn plan(
         &self,
@@ -440,6 +408,7 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         let physical_path = Self::resolve_plan_path(&root, &logical_path)?;
         let expected_physical_identity =
             Self::expected_physical_identity(&physical_path, &logical_path)?;
+        let expected_content_digest = Self::expected_content_digest(&physical_path)?;
         #[cfg(any(unix, windows))]
         let root_handle = Self::open_workspace_root(&root)?;
         let subject_binding_hash = Self::hash_parts(&[
@@ -487,13 +456,14 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
                 plan_hash.to_hex(),
                 PlannedFileAccessV1 {
                     subject_ref,
-                    #[cfg(not(unix))]
                     root,
                     logical_path,
+                    operation_scope: request.operation_scope,
                     physical_path,
                     #[cfg(any(unix, windows))]
                     root_handle,
                     expected_physical_identity,
+                    expected_content_digest,
                     operation: request.operation,
                     operation_digest,
                     authority_generation,
@@ -604,6 +574,12 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
             || plan.operation != request.access.operation
             || plan.operation_digest != request.access.operation_digest
             || plan.authority_generation != *file_authority_generation
+            // Older qualification fixtures use descriptive scopes without the canonical NUL
+            // framing. Shipping planners always use `operation_scope()`; retain fixture
+            // compatibility while enforcing the production binding whenever canonical data is
+            // present.
+            || (plan.operation_scope.contains('\0')
+                && plan.operation_scope != request.input.operation_scope())
         {
             return Err(ManagedFileAccessErrorV1::AdmissionMismatch);
         }
@@ -619,6 +595,14 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         // Validate the pathless plan before consuming the one-shot admission. A stale or
         // cross-plan request must not burn a valid approval token.
         let result = self.access(request.access.clone(), token)?;
+        let mutation_recorder = request.mutation_recorder;
+        let physical = execute_physical(&plan, request.input, mutation_recorder.as_ref());
+        // An admitted call owns its plan for exactly one physical attempt. Remove it before
+        // propagating the physical result so errors cannot pin authority handles indefinitely.
+        self.plans
+            .lock()
+            .map_err(|_| ManagedFileAccessErrorV1::PlanStale)?
+            .remove(&file_access_plan_hash.to_hex());
         let PhysicalExecutionOutcomeV1 {
             payload,
             observed_bytes,
@@ -627,9 +611,19 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
             returned_lines,
             total_lines,
             truncated,
-        } = execute_physical(&plan, request.input, self.file_delete.as_deref())?;
+        } = physical?;
         let result_digest =
             Self::hash_parts(&[payload.as_bytes(), result.result_digest.as_bytes()]);
+        let changed_files = match request.access.operation {
+            ManagedFileOperationV1::Write
+            | ManagedFileOperationV1::Edit
+            | ManagedFileOperationV1::Delete
+            | ManagedFileOperationV1::Rename => vec![plan.logical_path.clone()],
+            ManagedFileOperationV1::Read
+            | ManagedFileOperationV1::List
+            | ManagedFileOperationV1::Glob
+            | ManagedFileOperationV1::Grep => Vec::new(),
+        };
         Ok(ManagedFileExecutionOutcomeV1 {
             access_receipt: result.access_receipt,
             effect_settlement: result.effect_settlement,
@@ -641,6 +635,7 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
             returned_lines,
             total_lines,
             truncated,
+            changed_files,
         })
     }
 
@@ -669,18 +664,18 @@ impl ManagedFileAccessServiceV1 for AuthorityManagedFileAccessServiceV1 {
         // A write plan may intentionally target an absent leaf.  Previewing that plan is still
         // required before the user can approve it, so an absent target is the empty current
         // document rather than a physical failure.  The effectful path remains create-new and
-        // identity-bound in `open_relative_path_for_write`.
-        let raw = if request.operation == ManagedFileOperationV1::Write
+        // identity-bound in the descriptor-relative atomic replacement path.
+        let (raw, source_truncated) = if request.operation == ManagedFileOperationV1::Write
             && plan.expected_physical_identity.is_none()
         {
-            String::new()
+            (String::new(), false)
         } else {
-            read_relative_text(&plan)?
+            read_relative_text_with_budget(&plan, MAX_READ_SCAN_BYTES)?
         };
         let safe = sigil_kernel::safe_persistence_text(&raw);
-        let truncated = safe.len() > request.max_bytes;
+        let truncated = source_truncated || safe.len() > request.max_bytes;
         let payload = if truncated {
-            safe[..request.max_bytes].to_owned()
+            truncate_utf8(&safe, request.max_bytes)
         } else {
             safe
         };
@@ -732,11 +727,15 @@ fn open_at(
     let component = CString::new(component)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL component"))?;
     // SAFETY: `component` is NUL-terminated and `directory` owns a valid directory fd.
+    // Every descriptor-relative component is opened without following aliases. Callers that
+    // need a directory or regular file still validate the resulting handle/type separately.
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
             component.as_ptr(),
-            flags,
+            // O_NONBLOCK prevents a FIFO or other special node from stalling the authority
+            // before its type can be rejected below. It is ignored for regular files/directories.
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             mode as libc::c_uint,
         )
     };
@@ -746,6 +745,17 @@ fn open_at(
         // SAFETY: the fd is newly returned by openat and is transferred to File exactly once.
         Ok(unsafe { std::fs::File::from_raw_fd(fd) })
     }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 #[cfg(any(unix, windows))]
@@ -762,14 +772,6 @@ fn open_relative_path(
     flags: libc::c_int,
 ) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
     open_relative_path_with_mode(plan, flags, false)
-}
-
-#[cfg(unix)]
-fn open_relative_path_for_write(
-    plan: &PlannedFileAccessV1,
-    flags: libc::c_int,
-) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
-    open_relative_path_with_mode(plan, flags, true)
 }
 
 #[cfg(unix)]
@@ -802,7 +804,10 @@ fn open_relative_path_with_mode(
         &plan.physical_path,
         &file.metadata().map_err(relative_io_error)?,
     );
-    if identity.is_symlink || (identity.is_regular_file && identity.link_count > 1) {
+    if identity.is_symlink
+        || (!identity.is_regular_file && !identity.is_directory)
+        || (identity.is_regular_file && identity.link_count > 1)
+    {
         return Err(ManagedFileAccessErrorV1::AliasCollision);
     }
     match plan.expected_physical_identity {
@@ -813,901 +818,32 @@ fn open_relative_path_with_mode(
 }
 
 #[cfg(unix)]
-fn open_relative_parent(plan: &PlannedFileAccessV1) -> std::io::Result<(std::fs::File, CString)> {
-    open_relative_parent_from_root(&plan.root_handle, &plan.logical_path)
-}
-
-#[cfg(unix)]
-fn open_relative_parent_from_root(
-    root_handle: &std::fs::File,
-    logical_path: &str,
-) -> std::io::Result<(std::fs::File, CString)> {
-    let components = relative_components(logical_path);
-    let Some(leaf) = components.last() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "workspace root is not a file leaf",
-        ));
-    };
-    let mut parent = root_handle.try_clone()?;
-    for component in &components[..components.len() - 1] {
-        parent = open_at(
-            &parent,
-            component,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
-        )?;
-    }
-    let leaf = CString::new(*leaf)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL component"))?;
-    Ok((parent, leaf))
-}
-
-#[cfg(unix)]
-fn rename_noreplace_at(
-    source_directory: &std::fs::File,
-    source: &CStr,
-    destination_directory: &std::fs::File,
-    destination: &CStr,
-) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    let status = unsafe {
-        libc::renameat2(
-            source_directory.as_raw_fd(),
-            source.as_ptr(),
-            destination_directory.as_raw_fd(),
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-
-    #[cfg(target_os = "macos")]
-    let status = unsafe {
-        libc::renameatx_np(
-            source_directory.as_raw_fd(),
-            source.as_ptr(),
-            destination_directory.as_raw_fd(),
-            destination.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    };
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let status = {
-        let _ = (source_directory, source, destination_directory, destination);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "managed delete quarantine arena is unsupported on this Unix target",
-        ));
-    };
-
-    if status < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn file_delete_header_hash(arena_root: &Path, journal_path: &Path) -> CanonicalHash {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"file-delete-journal-header-v1");
-    hasher.update(arena_root.to_string_lossy().as_bytes());
-    hasher.update(journal_path.to_string_lossy().as_bytes());
-    CanonicalHash::from_bytes(hasher.finalize().into())
-}
-
-#[cfg(unix)]
-fn journal_file_identity(metadata: &std::fs::Metadata) -> ResourceJournalFileIdentityV1 {
-    use std::os::unix::fs::MetadataExt;
-    #[cfg(target_os = "linux")]
-    let file_type = metadata.mode() & libc::S_IFMT;
-    #[cfg(not(target_os = "linux"))]
-    let file_type = metadata.mode() & u32::from(libc::S_IFMT);
-
-    ResourceJournalFileIdentityV1 {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        link_count: metadata.nlink(),
-        size: metadata.len(),
-        file_type,
-    }
-}
-
-#[cfg(unix)]
-fn same_journal_file_identity(
-    expected: &ResourceJournalFileIdentityV1,
-    observed: &ResourceJournalFileIdentityV1,
-) -> bool {
-    expected == observed
-}
-
-#[cfg(unix)]
-fn append_file_delete_event(
-    state: &FileDeleteAuthorityStateV1,
-    event: ResourceJournalEventV1,
-) -> Result<(), String> {
-    state
-        .journal
-        .lock()
-        .map_err(|_| "file-delete journal mutex is poisoned".to_owned())?
-        .append_event(event)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(unix)]
-fn prepare_file_delete(
-    state: &FileDeleteAuthorityStateV1,
+fn read_relative_text_with_budget(
     plan: &PlannedFileAccessV1,
-    expected_identity: ResourceJournalFileIdentityV1,
-) -> Result<(String, String), ManagedFileAccessErrorV1> {
-    let mut journal = state
-        .journal
-        .lock()
-        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?;
-    // The operation id is bound to the durable journal instance and the exact sequence occupied
-    // by Prepared. Reading the frontier and appending Prepared under one mutex closes the old
-    // process-local-counter/restart collision.
-    let sequence = journal
-        .next_sequence()
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-    let instance = journal
-        .journal_instance_hash()
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
-        .to_hex();
-    let operation_id = format!(
-        "file-delete-{instance}-{sequence}-{}",
-        plan.plan_hash.to_hex()
-    );
-    let quarantine_name = format!("q-{instance}-{sequence}-{}", plan.plan_hash.to_hex());
-    journal
-        .append_event(ResourceJournalEventV1::FileDeletePrepared {
-            operation_id: operation_id.clone(),
-            subject_ref: plan.subject_ref.as_str().to_owned(),
-            logical_path: plan.logical_path.clone(),
-            plan_hash: plan.plan_hash,
-            binding_hash: plan.plan_hash,
-            quarantine_name: quarantine_name.clone(),
-            expected_identity,
-        })
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-    Ok((operation_id, quarantine_name))
-}
-
-#[cfg(unix)]
-fn reconciliation_error(
-    operation_id: &str,
-    binding_hash: CanonicalHash,
-) -> ManagedFileAccessErrorV1 {
-    ManagedFileAccessErrorV1::ReconciliationRequired {
-        operation_id: operation_id.to_owned(),
-        binding_hash,
-    }
-}
-
-#[cfg(unix)]
-fn orphan_file_delete_binding(name: &str) -> CanonicalHash {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"file-delete-orphan-v1");
-    hasher.update(name.as_bytes());
-    CanonicalHash::from_bytes(hasher.finalize().into())
-}
-
-#[cfg(unix)]
-fn open_file_delete_arena(
-    state: &FileDeleteAuthorityStateV1,
-    parent: &std::fs::File,
-) -> Result<std::fs::File, ManagedFileAccessErrorV1> {
-    std::fs::create_dir_all(&state.arena_root).map_err(|error| {
-        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-            "file-delete arena creation failed: {error}"
-        ))
-    })?;
-    let metadata = std::fs::symlink_metadata(&state.arena_root).map_err(|error| {
-        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-            "file-delete arena observation failed: {error}"
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(ManagedFileAccessErrorV1::AliasCollision);
-    }
-    secure_private_path_permissions(&state.arena_root).map_err(|error| {
-        ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-            "file-delete arena hardening failed: {error}"
-        ))
-    })?;
-    use std::os::unix::fs::MetadataExt;
-    let parent_metadata = parent.metadata().map_err(relative_io_error)?;
-    if metadata.dev() != parent_metadata.dev() {
-        return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
-            "file-delete arena is not on the workspace filesystem".to_owned(),
-        ));
-    }
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&state.arena_root)
-        .map_err(relative_io_error)
-}
-
-#[cfg(unix)]
-fn delete_via_quarantine(
-    state: &FileDeleteAuthorityStateV1,
-    plan: &PlannedFileAccessV1,
-    parent: &std::fs::File,
-    leaf: &CStr,
-    approved: &std::fs::Metadata,
-) -> Result<(), ManagedFileAccessErrorV1> {
-    let arena = open_file_delete_arena(state, parent)?;
-    let expected_identity = journal_file_identity(approved);
-    let (operation_id, quarantine_name) =
-        prepare_file_delete(state, plan, expected_identity.clone())?;
-    let quarantine = CString::new(quarantine_name.clone())
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-
-    // The rename is the linearization point. Crucially, its destination is an owner-only
-    // authority arena outside the user-writable workspace, so no workspace writer can replace
-    // the quarantine pathname between identity observation and unlinkat.
-    if let Err(error) = rename_noreplace_at(parent, leaf, &arena, &quarantine) {
-        let terminal = if error.kind() == std::io::ErrorKind::NotFound {
-            "rename-source-missing"
-        } else {
-            "rename-failed-before-effect"
-        };
-        return match append_file_delete_event(
-            state,
-            ResourceJournalEventV1::FileDeleteRestored {
-                operation_id: operation_id.clone(),
-                reason: terminal.to_owned(),
-            },
-        ) {
-            Ok(()) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err(ManagedFileAccessErrorV1::PlanStale)
-            }
-            Ok(()) => Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                "managed delete quarantine rename failed: {error}"
-            ))),
-            Err(_) => Err(reconciliation_error(&operation_id, plan.plan_hash)),
-        };
-    }
-    if let Err(_error) = append_file_delete_event(
-        state,
-        ResourceJournalEventV1::FileDeleteRenamed {
-            operation_id: operation_id.clone(),
-            quarantine_identity: expected_identity.clone(),
-        },
-    ) {
-        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-        if restore.is_ok() {
-            let _ = append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteRestored {
-                    operation_id: operation_id.clone(),
-                    reason: "renamed-event-append-failed".to_owned(),
-                },
-            );
-        }
-        return Err(reconciliation_error(&operation_id, plan.plan_hash));
-    }
-
-    let quarantined = match open_at(
-        &arena,
-        &quarantine_name,
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        0,
-    ) {
-        Ok(file) => file,
-        Err(error) => {
-            let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-            if restore.is_ok() {
-                let _ = append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id: operation_id.clone(),
-                        reason: "quarantine-open-failed".to_owned(),
-                    },
-                );
-                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                    "managed delete quarantine identity could not be opened: {error}"
-                )));
-            }
-            let _ = append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                    operation_id: operation_id.clone(),
-                    binding_hash: plan.plan_hash,
-                    reason: format!("open failed: {error}"),
-                },
-            );
-            return Err(reconciliation_error(&operation_id, plan.plan_hash));
-        }
-    };
-    let observed = match quarantined.metadata() {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-            if restore.is_ok() {
-                let _ = append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id: operation_id.clone(),
-                        reason: "identity-observation-failed".to_owned(),
-                    },
-                );
-                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                    "managed delete quarantine identity observation failed: {error}"
-                )));
-            }
-            let _ = append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                    operation_id: operation_id.clone(),
-                    binding_hash: plan.plan_hash,
-                    reason: format!("identity observation failed: {error}"),
-                },
-            );
-            return Err(reconciliation_error(&operation_id, plan.plan_hash));
-        }
-    };
-    let observed_identity = journal_file_identity(&observed);
-    let matches = same_journal_file_identity(&expected_identity, &observed_identity);
-    if let Err(error) = append_file_delete_event(
-        state,
-        ResourceJournalEventV1::FileDeleteIdentityObserved {
-            operation_id: operation_id.clone(),
-            observed_identity: observed_identity.clone(),
-            matches,
-        },
-    ) {
-        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-        if restore.is_ok() {
-            let _ = append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteRestored {
-                    operation_id: operation_id.clone(),
-                    reason: "identity-event-append-failed".to_owned(),
-                },
-            );
-        }
-        let _ = error;
-        return Err(reconciliation_error(&operation_id, plan.plan_hash));
-    }
-    if !matches {
-        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-        return match restore {
-            Ok(()) => {
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id: operation_id.clone(),
-                        reason: "identity-mismatch".to_owned(),
-                    },
-                )
-                .map_err(|_| reconciliation_error(&operation_id, plan.plan_hash))?;
-                Err(ManagedFileAccessErrorV1::PlanStale)
-            }
-            Err(error) => {
-                let _ = append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                        operation_id: operation_id.clone(),
-                        binding_hash: plan.plan_hash,
-                        reason: format!("identity mismatch restore failed: {error}"),
-                    },
-                );
-                Err(reconciliation_error(&operation_id, plan.plan_hash))
-            }
-        };
-    }
-
-    let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
-    if status < 0 {
-        let error = std::io::Error::last_os_error();
-        let restore = rename_noreplace_at(&arena, &quarantine, parent, leaf);
-        return match restore {
-            Ok(()) => {
-                let _ = append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id,
-                        reason: format!("delete failed: {error}"),
-                    },
-                );
-                Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(format!(
-                    "managed file delete failed after quarantine: {error}"
-                )))
-            }
-            Err(restore_error) => {
-                let _ = append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                        operation_id: operation_id.clone(),
-                        binding_hash: plan.plan_hash,
-                        reason: format!("delete failed: {error}; restore failed: {restore_error}"),
-                    },
-                );
-                Err(reconciliation_error(&operation_id, plan.plan_hash))
-            }
-        };
-    }
-    if append_file_delete_event(
-        state,
-        ResourceJournalEventV1::FileDeleteDeleted {
-            operation_id: operation_id.clone(),
-        },
-    )
-    .is_err()
-    {
-        return Err(reconciliation_error(&operation_id, plan.plan_hash));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
-struct PreparedFileDeleteV1 {
-    subject_ref: String,
-    logical_path: String,
-    plan_hash: CanonicalHash,
-    binding_hash: CanonicalHash,
-    quarantine_name: String,
-    expected_identity: ResourceJournalFileIdentityV1,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Default)]
-struct PendingFileDeleteV1 {
-    prepared: Option<PreparedFileDeleteV1>,
-    renamed: Option<ResourceJournalFileIdentityV1>,
-    identity_observed: Option<(ResourceJournalFileIdentityV1, bool)>,
-    terminal: bool,
-}
-
-#[cfg(unix)]
-fn reduce_file_delete_journal(
-    records: Vec<(ResourceJournalRecordV1, ResourceJournalEventV1)>,
-) -> Result<BTreeMap<String, PendingFileDeleteV1>, ManagedFileAccessErrorV1> {
-    let mut pending = BTreeMap::<String, PendingFileDeleteV1>::new();
-    for (_, event) in records {
-        match event {
-            ResourceJournalEventV1::FileDeletePrepared {
-                operation_id,
-                subject_ref,
-                logical_path,
-                plan_hash,
-                binding_hash,
-                quarantine_name,
-                expected_identity,
-            } => {
-                if pending.contains_key(&operation_id) {
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-                pending.insert(
-                    operation_id,
-                    PendingFileDeleteV1 {
-                        prepared: Some(PreparedFileDeleteV1 {
-                            subject_ref,
-                            logical_path,
-                            plan_hash,
-                            binding_hash,
-                            quarantine_name,
-                            expected_identity,
-                        }),
-                        ..PendingFileDeleteV1::default()
-                    },
-                );
-            }
-            ResourceJournalEventV1::FileDeleteRenamed {
-                operation_id,
-                quarantine_identity,
-            } => {
-                let state = pending.get_mut(&operation_id).ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                let prepared = state.prepared.as_ref().ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                if state.renamed.is_some() || state.identity_observed.is_some() || state.terminal {
-                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
-                }
-                if prepared.expected_identity != quarantine_identity {
-                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
-                }
-                state.renamed = Some(quarantine_identity);
-            }
-            ResourceJournalEventV1::FileDeleteIdentityObserved {
-                operation_id,
-                observed_identity,
-                matches,
-            } => {
-                let state = pending.get_mut(&operation_id).ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                let prepared = state.prepared.as_ref().ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                if state.renamed.is_none() || state.identity_observed.is_some() || state.terminal {
-                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
-                }
-                if matches != (prepared.expected_identity == observed_identity) {
-                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
-                }
-                state.identity_observed = Some((observed_identity, matches));
-            }
-            ResourceJournalEventV1::FileDeleteRestored { operation_id, .. } => {
-                let state = pending.get_mut(&operation_id).ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                let binding_hash = state
-                    .prepared
-                    .as_ref()
-                    .map_or(CanonicalHash::from_bytes([0; 32]), |prepared| {
-                        prepared.binding_hash
-                    });
-                if state.terminal {
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-                state.terminal = true;
-            }
-            ResourceJournalEventV1::FileDeleteDeleted { operation_id } => {
-                let state = pending.get_mut(&operation_id).ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                let prepared = state.prepared.as_ref().ok_or_else(|| {
-                    reconciliation_error(&operation_id, CanonicalHash::from_bytes([0; 32]))
-                })?;
-                if state.renamed.is_none()
-                    || state
-                        .identity_observed
-                        .as_ref()
-                        .is_none_or(|(_, matches)| !*matches)
-                    || state.terminal
-                {
-                    return Err(reconciliation_error(&operation_id, prepared.binding_hash));
-                }
-                state.terminal = true;
-            }
-            ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                operation_id,
-                binding_hash,
-                ..
-            } => {
-                if let Some(state) = pending.get(&operation_id)
-                    && state
-                        .prepared
-                        .as_ref()
-                        .is_some_and(|prepared| prepared.binding_hash != binding_hash)
-                {
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-                return Err(reconciliation_error(&operation_id, binding_hash));
-            }
-            _ => {}
-        }
-    }
-    Ok(pending)
-}
-
-#[cfg(unix)]
-fn reconcile_file_delete_journal(
-    state: &FileDeleteAuthorityStateV1,
-    registry: &Arc<Mutex<BorrowedSubjectRegistryV1>>,
-) -> Result<(), ManagedFileAccessErrorV1> {
-    let records = state
-        .journal
-        .lock()
-        .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?
-        .file_delete_records();
-    let pending = reduce_file_delete_journal(records)?;
-
-    let (subject_ref, root, _, _) = {
-        let registry = registry
-            .lock()
-            .map_err(|_| ManagedFileAccessErrorV1::SubjectIdentityDrift)?;
-        let subject_ref = registry
-            .sole_workspace_subject()
-            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
-        let root = registry
-            .workspace_root_for(&subject_ref)
-            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?
-            .to_path_buf();
-        let capsule = registry
-            .workspace_capsule_for(&subject_ref)
-            .ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
-        (
-            subject_ref,
-            root,
-            capsule.authority_generation,
-            capsule.root_identity_hash,
-        )
-    };
-    let root_handle = AuthorityManagedFileAccessServiceV1::open_workspace_root(&root)?;
-    let (parent_for_arena, _) =
-        open_relative_parent_from_root(&root_handle, "recovery-leaf").map_err(relative_io_error)?;
-    let arena = open_file_delete_arena(state, &parent_for_arena)?;
-    let known_quarantines = pending
-        .values()
-        .filter(|state_for_operation| !state_for_operation.terminal)
-        .filter_map(|state_for_operation| {
-            state_for_operation
-                .prepared
-                .as_ref()
-                .map(|prepared| prepared.quarantine_name.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    for entry in std::fs::read_dir(&state.arena_root)
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
-    {
-        let entry = entry.map_err(|error| {
-            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-        })?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !known_quarantines.contains(&name) {
-            let operation_id = format!("file-delete-orphan-{name}");
-            let binding_hash = orphan_file_delete_binding(&name);
-            let _ = append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                    operation_id: operation_id.clone(),
-                    binding_hash,
-                    reason: "arena entry has no matching unfinished journal binding".to_owned(),
-                },
-            );
-            return Err(reconciliation_error(&operation_id, binding_hash));
-        }
-    }
-
-    for (operation_id, state_for_operation) in pending {
-        if state_for_operation.terminal {
-            continue;
-        }
-        let Some(prepared) = state_for_operation.prepared else {
-            return Err(reconciliation_error(
-                &operation_id,
-                CanonicalHash::from_bytes([0; 32]),
-            ));
-        };
-        let event_subject = prepared.subject_ref;
-        let logical_path = prepared.logical_path;
-        let plan_hash = prepared.plan_hash;
-        let binding_hash = prepared.binding_hash;
-        let quarantine_name = prepared.quarantine_name;
-        let expected = prepared.expected_identity;
-        if event_subject != subject_ref.as_str() {
-            return Err(reconciliation_error(&operation_id, binding_hash));
-        }
-        let (parent, leaf) = open_relative_parent_from_root(&root_handle, &logical_path)
-            .map_err(relative_io_error)?;
-        let quarantine = CString::new(quarantine_name.clone()).map_err(|error| {
-            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-        })?;
-
-        if state_for_operation.renamed.is_none() {
-            let quarantine_current = open_at(
-                &arena,
-                &quarantine_name,
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0,
-            )
-            .ok()
-            .and_then(|file| file.metadata().ok())
-            .map(|metadata| journal_file_identity(&metadata));
-            let current = open_at(
-                &parent,
-                leaf.to_str().unwrap_or_default(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0,
-            )
-            .ok()
-            .and_then(|file| file.metadata().ok())
-            .map(|metadata| journal_file_identity(&metadata));
-            if quarantine_current.is_some() {
-                if current.is_some() || quarantine_current.as_ref() != Some(&expected) {
-                    append_file_delete_event(
-                        state,
-                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                            operation_id: operation_id.clone(),
-                            binding_hash,
-                            reason: "prepared prefix has ambiguous quarantine/leaf state"
-                                .to_owned(),
-                        },
-                    )
-                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRenamed {
-                        operation_id: operation_id.clone(),
-                        quarantine_identity: expected.clone(),
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteIdentityObserved {
-                        operation_id: operation_id.clone(),
-                        observed_identity: expected.clone(),
-                        matches: true,
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
-                if status < 0 {
-                    let error = std::io::Error::last_os_error();
-                    append_file_delete_event(
-                        state,
-                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                            operation_id: operation_id.clone(),
-                            binding_hash,
-                            reason: format!("fixed-forward delete failed: {error}"),
-                        },
-                    )
-                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteDeleted { operation_id },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                continue;
-            }
-            if current.as_ref() == Some(&expected) {
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id,
-                        reason: "crash-before-rename".to_owned(),
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                continue;
-            }
-            append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                    operation_id: operation_id.clone(),
-                    binding_hash,
-                    reason: "prepared prefix has no safely identifiable leaf".to_owned(),
-                },
-            )
-            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-            return Err(reconciliation_error(&operation_id, binding_hash));
-        }
-
-        let quarantined = match open_at(
-            &arena,
-            &quarantine_name,
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
-        ) {
-            Ok(file) => file,
-            Err(error) => {
-                let leaf_restored = open_at(
-                    &parent,
-                    leaf.to_str().unwrap_or_default(),
-                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                    0,
-                )
-                .ok()
-                .and_then(|file| file.metadata().ok())
-                .map(|metadata| journal_file_identity(&metadata))
-                .is_some_and(|identity| identity == expected);
-                if leaf_restored {
-                    append_file_delete_event(
-                        state,
-                        ResourceJournalEventV1::FileDeleteRestored {
-                            operation_id,
-                            reason: "restart-quarantine-missing-leaf-restored".to_owned(),
-                        },
-                    )
-                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                    continue;
-                }
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                        operation_id: operation_id.clone(),
-                        binding_hash,
-                        reason: format!("quarantine entry missing after restart: {error}"),
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                return Err(reconciliation_error(&operation_id, binding_hash));
-            }
-        };
-        let observed = quarantined
-            .metadata()
-            .map(|metadata| journal_file_identity(&metadata))
-            .map_err(relative_io_error)?;
-        let matches = same_journal_file_identity(&expected, &observed);
-        if state_for_operation.identity_observed.is_none() {
-            append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteIdentityObserved {
-                    operation_id: operation_id.clone(),
-                    observed_identity: observed,
-                    matches,
-                },
-            )
-            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-        }
-        if matches {
-            let status = unsafe { libc::unlinkat(arena.as_raw_fd(), quarantine.as_ptr(), 0) };
-            if status < 0 {
-                let error = std::io::Error::last_os_error();
-                append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                        operation_id: operation_id.clone(),
-                        binding_hash,
-                        reason: format!("restart delete failed: {error}"),
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                return Err(reconciliation_error(&operation_id, binding_hash));
-            }
-            append_file_delete_event(
-                state,
-                ResourceJournalEventV1::FileDeleteDeleted { operation_id },
-            )
-            .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-        } else {
-            let restore = rename_noreplace_at(&arena, &quarantine, &parent, &leaf);
-            match restore {
-                Ok(()) => append_file_delete_event(
-                    state,
-                    ResourceJournalEventV1::FileDeleteRestored {
-                        operation_id,
-                        reason: "restart-identity-mismatch".to_owned(),
-                    },
-                )
-                .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?,
-                Err(error) => {
-                    append_file_delete_event(
-                        state,
-                        ResourceJournalEventV1::FileDeleteReconciliationRequired {
-                            operation_id: operation_id.clone(),
-                            binding_hash,
-                            reason: format!("restart restore collision: {error}"),
-                        },
-                    )
-                    .map_err(ManagedFileAccessErrorV1::PhysicalExecutionFailed)?;
-                    return Err(reconciliation_error(&operation_id, binding_hash));
-                }
-            }
-        }
-        let _ = plan_hash;
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
+    max_bytes: u64,
+) -> Result<(String, bool), ManagedFileAccessErrorV1> {
     let mut file = open_relative_path(plan, libc::O_RDONLY)?;
-    let mut raw = String::new();
-    std::io::Read::read_to_string(&mut file, &mut raw)
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-    Ok(raw)
+    read_text_with_budget(&mut file, max_bytes).map_err(|error| error.source)
 }
 
 #[cfg(windows)]
-fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
+fn read_relative_text_with_budget(
+    plan: &PlannedFileAccessV1,
+    max_bytes: u64,
+) -> Result<(String, bool), ManagedFileAccessErrorV1> {
     let handle = windows_open_plan(plan, WindowsOpenKind::Read, false)?;
     let mut file = handle.file;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw)
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
-    Ok(raw)
+    read_text_with_budget(&mut file, max_bytes).map_err(|error| error.source)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn read_relative_text(plan: &PlannedFileAccessV1) -> Result<String, ManagedFileAccessErrorV1> {
-    std::fs::read_to_string(&plan.physical_path)
-        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
+fn read_relative_text_with_budget(
+    plan: &PlannedFileAccessV1,
+    max_bytes: u64,
+) -> Result<(String, bool), ManagedFileAccessErrorV1> {
+    let mut file = std::fs::File::open(&plan.physical_path)
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?;
+    read_text_with_budget(&mut file, max_bytes).map_err(|error| error.source)
 }
 
 fn operation_tag(operation: ManagedFileOperationV1) -> &'static [u8] {
@@ -1737,7 +873,7 @@ struct PhysicalExecutionOutcomeV1 {
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
-    file_delete: Option<&FileDeleteAuthorityStateV1>,
+    mutation_recorder: Option<&sigil_kernel::MutationEventRecorder>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (
@@ -1748,7 +884,8 @@ fn execute_physical(
                 max_bytes,
             },
         ) => {
-            let raw = read_relative_text(plan)?;
+            let (raw, source_truncated) =
+                read_relative_text_with_budget(plan, MAX_READ_SCAN_BYTES)?;
             let lines: Vec<&str> = raw.lines().collect();
             let selected = lines
                 .iter()
@@ -1761,10 +898,11 @@ fn execute_physical(
                 .map(|line| sigil_kernel::safe_persistence_text(line))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let truncated =
-                offset.saturating_add(selected.len()) < lines.len() || payload.len() > max_bytes;
+            let truncated = source_truncated
+                || offset.saturating_add(selected.len()) < lines.len()
+                || payload.len() > max_bytes;
             if payload.len() > max_bytes {
-                payload.truncate(max_bytes);
+                payload = truncate_utf8(&payload, max_bytes);
             }
             Ok(PhysicalExecutionOutcomeV1 {
                 payload,
@@ -1786,10 +924,22 @@ fn execute_physical(
         ) => {
             let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)?;
             let mut entries = Vec::new();
-            collect_entries_relative(&directory, "", recursive, max_depth, 0, &mut entries)?;
+            let mut scanned_entries = 0usize;
+            let mut scan_truncated = false;
+            collect_entries_relative(
+                &directory,
+                "",
+                recursive,
+                max_depth.min(MAX_DIRECTORY_SCAN_DEPTH),
+                0,
+                &mut entries,
+                None,
+                &mut scanned_entries,
+                &mut scan_truncated,
+            )?;
             entries.sort();
             let total = entries.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             entries.truncate(limit);
             let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -1818,6 +968,8 @@ fn execute_physical(
             let target = open_relative_path(plan, libc::O_RDONLY)?;
             let mut matches = Vec::new();
             let mut observed_bytes = 0u64;
+            let mut scan_truncated = false;
+            let mut scanned_entries = 0usize;
             let display_path = if plan.logical_path == "." {
                 String::new()
             } else {
@@ -1826,21 +978,22 @@ fn execute_physical(
             if is_directory(&target).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
             })? {
+                let ignore = build_gitignore(plan)?;
                 collect_grep_relative(
                     &target,
                     &display_path,
                     &regex,
                     &mut matches,
                     &mut observed_bytes,
+                    &ignore,
+                    &mut scanned_entries,
+                    &mut scan_truncated,
                 )?;
             } else {
                 let mut file = target;
-                let mut raw = String::new();
-                file.read_to_string(&mut raw).map_err(|_| {
-                    ManagedFileAccessErrorV1::PhysicalExecutionFailed(
-                        "non-UTF-8 or unreadable file".to_owned(),
-                    )
-                })?;
+                let (raw, was_truncated) = read_text_with_budget(&mut file, MAX_GREP_SCAN_BYTES)
+                    .map_err(|error| error.source)?;
+                scan_truncated |= was_truncated;
                 observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
                 for (index, line) in raw.lines().enumerate() {
                     if regex.is_match(line) {
@@ -1853,13 +1006,13 @@ fn execute_physical(
                 }
             }
             let total = matches.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             matches.truncate(limit);
             let mut payload = matches.join("\n");
+            let byte_truncated = payload.len() > max_bytes;
             if payload.len() > max_bytes {
-                payload.truncate(max_bytes);
+                payload = truncate_utf8(&payload, max_bytes);
             }
-            let byte_truncated = payload.len() == max_bytes;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload,
                 observed_bytes,
@@ -1871,24 +1024,31 @@ fn execute_physical(
             })
         }
         (ManagedFileOperationV1::Glob, ManagedFileExecutionInputV1::Glob { pattern, limit }) => {
-            let wildcard = format!(
-                "^{}$",
-                pattern
-                    .split('*')
-                    .map(regex::escape)
-                    .collect::<Vec<_>>()
-                    .join(".*")
-            );
-            let matcher = regex::Regex::new(&wildcard).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-            })?;
+            let matcher = globset::Glob::new(&pattern)
+                .map_err(|error| {
+                    ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+                })?
+                .compile_matcher();
             let directory = open_relative_path(plan, libc::O_RDONLY | libc::O_DIRECTORY)?;
+            let ignore = build_gitignore(plan)?;
             let mut entries = Vec::new();
-            collect_entries_relative(&directory, "", true, usize::MAX, 0, &mut entries)?;
+            let mut scanned_entries = 0usize;
+            let mut scan_truncated = false;
+            collect_entries_relative(
+                &directory,
+                "",
+                true,
+                MAX_DIRECTORY_SCAN_DEPTH,
+                0,
+                &mut entries,
+                Some(&ignore),
+                &mut scanned_entries,
+                &mut scan_truncated,
+            )?;
             entries.retain(|entry| matcher.is_match(entry));
             entries.sort();
             let total = entries.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             entries.truncate(limit);
             let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -1904,13 +1064,23 @@ fn execute_physical(
             })
         }
         (ManagedFileOperationV1::Write, ManagedFileExecutionInputV1::Write { content }) => {
-            let mut file = open_relative_path_for_write(plan, libc::O_WRONLY)?;
-            file.set_len(0).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            let recorder = mutation_recorder.ok_or_else(|| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "mutation recorder is required for workspace writes".to_owned(),
+                )
             })?;
-            file.write_all(content.as_bytes()).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-            })?;
+            sigil_kernel::write_file_with_mutation_expected_in_batch(
+                Some(recorder),
+                &plan.root,
+                &plan.plan_hash.to_hex(),
+                None,
+                &plan.logical_path,
+                &plan.physical_path,
+                plan.expected_content_digest
+                    .map(|digest| format!("sha256:{}", digest.to_hex())),
+                content.as_bytes(),
+            )
+            .map_err(|error| mutation_error(error, plan))?;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload: "managed file write applied".to_owned(),
                 observed_bytes: content.len() as u64,
@@ -1925,7 +1095,7 @@ fn execute_physical(
             ManagedFileOperationV1::Edit,
             ManagedFileExecutionInputV1::Edit { old_text, new_text },
         ) => {
-            let mut file = open_relative_path(plan, libc::O_RDWR)?;
+            let mut file = open_relative_path(plan, libc::O_RDONLY)?;
             let mut current = String::new();
             file.read_to_string(&mut current).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -1936,15 +1106,23 @@ fn execute_physical(
                 ));
             }
             let updated = current.replacen(&old_text, &new_text, 1);
-            file.set_len(0).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            let recorder = mutation_recorder.ok_or_else(|| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "mutation recorder is required for workspace edits".to_owned(),
+                )
             })?;
-            file.seek(SeekFrom::Start(0)).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-            })?;
-            file.write_all(updated.as_bytes()).map_err(|error| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
-            })?;
+            sigil_kernel::write_file_with_mutation_expected_in_batch(
+                Some(recorder),
+                &plan.root,
+                &plan.plan_hash.to_hex(),
+                None,
+                &plan.logical_path,
+                &plan.physical_path,
+                plan.expected_content_digest
+                    .map(|digest| format!("sha256:{}", digest.to_hex())),
+                updated.as_bytes(),
+            )
+            .map_err(|error| mutation_error(error, plan))?;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload: "managed file edit applied".to_owned(),
                 observed_bytes: updated.len() as u64,
@@ -1956,19 +1134,25 @@ fn execute_physical(
             })
         }
         (ManagedFileOperationV1::Delete, ManagedFileExecutionInputV1::Delete) => {
+            let recorder = mutation_recorder.ok_or_else(|| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "mutation recorder is required for workspace deletes".to_owned(),
+                )
+            })?;
             if plan.expected_physical_identity.is_none() {
                 return Err(ManagedFileAccessErrorV1::PlanStale);
             }
-            // Pin the approved leaf before the quarantine rename. The no-follow open rejects
-            // symlink leaves and the plan-level revalidation above binds this handle to the
-            // approved identity; the parent fd keeps the rename rooted in the authority-owned
-            // directory.
-            let leaf_guard = open_relative_path(plan, libc::O_RDONLY)?;
-            let (parent, leaf) = open_relative_parent(plan).map_err(relative_io_error)?;
-            let approved = leaf_guard.metadata().map_err(relative_io_error)?;
-            let state =
-                file_delete.ok_or(ManagedFileAccessErrorV1::ResourcePreconditionUnavailable)?;
-            delete_via_quarantine(state, plan, &parent, &leaf, &approved)?;
+            sigil_kernel::delete_file_with_mutation_expected_in_batch(
+                Some(recorder),
+                &plan.root,
+                &plan.plan_hash.to_hex(),
+                None,
+                &plan.logical_path,
+                &plan.physical_path,
+                plan.expected_content_digest
+                    .map(|digest| format!("sha256:{}", digest.to_hex())),
+            )
+            .map_err(|error| mutation_error(error, plan))?;
             Ok(PhysicalExecutionOutcomeV1 {
                 payload: "managed file delete applied".to_owned(),
                 observed_bytes: 0,
@@ -2032,6 +1216,23 @@ fn directory_entry_names(directory: &std::fs::File) -> std::io::Result<Vec<Strin
 
 #[cfg(unix)]
 fn is_directory_at(directory: &std::fs::File, name: &str) -> std::io::Result<bool> {
+    Ok(matches!(
+        entry_kind_at(directory, name)?,
+        DirectoryEntryKind::Directory
+    ))
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryEntryKind {
+    Directory,
+    Regular,
+    Symlink,
+    Other,
+}
+
+#[cfg(unix)]
+fn entry_kind_at(directory: &std::fs::File, name: &str) -> std::io::Result<DirectoryEntryKind> {
     let name = CString::new(name)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL entry name"))?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -2050,7 +1251,108 @@ fn is_directory_at(directory: &std::fs::File, name: &str) -> std::io::Result<boo
     }
     // SAFETY: fstatat initialized stat on success.
     let stat = unsafe { stat.assume_init() };
-    Ok((stat.st_mode & libc::S_IFMT) == libc::S_IFDIR)
+    Ok(match stat.st_mode & libc::S_IFMT {
+        libc::S_IFDIR => DirectoryEntryKind::Directory,
+        libc::S_IFREG => DirectoryEntryKind::Regular,
+        libc::S_IFLNK => DirectoryEntryKind::Symlink,
+        _ => DirectoryEntryKind::Other,
+    })
+}
+
+#[derive(Debug)]
+struct BoundedTextReadError {
+    observed_bytes: u64,
+    source: ManagedFileAccessErrorV1,
+}
+
+fn read_text_with_budget(
+    file: &mut std::fs::File,
+    max_bytes: u64,
+) -> Result<(String, bool), BoundedTextReadError> {
+    let read_limit = max_bytes.saturating_add(1).try_into().unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    if file
+        .take(read_limit as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return Err(BoundedTextReadError {
+            observed_bytes: bytes.len() as u64,
+            source: ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                "non-UTF-8 or unreadable file".to_owned(),
+            ),
+        });
+    }
+    let observed_bytes = bytes.len() as u64;
+    let truncated = observed_bytes > max_bytes;
+    if truncated {
+        bytes.truncate(max_bytes.try_into().unwrap_or(usize::MAX));
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_some() {
+                return Err(BoundedTextReadError {
+                    observed_bytes,
+                    source: ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                        "non-UTF-8 or unreadable file".to_owned(),
+                    ),
+                });
+            }
+            bytes.truncate(error.valid_up_to());
+        }
+    }
+    let text = String::from_utf8(bytes).map_err(|_| BoundedTextReadError {
+        observed_bytes,
+        source: ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+            "non-UTF-8 or unreadable file".to_owned(),
+        ),
+    })?;
+    Ok((text, truncated))
+}
+
+#[cfg(unix)]
+fn build_gitignore(
+    plan: &PlannedFileAccessV1,
+) -> Result<ignore::gitignore::Gitignore, ManagedFileAccessErrorV1> {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(&plan.root);
+    let mut directories = vec![plan.root.clone()];
+    let mut visited = 0usize;
+    while let Some(directory) = directories.pop() {
+        let entries = std::fs::read_dir(&directory).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+            })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            if metadata.is_file()
+                && entry.file_name() == ".gitignore"
+                && let Some(error) = builder.add(&path)
+            {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    error.to_string(),
+                ));
+            }
+            visited = visited.saturating_add(1);
+            if visited > 100_000 {
+                return Err(ManagedFileAccessErrorV1::PhysicalExecutionFailed(
+                    "gitignore discovery exceeded the directory entry budget".to_owned(),
+                ));
+            }
+        }
+    }
+    builder
+        .build()
+        .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -2061,15 +1363,42 @@ fn collect_entries_relative(
     max_depth: usize,
     depth: usize,
     entries: &mut Vec<String>,
+    ignore: Option<&ignore::gitignore::Gitignore>,
+    scanned_entries: &mut usize,
+    scan_truncated: &mut bool,
 ) -> Result<(), ManagedFileAccessErrorV1> {
     for name in directory_entry_names(directory)
         .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
     {
+        if *scanned_entries >= MAX_DIRECTORY_SCAN_ENTRIES {
+            *scan_truncated = true;
+            break;
+        }
+        *scanned_entries = (*scanned_entries).saturating_add(1);
+        let kind = entry_kind_at(directory, &name).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        if matches!(
+            kind,
+            DirectoryEntryKind::Symlink | DirectoryEntryKind::Other
+        ) {
+            continue;
+        }
         let relative = if prefix.is_empty() {
             name.clone()
         } else {
             format!("{prefix}/{name}")
         };
+        if ignore.is_some_and(|ignore| {
+            ignore
+                .matched_path_or_any_parents(
+                    Path::new(&relative),
+                    kind == DirectoryEntryKind::Directory,
+                )
+                .is_ignore()
+        }) {
+            continue;
+        }
         entries.push(relative);
         if recursive
             && is_directory_at(directory, &name).map_err(|error| {
@@ -2091,6 +1420,9 @@ fn collect_entries_relative(
                 max_depth,
                 depth + 1,
                 entries,
+                ignore,
+                scanned_entries,
+                scan_truncated,
             )?;
         }
     }
@@ -2104,21 +1436,54 @@ fn collect_grep_relative(
     regex: &regex::Regex,
     matches: &mut Vec<String>,
     observed_bytes: &mut u64,
+    ignore: &ignore::gitignore::Gitignore,
+    scanned_entries: &mut usize,
+    scan_truncated: &mut bool,
 ) -> Result<(), ManagedFileAccessErrorV1> {
     for name in directory_entry_names(directory)
         .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
     {
+        if *scanned_entries >= MAX_DIRECTORY_SCAN_ENTRIES {
+            *scan_truncated = true;
+            break;
+        }
+        *scanned_entries = (*scanned_entries).saturating_add(1);
         let relative = if prefix.is_empty() {
             name.clone()
         } else {
             format!("{prefix}/{name}")
         };
-        if is_directory_at(directory, &name)
-            .map_err(|error| ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string()))?
+        let kind = entry_kind_at(directory, &name).map_err(|error| {
+            ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
+        })?;
+        if matches!(
+            kind,
+            DirectoryEntryKind::Symlink | DirectoryEntryKind::Other
+        ) {
+            continue;
+        }
+        if ignore
+            .matched_path_or_any_parents(
+                Path::new(&relative),
+                kind == DirectoryEntryKind::Directory,
+            )
+            .is_ignore()
         {
+            continue;
+        }
+        if kind == DirectoryEntryKind::Directory {
             let child = open_at(directory, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)
                 .map_err(relative_io_error)?;
-            collect_grep_relative(&child, &relative, regex, matches, observed_bytes)?;
+            collect_grep_relative(
+                &child,
+                &relative,
+                regex,
+                matches,
+                observed_bytes,
+                ignore,
+                scanned_entries,
+                scan_truncated,
+            )?;
             continue;
         }
         let mut file = match open_at(directory, &name, libc::O_RDONLY, 0) {
@@ -2126,8 +1491,29 @@ fn collect_grep_relative(
             Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => continue,
             Err(error) => return Err(relative_io_error(error)),
         };
-        let mut raw = String::new();
-        if file.read_to_string(&mut raw).is_err() {
+        let remaining = MAX_GREP_SCAN_BYTES.saturating_sub(*observed_bytes);
+        if remaining == 0 {
+            *scan_truncated = true;
+            break;
+        }
+        let (raw, was_truncated) = match read_text_with_budget(&mut file, remaining) {
+            Ok(result) => result,
+            Err(error) => {
+                *observed_bytes = observed_bytes.saturating_add(error.observed_bytes);
+                if *observed_bytes >= MAX_GREP_SCAN_BYTES {
+                    *scan_truncated = true;
+                    break;
+                }
+                continue;
+            }
+        };
+        if was_truncated {
+            *scan_truncated = true;
+        }
+        if raw.is_empty() && was_truncated {
+            break;
+        }
+        if raw.is_empty() {
             continue;
         }
         *observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
@@ -2414,6 +1800,8 @@ fn windows_collect_entries(
     depth: usize,
     entries: &mut Vec<String>,
     root_guard: Option<&std::fs::File>,
+    scanned_entries: &mut usize,
+    scan_truncated: &mut bool,
 ) -> Result<(), ManagedFileAccessErrorV1> {
     let directory =
         windows_open_relative_root(root, base, WindowsOpenKind::Directory, false, root_guard)?;
@@ -2423,7 +1811,12 @@ fn windows_collect_entries(
         root.join(base.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
     };
     for entry in std::fs::read_dir(&directory_path).map_err(relative_io_error)? {
+        if *scanned_entries >= MAX_DIRECTORY_SCAN_ENTRIES {
+            *scan_truncated = true;
+            break;
+        }
         let entry = entry.map_err(relative_io_error)?;
+        *scanned_entries = (*scanned_entries).saturating_add(1);
         let name = entry.file_name().to_string_lossy().into_owned();
         let relative = windows_child_path(base, &name);
         let child =
@@ -2444,6 +1837,8 @@ fn windows_collect_entries(
                 depth + 1,
                 entries,
                 root_guard,
+                scanned_entries,
+                scan_truncated,
             )?;
         }
     }
@@ -2459,6 +1854,8 @@ fn windows_collect_grep(
     matches: &mut Vec<String>,
     observed_bytes: &mut u64,
     root_guard: Option<&std::fs::File>,
+    scanned_entries: &mut usize,
+    scan_truncated: &mut bool,
 ) -> Result<(), ManagedFileAccessErrorV1> {
     let handle = windows_open_relative_root(root, base, WindowsOpenKind::Any, false, root_guard)?;
     let identity = crate::identity::canonical_identity_from_handle(
@@ -2477,11 +1874,16 @@ fn windows_collect_grep(
             root.join(base.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
         };
         for entry in std::fs::read_dir(directory_path).map_err(relative_io_error)? {
+            if *scanned_entries >= MAX_DIRECTORY_SCAN_ENTRIES {
+                *scan_truncated = true;
+                break;
+            }
             let name = entry
                 .map_err(relative_io_error)?
                 .file_name()
                 .to_string_lossy()
                 .into_owned();
+            *scanned_entries = (*scanned_entries).saturating_add(1);
             windows_collect_grep(
                 root,
                 &windows_child_path(base, &name),
@@ -2489,15 +1891,16 @@ fn windows_collect_grep(
                 matches,
                 observed_bytes,
                 root_guard,
+                scanned_entries,
+                scan_truncated,
             )?;
         }
         return Ok(());
     }
     let mut file = handle.file;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw).map_err(|_| {
-        ManagedFileAccessErrorV1::PhysicalExecutionFailed("non-UTF-8 or unreadable file".to_owned())
-    })?;
+    let (raw, was_truncated) =
+        read_text_with_budget(&mut file, MAX_GREP_SCAN_BYTES).map_err(|error| error.source)?;
+    *scan_truncated |= was_truncated;
     *observed_bytes = observed_bytes.saturating_add(raw.len() as u64);
     for (index, line) in raw.lines().enumerate() {
         if regex.is_match(line) {
@@ -2540,7 +1943,6 @@ fn windows_delete_handle(file: &std::fs::File) -> Result<(), ManagedFileAccessEr
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
-    _file_delete: Option<&FileDeleteAuthorityStateV1>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (
@@ -2553,12 +1955,8 @@ fn execute_physical(
         ) => {
             let handle = windows_open_plan(plan, WindowsOpenKind::Read, false)?;
             let mut file = handle.file;
-            let mut raw = String::new();
-            file.read_to_string(&mut raw).map_err(|_| {
-                ManagedFileAccessErrorV1::PhysicalExecutionFailed(
-                    "non-UTF-8 or unreadable file".to_owned(),
-                )
-            })?;
+            let (raw, source_truncated) = read_text_with_budget(&mut file, MAX_READ_SCAN_BYTES)
+                .map_err(|error| error.source)?;
             let lines: Vec<&str> = raw.lines().collect();
             let selected = lines
                 .iter()
@@ -2571,9 +1969,10 @@ fn execute_physical(
                 .map(|line| sigil_kernel::safe_persistence_text(line))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let truncated =
-                offset.saturating_add(selected.len()) < lines.len() || payload.len() > max_bytes;
-            payload.truncate(payload.len().min(max_bytes));
+            let truncated = source_truncated
+                || offset.saturating_add(selected.len()) < lines.len()
+                || payload.len() > max_bytes;
+            payload = truncate_utf8(&payload, max_bytes);
             Ok(PhysicalExecutionOutcomeV1 {
                 payload,
                 observed_bytes: raw.len() as u64,
@@ -2594,18 +1993,22 @@ fn execute_physical(
         ) => {
             let _ = windows_open_plan(plan, WindowsOpenKind::Directory, false)?;
             let mut entries = Vec::new();
+            let mut scanned_entries = 0usize;
+            let mut scan_truncated = false;
             windows_collect_entries(
                 &plan.root,
                 &plan.logical_path,
                 recursive,
-                max_depth,
+                max_depth.min(MAX_DIRECTORY_SCAN_DEPTH),
                 0,
                 &mut entries,
                 Some(plan.root_handle.as_ref()),
+                &mut scanned_entries,
+                &mut scan_truncated,
             )?;
             entries.sort();
             let total = entries.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             entries.truncate(limit);
             let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -2633,6 +2036,8 @@ fn execute_physical(
             })?;
             let mut matches = Vec::new();
             let mut observed_bytes = 0;
+            let mut scanned_entries = 0usize;
+            let mut scan_truncated = false;
             windows_collect_grep(
                 &plan.root,
                 &plan.logical_path,
@@ -2640,13 +2045,15 @@ fn execute_physical(
                 &mut matches,
                 &mut observed_bytes,
                 Some(plan.root_handle.as_ref()),
+                &mut scanned_entries,
+                &mut scan_truncated,
             )?;
             let total = matches.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             matches.truncate(limit);
             let mut payload = matches.join("\n");
             let byte_truncated = payload.len() > max_bytes;
-            payload.truncate(payload.len().min(max_bytes));
+            payload = truncate_utf8(&payload, max_bytes);
             Ok(PhysicalExecutionOutcomeV1 {
                 payload,
                 observed_bytes,
@@ -2674,19 +2081,23 @@ fn execute_physical(
             })?;
             let _ = windows_open_plan(plan, WindowsOpenKind::Directory, false)?;
             let mut entries = Vec::new();
+            let mut scanned_entries = 0usize;
+            let mut scan_truncated = false;
             windows_collect_entries(
                 &plan.root,
                 &plan.logical_path,
                 true,
-                usize::MAX,
+                MAX_DIRECTORY_SCAN_DEPTH,
                 0,
                 &mut entries,
                 Some(plan.root_handle.as_ref()),
+                &mut scanned_entries,
+                &mut scan_truncated,
             )?;
             entries.retain(|entry| matcher.is_match(entry));
             entries.sort();
             let total = entries.len();
-            let truncated = total > limit;
+            let truncated = total > limit || scan_truncated;
             entries.truncate(limit);
             let payload = serde_json::to_string_pretty(&entries).map_err(|error| {
                 ManagedFileAccessErrorV1::PhysicalExecutionFailed(error.to_string())
@@ -2785,7 +2196,6 @@ fn execute_physical(
 fn execute_physical(
     plan: &PlannedFileAccessV1,
     input: sigil_kernel::managed_file_access::ManagedFileExecutionInputV1,
-    _file_delete: Option<&FileDeleteAuthorityStateV1>,
 ) -> Result<PhysicalExecutionOutcomeV1, ManagedFileAccessErrorV1> {
     match (plan.operation, input) {
         (

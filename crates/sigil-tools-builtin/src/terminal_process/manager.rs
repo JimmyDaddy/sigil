@@ -1,4 +1,5 @@
 use super::*;
+use sigil_process::ProcessTreeOwnerGuard;
 
 const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_BYTES: u64 = 64 * 1024;
 const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_INTERVAL_MS: u64 = 250;
@@ -401,6 +402,7 @@ impl TerminalProcessManager {
             &readiness,
         )?
         .with_scratch_leases(self.scratch_leases.clone());
+        lifecycle.mark_running();
         let lifecycle_route_baseline = lifecycle.snapshot();
         let lifecycle_route_receiver = lifecycle.subscribe();
         let pty_runtime = spawn_pty_runtime(
@@ -490,6 +492,7 @@ impl TerminalProcessManager {
             &readiness,
         )?
         .with_scratch_leases(self.scratch_leases.clone());
+        lifecycle.mark_running();
         let lifecycle_route_baseline = lifecycle.snapshot();
         let lifecycle_route_receiver = lifecycle.subscribe();
         let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(

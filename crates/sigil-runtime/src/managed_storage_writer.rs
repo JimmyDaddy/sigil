@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 
 use sigil_kernel::managed_storage::{
-    ManagedStorageDurableAdmissionBindingV1, ManagedStorageExistingNamespaceBindingV1,
-    ManagedStorageNamespaceHandleV1, ManagedStorageServiceV1, ManagedStorageStorageReceiptV1,
+    ManagedStorageExistingNamespaceBindingV1, ManagedStorageNamespaceHandleV1,
+    ManagedStorageServiceV1, ManagedStorageStorageReceiptV1,
 };
 use sigil_kernel::resource::{
     AdapterDurableStateClassV1, CanonicalHash, ManagedStorageCapabilityFamilyV1,
     ManagedStorageSemanticOwnerV1, MemoryScopeClassV1, OpaqueKernelCapabilityHandleId,
-    ResourceJournalScopeV1, ResourceOwnerScopeV1,
+    ResourceAuthorityScopeV1, ResourceOwnerScopeV1,
 };
 
 /// Closed semantic writer channel (row-aligned with the R71.6 mandatory adapter kinds).
@@ -80,6 +80,7 @@ impl ManagedStorageAdmissionContextV1 {
         &self,
         semantic_owner: ManagedStorageSemanticOwnerV1,
         capability_family: ManagedStorageCapabilityFamilyV1,
+        namespace_key_hash: CanonicalHash,
     ) -> Result<
         sigil_kernel::managed_storage::ManagedStorageAdmissionRequestV1,
         ManagedStorageWriterErrorV1,
@@ -96,7 +97,8 @@ impl ManagedStorageAdmissionContextV1 {
                 purpose: sigil_kernel::resource::ManagedStorageAdmissionPurposeV1::DurablePayload,
                 source,
                 owner_scope: ResourceOwnerScopeV1::Application,
-                journal_scope: ResourceJournalScopeV1::Application,
+                authority_scope: ResourceAuthorityScopeV1::Application,
+                namespace_key_hash,
             },
         )
     }
@@ -142,7 +144,7 @@ impl StorageWriterChannelV1 {
             ),
             Self::DurableMemory => (
                 ManagedStorageSemanticOwnerV1::DurableMemory(MemoryScopeClassV1::ProjectFact),
-                ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+                ManagedStorageCapabilityFamilyV1::AtomicProjection,
                 "durable-memory",
             ),
             Self::SessionCatalog => (
@@ -179,7 +181,7 @@ impl StorageWriterChannelV1 {
                 ManagedStorageSemanticOwnerV1::AdapterDurableState(
                     AdapterDurableStateClassV1::IdempotencyLedger,
                 ),
-                ManagedStorageCapabilityFamilyV1::JournaledAtomicProjection,
+                ManagedStorageCapabilityFamilyV1::AtomicProjection,
                 "adapter-idempotency-ledger",
             ),
         }
@@ -244,16 +246,13 @@ struct ManagedExistingSessionLogAdmissionV1 {
     path: PathBuf,
 }
 
-/// Runtime's strictly structural view of the original schema-2 admission marker. It is only
+/// Runtime's strictly structural view of the current admission marker. It is only
 /// converted into kernel evidence for RA; parsing it locally never authorizes a continuation.
 #[derive(serde::Deserialize)]
-struct ExistingSessionLogAdmissionMarkerV2 {
+struct ExistingSessionLogAdmissionMarkerV3 {
     schema_version: u32,
     handle_id: String,
     namespace_hash: CanonicalHash,
-    grant_hash: CanonicalHash,
-    admission_sequence: u64,
-    admission_record_hash: CanonicalHash,
 }
 
 impl ManagedExistingSessionLogAdmissionV1 {
@@ -453,7 +452,9 @@ impl ManagedStorageWriterAdapterV1 {
             return Err(ManagedStorageWriterErrorV1::LeafEscapesAnchor);
         }
         let (_, _, leaf) = channel.mapping();
-        Ok(self.leaf_path(leaf)?.join(key))
+        Ok(self
+            .leaf_path(leaf)?
+            .join(stable_namespace_hash(leaf, key).to_hex()))
     }
 
     /// Authority-declared managed leaf path for a channel without creating anything: read and
@@ -495,11 +496,53 @@ impl ManagedStorageWriterAdapterV1 {
         self.acquire_owned(channel, semantic_owner, key)
     }
 
+    /// Admits an already-published current-schema SessionLog namespace by its physical namespace
+    /// hash. A session snapshot stores this hash-bearing path, so reopening it must not hash the
+    /// hash a second time and accidentally select a different namespace.
+    pub(crate) fn acquire_existing_session_log_namespace(
+        &self,
+        namespace_hash: CanonicalHash,
+    ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
+        let admission = self.admit_existing_session_log_namespace(namespace_hash)?;
+        Ok(ManagedStorageWriterLeaseV1 {
+            handle: admission.handle,
+            path: admission.path,
+            channel: StorageWriterChannelV1::SessionLog,
+        })
+    }
+
+    /// Acquires a SessionLog by logical key, or reopens a current-schema namespace when the
+    /// caller has already resolved a hash-bearing managed path into its directory name.
+    pub(crate) fn acquire_session_log_key(
+        &self,
+        key: &str,
+    ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
+        if let Some(namespace_hash) = parse_namespace_hash(key) {
+            self.acquire_existing_session_log_namespace(namespace_hash)
+        } else {
+            self.acquire_named(StorageWriterChannelV1::SessionLog, key)
+        }
+    }
+
+    /// Resolves a SessionLog path using the same logical-key/current-namespace distinction as
+    /// [`Self::acquire_session_log_key`].
+    pub(crate) fn session_log_path_for_key(
+        &self,
+        key: &str,
+    ) -> Result<PathBuf, ManagedStorageWriterErrorV1> {
+        if let Some(namespace_hash) = parse_namespace_hash(key) {
+            let (_, _, leaf) = StorageWriterChannelV1::SessionLog.mapping();
+            Ok(self.leaf_path(leaf)?.join(namespace_hash.to_hex()))
+        } else {
+            self.managed_named_leaf_path(StorageWriterChannelV1::SessionLog, key)
+        }
+    }
+
     /// Admits an existing SessionLog namespace for recovery without initializing any filesystem
     /// object. The deterministic key is controller-owned; callers receive only a narrow
     /// crate-private read lease and must explicitly settle it.
     ///
-    /// This keeps recovery on the normal authority admission journal without treating a missing
+    /// This keeps recovery on the normal current-authority admission path without treating a missing
     /// child log as a new session. It intentionally does not open artifact namespaces.
     pub(crate) fn acquire_existing_session_log_for_recovery(
         &self,
@@ -530,8 +573,18 @@ impl ManagedStorageWriterAdapterV1 {
         key: &str,
     ) -> Result<ManagedExistingSessionLogAdmissionV1, ManagedStorageWriterErrorV1> {
         let channel = StorageWriterChannelV1::SessionLog;
+        let (_, _, leaf) = channel.mapping();
+        self.admit_existing_session_log_namespace(stable_namespace_hash(leaf, key))
+    }
+
+    fn admit_existing_session_log_namespace(
+        &self,
+        namespace_hash: CanonicalHash,
+    ) -> Result<ManagedExistingSessionLogAdmissionV1, ManagedStorageWriterErrorV1> {
+        let channel = StorageWriterChannelV1::SessionLog;
         let (semantic_owner, capability_family, leaf) = channel.mapping();
-        let path = self.managed_named_leaf_path(channel, key)?;
+        let path = self.leaf_path(leaf)?.join(namespace_hash.to_hex());
+        reject_existing_reparse_components(&path)?;
         ensure_existing_private_recovery_directory(&path)?;
         let record_file = path.join("records.jsonl");
         ensure_existing_private_recovery_file(&record_file, "record")?;
@@ -545,8 +598,7 @@ impl ManagedStorageWriterAdapterV1 {
 
         let capability = match &self.storage_issuer {
             Some(broker) => {
-                let proof = broker
-                    .seal_storage_namespace_proof(capability_family, writer_namespace_hash(leaf));
+                let proof = broker.seal_storage_namespace_proof(capability_family, namespace_hash);
                 broker
                     .issue_storage_namespace_capability(proof)
                     .map_err(|error| {
@@ -558,9 +610,9 @@ impl ManagedStorageWriterAdapterV1 {
                 )
             }
         };
-        let request = self
-            .admission_context
-            .request(semantic_owner, capability_family)?;
+        let request =
+            self.admission_context
+                .request(semantic_owner, capability_family, namespace_hash)?;
         let handle = self
             .service
             .admit_existing_namespace(request, capability, original)
@@ -574,25 +626,20 @@ impl ManagedStorageWriterAdapterV1 {
     ) -> Result<ManagedStorageExistingNamespaceBindingV1, ManagedStorageWriterErrorV1> {
         let marker_path = namespace.join("authority-admission.json");
         ensure_existing_private_recovery_file(&marker_path, "admission marker")?;
-        let marker: ExistingSessionLogAdmissionMarkerV2 =
+        let marker: ExistingSessionLogAdmissionMarkerV3 =
             serde_json::from_slice(&read_no_follow_file(&marker_path)?).map_err(|_| {
                 ManagedStorageWriterErrorV1::AdmissionFailed(
-                    "managed existing session-log marker is not current schema-2".to_owned(),
+                    "managed existing session-log marker is not current schema-3".to_owned(),
                 )
             })?;
-        if marker.schema_version != 2 || marker.handle_id.is_empty() {
+        if marker.schema_version != 3 || marker.handle_id.is_empty() {
             return Err(ManagedStorageWriterErrorV1::AdmissionFailed(
-                "managed existing session-log marker is not current schema-2".to_owned(),
+                "managed existing session-log marker is not current schema-3".to_owned(),
             ));
         }
         Ok(ManagedStorageExistingNamespaceBindingV1 {
             original_handle_id: OpaqueKernelCapabilityHandleId::new(marker.handle_id),
             original_namespace_hash: marker.namespace_hash,
-            original_admission: ManagedStorageDurableAdmissionBindingV1 {
-                grant_hash: marker.grant_hash,
-                admission_sequence: marker.admission_sequence,
-                admission_record_hash: marker.admission_record_hash,
-            },
         })
     }
 
@@ -628,14 +675,15 @@ impl ManagedStorageWriterAdapterV1 {
             return Err(ManagedStorageWriterErrorV1::LeafEscapesAnchor);
         }
         let (_, capability_family, leaf) = channel.mapping();
-        let path = self.leaf_path(leaf)?.join(key);
+        let namespace_key_hash = stable_namespace_hash(leaf, key);
+        let path = self.leaf_path(leaf)?.join(namespace_key_hash.to_hex());
         let capability = match &self.storage_issuer {
             Some(broker) => {
                 // The grant binds the authority-declared channel root. The logical key is
                 // carried by the admitted physical sub-leaf, while each broker claim still
                 // receives a distinct one-shot handle namespace in the authority.
-                let proof = broker
-                    .seal_storage_namespace_proof(capability_family, writer_namespace_hash(leaf));
+                let proof =
+                    broker.seal_storage_namespace_proof(capability_family, namespace_key_hash);
                 broker
                     .issue_storage_namespace_capability(proof)
                     .map_err(|error| {
@@ -647,9 +695,11 @@ impl ManagedStorageWriterAdapterV1 {
                 )
             }
         };
-        let request = self
-            .admission_context
-            .request(semantic_owner, capability_family)?;
+        let request = self.admission_context.request(
+            semantic_owner,
+            capability_family,
+            namespace_key_hash,
+        )?;
         let handle = self
             .service
             .admit_namespace(request, capability)
@@ -669,20 +719,21 @@ impl ManagedStorageWriterAdapterV1 {
         channel: StorageWriterChannelV1,
     ) -> Result<ManagedStorageWriterLeaseV1, ManagedStorageWriterErrorV1> {
         let (semantic_owner, capability_family, leaf) = channel.mapping();
+        // Unnamed channels own the channel leaf directly. Named channels use
+        // `acquire_named`, whose business key is mapped to a hashed sub-leaf.
+        // Keep this path aligned with `managed_leaf_path` consumers such as
+        // input history and the session catalog.
+        let namespace_key_hash = writer_namespace_hash(leaf);
         let path = self.leaf_path(leaf)?;
-        let request = self
-            .admission_context
-            .request(semantic_owner, capability_family)?;
+        let request = self.admission_context.request(
+            semantic_owner,
+            capability_family,
+            namespace_key_hash,
+        )?;
         let capability = match &self.storage_issuer {
             Some(broker) => {
-                let mut leaf_ns = [0x6au8; 32];
-                for (index, byte) in leaf.bytes().take(16).enumerate() {
-                    leaf_ns[index] = byte;
-                }
-                let proof = broker.seal_storage_namespace_proof(
-                    capability_family,
-                    CanonicalHash::from_bytes(leaf_ns),
-                );
+                let proof =
+                    broker.seal_storage_namespace_proof(capability_family, namespace_key_hash);
                 broker
                     .issue_storage_namespace_capability(proof)
                     .map_err(|error| {
@@ -801,22 +852,11 @@ impl ManagedStorageWriterAdapterV1 {
         path: &Path,
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageWriterErrorV1> {
-        let marker = if let Some(admission) = handle.durable_admission() {
-            serde_json::json!({
-                "schema_version": 2,
-                "handle_id": handle.handle_id.as_str(),
-                "namespace_hash": handle.namespace_hash,
-                "grant_hash": admission.grant_hash,
-                "admission_sequence": admission.admission_sequence,
-                "admission_record_hash": admission.admission_record_hash,
-            })
-        } else {
-            serde_json::json!({
-                "schema_version": 1,
-                "handle_id": handle.handle_id.as_str(),
-                "namespace_hash": handle.namespace_hash,
-            })
-        };
+        let marker = serde_json::json!({
+            "schema_version": 3,
+            "handle_id": handle.handle_id.as_str(),
+            "namespace_hash": handle.namespace_hash,
+        });
         let bytes = serde_json::to_vec(&marker)
             .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
         sigil_kernel::atomic_publish_private_file(&path.join("authority-admission.json"), &bytes)
@@ -1445,7 +1485,7 @@ fn sync_parent_directory(path: &Path) -> Result<(), ManagedStorageWriterErrorV1>
 /// a declared writer is a registered grant, so the cutover probe reflects exactly what is
 /// composed and nothing more).
 /// Both DurableMemory scope-class grants (UserPreference / ProjectFact) under the same
-/// JournaledAtomicProjection family: the two classes are distinct semantic owners, so the
+/// AtomicProjection family: the two classes are distinct semantic owners, so the
 /// memory writer admits exact class namespaces and the cutover probe only inspects the
 /// frozen ProjectFact cell.
 pub fn memory_grants(seed: u8) -> Vec<sigil_kernel::managed_storage::StorageAdmissionGrantV1> {
@@ -1603,13 +1643,13 @@ fn grant_for_owner(
         source_class: sigil_kernel::resource::StorageAdmissionSourceClassV1::ApplicationCutoverRoot,
         source_binding_hash,
         namespace_hash,
-        journal_scope: ResourceJournalScopeV1::Application,
-        journal_scope_hash: CanonicalHash::from_bytes([0x24; 32]),
+        authority_scope: ResourceAuthorityScopeV1::Application,
+        authority_scope_hash: CanonicalHash::from_bytes([0x24; 32]),
         resource_ref: sigil_kernel::resource::ResourceRefV1 {
             resource_id: sigil_kernel::resource::OpaqueResourceId::new(format!("res-{leaf}")),
             kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
             owner_scope: ResourceOwnerScopeV1::Application,
-            journal_scope: ResourceJournalScopeV1::Application,
+            authority_scope: ResourceAuthorityScopeV1::Application,
             generation: 1,
         },
         resource_binding_digest: CanonicalHash::from_bytes([0x25; 32]),
@@ -1631,7 +1671,6 @@ fn grant_for_owner(
             "schema-{leaf}"
         )),
         authority_generation,
-        journal_admission_sequence: 1,
         grant_hash: hash_grant_identity(leaf, authority_generation, source_binding_hash),
     }
 }
@@ -1642,6 +1681,27 @@ fn writer_namespace_hash(leaf: &str) -> CanonicalHash {
         namespace[index] = byte;
     }
     CanonicalHash::from_bytes(namespace)
+}
+
+/// Stable physical namespace identity derived from the closed channel and business key.
+fn stable_namespace_hash(leaf: &str, key: &str) -> CanonicalHash {
+    let mut bytes = Vec::with_capacity(28 + leaf.len() + key.len());
+    bytes.extend_from_slice(b"managed-storage-namespace-v1\0");
+    bytes.extend_from_slice(leaf.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(key.as_bytes());
+    crate::r71_shadow_planner::canonical_digest(&bytes)
+}
+
+fn parse_namespace_hash(value: &str) -> Option<CanonicalHash> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(CanonicalHash::from_bytes(bytes))
 }
 
 fn hash_grant_identity(

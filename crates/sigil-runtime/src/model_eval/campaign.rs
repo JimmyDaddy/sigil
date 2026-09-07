@@ -690,7 +690,7 @@ async fn execute_model_eval_run(
     // Model-eval is a production application-run driver, so it must perform the same authority
     // boot and exact workspace registration as the shipping CLI/HTTP/TUI surfaces before a
     // managed file tool can plan or execute. The isolated run root gives this repetition its
-    // own durable authority journal and state namespace.
+    // own durable authority state and state namespace.
     let services = match crate::r71_authority_composition::attach_boot_authority_to_services(
         services.clone(),
         &isolated.config_path,

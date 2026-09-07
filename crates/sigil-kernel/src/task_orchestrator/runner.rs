@@ -4049,7 +4049,7 @@ where
                 bail!(
                     "promoted integration source step {} must be blocked or completed, observed {}",
                     step_id.as_str(),
-                    super::scheduler::task_step_status_label(status)
+                    status.as_str()
                 );
             }
         }

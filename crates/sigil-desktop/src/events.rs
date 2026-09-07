@@ -810,7 +810,6 @@ pub enum DesktopRouteRecoveryCode {
     ConnectionConfigInvalid,
     ProviderUnavailable,
     AuthorityUnavailable,
-    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -821,7 +820,6 @@ pub enum DesktopRouteRecoveryCode {
 pub enum DesktopRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
-    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -1278,9 +1276,6 @@ impl DesktopProtocolEvent {
                         }
                         DesktopRouteRecoveryCode::AuthorityUnavailable => {
                             "The authority plane is unavailable and must be repaired before another run."
-                        }
-                        DesktopRouteRecoveryCode::AuthorityJournalCorrupted => {
-                            "The authority journal is corrupted and must be repaired before another run."
                         }
                         DesktopRouteRecoveryCode::SessionAlreadyActive => {
                             "This session is already active in another Sigil surface."

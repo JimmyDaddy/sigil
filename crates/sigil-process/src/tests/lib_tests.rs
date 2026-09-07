@@ -1,13 +1,5 @@
 use super::*;
 
-#[test]
-fn owner_probe_and_non_windows_guard_are_constructible() -> anyhow::Result<()> {
-    validate_process_tree_owner()?;
-    #[cfg(not(windows))]
-    let _guard = ProcessTreeOwnerGuard::assign(None)?;
-    Ok(())
-}
-
 #[cfg(unix)]
 #[test]
 fn configured_unix_process_group_can_be_terminated_and_reaped() -> anyhow::Result<()> {

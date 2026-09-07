@@ -119,11 +119,12 @@ fn register_trusted_code_intelligence_tools(
     config: &CodeIntelligenceConfig,
     workspace_root: std::path::PathBuf,
 ) -> Option<CodeIntelligenceService> {
-    register_code_intelligence_tools_with_workspace_trust(
+    register_code_intelligence_tools(
         registry,
         config,
         workspace_root,
         WorkspaceTrust::Trusted,
+        None,
     )
 }
 
@@ -302,6 +303,8 @@ fn register_code_intelligence_tools_skips_disabled_config() {
         &mut registry,
         &Default::default(),
         temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
     );
 
     assert!(service.is_none());
@@ -313,7 +316,13 @@ fn code_intel_tools_expose_permission_subjects_for_file_scoped_calls() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
     let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
 
     for tool_name in ["code_definition", "code_references", "code_diagnostics"] {
@@ -369,7 +378,13 @@ async fn code_symbols_tool_returns_bounded_json_envelope() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
 
     let result = registry
         .execute(
@@ -421,6 +436,8 @@ async fn code_symbols_tool_enforces_payload_byte_limit() {
         &mut registry,
         &bounded_payload_config(),
         temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
     )
     .expect("code intelligence should register");
 
@@ -446,7 +463,13 @@ fn code_symbols_permission_subject_rejects_external_path() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let outside = tempfile::NamedTempFile::new().expect("outside file should build");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
 
     let error = registry
         .permission_plan(
@@ -729,7 +752,13 @@ async fn code_definition_tool_maps_timeout_error_kind() {
 async fn code_diagnostics_tool_maps_missing_files_to_not_found() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
 
     let result = registry
         .execute(
@@ -752,7 +781,13 @@ async fn code_diagnostics_tool_maps_missing_files_to_not_found() {
 fn code_workspace_symbols_permission_subject_targets_workspace_root() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
 
     let call = ToolCall {
         id: "call-workspace".to_owned(),
@@ -788,7 +823,13 @@ fn code_workspace_symbols_permission_subject_targets_workspace_root() {
 fn code_action_and_rename_tools_are_registered_as_previewed_write_tools() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
 
     for name in ["code_action", "code_rename"] {
         let spec = registry.spec_for(name).expect("tool should be registered");
@@ -807,7 +848,13 @@ fn code_action_and_rename_tools_are_registered_as_previewed_write_tools() {
 fn read_only_code_intelligence_tools_declare_no_workspace_mutation_tracking() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
     let contracts = registry
         .contracts()
         .into_iter()
@@ -834,7 +881,13 @@ fn code_action_and_rename_permission_subjects_use_expected_scopes() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
     let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
     let actions = registry
         .permission_plan(
@@ -881,7 +934,13 @@ fn prepared_code_mutation_permission_plans_publish_read_write_facts_without_reus
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    register_code_intelligence_tools(
+        &mut registry,
+        &enabled_config(),
+        temp.path().to_path_buf(),
+        WorkspaceTrust::Unknown,
+        None,
+    );
     let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
 
     for (name, args, operation, planner) in [

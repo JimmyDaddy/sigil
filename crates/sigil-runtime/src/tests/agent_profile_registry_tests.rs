@@ -12,8 +12,8 @@ use sigil_kernel::{
     ConnectionId, ControlEntry, MemoryConfig, PermissionConfig, PermissionPolicy, PermissionRule,
     PluginTrustDecision, PluginTrustEntry, RootConfig, SessionConfig, SessionLogEntry,
     SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, ToolAccess,
-    ToolAllowlistConfig, ToolCategory, ToolPreviewCapability, ToolRegistryScope, ToolSpec,
-    ToolSubject, WorkspaceConfig,
+    ToolAllowlistConfig, ToolCategory, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolSpec, ToolSubject, WorkspaceConfig,
 };
 
 use super::{
@@ -1462,6 +1462,127 @@ fn registry_projects_existing_task_roles_to_builtin_profiles() -> Result<()> {
     assert!(!worker.profile.tool_scope.allows("apply_changeset"));
     assert!(!worker.profile.tool_scope.allows("bash"));
     assert!(registry.warnings().is_empty());
+    Ok(())
+}
+
+#[test]
+fn builtin_profiles_and_role_registries_share_the_role_scope_matrix() -> Result<()> {
+    let role_profiles = [
+        (BUILD_PROFILE_ID, sigil_kernel::AgentRole::Executor),
+        (PLAN_PROFILE_ID, sigil_kernel::AgentRole::Planner),
+        (EXPLORE_PROFILE_ID, sigil_kernel::AgentRole::SubagentRead),
+        (WORKER_PROFILE_ID, sigil_kernel::AgentRole::SubagentWrite),
+    ];
+    let probe_names = ["read_file", "grep", "write_file", "edit_file", "bash"];
+    let mut tools = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut tools);
+
+    for allow_write_subagents in [false, true] {
+        let mut config = root_config();
+        config.task.allow_write_subagents = allow_write_subagents;
+        let profiles = AgentProfileRegistry::from_root_config(&config)?;
+
+        for (profile_id, role) in role_profiles {
+            let role_scope = crate::run_options::role_tool_scope(&config, role);
+            let role_registry = crate::build_role_tool_registry(&tools, &config, role);
+            for name in probe_names {
+                assert_eq!(
+                    role_scope.allows(name),
+                    role_registry.spec_for(name).is_some(),
+                    "role registry drift for {role:?}/{name} with allow_write_subagents={allow_write_subagents}"
+                );
+            }
+
+            let profile = profiles
+                .profiles()
+                .iter()
+                .find(|profile| profile.profile.id.as_str() == profile_id)
+                .expect("built-in profile exists");
+            if role == sigil_kernel::AgentRole::SubagentWrite {
+                assert_eq!(
+                    profile.profile.tool_scope,
+                    sigil_kernel::changeset_only_child_tool_scope(),
+                    "worker profile keeps its explicit changeset-only override"
+                );
+            } else {
+                assert_eq!(
+                    profile.profile.tool_scope, role_scope,
+                    "built-in profile drift for {profile_id}/{role:?}"
+                );
+            }
+        }
+
+        let subagent_write = crate::build_role_tool_registry(
+            &tools,
+            &config,
+            sigil_kernel::AgentRole::SubagentWrite,
+        );
+        assert_eq!(
+            subagent_write.spec_for("write_file").is_some(),
+            allow_write_subagents,
+            "subagent write default must follow allow_write_subagents"
+        );
+    }
+
+    let mut configured = root_config();
+    configured.task.executor.tools = ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["grep".to_owned()],
+        prefixes: vec!["write_".to_owned()],
+    };
+    configured.task.planner.tools = ToolAllowlistConfig {
+        allow_all: true,
+        names: vec!["write_file".to_owned()],
+        prefixes: vec!["edit_".to_owned()],
+    };
+    configured.task.subagent_read.tools = ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["read_file".to_owned()],
+        prefixes: vec!["code_".to_owned()],
+    };
+    configured.task.subagent_write.tools = ToolAllowlistConfig {
+        allow_all: true,
+        names: Vec::new(),
+        prefixes: Vec::new(),
+    };
+
+    let profiles = AgentProfileRegistry::from_root_config(&configured)?;
+    for (profile_id, role) in role_profiles {
+        let role_scope = crate::run_options::role_tool_scope(&configured, role);
+        let role_registry = crate::build_role_tool_registry(&tools, &configured, role);
+        for name in probe_names {
+            assert_eq!(
+                role_scope.allows(name),
+                role_registry.spec_for(name).is_some(),
+                "configured role registry drift for {role:?}/{name}"
+            );
+        }
+
+        let profile = profiles
+            .profiles()
+            .iter()
+            .find(|profile| profile.profile.id.as_str() == profile_id)
+            .expect("built-in profile exists");
+        if role == sigil_kernel::AgentRole::SubagentWrite {
+            assert_eq!(
+                profile.profile.tool_scope,
+                sigil_kernel::changeset_only_child_tool_scope()
+            );
+        } else {
+            assert_eq!(profile.profile.tool_scope, role_scope);
+        }
+    }
+
+    let planner = profiles
+        .profiles()
+        .iter()
+        .find(|profile| profile.profile.id.as_str() == PLAN_PROFILE_ID)
+        .expect("plan profile exists");
+    assert!(planner.profile.tool_scope.allows("write_file"));
+    let plan_review = crate::build_plan_review_tool_registry(&tools, &configured);
+    assert!(plan_review.spec_for("read_file").is_some());
+    assert!(plan_review.spec_for("write_file").is_none());
+    assert!(plan_review.spec_for("edit_file").is_none());
     Ok(())
 }
 

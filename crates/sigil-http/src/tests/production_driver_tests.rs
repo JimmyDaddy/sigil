@@ -61,10 +61,10 @@ fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
 }
 
 #[test]
-fn preparation_authority_failure_projects_repair_authority_without_provider_fallback() {
+fn preparation_authority_failure_projects_new_session_without_provider_fallback() {
     let error = anyhow::Error::new(
         sigil_runtime::application_run::ApplicationRunPrepareError::AuthorityUnavailable {
-            source: anyhow::anyhow!("durable authority journal failed"),
+            source: anyhow::anyhow!("durable authority failed"),
         },
     );
     assert!(matches!(
@@ -75,29 +75,7 @@ fn preparation_authority_failure_projects_repair_authority_without_provider_fall
             retryable: true,
             ..
         } if actions == vec![
-            PublicRouteRecoveryAction::RepairAuthority,
             PublicRouteRecoveryAction::StartNewSession,
-            PublicRouteRecoveryAction::BackToSessionLibrary,
-        ]
-    ));
-}
-
-#[test]
-fn preparation_journal_corruption_projects_distinct_repair_code() {
-    let error = anyhow::Error::new(
-        sigil_runtime::application_run::ApplicationRunPrepareError::AuthorityJournalCorrupted {
-            source: anyhow::anyhow!("journal record is not hash-chained to the previous record"),
-        },
-    );
-    assert!(matches!(
-        public_preparation_failure_event(&error),
-        PublicRunEventKind::RouteRecoveryRequired {
-            code: PublicRouteRecoveryCode::AuthorityJournalCorrupted,
-            actions,
-            retryable: false,
-            ..
-        } if actions == vec![
-            PublicRouteRecoveryAction::RepairAuthority,
             PublicRouteRecoveryAction::BackToSessionLibrary,
         ]
     ));
@@ -861,6 +839,72 @@ fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpS
     }
 }
 
+fn production_authority_session(
+    driver: &HttpProductionRunDriver,
+    _temp: &tempfile::TempDir,
+    name: &str,
+) -> HttpSessionSnapshot {
+    let composition = driver
+        .services
+        .authority_composition()
+        .expect("current-schema authority composition should be present");
+    let lease = composition
+        .storage_writer
+        .acquire_named(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+            name,
+        )
+        .expect("authority session namespace should be admitted");
+    let session_path = lease.path().join("records.jsonl");
+    let store =
+        JsonlSessionStore::new(&session_path).expect("authority session store should initialize");
+    let (provider_name, route) = production_test_model_route_from_driver(driver);
+    let mut session = sigil_kernel::Session::new_with_route(provider_name, route).with_store(store);
+    session
+        .ensure_identity_entry()
+        .expect("authority session identity should append");
+    let durable_session_scope_id = session.session_scope_id().to_owned();
+    drop(session);
+    drop(lease);
+    HttpSessionSnapshot {
+        id: format!("adapter-{name}"),
+        label: None,
+        run_ids: Vec::new(),
+        durable_session_scope_id,
+        session_log_path: session_path.display().to_string(),
+        foreground_run_id: None,
+        route_transition: None,
+        route_recovery: None,
+    }
+}
+
+fn production_test_model_route_from_driver(
+    driver: &HttpProductionRunDriver,
+) -> (String, sigil_kernel::ResolvedModelRoute) {
+    let config = sigil_kernel::RootConfig::load(&driver.options.config_path)
+        .expect("production test config should load");
+    sigil_runtime::provider_connections::resolve_default_model_route(&config)
+        .expect("V2 model route should resolve")
+}
+
+fn authority_artifact_store_root(
+    driver: &HttpProductionRunDriver,
+    session: &HttpSessionSnapshot,
+) -> std::path::PathBuf {
+    let key = authority_artifact_store_key(&driver.services, session)
+        .expect("current-schema artifact authority should resolve the session key");
+    driver
+        .services
+        .authority_composition()
+        .expect("current-schema authority composition should be present")
+        .storage_writer
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::ArtifactStore,
+            &key,
+        )
+        .expect("artifact store namespace should resolve")
+}
+
 fn append_durable_tool_artifact(
     driver: &HttpProductionRunDriver,
     session: &HttpSessionSnapshot,
@@ -904,7 +948,7 @@ fn with_authority_artifact_store<T>(
 async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-read");
-    let session = production_queue_session_named(&temp, "artifact-owner");
+    let session = production_authority_session(&driver, &temp, "artifact-owner");
     let descriptor = append_durable_tool_artifact(
         &driver,
         &session,
@@ -962,7 +1006,7 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         "steady-state typed retrieval must not rescan the durable session"
     );
 
-    let other_session = production_queue_session_named(&temp, "artifact-other");
+    let other_session = production_authority_session(&driver, &temp, "artifact-other");
     assert_eq!(
         driver.tool_artifact_page(&other_session, &request),
         Err(crate::HttpToolArtifactReadDriverError::Unavailable)
@@ -1040,9 +1084,9 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
         .content_sha256
         .strip_prefix("sha256:")
         .expect("descriptor hash prefix");
-    let blob_path = temp
-        .path()
-        .join("state/managed/artifact-store/artifact-owner/blobs")
+    let artifact_store_root = authority_artifact_store_root(&driver, &session);
+    let blob_path = artifact_store_root
+        .join("blobs")
         .join(&digest[..2])
         .join(format!("{digest}.blob"));
     std::fs::write(&blob_path, b"tampered")
@@ -1069,7 +1113,7 @@ async fn production_driver_authorizes_artifact_reads_by_exact_session_and_hash()
 async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact_sidecars() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "artifact-binding");
-    let session = production_queue_session_named(&temp, "artifact-binding-owner");
+    let session = production_authority_session(&driver, &temp, "artifact-binding-owner");
 
     let orphan = with_authority_artifact_store(&driver, &session, |store| {
         let orphan = store
@@ -1112,9 +1156,9 @@ async fn production_driver_uses_durable_projection_instead_of_forgeable_artifact
     );
     let mut forged_descriptor = descriptor.clone();
     forged_descriptor.tool_name = "forged-tool".to_owned();
-    let manifest_path = temp
-        .path()
-        .join("state/managed/artifact-store/artifact-binding-owner/refs")
+    let artifact_store_root = authority_artifact_store_root(&driver, &session);
+    let manifest_path = artifact_store_root
+        .join("refs")
         .join(format!("{}.json", descriptor.artifact_ref.artifact_id));
     std::fs::write(
         manifest_path,
@@ -6116,6 +6160,7 @@ credential = {{ source = "none" }}
                         .as_str()
                         .to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },
@@ -6251,6 +6296,7 @@ credential = {{ source = "none" }}
                 HttpPlanDecisionRequest {
                     plan_id: original_plan_id.as_str().to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Save,
                     permission_grant: None,
                 },
@@ -6553,6 +6599,7 @@ credential = {{ source = "none" }}
                     .as_str()
                     .to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },
@@ -6714,10 +6761,16 @@ credential = {{ source = "none" }}
     );
     let child_key = format!("pr-{}-research-0", attempt_id.as_str());
     let child_scope_id = format!("{}-research", revision_run_id);
-    let child_session_log_path = temp
-        .path()
-        .join("state/managed/session-log")
-        .join(&child_key)
+    let child_session_log_path = driver
+        .services
+        .authority_composition()
+        .expect("current-schema authority composition should be present")
+        .storage_writer
+        .managed_named_leaf_path(
+            sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
+            &child_key,
+        )
+        .expect("child session namespace should resolve")
         .join("records.jsonl");
     let child_entries = JsonlSessionStore::read_entries(&child_session_log_path)
         .expect("the production child durable log should remain readable after settlement");
@@ -6932,6 +6985,7 @@ credential = {{ source = "none" }}
                     .as_str()
                     .to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },
@@ -7353,6 +7407,7 @@ credential = {{ source = "none" }}
                     .as_str()
                     .to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },
@@ -7751,6 +7806,7 @@ credential = {{ source = "none" }}
                     .as_str()
                     .to_owned(),
                     expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
                     action: HttpPlanDecisionAction::Revise,
                     permission_grant: None,
                 },

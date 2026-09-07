@@ -13,7 +13,7 @@ use crate::recovery::EffectSettlementV1;
 use crate::resource::{
     AuthorityGeneration, CanonicalHash, EffectiveEnforcementV1, EnforcementCompletenessV1,
     OpaquePermissionSubjectRef, PhysicalAttemptId, ReflectiveOpaqueProcessRef,
-    RequestedEnforcementV1, ResourceAccessV1, ResourceCleanupStatusV1, ResourceJournalScopeV1,
+    RequestedEnforcementV1, ResourceAccessV1, ResourceAuthorityScopeV1, ResourceCleanupStatusV1,
     ResourceRefV1, ResourceRequirementSetV1,
 };
 
@@ -130,8 +130,8 @@ pub struct ManagedExecutionPlanDraftV1 {
     pub argv_digest: CanonicalHash,
     pub structured_command_digest: CanonicalHash,
     pub cwd_subject_binding_hash: CanonicalHash,
-    pub attempt_journal_scope: ResourceJournalScopeV1,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope: ResourceAuthorityScopeV1,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub resource_plan_hash: CanonicalHash,
     pub resource_requirements: ResourceRequirementSetV1,
     pub environment_profile: EnvironmentProfileRefV1,
@@ -178,8 +178,8 @@ pub struct ApprovedExecutionAdmissionV1 {
     pub argv_digest: CanonicalHash,
     pub structured_command_digest: CanonicalHash,
     pub cwd_subject_binding_hash: CanonicalHash,
-    pub attempt_journal_scope: ResourceJournalScopeV1,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope: ResourceAuthorityScopeV1,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub permission_plan_hash: CanonicalHash,
     pub decision_digest: CanonicalHash,
     pub approval_continuity_hash: CanonicalHash,

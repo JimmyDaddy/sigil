@@ -1825,7 +1825,13 @@ impl HttpSessionRunRegistry {
             action: command.payload.action.kind(),
             expected_generation: command.payload.expected_generation,
             generation: queue.generation.clone(),
-            interrupt_owner: self.session_foreground_owner(session_id)?,
+            interrupt_owner: matches!(
+                command.payload.action,
+                HttpConversationQueueCommandAction::InterruptAndRunNext { .. }
+            )
+            .then(|| self.session_foreground_owner(session_id))
+            .transpose()?
+            .flatten(),
             queue,
             correlation_id: command.correlation_id,
             replayed,

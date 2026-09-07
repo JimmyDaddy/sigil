@@ -35,6 +35,7 @@ impl EnvScope {
             SIGIL_ANTHROPIC_BASE_URL_ENV,
             SIGIL_ANTHROPIC_VERSION_ENV,
             SIGIL_ANTHROPIC_MAX_TOKENS_ENV,
+            "SSL_CERT_FILE",
         ];
         let previous = names
             .into_iter()
@@ -219,6 +220,21 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
         provider.image_input_capability("claude-test"),
         ImageInputCapability::Unsupported
     );
+    Ok(())
+}
+
+#[test]
+fn constructor_uses_common_http_client_ca_validation() -> anyhow::Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::clear();
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");
+    }
+    assert!(AnthropicProvider::new(
+        AnthropicProviderConfig::default(),
+        ModelRequestTimeouts::default(),
+    )
+    .is_err());
     Ok(())
 }
 

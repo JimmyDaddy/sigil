@@ -22,7 +22,7 @@ use crate::resource::{
     ManagedStorageSemanticOwnerV1, OpaqueApprovalRequestId, OpaqueExecutionPlanDraftId,
     OpaqueManagedFileAccessPlanId, OpaqueManagedStoragePlanId, OpaquePermissionDecisionId,
     OpaquePermissionSubjectRef, OpaqueSessionGrantRef, OpaqueStorageOperationAttemptId,
-    OpaqueToolCallId, RequestedEnforcementV1, ResourceContractError, ResourceJournalScopeV1,
+    OpaqueToolCallId, RequestedEnforcementV1, ResourceAuthorityScopeV1, ResourceContractError,
     ResourceRequirementSetV1,
 };
 use crate::{
@@ -42,7 +42,7 @@ pub struct ManagedExecutionPlanDraftRefV1 {
     pub draft_id: OpaqueExecutionPlanDraftId,
     pub draft_hash: CanonicalHash,
     pub resource_plan_hash: CanonicalHash,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope_hash: CanonicalHash,
 }
 
 /// Reference to an in-process managed storage plan produced by the authority-owned storage service.
@@ -54,7 +54,7 @@ pub struct ManagedStoragePlanRefV1 {
     pub capability_family: ManagedStorageCapabilityFamilyV1,
     pub requirement_set_hash: CanonicalHash,
     pub operation_digest: CanonicalHash,
-    pub journal_scope_hash: CanonicalHash,
+    pub authority_scope_hash: CanonicalHash,
     pub plan_hash: CanonicalHash,
 }
 
@@ -94,8 +94,8 @@ pub struct ToolPermissionPlanV3 {
     pub execution_plan_drafts: Vec<ManagedExecutionPlanDraftRefV1>,
     pub managed_storage_plans: Vec<ManagedStoragePlanRefV1>,
     pub managed_file_access_plan: Option<ManagedFileAccessPlanDraftRefV1>,
-    pub attempt_journal_scope: ResourceJournalScopeV1,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope: ResourceAuthorityScopeV1,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub requested_enforcement: RequestedEnforcementV1,
     pub plan_hash: CanonicalHash,
 }
@@ -134,7 +134,7 @@ pub struct ToolPermissionDecisionV3 {
     pub execution_draft_hashes: Vec<CanonicalHash>,
     pub managed_storage_plan_hashes: Vec<CanonicalHash>,
     pub managed_file_access_plan_hash: Option<CanonicalHash>,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub subject_binding_hash: CanonicalHash,
     pub requested_enforcement_hash: CanonicalHash,
     pub policy_version: String,

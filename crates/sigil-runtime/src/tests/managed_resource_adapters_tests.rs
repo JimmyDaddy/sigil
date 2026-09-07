@@ -1,8 +1,4 @@
 use super::*;
-use sigil_kernel::resource::CanonicalHash;
-use sigil_resource_authority::storage::{
-    AuthorityManagedStorageServiceV1, AuthorityStorageGrantTableV1,
-};
 use std::time::Duration;
 
 fn test_process_inventory() -> Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1> {
@@ -123,36 +119,6 @@ fn manager_persistent_command() -> (String, String) {
         "ping -n 30 127.0.0.1 >NUL".to_owned(),
         comspec_path().to_string_lossy().into_owned(),
     )
-}
-
-#[test]
-fn r71_runtime_compose_holds_only_pathless_ports() {
-    let storage = Arc::new(AuthorityManagedStorageServiceV1::new(
-        AuthorityStorageGrantTableV1::new(),
-        sigil_kernel::resource::AuthorityGeneration {
-            epoch: 1,
-            instance_hash: CanonicalHash::from_bytes([1u8; 32]),
-        },
-    ));
-    let file_access = sigil_resource_authority::file_access_stub::stub_file_access_service();
-    let bundle = sigil_resource_authority::factory::ResourceAuthorityServiceFactoryV1::new(
-        sigil_kernel::resource::AuthorityGeneration {
-            epoch: 2,
-            instance_hash: CanonicalHash::from_bytes([2u8; 32]),
-        },
-        storage,
-        file_access,
-    )
-    .build_bundle();
-    let composed = RuntimeManagedResourceServicesV1::compose(
-        bundle,
-        sigil_kernel::capability_issuer::mock_issuer(),
-        Arc::new(StubProjectionServiceV1),
-    );
-    // The runtime view is fully trait-object-y: no concrete authority type escapes.
-    let _ = composed.file_access;
-    let _ = composed.storage;
-    let _ = composed.projection;
 }
 
 #[tokio::test]
@@ -553,21 +519,4 @@ async fn r71_managed_terminal_manager_cancel_waits_for_persistent_receipt() -> a
         sigil_kernel::TerminalTaskStatus::Cancelled
     ));
     Ok(())
-}
-
-/// Minimal projection stub for the isolated composition test.
-struct StubProjectionServiceV1;
-
-#[async_trait::async_trait]
-impl ManagedProjectionServiceV1 for StubProjectionServiceV1 {
-    async fn open_rebuildable_projection(
-        &self,
-        _handle: &sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
-        _request: sigil_kernel::managed_projection::OpenProjectionConnectionRequestV1,
-    ) -> Result<
-        Box<dyn sigil_kernel::managed_projection::ManagedProjectionConnectionV1>,
-        sigil_kernel::managed_projection::ProjectionErrorV1,
-    > {
-        Err(sigil_kernel::managed_projection::ProjectionErrorV1::ConnectionClosed)
-    }
 }

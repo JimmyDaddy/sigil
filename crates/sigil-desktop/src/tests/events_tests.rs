@@ -648,13 +648,13 @@ fn route_recovery_event_projects_bounded_renderer_actions() {
 }
 
 #[test]
-fn authority_journal_recovery_uses_stable_snake_case_and_preserves_repair_action() {
+fn authority_unavailable_recovery_uses_stable_snake_case_and_starts_new_session() {
     let event = envelope(
         DesktopProtocolEventClass::Durable,
         json!({
             "type": "route_recovery_required",
-            "code": "authority_journal_corrupted",
-            "actions": ["repair_authority"],
+            "code": "authority_unavailable",
+            "actions": ["start_new_session"],
             "recovery_binding": "authority-recovery-binding",
             "retryable": false
         }),
@@ -666,22 +666,22 @@ fn authority_journal_recovery_uses_stable_snake_case_and_preserves_repair_action
 
     assert_eq!(
         timeline.text.as_deref(),
-        Some("The authority journal is corrupted and must be repaired before another run.")
+        Some("The authority plane is unavailable and must be repaired before another run.")
     );
     let recovery = timeline.route_recovery.expect("typed authority recovery");
     assert_eq!(
         recovery.code,
-        DesktopRouteRecoveryCode::AuthorityJournalCorrupted
+        DesktopRouteRecoveryCode::AuthorityUnavailable
     );
     assert_eq!(
         recovery.actions,
-        vec![DesktopRouteRecoveryAction::RepairAuthority]
+        vec![DesktopRouteRecoveryAction::StartNewSession]
     );
     assert_eq!(
         serde_json::to_value(&recovery).expect("recovery should serialize"),
         json!({
-            "code": "authority_journal_corrupted",
-            "actions": ["repair_authority"],
+            "code": "authority_unavailable",
+            "actions": ["start_new_session"],
             "recoveryBinding": "authority-recovery-binding",
             "retryable": false
         })

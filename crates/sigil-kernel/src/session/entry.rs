@@ -266,6 +266,10 @@ pub enum ControlEntry {
     TerminalTask(TerminalTaskEntry),
     ConversationRouteDecisionRecorded(crate::ConversationRouteDecisionRecordedEntry),
     PlanReviewAttempt(crate::PlanReviewAttemptEntry),
+    /// RFC-0073: immutable plain-text candidate evidence captured before result classification.
+    PlanReviewCandidateRecordedV1(Box<crate::PlanReviewCandidateRecordedV1>),
+    /// RFC-0073: typed classification receipt bound to one immutable candidate hash.
+    PlanReviewResolutionRecordedV1(crate::PlanReviewResolutionRecordedV1),
     PlanDraftCreated(PlanDraftCreatedEntry),
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
     PlanPermissionGranted(PlanPermissionGrantedEntry),
@@ -421,6 +425,7 @@ impl ControlEntry {
             Self::PlanReviewAttempt(entry) => {
                 crate::conversation_route::validate_attempt_payload(entry)
             }
+            Self::PlanReviewResolutionRecordedV1(entry) => entry.validate(),
             Self::AgentUserInputRoute(entry) => entry.validate(),
             Self::ExecutablePlanCandidatePreparedV1(candidate) => candidate.validate(),
             Self::PlanReadyCommittedV1(marker) => marker.validate(),

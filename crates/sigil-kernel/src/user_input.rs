@@ -100,9 +100,9 @@ pub fn request_user_input_tool_spec() -> ToolSpec {
                                         "properties": {
                                             "kind": {"const": "single_select"},
                                             "options": options_schema.clone(),
-                                            "allow_other": {"type": "boolean"}
+                                            "allow_other": {"type": "boolean", "default": false}
                                         },
-                                        "required": ["kind", "options", "allow_other"],
+                                        "required": ["kind", "options"],
                                         "additionalProperties": false
                                     },
                                     {
@@ -339,6 +339,7 @@ pub enum UserInputFieldKindV1 {
     Boolean,
     SingleSelect {
         options: Vec<UserInputOptionV1>,
+        #[serde(default)]
         allow_other: bool,
     },
     MultiSelect {

@@ -66,6 +66,31 @@ fn text_request_for_session(
     UserInputRequestedV1::new(request)
 }
 
+#[test]
+fn request_user_input_single_select_defaults_allow_other_to_false() -> Result<()> {
+    let question: UserInputQuestionV1 = serde_json::from_value(serde_json::json!({
+        "id": "scope",
+        "header": "Scope",
+        "question": "Which scope should I use?",
+        "required": true,
+        "field": {
+            "kind": "single_select",
+            "options": [
+                {"id": "narrow", "label": "Narrow"},
+                {"id": "broad", "label": "Broad"}
+            ]
+        }
+    }))?;
+    assert!(matches!(
+        question.field,
+        UserInputFieldKindV1::SingleSelect {
+            allow_other: false,
+            ..
+        }
+    ));
+    Ok(())
+}
+
 fn submitted_decision(request: &UserInputRequestedV1) -> Result<UserInputDecisionAcceptedV1> {
     UserInputDecisionAcceptedV1::new(
         request,

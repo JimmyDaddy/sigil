@@ -309,7 +309,18 @@ async fn save_connection_config_with_guard(
 ) -> Result<ConnectionSaveOutcome, ConnectionSaveError> {
     verify_connection_config_snapshot(current, path, compare_and_swap)?;
     let current_loaded = load_provider_connections(current);
-    if current_loaded.mode != ConfigMode::V2 || !current_loaded.issues.is_empty() {
+    let is_unconfigured_replacement_base = matches!(
+        compare_and_swap,
+        ConnectionCompareAndSwap::ExactSource(snapshot) if snapshot.is_invalid()
+    ) && current_loaded.mode == ConfigMode::V2
+        && current_loaded.connections.is_empty()
+        && current_loaded
+            .issues
+            .iter()
+            .all(|issue| issue.code == "model_route_not_configured");
+    if current_loaded.mode != ConfigMode::V2
+        || (!current_loaded.issues.is_empty() && !is_unconfigured_replacement_base)
+    {
         return Err(ConnectionSaveError::CurrentConfigInvalid);
     }
 

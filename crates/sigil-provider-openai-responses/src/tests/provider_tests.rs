@@ -64,6 +64,21 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
 }
 
 #[test]
+fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::set(
+        "SSL_CERT_FILE",
+        "/definitely/missing/sigil-provider-ca.pem",
+    );
+    assert!(OpenAiResponsesProvider::new(
+        OpenAiResponsesProviderConfig::default(),
+        ModelRequestTimeouts::default(),
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
 fn only_the_official_openai_endpoint_is_eligible_for_the_proof_contract() {
     assert!(is_official_openai_base_url("https://api.openai.com/v1"));
     assert!(is_official_openai_base_url("https://api.openai.com/v1/"));

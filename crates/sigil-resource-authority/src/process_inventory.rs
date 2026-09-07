@@ -110,10 +110,6 @@ impl AuthorityProcessInventoryAuthenticatorV1 {
         self.state = AuthorityProcessInventoryAuthenticatorStateV1::Active;
     }
 
-    pub(crate) fn is_active(&self) -> bool {
-        self.state == AuthorityProcessInventoryAuthenticatorStateV1::Active
-    }
-
     fn authenticate(
         &self,
         snapshot_hash: CanonicalHash,

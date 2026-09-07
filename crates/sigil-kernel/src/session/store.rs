@@ -1319,6 +1319,9 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
             DurableEventType::ConversationRouteDecisionRecorded
         }
         ControlEntry::PlanReviewAttempt(_) => DurableEventType::PlanReviewAttempt,
+        ControlEntry::PlanReviewResolutionRecordedV1(_) => {
+            DurableEventType::PlanReviewResolutionRecorded
+        }
         ControlEntry::UserInputRequested(_)
         | ControlEntry::UserInputDecisionAccepted(_)
         | ControlEntry::UserInputContinuationClaimed(_)

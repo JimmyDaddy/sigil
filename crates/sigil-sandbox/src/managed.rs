@@ -34,7 +34,7 @@ use sigil_kernel::resource::{
     EnforcementRequirementClassV1, EnvironmentProfileClassV1, IssuedExecutionAdmissionBundleV1,
     OpaquePermissionSubjectRef, OpaqueProcessRef, OpaqueResourceId, OpaqueSpawnIntentId,
     PhysicalAttemptId, ReflectiveOpaqueProcessRef, RequestedEnforcementV1, ResourceAccessV1,
-    ResourceCleanupStatusV1, ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1,
+    ResourceAuthorityScopeV1, ResourceCleanupStatusV1, ResourceKindV1, ResourceOwnerScopeV1,
     ResourceRefV1, SandboxBackendClassV1,
 };
 
@@ -697,7 +697,7 @@ impl SandboxManagedExecutionServiceV1 {
             )),
             kind,
             owner_scope: ResourceOwnerScopeV1::Application,
-            journal_scope: ResourceJournalScopeV1::Application,
+            authority_scope: ResourceAuthorityScopeV1::Application,
             generation: 1,
         };
         let requested_policy = match requested_enforcement.requirement {

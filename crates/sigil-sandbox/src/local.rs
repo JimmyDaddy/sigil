@@ -4,7 +4,7 @@
 //! unconfined (danger-full-access). It never fabricates effective enforcement and never accepts
 //! a required-exact request.
 
-use sigil_kernel::resource::{CanonicalHash, EnforcementCompletenessV1, SandboxBackendClassV1};
+use sigil_kernel::resource::{EnforcementCompletenessV1, SandboxBackendClassV1};
 
 use crate::receipt::{EnforcementVerificationErrorV1, SandboxPlatformSupportV1};
 
@@ -43,19 +43,6 @@ pub fn local_confinement_guard(
             Err(EnforcementVerificationErrorV1::LocalRequiresUnconfined)
         }
     }
-}
-
-/// Local effective enforcement is always none (never a requested-set clone).
-pub fn local_effective_enforcement(
-    descriptor: &LocalProviderDescriptorV1,
-) -> EnforcementCompletenessV1 {
-    descriptor.enforcement
-}
-
-/// Local bind evidence: no root bindings exist, so the set is empty but must be present in the
-/// per-resource receipt as an explicit observation.
-pub fn local_bind_evidence() -> Vec<CanonicalHash> {
-    Vec::new()
 }
 
 #[cfg(test)]

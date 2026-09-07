@@ -193,13 +193,13 @@ fn storage_grant(
             }
             CanonicalHash::from_bytes(ns)
         },
-        journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
-        journal_scope_hash: CanonicalHash::from_bytes([0x34; 32]),
+        authority_scope: sigil_kernel::resource::ResourceAuthorityScopeV1::Application,
+        authority_scope_hash: CanonicalHash::from_bytes([0x34; 32]),
         resource_ref: sigil_kernel::resource::ResourceRefV1 {
             resource_id: sigil_kernel::resource::OpaqueResourceId::new(format!("res-{grant_id}")),
             kind: sigil_kernel::resource::ResourceKindV1::RuntimeState,
             owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
-            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+            authority_scope: sigil_kernel::resource::ResourceAuthorityScopeV1::Application,
             generation: 1,
         },
         resource_binding_digest: CanonicalHash::from_bytes([0x35; 32]),
@@ -221,7 +221,6 @@ fn storage_grant(
             "schema-{grant_id}"
         )),
         authority_generation: authority(),
-        journal_admission_sequence: 1,
         grant_hash: CanonicalHash::from_bytes([0x38; 32]),
     }
 }
@@ -744,13 +743,16 @@ fn r71_full_composition_gate() {
         composition
     };
     let recovery = ApplicationResourceRecoveryFacadeV1::new();
-    let cutover = RuntimeGlobalCutoverV1::evaluate(
+    // The composition above was explicitly bound to this cutover-root hash.  Probe against
+    // that same source binding; `evaluate()` intentionally uses the pre-manifest provisional
+    // source and is only correct for the first phase of the two-pass boot composition.
+    let cutover = RuntimeGlobalCutoverV1::evaluate_current_schema_with_source(
         "inst-full",
         1,
         authority(),
         &composition.services,
         &recovery,
-        StartupEpochV1::NewCurrentSchema,
+        CanonicalHash::from_bytes([0x55; 32]),
     );
     match cutover.gate() {
         Ok(()) => {}

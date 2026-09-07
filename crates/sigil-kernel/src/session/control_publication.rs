@@ -2,7 +2,10 @@ use super::writer::PendingStoredEvent;
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::{PublicRunEvent, PublicRunEventKind, PublicTaskEventProjector};
+use crate::{
+    ConversationRunFinalizedEntryV1, ConversationRunLifecycleRecordV1, PublicRunEvent,
+    PublicRunEventKind, PublicTaskEventProjector,
+};
 
 /// An explicit, source-bound public projection for one provider-visible session entry.
 ///
@@ -288,6 +291,170 @@ impl Session {
         self.bind_tool_artifacts_after_append(&entries, &domain_events);
         self.entries.extend(entries);
         candidate.refresh(&self.entries)?;
+        self.control_public_projection = candidate;
+        self.advance_durable_session_entry_count(&domain_events);
+        Ok((domain_events, outbox))
+    }
+
+    /// Commits a mixed plan-review terminal bundle in one recoverable writer intent. The source
+    /// entries (including private controls and an assistant final answer), their explicit public
+    /// projections, the conversation terminal lifecycle record, and its terminal outbox entry
+    /// become one contiguous durable batch. This prevents a crash between plan-review closure,
+    /// final-answer persistence, and the enclosing conversation terminal from leaving a split
+    /// visible state.
+    pub fn append_session_entries_with_terminal_outbox(
+        &mut self,
+        entries: Vec<SessionLogEntry>,
+        publications: Vec<SessionPublicEventProjectionV1>,
+        terminal: ConversationRunFinalizedEntryV1,
+        terminal_event: PublicRunEventKind,
+        run_id: &str,
+        next_sequence: u64,
+    ) -> Result<(Vec<StoredEvent>, Vec<PublicEventOutboxEntryV1>)> {
+        if entries.is_empty()
+            || run_id.trim().is_empty()
+            || next_sequence == 0
+            || terminal.run_id() != run_id
+        {
+            bail!(
+                "terminal session publication requires entries, an active run, and matching terminal identity"
+            );
+        }
+        let store = self
+            .store
+            .as_ref()
+            .context("terminal session publication requires a durable session")?;
+        self.validate_session_publication_bundle(&entries, &publications)?;
+        terminal.validate_shape()?;
+        if !super::public_event_outbox::is_terminal_event(&terminal_event) {
+            bail!("terminal session publication requires a terminal public event");
+        }
+
+        let mut publications_by_source =
+            BTreeMap::<usize, Vec<SessionPublicEventProjectionV1>>::new();
+        for publication in publications {
+            publications_by_source
+                .entry(publication.source_entry_index())
+                .or_default()
+                .push(publication);
+        }
+
+        let mut candidate = self.control_public_projection.clone();
+        candidate.refresh(&self.entries)?;
+        let mut sequence = next_sequence;
+        let mut pending = Vec::with_capacity(entries.len() + publications_by_source.len() + 2);
+        let mut outbox = Vec::new();
+        for (entry_index, entry) in entries.iter().enumerate() {
+            let domain_id = uuid::Uuid::new_v4().to_string();
+            let event_type = super::store::session_entry_event_type(entry);
+            pending.push(PendingStoredEvent {
+                event_type,
+                event_class: super::store::session_entry_event_class(event_type),
+                payload: serde_json::json!({ "session_log_entry": entry }),
+                event_id: Some(domain_id.clone()),
+                correlation_id: Some(domain_id.clone()),
+                causation_id: None,
+            });
+
+            let mut public_events = if let SessionLogEntry::Control(control) = entry {
+                project_explicit_control(&mut candidate.projector, control)?
+            } else {
+                Vec::new()
+            };
+            let explicit_publications = publications_by_source
+                .remove(&entry_index)
+                .unwrap_or_default();
+            if !public_events.is_empty() && !explicit_publications.is_empty() {
+                bail!("terminal session source cannot mix control and explicit public projections");
+            }
+            public_events.extend(
+                explicit_publications
+                    .into_iter()
+                    .map(|publication| publication.public_event()),
+            );
+            for event in public_events {
+                let public =
+                    PublicRunEvent::new(self.session_scope_id.clone(), run_id, sequence, event);
+                let public_event_id = format!(
+                    "application-public:{}:{run_id}:{sequence}",
+                    self.session_scope_id
+                );
+                let outbox_entry = PublicEventOutboxEntryV1 {
+                    schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                    domain_event_id: domain_id.clone(),
+                    public_event_id: public_event_id.clone(),
+                    run_id: run_id.to_owned(),
+                    sequence,
+                    payload_digest: stable_event_hash(&serde_json::to_vec(&public)?),
+                    event: public,
+                };
+                if super::public_event_outbox::is_terminal_event(&outbox_entry.event.event) {
+                    bail!("terminal session source publication cannot create a run terminal");
+                }
+                pending.push(PendingStoredEvent {
+                    event_type: DurableEventType::PublicEventOutbox,
+                    event_class: EventClass::Critical,
+                    payload: serde_json::to_value(&outbox_entry)?,
+                    event_id: Some(public_event_id),
+                    correlation_id: Some(domain_id.clone()),
+                    causation_id: Some(domain_id.clone()),
+                });
+                outbox.push(outbox_entry);
+                sequence = sequence
+                    .checked_add(1)
+                    .context("terminal session publication sequence exhausted")?;
+            }
+        }
+
+        let terminal_domain_id = uuid::Uuid::new_v4().to_string();
+        let terminal_public = PublicRunEvent::new(
+            self.session_scope_id.clone(),
+            run_id,
+            sequence,
+            terminal_event,
+        );
+        let terminal_public_event_id = format!(
+            "application-public:{}:{run_id}:{sequence}",
+            self.session_scope_id
+        );
+        let terminal_outbox = PublicEventOutboxEntryV1 {
+            schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            domain_event_id: terminal_domain_id.clone(),
+            public_event_id: terminal_public_event_id.clone(),
+            run_id: run_id.to_owned(),
+            sequence,
+            payload_digest: stable_event_hash(&serde_json::to_vec(&terminal_public)?),
+            event: terminal_public,
+        };
+        crate::conversation_run::validate_terminal_outbox(&terminal, &terminal_outbox)?;
+        pending.push(PendingStoredEvent {
+            event_type: DurableEventType::RunFinalized,
+            event_class: EventClass::Critical,
+            payload: serde_json::to_value(
+                ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(terminal),
+            )?,
+            event_id: Some(terminal_domain_id),
+            correlation_id: None,
+            causation_id: None,
+        });
+        pending.push(PendingStoredEvent {
+            event_type: DurableEventType::PublicEventOutbox,
+            event_class: EventClass::Critical,
+            payload: serde_json::to_value(&terminal_outbox)?,
+            event_id: Some(terminal_public_event_id),
+            correlation_id: None,
+            causation_id: None,
+        });
+        outbox.push(terminal_outbox);
+
+        let events = store.append_control_publication(pending, run_id)?;
+        let domain_events = events
+            .into_iter()
+            .filter(|event| event.event_kind() != Some(DurableEventType::PublicEventOutbox))
+            .collect::<Vec<_>>();
+        self.bind_tool_artifacts_after_append(&entries, &domain_events);
+        self.entries.extend(entries);
+        candidate.entry_count = self.entries.len();
         self.control_public_projection = candidate;
         self.advance_durable_session_entry_count(&domain_events);
         Ok((domain_events, outbox))

@@ -12,36 +12,22 @@ use crate::resource::{
     ManagedStorageCapabilityFamilyV1, ManagedStorageSemanticOwnerV1, OpaqueArtifactId,
     OpaqueBlobWriterId, OpaqueKernelCapabilityAuthenticatorV1, OpaqueKernelCapabilityHandleId,
     OpaquePublishTransactionId, OpaqueResourceId, OpaqueSemanticSchemaId, OpaqueStagedBlobRef,
-    OpaqueStorageGrantId, OpaqueStorageKeyIdV1, ResourceJournalScopeV1, ResourceKindV1,
+    OpaqueStorageGrantId, OpaqueStorageKeyIdV1, ResourceAuthorityScopeV1, ResourceKindV1,
     ResourceOwnerScopeV1, ResourceQuotaProfileV1, ResourceRefV1, ResourceRetentionPolicyV1,
     StorageAdmissionSourceClassV1, StorageLogicalKeyKindV1,
 };
 
 pub const MAX_STORAGE_LOGICAL_KEY_ATOMS: usize = 8;
 
-/// Opaque durable admission identity returned by the authority with a namespace handle.
+/// Evidence naming one already-published physical namespace.
 ///
-/// The runtime may persist these hashes in an owner-only physical marker, but it cannot use
-/// them to mint or reactivate a handle. They bind one physical namespace to one exact journal
-/// admission across process restarts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManagedStorageDurableAdmissionBindingV1 {
-    pub grant_hash: CanonicalHash,
-    pub admission_sequence: u64,
-    pub admission_record_hash: CanonicalHash,
-}
-
-/// Durable evidence naming one already-published physical namespace.
-///
-/// This is a deserializable record locator, not an authority capability: callers may obtain it
-/// from an owner-only marker, but only a journal-backed managed-storage service can verify the
-/// historical admission, terminal evidence, current compatible grant, and physical marker before
-/// it consumes a new one-shot continuation claim.
+/// This is only a stable business-key locator. It is never a capability and is revalidated
+/// against the current grant, current authority generation and the protected namespace marker
+/// before a new in-memory lease is issued after restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedStorageExistingNamespaceBindingV1 {
     pub original_handle_id: OpaqueKernelCapabilityHandleId,
     pub original_namespace_hash: CanonicalHash,
-    pub original_admission: ManagedStorageDurableAdmissionBindingV1,
 }
 
 /// Opaque storage namespace handle (kernel-broker constructed; non-clone).
@@ -50,7 +36,6 @@ pub struct ManagedStorageNamespaceHandleV1 {
     pub handle_id: OpaqueKernelCapabilityHandleId,
     pub namespace_hash: CanonicalHash,
     pub capability_family: ManagedStorageCapabilityFamilyV1,
-    durable_admission: Option<ManagedStorageDurableAdmissionBindingV1>,
     #[allow(dead_code)]
     authenticator: OpaqueKernelCapabilityAuthenticatorV1,
 }
@@ -66,33 +51,8 @@ impl ManagedStorageNamespaceHandleV1 {
             handle_id,
             namespace_hash,
             capability_family,
-            durable_admission: None,
             authenticator,
         }
-    }
-
-    /// Constructs a handle bound to one exact durable journal admission.
-    pub const fn new_durable(
-        handle_id: OpaqueKernelCapabilityHandleId,
-        namespace_hash: CanonicalHash,
-        capability_family: ManagedStorageCapabilityFamilyV1,
-        durable_admission: ManagedStorageDurableAdmissionBindingV1,
-        authenticator: OpaqueKernelCapabilityAuthenticatorV1,
-    ) -> Self {
-        Self {
-            handle_id,
-            namespace_hash,
-            capability_family,
-            durable_admission: Some(durable_admission),
-            authenticator,
-        }
-    }
-
-    /// Returns the opaque durable marker binding, when this handle came from a journal-backed
-    /// admission. The value is evidence only and cannot authorize a storage operation.
-    #[must_use]
-    pub const fn durable_admission(&self) -> Option<ManagedStorageDurableAdmissionBindingV1> {
-        self.durable_admission
     }
 }
 
@@ -107,8 +67,8 @@ pub struct StorageAdmissionGrantV1 {
     pub source_class: StorageAdmissionSourceClassV1,
     pub source_binding_hash: CanonicalHash,
     pub namespace_hash: CanonicalHash,
-    pub journal_scope: ResourceJournalScopeV1,
-    pub journal_scope_hash: CanonicalHash,
+    pub authority_scope: ResourceAuthorityScopeV1,
+    pub authority_scope_hash: CanonicalHash,
     pub resource_ref: ResourceRefV1,
     pub resource_binding_digest: CanonicalHash,
     pub physical_binding_hash: CanonicalHash,
@@ -119,7 +79,6 @@ pub struct StorageAdmissionGrantV1 {
     pub quota_profile: ResourceQuotaProfileV1,
     pub semantic_schema: OpaqueSemanticSchemaId,
     pub authority_generation: AuthorityGeneration,
-    pub journal_admission_sequence: u64,
     pub grant_hash: CanonicalHash,
 }
 
@@ -190,7 +149,7 @@ pub struct ArtifactPublishAdmissionV1 {
     pub expected_byte_length: u64,
     pub artifact_object_key_hash: CanonicalHash,
     pub authority_generation: AuthorityGeneration,
-    pub journal_scope: ResourceJournalScopeV1,
+    pub authority_scope: ResourceAuthorityScopeV1,
     pub staging_namespace_hash: CanonicalHash,
     pub store_namespace_hash: CanonicalHash,
 }
@@ -291,7 +250,10 @@ pub struct ManagedStorageAdmissionRequestV1 {
     pub purpose: ManagedStorageAdmissionPurposeV1,
     pub source: StorageAdmissionSourceV1,
     pub owner_scope: ResourceOwnerScopeV1,
-    pub journal_scope: ResourceJournalScopeV1,
+    pub authority_scope: ResourceAuthorityScopeV1,
+    /// Stable business identity for the physical namespace. The authority uses this value,
+    /// never a process-local sequence, to locate the namespace after restart.
+    pub namespace_key_hash: CanonicalHash,
 }
 
 /// Validated storage admission capability (kernel-issued; non-clone, non-serialize).
@@ -368,7 +330,8 @@ pub struct ManagedStorageResultV1 {
     pub result_digest: CanonicalHash,
 }
 
-/// Reduced storage receipt (full contract lives with the authority journal).
+/// Reduced storage receipt. The committed version is local to the current namespace and is not
+/// a replay cursor or authority state sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedStorageStorageReceiptV1 {
     pub grant_id: OpaqueStorageGrantId,
@@ -377,15 +340,12 @@ pub struct ManagedStorageStorageReceiptV1 {
     pub capability_family: ManagedStorageCapabilityFamilyV1,
     pub resource_id: OpaqueResourceId,
     pub operation_digest: CanonicalHash,
-    pub committed_sequence_or_version: Option<u64>,
+    pub committed_entry_count: Option<u64>,
     pub committed_frontier_hash: CanonicalHash,
     pub receipt_hash: CanonicalHash,
-    /// Authority-owned binding to the exact physical bytes used for normal settlement. Probe
-    /// receipts and isolated in-memory authority receipts may leave these absent.
+    /// Authority-owned observation of the bytes committed by this operation.
     #[serde(default)]
     pub physical_frontier_hash: Option<CanonicalHash>,
-    #[serde(default)]
-    pub physical_observation_record_hash: Option<CanonicalHash>,
 }
 
 /// Consumer facing pathless managed storage service (authority implementation).
@@ -396,21 +356,17 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         capability: ValidatedStorageAdmissionCapabilityV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1>;
 
-    /// Consumes a fresh storage capability to continue one already-settled, schema-2 physical
-    /// namespace. The supplied binding is evidence only; implementations must fail closed unless
-    /// the authenticated journal and the unique unchanged physical marker prove it belongs to a
-    /// terminal admission compatible with `request` in the current authority epoch.
-    ///
-    /// The returned handle has its own admission/finalization identity. Implementations must not
-    /// overwrite or re-sign the historical marker, and probe-only services do not support this
-    /// operation.
+    /// Consumes a fresh storage capability to attach to an already materialized namespace. The
+    /// supplied binding is evidence only; implementations must revalidate the current grant,
+    /// authority generation, protected marker and stable namespace identity before issuing a
+    /// new in-memory lease.
     fn admit_existing_namespace(
         &self,
         _request: ManagedStorageAdmissionRequestV1,
         _capability: ValidatedStorageAdmissionCapabilityV1,
         _original: ManagedStorageExistingNamespaceBindingV1,
     ) -> Result<ManagedStorageNamespaceHandleV1, ManagedStorageErrorV1> {
-        Err(ManagedStorageErrorV1::JournalUnavailable)
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
     }
 
     /// Validates that a physical mutation is still covered by an admitted namespace. The
@@ -430,7 +386,7 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         _bytes: u64,
         _entries: u64,
     ) -> Result<(), ManagedStorageErrorV1> {
-        Err(ManagedStorageErrorV1::JournalUnavailable)
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
     }
 
     fn finalize_namespace(
@@ -465,8 +421,8 @@ pub enum ManagedStorageErrorV1 {
     UnsafeLogicalKey,
     #[error("namespace does not permit this capability family")]
     FamilyMismatch,
-    #[error("managed storage authority journal is unavailable")]
-    JournalUnavailable,
+    #[error("managed storage authority is unavailable")]
+    AuthorityUnavailable,
 }
 
 /// Closed artifact id for the dual-grant publish path.

@@ -8,39 +8,32 @@ pub mod arena;
 pub mod bootstrap;
 pub mod borrowed;
 pub mod configuration;
+#[cfg(test)]
 pub mod consumer_ports;
 mod durable_snapshot;
 pub mod factory;
 pub mod file_access;
+#[cfg(any(test, feature = "test-support"))]
 pub mod file_access_stub;
 pub mod identity;
-pub mod journal;
+#[cfg(test)]
 pub mod lease;
 pub mod maintenance;
 pub mod native_save;
 pub mod process_inventory;
-pub mod provider_registry;
 pub mod quota;
-pub mod reconcile;
 pub mod release_output;
+#[cfg(test)]
 pub mod semantic_matrix;
 pub mod session_scratch;
 pub mod spawn_protocol;
 pub mod storage;
 
 pub use bootstrap::{
-    AuthorityBootstrapObjectClassV1, AuthorityBootstrapOperatorChallengeV1,
-    AuthorityBootstrapPublicationGuard, AuthorityBootstrapRecoveryAuthorizationV1,
-    AuthorityBootstrapRecoveryErrorV1, AuthorityBootstrapRecoveryNamespaceV1,
-    AuthorityBootstrapRecoveryOperationV1, AuthorityBootstrapRecoveryReceiptV1,
-    AuthorityBootstrapRecoveryServiceV1, AuthorityBootstrapRecoveryTransactionGuard,
-    AuthorityBootstrapRoots, AuthorityBootstrapStoreV1, AuthorityJournalFailureClassV1,
-    BootstrapErrorV1, BootstrapRootResolverV1, ExactBootstrapOperatorConfirmationV1,
-    FailedAuthorityJournalEvidenceV1, OldAuthorityEpochQuiescenceProofV1,
-    OpaqueBootstrapRecoveryAuthorizationId, OpaqueBootstrapRootConfigRef, OpaqueDiagnosticRef,
-    OpaqueOperatorChallengeId,
+    AuthorityBootstrapObjectClassV1, AuthorityBootstrapPublicationGuard, AuthorityBootstrapRoots,
+    AuthorityBootstrapStoreV1, BootstrapErrorV1, BootstrapRootResolverV1,
 };
-pub use journal::{JournalErrorV1, ResourceJournalEventV1, ResourceJournalHeaderV1};
+#[cfg(test)]
 pub use lease::{
     LeaseTransitionErrorV1, ManagedGenerationRecordV1, ManagedLeaseHandleV1,
     ResourceGenerationStateV1,
@@ -56,10 +49,6 @@ pub use quota::{QuotaBookV1, QuotaErrorV1, QuotaReservationV1};
 pub use spawn_protocol::{PreparedSandboxLaunchV1, SandboxBoundExecutionLeaseV1};
 
 #[cfg(test)]
-#[path = "tests/fault_journal_tests.rs"]
-mod fault_journal_tests;
-
-#[cfg(test)]
 #[path = "tests/fault_bootstrap_tests.rs"]
 mod fault_bootstrap_tests;
 
@@ -68,24 +57,12 @@ mod fault_bootstrap_tests;
 mod fault_attachment_tests;
 
 #[cfg(test)]
-#[path = "tests/fault_recovery_tests.rs"]
-mod fault_recovery_tests;
-
-#[cfg(test)]
-#[path = "tests/fault_authority_bootstrap_tests.rs"]
-mod fault_authority_bootstrap_tests;
-
-#[cfg(test)]
 #[path = "tests/fault_key_tests.rs"]
 mod fault_key_tests;
 
 #[cfg(test)]
 #[path = "tests/fault_retire_tests.rs"]
 mod fault_retire_tests;
-
-#[cfg(test)]
-#[path = "tests/fault_bridge_tests.rs"]
-mod fault_bridge_tests;
 
 #[cfg(test)]
 #[path = "tests/fault_child_tests.rs"]

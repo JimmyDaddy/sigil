@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::resource::{
     AuthorityGeneration, CanonicalHash, ExtensionKindV1, OpaqueAdmissionId, OpaqueDomainEventId,
     OpaqueExtensionGrantRef, OpaqueExtensionId, PhysicalAttemptId, RequestedEnforcementV1,
-    ResourceJournalScopeV1, ResourceOwnerScopeV1, ResourceRequirementSetV1,
+    ResourceAuthorityScopeV1, ResourceOwnerScopeV1, ResourceRequirementSetV1,
 };
 
 /// Durable admission scope: every managed execution selects exactly one durable domain writer.
@@ -40,8 +40,8 @@ pub struct ExtensionProcessPlanV1 {
     pub extension_kind: ExtensionKindV1,
     pub extension_id: OpaqueExtensionId,
     pub config_generation: u64,
-    pub attempt_journal_scope: ResourceJournalScopeV1,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope: ResourceAuthorityScopeV1,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub executable_and_args_digest: CanonicalHash,
     pub config_policy_digest: CanonicalHash,
     pub permission_upper_bound_hash: CanonicalHash,
@@ -87,7 +87,7 @@ pub struct ExtensionProcessDecisionV1 {
     pub durable_scope: DurableAdmissionScopeV1,
     pub domain_event_id: OpaqueDomainEventId,
     pub extension_plan_hash: CanonicalHash,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub policy_version: String,
     pub authorization: ExtensionApprovalDecisionV1,
     pub decision_hash: CanonicalHash,
@@ -102,8 +102,8 @@ pub struct ExtensionProcessAdmissionV1 {
     pub extension_id: OpaqueExtensionId,
     pub config_generation: u64,
     pub authority_generation: AuthorityGeneration,
-    pub attempt_journal_scope: ResourceJournalScopeV1,
-    pub attempt_journal_scope_hash: CanonicalHash,
+    pub attempt_authority_scope: ResourceAuthorityScopeV1,
+    pub attempt_authority_scope_hash: CanonicalHash,
     pub executable_and_args_digest: CanonicalHash,
     pub config_policy_digest: CanonicalHash,
     pub permission_upper_bound_hash: CanonicalHash,

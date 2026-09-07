@@ -1,7 +1,7 @@
 use super::*;
 use crate::resource::{
     EnvironmentProfileClassV1, OpaqueResourceId, OpaqueSessionId, ResourceAccessV1,
-    ResourceBlockerScopeV1, ResourceCleanupPolicyV1, ResourceJournalScopeV1, ResourceKindV1,
+    ResourceAuthorityScopeV1, ResourceBlockerScopeV1, ResourceCleanupPolicyV1, ResourceKindV1,
     ResourceLeaseLifetimeV1, ResourcePurposeV1, ResourceQuotaClassV1, ResourceQuotaProfileV1,
     ResourceRetentionPolicyV1,
 };
@@ -79,7 +79,7 @@ fn r71_realized_generation_gate_blocks_across_purpose_swaps() {
         resource_id: OpaqueResourceId::new("r1".to_owned()),
         kind: ResourceKindV1::ExecutionTemp,
         owner_scope: crate::resource::ResourceOwnerScopeV1::Application,
-        journal_scope: ResourceJournalScopeV1::Application,
+        authority_scope: ResourceAuthorityScopeV1::Application,
         generation: 3,
     };
     let key = ResourceBlockerAdmissionKeyV1::RealizedGeneration {

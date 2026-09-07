@@ -2457,7 +2457,7 @@ async fn cow_explicit_invalid_replacement_publishes_only_from_an_invalid_live_fi
     let invalid = PersistedConfigSnapshot::load(&path).expect("invalid source snapshot");
 
     let outcome = save_connection_config_replacing_invalid(
-        &root,
+        &default_setup_root_config(),
         &invalid,
         &path,
         ConnectionSaveDraft {

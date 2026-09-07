@@ -1,13 +1,14 @@
-//! RFC-0071 section 10.3 / 10.5: managed generation lifecycle state machine and leases.
+//! Test-only RFC-0071 section 10.3 / 10.5 managed generation lifecycle model.
 //!
-//! Illegal transitions are rejected with a closed reason code. In particular: Planned never goes
+//! Model transitions are rejected with a closed reason code. In particular: Planned never goes
 //! directly Active; Ready may not spawn without a bound permission/lease hash; after Active any
 //! error must settle first; Quarantined generations are never reactivated; CleanupIncomplete can
 //! only forward-reconcile.
+//! These fixtures do not exercise the shipping storage, process inventory or spawn lifecycle.
 
 use sigil_kernel::resource::{
-    AuthorityGeneration, CanonicalHash, PhysicalAttemptId, ResourceCleanupStatusV1,
-    ResourceJournalScopeV1,
+    AuthorityGeneration, CanonicalHash, PhysicalAttemptId, ResourceAuthorityScopeV1,
+    ResourceCleanupStatusV1,
 };
 
 /// Closed lifecycle state.
@@ -78,19 +79,18 @@ pub enum LeaseTransitionErrorV1 {
     ActiveHolders(u64),
 }
 
-/// One managed generation record (journal-backed identity, not a live handle).
+/// One managed generation record (durable identity, not a live handle).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedGenerationRecordV1 {
     pub resource_id: String,
     pub generation: u64,
     pub state: ResourceGenerationStateV1,
     pub authority_generation: AuthorityGeneration,
-    pub journal_scope: ResourceJournalScopeV1,
+    pub authority_scope: ResourceAuthorityScopeV1,
     pub physical_attempt_id: Option<PhysicalAttemptId>,
     pub bound_manifest_hash: Option<CanonicalHash>,
     pub holder_count: u64,
     pub cleanup_status: ResourceCleanupStatusV1,
-    pub journal_frontier_hash: CanonicalHash,
 }
 
 impl ManagedGenerationRecordV1 {
@@ -142,7 +142,7 @@ pub struct ManagedLeaseHandleV1 {
     pub resource_id: String,
     pub generation: u64,
     pub bound_manifest_hash: CanonicalHash,
-    pub journal_scope: ResourceJournalScopeV1,
+    pub authority_scope: ResourceAuthorityScopeV1,
 }
 
 #[cfg(test)]

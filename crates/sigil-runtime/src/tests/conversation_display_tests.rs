@@ -65,7 +65,7 @@ fn terminal_outbox(
 }
 
 fn internal_context_fixture() -> RuntimeContextCandidates {
-    let body = "provider-only context snapshot body";
+    let body = "context snapshot body";
     let mut candidates = RuntimeContextCandidates::new();
     candidates.items.push(ContextItem {
         id: "context-display-fixture".to_owned(),
@@ -109,7 +109,7 @@ fn conversation_display_hides_provider_visible_context_v2_snapshots() -> Result<
 
     let page = conversation_display_page(store.path(), session.session_scope_id(), None, 20, None)?;
     assert_eq!(page.items.len(), 2);
-    assert!(!format!("{page:?}").contains("provider-only context snapshot body"));
+    assert!(!format!("{page:?}").contains("context snapshot body"));
     Ok(())
 }
 
@@ -1586,7 +1586,10 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
     )?;
     assert_eq!(failed.status, sigil_kernel::PublicPlanReviewStatus::Failed);
     assert!(failed.summary.is_none());
-    assert!(failed.allowed_actions.is_empty());
+    assert_eq!(
+        failed.allowed_actions,
+        vec![sigil_kernel::PublicPlanAction::RetryReview]
+    );
 
     // A cancelled attempt without a draft projects as cancelled.
     let cancelled = project_terminal(

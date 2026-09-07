@@ -19,7 +19,7 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
 }
 
 pub(crate) fn with_clean_provider_env<T>(run: impl FnOnce() -> T) -> T {
-    const NAMES: [&str; 8] = [
+    const NAMES: [&str; 9] = [
         SIGIL_API_KEY_ENV,
         DEEPSEEK_API_KEY_ENV,
         SIGIL_BASE_URL_ENV,
@@ -28,6 +28,7 @@ pub(crate) fn with_clean_provider_env<T>(run: impl FnOnce() -> T) -> T {
         SIGIL_USER_ID_STRATEGY_ENV,
         SIGIL_FIM_MODEL_ENV,
         SIGIL_STRICT_TOOLS_MODE_ENV,
+        "SSL_CERT_FILE",
     ];
 
     let _lock = lock();
@@ -41,12 +42,12 @@ pub(crate) fn with_clean_provider_env<T>(run: impl FnOnce() -> T) -> T {
 }
 
 struct ProviderEnvRestore {
-    previous: [Option<OsString>; 8],
+    previous: [Option<OsString>; 9],
 }
 
 impl Drop for ProviderEnvRestore {
     fn drop(&mut self) {
-        const NAMES: [&str; 8] = [
+        const NAMES: [&str; 9] = [
             SIGIL_API_KEY_ENV,
             DEEPSEEK_API_KEY_ENV,
             SIGIL_BASE_URL_ENV,
@@ -55,6 +56,7 @@ impl Drop for ProviderEnvRestore {
             SIGIL_USER_ID_STRATEGY_ENV,
             SIGIL_FIM_MODEL_ENV,
             SIGIL_STRICT_TOOLS_MODE_ENV,
+            "SSL_CERT_FILE",
         ];
         for (name, value) in NAMES.into_iter().zip(&self.previous) {
             match value {

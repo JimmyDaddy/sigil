@@ -2259,7 +2259,7 @@ fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()
     fs::create_dir(&sessions)?;
     let service =
         LocalSessionLifecycleService::new("workspace-1", &sessions, temp.path().join("exports"))
-            .with_managed_writer(writer, "workspace-1")?;
+            .with_managed_writer(writer.clone(), "workspace-1")?;
 
     service.journal_append(
         "session-pin:managed",
@@ -2274,11 +2274,12 @@ fn managed_lifecycle_journal_round_trips_under_admitted_namespace() -> Result<()
     let records = service.lifecycle_records()?;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].operation_id, "session-pin:managed");
+    let lifecycle_namespace = writer.managed_named_leaf_path(
+        crate::managed_storage_writer::StorageWriterChannelV1::SessionLifecycleLog,
+        "workspace-1",
+    )?;
     assert!(
-        anchor
-            .join("managed")
-            .join("session-lifecycle-log")
-            .join("workspace-1")
+        lifecycle_namespace
             .join("session-lifecycle-v1.jsonl")
             .is_file()
     );
@@ -2396,7 +2397,7 @@ fn managed_session_artifact_gc_uses_authority_roots_without_legacy_sibling() -> 
         &session_dir,
         temp.path().join("exports"),
     )
-    .with_managed_writer(writer, "workspace-managed-artifacts")?
+    .with_managed_writer(writer.clone(), "workspace-managed-artifacts")?
     .with_managed_session_log_root(&managed_root)?
     .with_managed_artifact_roots(&artifact_store_root, &artifact_staging_root)?;
 
@@ -2407,8 +2408,12 @@ fn managed_session_artifact_gc_uses_authority_roots_without_legacy_sibling() -> 
         u64::MAX,
     )?;
     assert_eq!(report.scanned_manifests, 0);
-    assert!(artifact_store_root.join("session-gc").is_dir());
-    assert!(artifact_staging_root.join("session-gc").is_dir());
+    let current_artifact_store =
+        writer.managed_named_leaf_path(StorageWriterChannelV1::ArtifactStore, "session-gc")?;
+    let current_artifact_staging =
+        writer.managed_named_leaf_path(StorageWriterChannelV1::ArtifactStaging, "session-gc")?;
+    assert!(current_artifact_store.is_dir());
+    assert!(current_artifact_staging.is_dir());
     assert!(
         !managed_session
             .parent()

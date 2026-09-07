@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use anyhow::{Result, anyhow};
@@ -746,8 +746,8 @@ fn materialize_plugin_extension_admission(
             request.plugin_id, request.hook_id
         )),
         config_generation: request.config_generation,
-        attempt_journal_scope: prepared.draft.attempt_journal_scope.clone(),
-        attempt_journal_scope_hash: prepared.draft.attempt_journal_scope_hash,
+        attempt_authority_scope: prepared.draft.attempt_authority_scope.clone(),
+        attempt_authority_scope_hash: prepared.draft.attempt_authority_scope_hash,
         executable_and_args_digest: prepared.draft.argv_digest,
         config_policy_digest,
         permission_upper_bound_hash,
@@ -779,7 +779,7 @@ fn materialize_plugin_extension_admission(
             prepared.attempt_id.as_str()
         )),
         extension_plan_hash,
-        attempt_journal_scope_hash: prepared.draft.attempt_journal_scope_hash,
+        attempt_authority_scope_hash: prepared.draft.attempt_authority_scope_hash,
         policy_version: "plugin-config-grant-v1".to_owned(),
         authorization: ExtensionApprovalDecisionV1::AllowByDurableConfigGrant {
             grant_ref: request.config_grant_ref.clone(),
@@ -819,8 +819,8 @@ fn materialize_plugin_extension_admission(
         extension_id: plan.extension_id,
         config_generation: plan.config_generation,
         authority_generation,
-        attempt_journal_scope: plan.attempt_journal_scope,
-        attempt_journal_scope_hash: plan.attempt_journal_scope_hash,
+        attempt_authority_scope: plan.attempt_authority_scope,
+        attempt_authority_scope_hash: plan.attempt_authority_scope_hash,
         executable_and_args_digest: plan.executable_and_args_digest,
         config_policy_digest: plan.config_policy_digest,
         permission_upper_bound_hash: plan.permission_upper_bound_hash,
@@ -902,6 +902,7 @@ struct ManagedOutputCaptureBridge {
     handle: Mutex<Option<sigil_kernel::ExecutionCaptureHandle>>,
     failed: AtomicBool,
     closed: AtomicBool,
+    observed_bytes: AtomicU64,
 }
 
 impl ManagedOutputCaptureBridge {
@@ -910,6 +911,7 @@ impl ManagedOutputCaptureBridge {
             handle: Mutex::new(Some(handle)),
             failed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            observed_bytes: AtomicU64::new(0),
         }
     }
 
@@ -920,6 +922,10 @@ impl ManagedOutputCaptureBridge {
 
     fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
+    }
+
+    fn observed_bytes(&self) -> u64 {
+        self.observed_bytes.load(Ordering::SeqCst)
     }
 }
 
@@ -950,6 +956,8 @@ impl sigil_sandbox::managed::ManagedOutputCaptureSinkV1 for ManagedOutputCapture
             self.failed.store(true, Ordering::SeqCst);
             return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
         };
+        self.observed_bytes
+            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
         if let Err(error) = handle.sink.write_stream(stream, bytes) {
             handle.sink.mark_process_write_failed();
             self.failed.store(true, Ordering::SeqCst);
@@ -1472,26 +1480,20 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         };
         let capture_outcome = capture_bridge.and_then(|capture_bridge| {
             let sink_failed = capture_bridge.failed();
+            let capture_observed_bytes = capture_bridge.observed_bytes();
             capture_bridge.take_handle().map(|mut capture| {
-                // The bounded execution summary is a preview only. If the managed reader hit
-                // its cap, never publish that preview as a complete durable artifact; the sink
-                // records unavailable storage and the caller can recover from the typed receipt.
-                if process.stdout_summary.truncated
-                    || process.stderr_summary.truncated
-                    || sink_failed
-                {
+                // The managed process summary is a bounded projection and can legitimately be
+                // smaller than the bytes already handed to the durable capture sink. The sink's
+                // own staging limit and completeness ledger are authoritative for artifact
+                // storage; only an actual sink failure makes the storage unavailable.
+                if sink_failed {
                     capture.sink.mark_process_write_failed();
                 }
-                let source = if process.stdout_summary.truncated || process.stderr_summary.truncated
-                {
-                    sigil_kernel::ToolSourceCompletenessV1::ResourceLimited
-                } else {
-                    source_completeness(&process.termination)
-                };
+                let source = source_completeness(&process.termination);
                 ExecutionCaptureOutcome {
                     sink: capture.sink,
                     source,
-                    observed_bytes: output.combined_total_bytes,
+                    observed_bytes: output.combined_total_bytes.max(capture_observed_bytes),
                     reader_failed: false,
                 }
             })

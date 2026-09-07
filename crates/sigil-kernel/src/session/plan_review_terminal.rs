@@ -60,6 +60,11 @@ impl Session {
         if let Some(draft) = draft {
             controls.push(ControlEntry::PlanDraftCreated(draft));
         }
+        if let Some(resolution) =
+            self.plan_review_resolution_for_attempt(&attempt, controls.first())?
+        {
+            controls.push(ControlEntry::PlanReviewResolutionRecordedV1(resolution));
+        }
         controls.push(ControlEntry::PlanDecisionRecorded(decision));
         controls.push(ControlEntry::PlanReviewAttempt(attempt.clone()));
         for control in &controls {
@@ -135,6 +140,10 @@ impl Session {
                             ControlEntry::PlanDecisionRecorded(original),
                             ControlEntry::PlanDecisionRecorded(retry),
                         ) => original.decided_at_ms = retry.decided_at_ms,
+                        (
+                            ControlEntry::PlanReviewResolutionRecordedV1(original),
+                            ControlEntry::PlanReviewResolutionRecordedV1(retry),
+                        ) => original.recorded_at_ms = retry.recorded_at_ms,
                         _ => {}
                     }
                     if serde_json::to_value(original)? != serde_json::to_value(control)? {
@@ -170,6 +179,47 @@ impl Session {
         })?;
         self.reconcile_plan_review_revision_terminal(&run_id)?
             .context("committed revision terminal is missing its original outbox")
+    }
+
+    fn plan_review_resolution_for_attempt(
+        &self,
+        attempt: &PlanReviewAttemptEntry,
+        first_control: Option<&ControlEntry>,
+    ) -> Result<Option<crate::PlanReviewResolutionRecordedV1>> {
+        let Some(ControlEntry::PlanDraftCreated(draft)) = first_control else {
+            return Ok(None);
+        };
+        let Some(candidate) = self.entries().iter().rev().find_map(|entry| {
+            let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
+                entry
+            else {
+                return None;
+            };
+            (candidate.plan_review_id == attempt.plan_review_id
+                && candidate.attempt_id == attempt.attempt_id
+                && candidate.plan_id == attempt.plan_id
+                && candidate.completeness == crate::PlanReviewCandidateCompletenessV1::Complete
+                && candidate.content_hash == draft.plan_hash)
+                .then(|| (**candidate).clone())
+        }) else {
+            return Ok(None);
+        };
+        let receipt_id = candidate.source_event_id.clone().unwrap_or_else(|| {
+            stable_event_uuid(
+                "sigil-plan-review-model-resolution-v1",
+                &format!("{}|{}", attempt.attempt_id.as_str(), candidate.content_hash),
+            )
+        });
+        Ok(Some(crate::PlanReviewResolutionRecordedV1 {
+            schema_version: crate::PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION,
+            plan_review_id: attempt.plan_review_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            candidate_hash: candidate.content_hash,
+            outcome: crate::PlanReviewResultOutcome::Draft,
+            actor: crate::PlanReviewResolutionActorV1::Model,
+            receipt_id,
+            recorded_at_ms: attempt.recorded_at_ms,
+        }))
     }
 
     /// Recovers any pending writer intent, validates the exact terminal pair, and refreshes

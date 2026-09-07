@@ -45,11 +45,11 @@ pub struct SandboxPendingLaunchFactoryEvidenceV1 {
     pub provider_registration_hash: CanonicalHash,
 }
 
-/// One-shot sink that accepts the initiated journal bundle without a rejected branch.
+/// One-shot sink that accepts the initiated spawn bundle without a rejected branch.
 pub trait SandboxInitiatedSpawnBundleSinkV1: Send {
     fn accept_initiated_bundle(
         self: Box<Self>,
-        initiated: InitiatedSpawnJournalBundleV1,
+        initiated: InitiatedSpawnBundleV1,
     ) -> SpawnSupervisorAcceptedTicketV1;
 }
 
@@ -61,7 +61,7 @@ pub struct SpawnSupervisorAcceptedTicketV1 {
 
 /// Initiated bundle aggregate consumed by the sink.
 #[derive(Debug)]
-pub struct InitiatedSpawnJournalBundleV1;
+pub struct InitiatedSpawnBundleV1;
 
 /// Prepared capsule handed to the coordinator (borrowed protocol request only).
 pub struct PreparedSandboxLaunchV1 {

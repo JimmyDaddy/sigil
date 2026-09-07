@@ -4353,7 +4353,7 @@ fn completed_run_terminal_records_share_one_durable_sync() -> Result<()> {
         AgentRunTerminalReason::FinalAnswer,
         "message-final",
         1,
-        readiness,
+        Some(readiness),
     )?;
 
     assert_eq!(store.writer_data_sync_count()? - before_syncs, 1);
@@ -13986,7 +13986,10 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
         name: "write_file".to_owned(),
         args_json: r#"{"path":"note.txt"}"#.to_owned(),
     };
-    let external_path = std::env::temp_dir().join("outside/note.txt");
+    // Keep this fixture outside both the isolated HOME and its temporary directory. The test is
+    // asserting external-directory classification, so deriving it from `temp_dir()` would make
+    // the result depend on the test runner's HOME/TMPDIR mapping (and on macOS `/var` aliases).
+    let external_path = synthetic_external_test_root()?.join("outside/note.txt");
     let subjects = vec![ToolSubject::path_with_scope(
         external_path.display().to_string(),
         external_path.display().to_string(),
@@ -15821,8 +15824,7 @@ async fn request_user_input_suspends_with_durable_request_and_cancels_extra_call
                             "options": [
                                 {"id": "current", "label": "Current release"},
                                 {"id": "legacy", "label": "Legacy sessions"}
-                            ],
-                            "allow_other": false
+                            ]
                         }
                     }]
                 })

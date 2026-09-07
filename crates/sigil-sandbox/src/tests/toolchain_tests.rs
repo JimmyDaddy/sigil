@@ -28,7 +28,7 @@ fn r71_toolchain_realized_binding_must_match_plan_cas() {
             resource_id: OpaqueResourceId::new("exec-1".to_owned()),
             kind: ResourceKindV1::ToolchainStore,
             owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Application,
-            journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Application,
+            authority_scope: sigil_kernel::resource::ResourceAuthorityScopeV1::Application,
             generation: 1,
         },
         readonly_stores: Vec::new(),

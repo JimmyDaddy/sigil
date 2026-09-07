@@ -110,8 +110,6 @@ pub trait StorageCapabilityActivationValidatorV1: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct EvidenceEnvelopeV1 {
     pub record_hash: CanonicalHash,
-    pub journal_frontier_hash: CanonicalHash,
-    pub journal_instance_hash: CanonicalHash,
     pub authority_instance_hash: CanonicalHash,
 }
 
@@ -120,7 +118,6 @@ pub struct EvidenceEnvelopeV1 {
 pub struct VerifiedEvidenceViewV1 {
     pub verifier_instance_hash: CanonicalHash,
     pub verified_record_hash: CanonicalHash,
-    pub verified_frontier_hash: CanonicalHash,
 }
 
 /// Verified execution bundle view returned after consumption.
@@ -453,6 +450,7 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
         proof: SealedExecutionAdmissionProofV1,
     ) -> Result<ManagedFileAccessAdmissionTokenV1, CapabilityIssueErrorV1> {
         use crate::managed_file_access::ToolFileAccessAdmissionTokenV1;
+        let claim_id = proof.handle_id.as_str().to_owned();
         let (binding, subject_binding_hash, operation_digest) = self
             .file_access_bindings
             .lock()
@@ -464,6 +462,7 @@ impl KernelCapabilityIssuerV1 for KernelCapabilityBrokerV1 {
                 binding,
                 subject_binding_hash,
                 operation_digest,
+                claim_id,
             ),
         ))
     }

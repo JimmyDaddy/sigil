@@ -1,7 +1,7 @@
 //! Owner-only filesystem primitives shared by durable authority snapshots.
 //!
-//! Domain journals retain their own schemas and append preconditions. This module owns only the
-//! host-filesystem exclusion primitive so every full-snapshot writer gets the same no-follow,
+//! Durable snapshots retain their own schemas and append preconditions. This module owns only
+//! the host-filesystem exclusion primitive so every full-snapshot writer gets the same no-follow,
 //! owner-only and cross-process behavior.
 
 use std::fs::{self, File, OpenOptions};
@@ -63,3 +63,7 @@ pub(crate) fn open_owner_only_snapshot_writer_lock(snapshot: &Path) -> std::io::
     })?;
     Ok(file)
 }
+
+#[cfg(test)]
+#[path = "tests/durable_snapshot_tests.rs"]
+mod tests;

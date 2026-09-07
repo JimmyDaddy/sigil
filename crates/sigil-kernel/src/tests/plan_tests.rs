@@ -5,13 +5,20 @@ use serde_json::json;
 use crate::{
     ControlEntry, ConversationTurnRef, NetworkEffect, PlanApprovalPermission,
     PlanArtifactProjection, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanId,
-    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewId,
-    PlanReviewSource, PlanSourceRef, SessionLogEntry, TaskCreatedFromPlanEntry, TaskId,
-    TaskIsolationMode, TaskStepMode, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec,
+    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus,
+    PlanReviewCandidateCompletenessV1, PlanReviewId, PlanReviewSource, PlanSourceRef,
+    SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess,
+    ToolCategory, ToolPreviewCapability, ToolSpec, confirm_plan_review_candidate_tool_spec,
     plain_text_plan_draft_entry, plain_text_plan_draft_entry_with_plan_id,
-    plan_draft_created_entry, plan_review_child_session_ref, plan_review_detail_from_entries,
-    plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    plan_draft_created_entry, plan_review_candidate_recorded_entry, plan_review_child_session_ref,
+    plan_review_detail_from_entries, plan_task_input_from_draft, plan_text_hash,
+    plan_workspace_paths, submit_plan_draft_entry, task_id_from_plan_draft,
+    task_plan_from_plan_draft,
+};
+
+use crate::plan::{
+    PlanReviewResult, PlanReviewResultValidationError, decode_plan_review_result,
+    submit_plan_review_result,
 };
 
 fn tool_spec(
@@ -934,6 +941,196 @@ fn plan_review_detail_rejects_later_cross_review_identity_collisions() -> Result
         }
         assert!(plan_review_detail_from_entries(&corrupted, &plan_id, &draft.plan_hash).is_err());
     }
+    Ok(())
+}
+
+#[test]
+fn typed_plan_review_result_preserves_complete_draft_content_and_hash() -> Result<()> {
+    let content =
+        "# Review the coordinator\n\n1. Trace the state transitions.\n2. Add focused tests.";
+    let args = serde_json::to_string(&json!({
+        "schema_version": 1,
+        "outcome": "draft",
+        "content": content,
+    }))?;
+    let envelope = decode_plan_review_result(&args)?;
+    assert_eq!(envelope.content, content);
+    let plan_id = PlanId::new("typed-result-draft")?;
+    let result =
+        submit_plan_review_result(&args, plan_id.clone(), PlanSourceRef::default(), 42, None)?;
+
+    let PlanReviewResult::Draft(draft) = result else {
+        panic!("typed draft result must produce a draft");
+    };
+    assert_eq!(draft.plan_id, plan_id);
+    assert_eq!(draft.inline_text.as_deref(), Some(content));
+    assert_eq!(draft.plan_hash, plan_text_hash(content));
+    // The small result envelope does not make execution hints mandatory.
+    assert!(draft.steps.is_empty());
+    Ok(())
+}
+
+#[test]
+fn typed_plan_review_no_plan_has_no_draft_artifact_or_run_candidate() -> Result<()> {
+    let result = submit_plan_review_result(
+        r#"{
+            "schema_version": 1,
+            "outcome": "no_plan",
+            "content": "The requested scope is not specified enough to form a safe Plan."
+        }"#,
+        PlanId::new("typed-result-no-plan")?,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )?;
+
+    let PlanReviewResult::NoPlan { reason } = result else {
+        panic!("no_plan result must not materialize a draft");
+    };
+    assert!(reason.contains("not specified"));
+    // A no_plan result has no PlanDraftCreatedEntry, so it cannot make the durable Plan
+    // projection ready or expose the direct Plan run path.
+    let projection = PlanArtifactProjection::from_entries(&[]);
+    assert!(!projection.plan_is_ready(&PlanId::new("typed-result-no-plan")?));
+    Ok(())
+}
+
+#[test]
+fn confirm_plan_review_candidate_schema_is_body_free_and_strict() -> Result<()> {
+    let spec = confirm_plan_review_candidate_tool_spec();
+    assert_eq!(spec.name, "confirm_plan_review_candidate");
+    assert_eq!(spec.input_schema["required"], json!(["decision"]));
+    assert_eq!(spec.input_schema["additionalProperties"], json!(false));
+    assert_eq!(
+        spec.input_schema["properties"]["decision"]["enum"],
+        json!(["accept"])
+    );
+    assert!(spec.input_schema["properties"].get("content").is_none());
+    Ok(())
+}
+
+#[test]
+fn plan_review_candidate_is_immutable_attempt_bound_evidence() -> Result<()> {
+    let review_id = PlanReviewId::new("candidate-review")?;
+    let attempt_id = PlanReviewAttemptId::new("candidate-attempt")?;
+    let plan_id = PlanId::new("candidate-plan")?;
+    let source = PlanSourceRef {
+        plan_review_id: Some(review_id.clone()),
+        source_turn: Some(ConversationTurnRef {
+            session_scope_id: "session".to_owned(),
+            message_id: "source".to_owned(),
+            logical_run_id: "run".to_owned(),
+        }),
+        ..PlanSourceRef::default()
+    };
+    let candidate = plan_review_candidate_recorded_entry(
+        review_id.clone(),
+        attempt_id.clone(),
+        plan_id.clone(),
+        source,
+        Some("assistant-1".to_owned()),
+        "# Candidate\n\n1. Preserve the exact body.",
+        PlanReviewCandidateCompletenessV1::Complete,
+        42,
+    )?;
+    assert_eq!(candidate.schema_version, 1);
+    assert_eq!(candidate.content_hash, plan_text_hash(&candidate.content));
+
+    let entry = SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(Box::new(
+        candidate.clone(),
+    )));
+    let encoded = serde_json::to_value(&entry)?;
+    let decoded: SessionLogEntry = serde_json::from_value(encoded)?;
+    assert!(matches!(
+        decoded,
+        SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(ref value))
+            if value.as_ref() == &candidate
+                && value.plan_review_id == review_id
+                && value.attempt_id == attempt_id
+                && value.plan_id == plan_id
+    ));
+    Ok(())
+}
+
+#[test]
+fn typed_plan_review_result_rejects_unknown_fields_and_invalid_outcomes_fail_closed() -> Result<()>
+{
+    let plan_id = PlanId::new("typed-result-invalid")?;
+    let unknown_field = r#"{
+        "schema_version": 1,
+        "outcome": "draft",
+        "content": "A complete Plan",
+        "task_id": "must-not-be-authority"
+    }"#;
+    let error = submit_plan_review_result(
+        unknown_field,
+        plan_id.clone(),
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("unknown result fields must fail closed");
+    assert!(
+        error
+            .downcast_ref::<PlanReviewResultValidationError>()
+            .is_some()
+    );
+    assert!(error.to_string().contains("invalid_result_envelope"));
+
+    let invalid_outcome = r#"{
+        "schema_version": 1,
+        "outcome": "completed",
+        "content": "A complete Plan"
+    }"#;
+    let error =
+        submit_plan_review_result(invalid_outcome, plan_id, PlanSourceRef::default(), 42, None)
+            .expect_err("unknown outcomes must fail closed");
+    let issue = error
+        .downcast_ref::<PlanReviewResultValidationError>()
+        .expect("invalid outcome should expose typed validation");
+    assert_eq!(issue.issue.code, "invalid_result_envelope");
+    assert_eq!(issue.issue.field_path, "$");
+
+    let empty_content = r#"{
+        "schema_version": 1,
+        "outcome": "no_plan",
+        "content": "  "
+    }"#;
+    let error = submit_plan_review_result(
+        empty_content,
+        PlanId::new("typed-result-empty")?,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("empty result content must fail closed");
+    let issue = error
+        .downcast_ref::<PlanReviewResultValidationError>()
+        .expect("empty content should expose typed validation");
+    assert_eq!(issue.issue.code, "empty_result_content");
+    assert_eq!(issue.issue.field_path, "$.content");
+
+    let oversized = serde_json::to_string(&json!({
+        "schema_version": 1,
+        "outcome": "draft",
+        "content": "x".repeat(64 * 1024 + 1),
+    }))?;
+    let error = submit_plan_review_result(
+        &oversized,
+        PlanId::new("typed-result-oversized")?,
+        PlanSourceRef::default(),
+        42,
+        None,
+    )
+    .expect_err("oversized result content must fail closed");
+    assert_eq!(
+        error
+            .downcast_ref::<PlanReviewResultValidationError>()
+            .expect("oversized content should expose typed validation")
+            .issue
+            .code,
+        "result_content_too_large"
+    );
     Ok(())
 }
 

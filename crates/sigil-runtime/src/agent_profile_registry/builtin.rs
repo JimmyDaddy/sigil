@@ -3,12 +3,12 @@ use serde_json::json;
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfile, AgentProfileId, AgentProfileKind, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentResultPolicy, AgentRole, AgentTrustState,
-    ConnectionId, RootConfig, ToolAllowlistConfig, ToolRegistryScope,
+    ConnectionId, RootConfig, ToolRegistryScope,
 };
 
 use crate::{
-    LOAD_SKILL_TOOL_NAME,
     provider_connections::{ProviderFamily, ProviderProtocol, load_provider_connections},
+    run_options::role_tool_scope,
 };
 
 use super::{ResolvedAgentProfile, hash_json};
@@ -145,52 +145,6 @@ pub(super) fn capture_profile_snapshot(
         resolved_skill_hashes: skill_hashes,
         trust_state: profile.trust_state,
     })
-}
-
-fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
-    let configured = &root_config.task.role_config(role).tools;
-    if !configured_allowlist_is_empty(configured) {
-        return ToolRegistryScope {
-            allow_all: configured.allow_all,
-            names: configured.names.iter().cloned().collect(),
-            prefixes: configured.prefixes.clone(),
-        };
-    }
-    match role {
-        AgentRole::Planner | AgentRole::SubagentRead => read_only_role_tool_scope(),
-        AgentRole::Executor => ToolRegistryScope {
-            allow_all: true,
-            ..ToolRegistryScope::default()
-        },
-        AgentRole::SubagentWrite if root_config.task.allow_write_subagents => ToolRegistryScope {
-            allow_all: true,
-            ..ToolRegistryScope::default()
-        },
-        AgentRole::SubagentWrite => read_only_role_tool_scope(),
-    }
-}
-
-fn configured_allowlist_is_empty(config: &ToolAllowlistConfig) -> bool {
-    !config.allow_all && config.names.is_empty() && config.prefixes.is_empty()
-}
-
-pub(super) fn read_only_role_tool_scope() -> ToolRegistryScope {
-    ToolRegistryScope::from_names_and_prefixes(
-        [
-            "read_file",
-            "ls",
-            "glob",
-            "grep",
-            "vcs_inspect",
-            "code_symbols",
-            "code_workspace_symbols",
-            "code_definition",
-            "code_references",
-            "code_diagnostics",
-            LOAD_SKILL_TOOL_NAME,
-        ],
-        std::iter::empty::<&str>(),
-    )
 }
 
 fn short_hash(hash: &str) -> &str {

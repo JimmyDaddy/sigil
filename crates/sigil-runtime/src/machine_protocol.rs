@@ -147,8 +147,6 @@ pub enum MachineErrorCode {
     ProviderUnavailable,
     /// The authority plane could not be composed or verified.
     AuthorityUnavailable,
-    /// The authority journal failed integrity validation.
-    AuthorityJournalCorrupted,
     /// A live route owner prevents this writer transition.
     SessionWriterBusy,
     /// The durable session stream is invalid.
@@ -264,7 +262,6 @@ impl MachineExitCode {
             MachineErrorCode::SessionAlreadyActive
             | MachineErrorCode::ProviderUnavailable
             | MachineErrorCode::AuthorityUnavailable
-            | MachineErrorCode::AuthorityJournalCorrupted
             | MachineErrorCode::SessionWriterBusy
             | MachineErrorCode::SessionStreamInvalid
             | MachineErrorCode::ExecutionFailed

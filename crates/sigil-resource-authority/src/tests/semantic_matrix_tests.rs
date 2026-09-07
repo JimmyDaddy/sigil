@@ -84,9 +84,10 @@ fn request(
         owner_scope: sigil_kernel::resource::ResourceOwnerScopeV1::Workspace(
             OpaqueWorkspaceId::new("w1".to_owned()),
         ),
-        journal_scope: sigil_kernel::resource::ResourceJournalScopeV1::Workspace(
+        authority_scope: sigil_kernel::resource::ResourceAuthorityScopeV1::Workspace(
             OpaqueWorkspaceId::new("w1".to_owned()),
         ),
+        namespace_key_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x31; 32]),
     }
 }
 

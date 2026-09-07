@@ -52,7 +52,6 @@ use crate::execution_backends::{
 #[cfg(test)]
 use crate::path::resolve_existing_prefix;
 use crate::path::{absolute_path_from, canonical_workspace_root, lexically_normalize_path};
-use crate::process_owner::ProcessTreeOwnerGuard;
 use crate::shell_runtime::ResolvedShell;
 
 mod config; // public DTOs and terminal execution policy.

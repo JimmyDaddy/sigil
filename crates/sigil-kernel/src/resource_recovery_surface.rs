@@ -22,7 +22,6 @@ pub enum ResourceRecoveryReasonCodeV1 {
     CleanupIncomplete,
     Quarantined,
     OutcomeUncertain,
-    AuthorityBootstrapCorrupted,
 }
 
 /// Closed retry disposition (never inferred from an error string).
@@ -49,7 +48,6 @@ pub enum ResourceRecoveryActionV1 {
     ReconcileCleanupIncomplete,
     RecreateExecutionTemp,
     UserReselectDestination,
-    SelectFreshAuthorityEpoch,
 }
 
 /// Public blocker projection shared by all surfaces.
@@ -74,7 +72,6 @@ pub enum ResourceRecoveryDomainV1 {
     RealizedGeneration,
     Storage,
     Maintenance,
-    AuthorityBootstrap,
 }
 
 /// Resource / effect receipt projection (lossless view, never a second state).

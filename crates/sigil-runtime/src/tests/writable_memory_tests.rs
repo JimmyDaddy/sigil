@@ -403,7 +403,7 @@ fn remember_tools_require_preview_and_default_to_ask() -> Result<()> {
 #[test]
 fn managed_writer_round_trips_both_memory_scopes_under_admitted_namespaces() -> Result<()> {
     use crate::managed_storage_writer::{
-        ManagedStorageWriterAdapterV1, memory_grants_with_context,
+        ManagedStorageWriterAdapterV1, StorageWriterChannelV1, memory_grants_with_context,
     };
     use sigil_kernel::capability_issuer::KernelCapabilityBrokerV1;
     use sigil_kernel::managed_storage::ManagedStorageServiceV1;
@@ -479,19 +479,11 @@ fn managed_writer_round_trips_both_memory_scopes_under_admitted_namespaces() -> 
     );
 
     // The physical leaves are authority-declared named namespaces, never caller paths.
-    assert!(
-        anchor
-            .join("managed")
-            .join("durable-memory")
-            .join("user-preferences")
-            .is_dir()
-    );
-    assert!(
-        anchor
-            .join("managed")
-            .join("durable-memory")
-            .join("project-facts")
-            .is_dir()
-    );
+    let preference_namespace = writer
+        .managed_named_leaf_path(StorageWriterChannelV1::DurableMemory, "user-preferences")?;
+    let project_namespace =
+        writer.managed_named_leaf_path(StorageWriterChannelV1::DurableMemory, "project-facts")?;
+    assert!(preference_namespace.is_dir());
+    assert!(project_namespace.is_dir());
     Ok(())
 }

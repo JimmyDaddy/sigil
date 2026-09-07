@@ -2102,16 +2102,26 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
                         "plan_hash": { "type": ["string", "null"], "maxLength": 128 },
-                        "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] },
+                        "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "compile_failed", "completed_without_draft", "blocked", "paused", "failed", "interrupted", "cancelled"] },
                         "summary": { "type": ["string", "null"], "maxLength": 512 },
                         "summary_truncated": { "type": "boolean" },
                         "step_count": { "type": ["integer", "null"], "minimum": 0 },
                         "target_path_count": { "type": ["integer", "null"], "minimum": 0 },
                         "suggested_check_count": { "type": ["integer", "null"], "minimum": 0 },
                         "risk": { "type": ["string", "null"], "maxLength": 512 },
-                        "allowed_actions": { "type": "array", "items": { "type": "string", "enum": ["run", "save", "revise", "reject"] } },
+                        "allowed_actions": { "type": "array", "items": { "type": "string", "enum": ["run", "save", "revise", "reject", "adopt_candidate", "retry_review"] } },
                         "source": { "type": "string", "enum": ["explicit_plan_command", "automatic_conversation_route"] },
                         "stale": { "type": "boolean" },
+                        "candidate": {
+                            "oneOf": [
+                                { "type": "object", "additionalProperties": false, "required": ["content_hash", "content", "completeness"], "properties": {
+                                    "content_hash": { "type": "string", "maxLength": 128 },
+                                    "content": { "type": "string", "maxLength": 65536 },
+                                    "completeness": { "type": "string", "enum": ["complete", "partial", "unknown"] }
+                                } },
+                                { "type": "null" }
+                            ]
+                        },
                         "revision": {
                             "oneOf": [
                                 {
@@ -2221,7 +2231,8 @@ pub fn http_openapi_document() -> Value {
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
                         "expected_plan_hash": { "type": "string", "maxLength": 128 },
-                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
+                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject", "adopt_candidate", "retry_review"] },
+                        "expected_candidate_hash": { "type": ["string", "null"], "maxLength": 128 },
                         "permission_grant": { "oneOf": [{ "type": "string", "enum": ["ask", "workspace_edits"] }, { "type": "null" }] }
                     }
                 },
@@ -2235,7 +2246,7 @@ pub fn http_openapi_document() -> Value {
                         "session_id": { "type": "string" },
                         "plan_id": { "type": "string" },
                         "plan_hash": { "type": "string" },
-                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject"] },
+                        "action": { "type": "string", "enum": ["run", "save", "revise", "reject", "adopt_candidate", "retry_review"] },
                         "task_id": { "type": ["string", "null"] },
                         "task_title": { "type": ["string", "null"] },
                         "candidate_hash": { "type": ["string", "null"] },

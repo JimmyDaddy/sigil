@@ -5443,7 +5443,9 @@ pub(crate) fn collect_bash_segment_subjects(
                 push_shell_path_subject(subjects, workspace_root, cwd, target)?;
                 index += 1;
             }
-        } else if is_path_argument(command, word) && !find_pattern_argument(words, command, index) {
+        } else if is_path_argument(command, word)
+            && !is_non_path_pattern_argument(words, command, index)
+        {
             push_shell_path_subject(subjects, workspace_root, cwd, word)?;
         }
         index += 1;
@@ -5451,14 +5453,96 @@ pub(crate) fn collect_bash_segment_subjects(
     Ok(())
 }
 
-fn find_pattern_argument(words: &[String], command: &str, index: usize) -> bool {
-    command == "find"
+fn is_non_path_pattern_argument(words: &[String], command: &str, index: usize) -> bool {
+    if command == "find"
         && index.checked_sub(1).is_some_and(|previous| {
             matches!(
                 words[previous].as_str(),
                 "-name" | "-iname" | "-path" | "-ipath" | "-regex" | "-iregex"
             )
         })
+    {
+        return true;
+    }
+
+    // These command families take a regular-expression/program operand before their input
+    // paths. Such operands often contain slashes (for example awk `/foo/,/^bar/`) but are code,
+    // not filesystem objects. Options that explicitly name a file remain path subjects.
+    match command {
+        "awk" => first_awk_program_index(words) == Some(index),
+        "sed" => first_sed_script_index(words) == Some(index),
+        "grep" | "egrep" | "fgrep" | "rg" => {
+            first_grep_pattern_index(words, command) == Some(index)
+        }
+        _ => false,
+    }
+}
+
+fn first_awk_program_index(words: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "--" {
+            return (index + 1 < words.len()).then_some(index + 1);
+        }
+        if matches!(word, "-f" | "--file" | "-v" | "--assign") {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn first_sed_script_index(words: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "--" {
+            return (index + 1 < words.len()).then_some(index + 1);
+        }
+        if matches!(word, "-f" | "--file" | "-e" | "--expression") {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn first_grep_pattern_index(words: &[String], command: &str) -> Option<usize> {
+    let mut index = 1;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "--" {
+            return (index + 1 < words.len()).then_some(index + 1);
+        }
+        if matches!(word, "-e" | "--regexp") {
+            return (index + 1 < words.len()).then_some(index + 1);
+        }
+        if matches!(word, "-f" | "--file") {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        // grep/rg accept a bare pattern as the first non-option operand. `command` is kept in
+        // the signature so the call site documents the family and future option differences can
+        // be added without changing the predicate contract.
+        let _ = command;
+        return Some(index);
+    }
+    None
 }
 
 fn push_shell_path_subject(

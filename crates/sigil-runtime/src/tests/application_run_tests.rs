@@ -5362,7 +5362,9 @@ credential = {{ source = "none" }}
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_run() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
     struct ConflictingTaskAdapter {
         store: JsonlSessionStore,
         inserted: bool,
@@ -7511,26 +7513,17 @@ impl Provider for PlanReviewDraftProvider {
         if request
             .tools
             .iter()
-            .any(|tool| tool.name == sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME)
+            .any(|tool| tool.name == sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME)
         {
-            let args = r#"{
-                "schema_version": 2,
-                "summary": "Migrate the coordinator",
-                "steps": [{
-                    "step_id": "migrate_1",
-                    "title": "Migrate coordinator",
-                    "role": "executor",
-                    "mode": "write",
-                    "isolation": "sequential_workspace_write",
-                    "target_paths": ["src/coordinator.rs"]
-                }],
-                "target_paths": ["src/coordinator.rs"],
-                "suggested_checks": ["cargo test"]
-            }"#;
+            let args = r##"{
+                "schema_version": 1,
+                "outcome": "draft",
+                "content": "# Migrate the coordinator\n\n1. Migrate coordinator."
+            }"##;
             return Ok(Box::pin(stream::iter(vec![
                 Ok(ProviderChunk::ToolCallStart {
                     id: "plan-draft-call".to_owned(),
-                    name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                    name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
                 }),
                 Ok(ProviderChunk::ToolCallArgsDelta {
                     id: "plan-draft-call".to_owned(),
@@ -7538,7 +7531,7 @@ impl Provider for PlanReviewDraftProvider {
                 }),
                 Ok(ProviderChunk::ToolCallComplete(ToolCall {
                     id: "plan-draft-call".to_owned(),
-                    name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                    name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
                     args_json: args.to_owned(),
                 })),
                 Ok(ProviderChunk::Done),
@@ -7716,6 +7709,8 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         &mut handler,
         &mut approval_handler,
         &cancellation_owner.handle(),
+        "run-application-plan-review",
+        &sigil_kernel::SecretRedactor::empty(),
     )
     .await?;
     assert!(matches!(
@@ -7856,6 +7851,45 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
             Some(domain_event_id.as_str())
         );
     }
+    let (terminal_index, terminal_domain_id) = records
+        .iter()
+        .enumerate()
+        .find_map(|(index, record)| {
+            matches!(
+                conversation_run_lifecycle_record_from_stream(record),
+                Ok(Some(ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(ref entry)))
+                    if entry.run_id() == "run-application-plan-review"
+            )
+            .then(|| (index, record.stored_event().event_id.to_string()))
+        })
+        .expect("ordinary Plan review must finalize its enclosing conversation run");
+    let terminal_outbox = outbox
+        .events_in_order()
+        .into_iter()
+        .find(|entry| {
+            entry.domain_event_id == terminal_domain_id
+                && matches!(entry.event.event, PublicRunEventKind::RunFinished { .. })
+        })
+        .expect("conversation terminal must have an exact RunFinished outbox entry");
+    let terminal_public_index = records
+        .iter()
+        .position(|record| record.stored_event().event_id == terminal_outbox.public_event_id)
+        .expect("terminal public outbox record must be durable");
+    assert_eq!(terminal_public_index, terminal_index + 1);
+    let final_answer_index = records
+        .iter()
+        .enumerate()
+        .find_map(|(index, record)| {
+            matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Assistant(message)))
+                    if message.id == final_message_id
+            )
+            .then_some(index)
+        })
+        .expect("final answer source must be durable");
+    assert!(draft_ready_source.0 < final_answer_index);
+    assert!(final_answer_index < terminal_index);
     Ok(())
 }
 
@@ -8075,6 +8109,16 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         }
     }
 
+    impl ApplicationRunEventHandler for FinalizingPublicationConflict<'_> {
+        fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
+            self.inner.handler.handle_public_event(event)
+        }
+
+        fn public_event_adapter_id(&self) -> &'static str {
+            self.inner.handler.public_event_adapter_id()
+        }
+    }
+
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
@@ -8140,6 +8184,8 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
         &mut handler,
         &mut AutoApproveHandler,
         &cancellation_owner.handle(),
+        run_id,
+        &sigil_kernel::SecretRedactor::empty(),
     )
     .await
     .expect_err("a stale Finalizing outbox sequence must stop the original execution");

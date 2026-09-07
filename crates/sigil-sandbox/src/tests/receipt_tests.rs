@@ -1,6 +1,6 @@
 use super::*;
 use sigil_kernel::resource::{
-    OpaqueResourceId, ResourceJournalScopeV1, ResourceKindV1, ResourceOwnerScopeV1,
+    OpaqueResourceId, ResourceAuthorityScopeV1, ResourceKindV1, ResourceOwnerScopeV1,
 };
 
 fn resource() -> ResourceRefV1 {
@@ -8,7 +8,7 @@ fn resource() -> ResourceRefV1 {
         resource_id: OpaqueResourceId::new("r1".to_owned()),
         kind: ResourceKindV1::ExecutionTemp,
         owner_scope: ResourceOwnerScopeV1::Application,
-        journal_scope: ResourceJournalScopeV1::Application,
+        authority_scope: ResourceAuthorityScopeV1::Application,
         generation: 1,
     }
 }

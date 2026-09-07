@@ -9,6 +9,8 @@ test-support = []
 
 [dependencies]
 fs2.workspace = true
+globset.workspace = true
+ignore.workspace = true
 hmac.workspace = true
 libc.workspace = true
 regex.workspace = true

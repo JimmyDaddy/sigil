@@ -16,7 +16,7 @@ use sigil_kernel::managed_execution::ManagedExecutionPlannerV1;
 use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
 use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
 use sigil_kernel::managed_storage::ManagedStorageServiceV1;
-use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceJournalScopeV1};
+use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceAuthorityScopeV1};
 
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
 use crate::managed_resource_adapters::{
@@ -46,8 +46,6 @@ pub struct RuntimeAuthorityCompositionV1 {
     borrowed_workspace_registry: std::sync::Arc<
         std::sync::Mutex<sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1>,
     >,
-    file_access_impl:
-        std::sync::Arc<sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1>,
 }
 
 impl RuntimeAuthorityCompositionV1 {
@@ -110,9 +108,6 @@ impl RuntimeAuthorityCompositionV1 {
             .map_err(|error| {
                 RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
             })?;
-        self.file_access_impl
-            .reconcile_file_delete_journal()
-            .map_err(classify_file_access_boot_error)?;
         Ok(capsule)
     }
 }
@@ -210,54 +205,8 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
     AnchorInvalid(String),
     #[error("declared writer grant failed: {0}")]
     GrantDeclared(String),
-    #[error("durable authority journal failed: {0}")]
-    JournalUnavailable(String),
-    #[error("durable authority journal is corrupted: {0}")]
-    JournalCorrupted(String),
     #[error("execution configuration failed: {0}")]
     ExecutionConfigurationInvalid(String),
-    #[error("managed file-delete journal is corrupted: {0}")]
-    FileJournalCorrupted(String),
-    #[error("managed file-delete journal is unavailable: {0}")]
-    FileJournalUnavailable(String),
-}
-
-fn classify_file_access_boot_error(
-    error: sigil_kernel::managed_file_access::ManagedFileAccessErrorV1,
-) -> RuntimeAuthorityCompositionErrorV1 {
-    use sigil_kernel::managed_file_access::ManagedFileAccessErrorV1;
-
-    match error {
-        ManagedFileAccessErrorV1::JournalCorrupted(message) => {
-            RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(message)
-        }
-        ManagedFileAccessErrorV1::JournalUnavailable(message) => {
-            RuntimeAuthorityCompositionErrorV1::FileJournalUnavailable(message)
-        }
-        other => {
-            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(other.to_string())
-        }
-    }
-}
-
-fn classify_resource_journal_open_error(
-    error: sigil_resource_authority::JournalErrorV1,
-) -> RuntimeAuthorityCompositionErrorV1 {
-    let message = error.to_string();
-    match error {
-        sigil_resource_authority::JournalErrorV1::PreconditionMismatch
-        | sigil_resource_authority::JournalErrorV1::HashChainBroken
-        | sigil_resource_authority::JournalErrorV1::InstanceMismatch
-        | sigil_resource_authority::JournalErrorV1::FirstRecordNotBootstrapBound
-        | sigil_resource_authority::JournalErrorV1::Corrupt(_) => {
-            RuntimeAuthorityCompositionErrorV1::JournalCorrupted(message)
-        }
-        sigil_resource_authority::JournalErrorV1::JournalFull
-        | sigil_resource_authority::JournalErrorV1::Filesystem(_)
-        | sigil_resource_authority::JournalErrorV1::DurabilityUncertain(_) => {
-            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(message)
-        }
-    }
 }
 
 /// Validated, immutable configuration input for one authority composition.
@@ -636,7 +585,6 @@ fn compose_runtime_authority_inner(
     // The real kernel capability broker is the single issuer for this composition: execution
     // bundles and storage admission capabilities are broker-issued (one-shot proofs), never
     // fabricated by consumers.
-    let journal_instance_hash = hash_path_binding("authority-journal-instance-v1", state_anchor);
     let bootstrap_manifest_hash =
         hash_path_binding("authority-bootstrap-manifest-v1", state_anchor);
     let broker =
@@ -649,7 +597,6 @@ fn compose_runtime_authority_inner(
         cache_identity: CanonicalHash::from_bytes([0x72; 32]),
         execution_temp_identity: CanonicalHash::from_bytes([0x73; 32]),
         manifest_hash: bootstrap_manifest_hash,
-        journal_instance_hash,
     };
     bootstrap
         .validate_anchors()
@@ -685,37 +632,22 @@ fn compose_runtime_authority_inner(
         })?;
     }
     let storage_service =
-        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new_with_journal(
+        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new_with_state_root(
             table,
             authority,
-            state_anchor.join("authority-resources.journal.json"),
-            bootstrap_manifest_hash,
-            journal_instance_hash,
+            state_anchor,
         )
-        .map_err(classify_resource_journal_open_error)?;
-    storage_service
-        .reconcile_unsettled_storage_grants_with_physical_bridge()
         .map_err(|error| {
-            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
-        })?;
-    storage_service
-        .require_startup_reconciliation()
-        .map_err(|error| {
-            RuntimeAuthorityCompositionErrorV1::JournalUnavailable(error.to_string())
+            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
         })?;
     let storage: Arc<dyn ManagedStorageServiceV1> = Arc::new(storage_service);
     let registry = Arc::new(std::sync::Mutex::new(
         sigil_resource_authority::borrowed::BorrowedSubjectRegistryV1::new(),
     ));
     let file_access_impl = Arc::new(
-        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new_with_journal(
+        sigil_resource_authority::file_access::AuthorityManagedFileAccessServiceV1::new(
             Arc::clone(&registry),
-            state_anchor.join("file-delete-quarantine"),
-            state_anchor.join("file-delete.journal.json"),
-            bootstrap_manifest_hash,
-            journal_instance_hash,
-        )
-        .map_err(classify_file_access_boot_error)?,
+        ),
     );
     let file_access: Arc<dyn ManagedFileAccessServiceV1> = file_access_impl.clone();
     let borrowed_native_save: Arc<
@@ -840,7 +772,6 @@ fn compose_runtime_authority_inner(
         command_execution,
         authority_generation: authority,
         borrowed_workspace_registry: registry,
-        file_access_impl,
     })
 }
 
@@ -940,7 +871,7 @@ fn load_authority_config_generation(
             .is_some();
         if cutover_exists || !bootstrap.was_created_for_this_open() {
             return Err(BootAuthorityErrorV1::Bootstrap(
-                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
                     "authority config generation metadata is missing".to_owned(),
                 ),
             ));
@@ -1009,9 +940,9 @@ fn publish_authority_config_generation(
     Ok(())
 }
 
-/// Convenience: authoritative resource journal scope for the composition (application-level).
-pub fn composition_journal_scope() -> ResourceJournalScopeV1 {
-    ResourceJournalScopeV1::Application
+/// Convenience: authoritative resource scope for the composition (application-level).
+pub fn composition_authority_scope() -> ResourceAuthorityScopeV1 {
+    ResourceAuthorityScopeV1::Application
 }
 /// Closed boot-authority attach error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1055,9 +986,9 @@ fn map_process_inventory_boot_error(
         | InventoryError::PriorManagedProcessStillLive(_)
         | InventoryError::PreparedProcessRecoveryRequired
         | InventoryError::Observation(_)
-        | InventoryError::LockPoisoned) => BootAuthorityErrorV1::Bootstrap(
-            BootstrapErrorV1::ReconciliationRequired(error.to_string()),
-        ),
+        | InventoryError::LockPoisoned) => {
+            BootAuthorityErrorV1::Bootstrap(BootstrapErrorV1::MetadataCorrupted(error.to_string()))
+        }
     }
 }
 
@@ -1104,9 +1035,6 @@ fn build_current_boot_transaction_inner(
             error.clone(),
         ))
     })?;
-    bootstrap
-        .resolve_boot_failure(&publication)
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     if require_source_stability {
         ensure_config_snapshot_is_current(&config_snapshot)?;
     }
@@ -1210,13 +1138,13 @@ pub fn authority_bootstrap_manifest_path(
 
 /// Builds the current-schema authority composition for one valid boot surface. Publication of the
 /// cutover manifest belongs to [`build_current_boot_transaction`], after workspace activation and
-/// journal reconciliation have completed.
+/// current authority composition have completed.
 ///
 /// The readiness manifest is computed once against an isolated provisional composition, then the
 /// production composition is rebound to the resulting content hash so storage grants and the
 /// persisted cutover manifest carry the same source binding. Probes perform real admission and
-/// settlement, so their provisional journal must not contaminate the production journal before
-/// the source binding is frozen.
+/// settlement, so their provisional state must not contaminate the production state before the
+/// source binding is frozen.
 pub fn compose_current_boot_authority(
     config_snapshot: &ValidatedAuthorityConfigSnapshotV1,
     state_anchor: &std::path::Path,
@@ -1328,14 +1256,6 @@ fn compose_current_boot_authority_locked(
             .authority_instance_hash(publication)
             .map_err(BootAuthorityErrorV1::Bootstrap)?,
     };
-    bootstrap
-        .validate_recovery_root_selection(
-            publication,
-            state_anchor,
-            cache_root,
-            execution_temp_root,
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
     let declared = [
         Ch::ApplicationControlLog,
         Ch::SessionLog,
@@ -1404,53 +1324,7 @@ fn compose_current_boot_authority_locked(
         process_inventory,
     ) {
         Ok(composition) => composition,
-        Err(error) => {
-            if let RuntimeAuthorityCompositionErrorV1::JournalCorrupted(message)
-            | RuntimeAuthorityCompositionErrorV1::FileJournalCorrupted(message) = &error
-            {
-                bootstrap
-                    .record_boot_failure(
-                        publication,
-                        vec![sigil_resource_authority::FailedAuthorityJournalEvidenceV1 {
-                            journal_scope:
-                                sigil_kernel::resource::ResourceJournalScopeV1::Application,
-                            expected_anchor_identity: hash_path_binding(
-                                "authority-state-anchor-v1",
-                                state_anchor,
-                            ),
-                            last_verified_record_hash: None,
-                            observed_failure_digest: crate::r71_shadow_planner::canonical_digest(
-                                message.as_bytes(),
-                            ),
-                            failure_class: sigil_resource_authority::AuthorityJournalFailureClassV1::CorruptHashChain,
-                        }],
-                    )
-                    .map_err(BootAuthorityErrorV1::Bootstrap)?;
-            }
-            if let RuntimeAuthorityCompositionErrorV1::JournalUnavailable(message)
-            | RuntimeAuthorityCompositionErrorV1::FileJournalUnavailable(message) = &error
-            {
-                bootstrap
-                    .record_boot_failure(
-                        publication,
-                        vec![sigil_resource_authority::FailedAuthorityJournalEvidenceV1 {
-                            journal_scope:
-                                sigil_kernel::resource::ResourceJournalScopeV1::Application,
-                            expected_anchor_identity: hash_path_binding(
-                                "authority-state-anchor-v1",
-                                state_anchor,
-                            ),
-                            last_verified_record_hash: None,
-                            observed_failure_digest: crate::r71_shadow_planner::canonical_digest(
-                                message.as_bytes(),
-                            ),
-                            failure_class: sigil_resource_authority::AuthorityJournalFailureClassV1::UnreadableOrIdentityDrift,
-                        }],
-                    )
-                    .map_err(BootAuthorityErrorV1::Bootstrap)?;
-            }
-            return Err(BootAuthorityErrorV1::Composition(error));
-        }
+        Err(error) => return Err(BootAuthorityErrorV1::Composition(error)),
     };
     let decision =
         crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate_current_schema_with_source(
@@ -1482,14 +1356,14 @@ fn publish_current_boot_manifest(
         .map_err(BootAuthorityErrorV1::Bootstrap)?
         .ok_or_else(|| {
             BootAuthorityErrorV1::Bootstrap(
-                sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(
+                sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
                     "authority config generation is missing before cutover publication".to_owned(),
                 ),
             )
         })?;
     if generation.generation != decision.manifest().application_generation {
         return Err(BootAuthorityErrorV1::Bootstrap(
-            sigil_resource_authority::bootstrap::BootstrapErrorV1::ReconciliationRequired(format!(
+            sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(format!(
                 "authority config generation {} does not match cutover generation {}",
                 generation.generation,
                 decision.manifest().application_generation

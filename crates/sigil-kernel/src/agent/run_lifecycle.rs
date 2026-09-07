@@ -32,7 +32,7 @@ pub(super) fn append_completed_run_lifecycle_events(
     terminal_reason: AgentRunTerminalReason,
     final_message_id: &str,
     tool_calls: usize,
-    readiness: ReadinessEvaluatedEntry,
+    readiness: Option<ReadinessEvaluatedEntry>,
 ) -> Result<()> {
     append_run_lifecycle_event_payload(
         session,
@@ -41,7 +41,7 @@ pub(super) fn append_completed_run_lifecycle_events(
         Some(final_message_id),
         tool_calls,
         None,
-        Some(ControlEntry::ReadinessEvaluated(readiness)),
+        readiness.map(ControlEntry::ReadinessEvaluated),
     )
 }
 

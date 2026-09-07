@@ -6,7 +6,7 @@ use crate::{
     ControlEntry, IntegrationPlan, PlanReviewAttemptStatus, PublicRunEventKind,
     TaskChecklistItemV1, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
     TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus,
-    TaskRunStatus, TaskStepSpec, TaskStepStatus,
+    TaskRunStatus, TaskStepSpec,
 };
 
 /// Stable public task phase shared by TUI, HTTP, and desktop adapters.
@@ -112,6 +112,8 @@ pub enum PublicPlanAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 impl PublicPlanAction {
@@ -121,8 +123,21 @@ impl PublicPlanAction {
             Self::Save => "save",
             Self::Revise => "revise",
             Self::Reject => "reject",
+            Self::AdoptCandidate => "adopt_candidate",
+            Self::RetryReview => "retry_review",
         }
     }
+}
+
+/// Bounded immutable candidate text preserved when a review response did not carry a typed
+/// result.  The candidate is review evidence only; adopting it still requires an explicit user
+/// action before a Plan draft is created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PublicPlanReviewCandidateV1 {
+    pub content_hash: String,
+    pub content: String,
+    pub completeness: crate::PlanReviewCandidateCompletenessV1,
 }
 
 /// Public source of one plan review lifecycle.
@@ -169,6 +184,8 @@ pub struct PublicPlanReview {
     pub allowed_actions: Vec<PublicPlanAction>,
     pub source: PublicPlanReviewSource,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<PublicPlanReviewCandidateV1>,
     /// Candidate revision state is projected separately so a failed/running attempt never hides
     /// the immutable active plan above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,7 +372,7 @@ impl PublicTaskEventProjector {
             ControlEntry::TaskRun(entry) => vec![PublicRunEventKind::TaskPhaseChanged {
                 task_id: Some(entry.task_id.as_str().to_owned()),
                 phase: task_run_phase(entry.status),
-                status: task_run_status_label(entry.status).to_owned(),
+                status: entry.status.as_str().to_owned(),
             }],
             ControlEntry::TaskPlan(entry) => {
                 let mut events = Vec::with_capacity(2);
@@ -410,7 +427,7 @@ impl PublicTaskEventProjector {
                     plan_version: entry.plan_version,
                     step_id: entry.step_id.as_str().to_owned(),
                     attempt_id,
-                    status: task_step_status_label(entry.status).to_owned(),
+                    status: entry.status.as_str().to_owned(),
                 }]
             }
             ControlEntry::TaskParticipantAttempt(entry) => self.project_participant(entry),
@@ -548,7 +565,7 @@ fn public_task_plan_updated(entry: &TaskPlanEntry) -> PublicRunEventKind {
     PublicRunEventKind::TaskPlanUpdated {
         task_id: entry.task_id.as_str().to_owned(),
         plan_version: entry.plan_version,
-        status: task_plan_status_label(entry.status).to_owned(),
+        status: entry.status.as_str().to_owned(),
         steps: entry.steps.iter().map(PublicTaskPlanStep::from).collect(),
     }
 }
@@ -561,40 +578,6 @@ fn task_run_phase(status: TaskRunStatus) -> PublicTaskPhase {
         | TaskRunStatus::Failed
         | TaskRunStatus::Cancelled
         | TaskRunStatus::Interrupted => PublicTaskPhase::Terminal,
-    }
-}
-
-fn task_run_status_label(status: TaskRunStatus) -> &'static str {
-    match status {
-        TaskRunStatus::Started => "started",
-        TaskRunStatus::Running => "running",
-        TaskRunStatus::Paused => "paused",
-        TaskRunStatus::Completed => "completed",
-        TaskRunStatus::Failed => "failed",
-        TaskRunStatus::Cancelled => "cancelled",
-        TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-fn task_plan_status_label(status: TaskPlanStatus) -> &'static str {
-    match status {
-        TaskPlanStatus::Proposed => "proposed",
-        TaskPlanStatus::Accepted => "accepted",
-        TaskPlanStatus::Superseded => "superseded",
-        TaskPlanStatus::Rejected => "rejected",
-    }
-}
-
-fn task_step_status_label(status: TaskStepStatus) -> &'static str {
-    match status {
-        TaskStepStatus::Pending => "pending",
-        TaskStepStatus::Running => "running",
-        TaskStepStatus::Completed => "completed",
-        TaskStepStatus::Failed => "failed",
-        TaskStepStatus::Blocked => "blocked",
-        TaskStepStatus::Cancelled => "cancelled",
-        TaskStepStatus::Interrupted => "interrupted",
-        TaskStepStatus::Superseded => "superseded",
     }
 }
 

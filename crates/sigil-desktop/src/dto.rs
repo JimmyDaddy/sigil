@@ -1403,7 +1403,6 @@ pub enum DesktopSessionRouteRecoveryCode {
     ConnectionConfigInvalid,
     ProviderUnavailable,
     AuthorityUnavailable,
-    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -1414,7 +1413,6 @@ pub enum DesktopSessionRouteRecoveryCode {
 pub enum DesktopSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
-    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -2708,6 +2706,8 @@ pub struct DesktopPlanDecisionRequest {
     pub plan_id: String,
     pub expected_plan_hash: String,
     pub action: DesktopPlanDecisionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_candidate_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2717,6 +2717,8 @@ pub enum DesktopPlanDecisionAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 /// Idempotent receipt for one typed plan decision.
@@ -2731,6 +2733,12 @@ pub struct DesktopPlanDecisionCommandReceipt {
     pub action: DesktopPlanDecisionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// RFC-0067: semantic Task title shown immediately after a Run receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    /// RFC-0067: adopted candidate hash for receipt idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_hash: Option<String>,
     /// RFC-0067: durable Task phase right after admission (Preparing/Ready/Blocked/Paused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_phase: Option<DesktopTaskExecutionPhase>,
@@ -2809,7 +2817,17 @@ pub struct DesktopPlanReview {
     pub source: DesktopPlanReviewSource,
     pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<DesktopPlanReviewCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<DesktopPlanRevisionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DesktopPlanReviewCandidate {
+    pub content_hash: String,
+    pub content: String,
+    pub completeness: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2861,6 +2879,8 @@ pub enum DesktopPlanAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

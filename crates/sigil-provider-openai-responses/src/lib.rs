@@ -7,7 +7,6 @@
 
 mod capabilities;
 mod catalog;
-mod client;
 mod config;
 mod errors;
 mod mapper;
@@ -38,9 +37,6 @@ pub use request::OPENAI_RESPONSES_OUTPUT_ITEMS_STATE_KIND;
 #[cfg(test)]
 #[path = "tests/catalog_tests.rs"]
 mod catalog_tests;
-#[cfg(test)]
-#[path = "tests/client_tests.rs"]
-mod client_tests;
 #[cfg(test)]
 #[path = "tests/reasoning_effort_tests.rs"]
 mod reasoning_effort_tests;

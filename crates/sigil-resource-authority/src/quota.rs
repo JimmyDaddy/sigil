@@ -587,6 +587,17 @@ impl QuotaBookV1 {
         self.release_active(epoch, active)
     }
 
+    /// Releases reservations left by a previous owner process after the caller has acquired
+    /// that process's exclusive authority lock. Reservations are process leases, not durable
+    /// claims on a namespace; the next process re-admits current physical objects as needed.
+    pub(crate) fn release_all_active(&mut self) -> Result<(), QuotaErrorV1> {
+        let owners: Vec<String> = self.active_owner_keys().into_iter().collect();
+        for owner in owners {
+            self.release_owner(&owner)?;
+        }
+        Ok(())
+    }
+
     /// Releases a reservation (settlement). Idempotent on unknown or mismatched epochs.
     pub fn release(
         &mut self,

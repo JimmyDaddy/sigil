@@ -79,10 +79,8 @@ pub enum CutoverErrorV1 {
     ManifestHashMismatch,
     #[error("old-schema session is explicitly unavailable in a current-schema binary")]
     LegacySessionUnavailable,
-    #[error("current-schema authority composition is unavailable")]
+    #[error("current-schema authority is unavailable")]
     AuthorityUnavailable,
-    #[error("current-schema authority journal is corrupted")]
-    AuthorityJournalCorrupted,
 }
 
 /// Schema version for the renderer-neutral cutover status shared by all product surfaces.

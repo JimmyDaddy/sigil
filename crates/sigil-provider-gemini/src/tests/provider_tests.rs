@@ -26,6 +26,7 @@ impl EnvScope {
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
             SIGIL_GEMINI_BASE_URL_ENV,
+            "SSL_CERT_FILE",
         ];
         let previous = names
             .into_iter()
@@ -77,6 +78,21 @@ fn provider_constructs_without_api_key_and_declares_name() -> anyhow::Result<()>
         provider.image_input_capability("gemini-test"),
         ImageInputCapability::Unsupported
     );
+    Ok(())
+}
+
+#[test]
+fn constructor_uses_common_http_client_ca_validation() -> anyhow::Result<()> {
+    let _guard = crate::test_env::lock();
+    let _scope = EnvScope::clear();
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");
+    }
+    assert!(GeminiProvider::new(
+        GeminiProviderConfig::default(),
+        ModelRequestTimeouts::default(),
+    )
+    .is_err());
     Ok(())
 }
 

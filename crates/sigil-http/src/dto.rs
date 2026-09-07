@@ -1309,6 +1309,8 @@ pub struct HttpPlanReview {
     pub source: HttpPlanReviewSource,
     pub stale: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<sigil_kernel::PublicPlanReviewCandidateV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
 }
 
@@ -1365,6 +1367,8 @@ pub enum HttpPlanAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2276,7 +2280,6 @@ pub enum HttpSessionRouteRecoveryCode {
     ConnectionConfigInvalid,
     ProviderUnavailable,
     AuthorityUnavailable,
-    AuthorityJournalCorrupted,
     SessionAlreadyActive,
     SessionWriterBusy,
     SessionStreamInvalid,
@@ -2287,7 +2290,6 @@ pub enum HttpSessionRouteRecoveryCode {
 pub enum HttpSessionRouteRecoveryAction {
     ConfirmCurrentRoute,
     RepairConnection,
-    RepairAuthority,
     SelectReplacement,
     StartNewSession,
     RetryProvider,
@@ -3718,6 +3720,7 @@ impl From<sigil_kernel::PublicPlanReview> for HttpPlanReview {
             allowed_actions: review.allowed_actions.into_iter().map(Into::into).collect(),
             source: review.source.into(),
             stale: review.stale,
+            candidate: review.candidate,
             revision: review.revision,
         }
     }
@@ -3750,6 +3753,8 @@ impl From<sigil_kernel::PublicPlanAction> for HttpPlanAction {
             sigil_kernel::PublicPlanAction::Save => Self::Save,
             sigil_kernel::PublicPlanAction::Revise => Self::Revise,
             sigil_kernel::PublicPlanAction::Reject => Self::Reject,
+            sigil_kernel::PublicPlanAction::AdoptCandidate => Self::AdoptCandidate,
+            sigil_kernel::PublicPlanAction::RetryReview => Self::RetryReview,
         }
     }
 }
@@ -3773,6 +3778,8 @@ pub struct HttpPlanDecisionRequest {
     pub expected_plan_hash: String,
     pub action: HttpPlanDecisionAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_candidate_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_grant: Option<sigil_kernel::PlanApprovalPermission>,
 }
 
@@ -3783,6 +3790,8 @@ pub enum HttpPlanDecisionAction {
     Save,
     Revise,
     Reject,
+    AdoptCandidate,
+    RetryReview,
 }
 
 impl From<HttpPlanDecisionRequest> for sigil_runtime::ApplicationPlanDecisionCommand {
@@ -3791,6 +3800,7 @@ impl From<HttpPlanDecisionRequest> for sigil_runtime::ApplicationPlanDecisionCom
             plan_id: request.plan_id,
             expected_plan_hash: request.expected_plan_hash,
             action: request.action.into(),
+            expected_candidate_hash: request.expected_candidate_hash,
             permission_grant: request.permission_grant,
         }
     }
@@ -3803,6 +3813,8 @@ impl From<HttpPlanDecisionAction> for sigil_runtime::ApplicationPlanAction {
             HttpPlanDecisionAction::Save => Self::Save,
             HttpPlanDecisionAction::Revise => Self::Revise,
             HttpPlanDecisionAction::Reject => Self::Reject,
+            HttpPlanDecisionAction::AdoptCandidate => Self::AdoptCandidate,
+            HttpPlanDecisionAction::RetryReview => Self::RetryReview,
         }
     }
 }
@@ -3939,6 +3951,12 @@ impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCom
                 sigil_runtime::ApplicationPlanAction::Save => HttpPlanDecisionAction::Save,
                 sigil_runtime::ApplicationPlanAction::Revise => HttpPlanDecisionAction::Revise,
                 sigil_runtime::ApplicationPlanAction::Reject => HttpPlanDecisionAction::Reject,
+                sigil_runtime::ApplicationPlanAction::AdoptCandidate => {
+                    HttpPlanDecisionAction::AdoptCandidate
+                }
+                sigil_runtime::ApplicationPlanAction::RetryReview => {
+                    HttpPlanDecisionAction::RetryReview
+                }
             },
             task_id: receipt.task_id,
             task_title: receipt.task_title,

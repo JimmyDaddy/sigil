@@ -15,5 +15,4 @@ fn r71_local_reports_truthful_none() {
     let descriptor =
         local_confinement_guard(LocalRunPolicyV1::ExplicitUnconfined).expect("explicit unconfined");
     assert_eq!(descriptor.enforcement, EnforcementCompletenessV1::None);
-    assert!(local_bind_evidence().is_empty());
 }

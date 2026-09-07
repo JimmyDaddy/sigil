@@ -302,25 +302,12 @@ where
             Some(format!(
                 "dependency {} ended with {}",
                 failed_step_id.as_str(),
-                task_step_status_label(failed_status)
+                failed_status.as_str()
             )),
         )?;
         count += 1;
     }
     Ok(count)
-}
-
-pub(super) fn task_step_status_label(status: TaskStepStatus) -> &'static str {
-    match status {
-        TaskStepStatus::Pending => "pending",
-        TaskStepStatus::Running => "running",
-        TaskStepStatus::Completed => "completed",
-        TaskStepStatus::Failed => "failed",
-        TaskStepStatus::Blocked => "blocked",
-        TaskStepStatus::Cancelled => "cancelled",
-        TaskStepStatus::Interrupted => "interrupted",
-        TaskStepStatus::Superseded => "superseded",
-    }
 }
 
 pub(super) fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus {

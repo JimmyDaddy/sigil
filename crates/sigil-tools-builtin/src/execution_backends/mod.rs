@@ -24,6 +24,7 @@ use sigil_kernel::{
     ExecutionTerminationCause, ExecutionTimeoutSource, ProcessEnvironmentPolicy,
     ResolvedProcessEnvironment, validate_extension_process_isolation,
 };
+use sigil_process::ProcessTreeOwnerGuard;
 use tokio::{
     io::AsyncRead,
     process::{Child, Command},
@@ -37,9 +38,8 @@ use crate::process_group::{
     process_group_has_live_members as process_group_is_alive,
     send_process_group_signal as send_signal_to_process_group,
 };
-use crate::process_owner::ProcessTreeOwnerGuard;
 #[cfg(windows)]
-use crate::process_owner::terminate_owned_process_tree;
+use sigil_process::terminate_owned_process_tree;
 
 mod bubblewrap;
 mod docker;

@@ -458,10 +458,10 @@ impl ConversationTaskControlProjection {
             ControlEntry::TaskContinuationSelected(entry) => {
                 let matches_frozen_task =
                     self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
-                        task.status == task_run_status_label(entry.task_status)
+                        task.status == entry.task_status.as_str()
                             && task.plan_version == entry.plan_version
                             && task.plan_status.as_deref()
-                                == entry.plan_status.map(task_plan_status_label)
+                                == entry.plan_status.map(sigil_kernel::TaskPlanStatus::as_str)
                     });
                 if matches_frozen_task {
                     self.select_current(entry.task_id.as_str());
@@ -493,10 +493,10 @@ impl ConversationTaskControlProjection {
                     self.task_run_scopes.get(entry.task_id.as_str()) == Some(&entry.run_scope_id);
                 let matches_frozen_task =
                     self.tasks.get(entry.task_id.as_str()).is_some_and(|task| {
-                        task.status == task_run_status_label(entry.task_status)
+                        task.status == entry.task_status.as_str()
                             && task.plan_version == entry.plan_version
                             && task.plan_status.as_deref()
-                                == entry.plan_status.map(task_plan_status_label)
+                                == entry.plan_status.map(sigil_kernel::TaskPlanStatus::as_str)
                     });
                 if entry.validate_shape().is_ok() && matches_scope && matches_frozen_task {
                     self.select_current(entry.task_id.as_str());
@@ -754,27 +754,6 @@ impl ConversationTaskControlProjection {
     }
 }
 
-fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskRunStatus::Started => "started",
-        sigil_kernel::TaskRunStatus::Running => "running",
-        sigil_kernel::TaskRunStatus::Paused => "paused",
-        sigil_kernel::TaskRunStatus::Completed => "completed",
-        sigil_kernel::TaskRunStatus::Failed => "failed",
-        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-fn task_plan_status_label(status: sigil_kernel::TaskPlanStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskPlanStatus::Proposed => "proposed",
-        sigil_kernel::TaskPlanStatus::Accepted => "accepted",
-        sigil_kernel::TaskPlanStatus::Superseded => "superseded",
-        sigil_kernel::TaskPlanStatus::Rejected => "rejected",
-    }
-}
-
 /// Derives an opaque renderer identity for one live semantic slot.
 ///
 /// # Errors
@@ -868,6 +847,28 @@ pub fn conversation_display_page_with_artifact_store(
     current_workspace_snapshot_id: Option<&str>,
     artifact_store: &ToolArtifactStore,
 ) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
+    conversation_display_page_with_optional_artifact_store(
+        session_path,
+        expected_scope,
+        cursor,
+        limit,
+        current_workspace_snapshot_id,
+        Some(artifact_store),
+    )
+}
+
+/// Projects one canonical display page while optionally reconciling physical tool-artifact
+/// availability. The durable session stream remains readable while a foreground run holds the
+/// exclusive ArtifactStaging/ArtifactStore leases; callers may omit the lease in that window and
+/// receive the same canonical page with availability left unknown until a later refresh.
+pub fn conversation_display_page_with_optional_artifact_store(
+    session_path: &Path,
+    expected_scope: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    current_workspace_snapshot_id: Option<&str>,
+    artifact_store: Option<&ToolArtifactStore>,
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
     let records = JsonlSessionStore::read_event_records(session_path).with_context(|| {
         format!(
             "failed to read conversation session {}",
@@ -881,7 +882,9 @@ pub fn conversation_display_page_with_artifact_store(
         limit,
         current_workspace_snapshot_id,
     )?;
-    reconcile_physical_artifact_availability(&mut page, artifact_store);
+    if let Some(artifact_store) = artifact_store {
+        reconcile_physical_artifact_availability(&mut page, artifact_store);
+    }
     Ok(page)
 }
 
@@ -2075,6 +2078,10 @@ struct PlanReviewDisplayProjection {
         std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::UserInputRequestId>,
     revision_guidance_resolution:
         std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::UserInputResolutionV1>,
+    candidates: std::collections::BTreeMap<
+        sigil_kernel::PlanId,
+        sigil_kernel::PlanReviewCandidateRecordedV1,
+    >,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2108,6 +2115,12 @@ impl PlanReviewDisplayProjection {
                 sigil_kernel::ControlEntry::PlanDraftCreated(draft),
             ) => {
                 self.drafts.insert(draft.plan_id.clone(), draft);
+            }
+            sigil_kernel::SessionLogEntry::Control(
+                sigil_kernel::ControlEntry::PlanReviewCandidateRecordedV1(candidate),
+            ) => {
+                self.candidates
+                    .insert(candidate.plan_id.clone(), *candidate);
             }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanDecisionRecorded(decision),
@@ -2287,6 +2300,17 @@ impl PlanReviewDisplayProjection {
         });
         // Plan review is text approval, not Task compilation. A missing/failed preflight
         // candidate does not hide Run; post-approval materialization owns any blocker.
+        let candidate = self
+            .candidates
+            .get(&active_attempt.plan_id)
+            .filter(|candidate| {
+                candidate.attempt_id == active_attempt.attempt_id && draft.is_none()
+            })
+            .map(|candidate| sigil_kernel::PublicPlanReviewCandidateV1 {
+                content_hash: candidate.content_hash.clone(),
+                content: candidate.content.clone(),
+                completeness: candidate.completeness,
+            });
         let allowed_actions = if let Some(blocker) = materialization_blocker {
             let mut actions = Vec::new();
             if blocker
@@ -2334,6 +2358,23 @@ impl PlanReviewDisplayProjection {
                     sigil_kernel::PublicPlanAction::Reject,
                 ],
             }
+        } else if matches!(
+            active_attempt.status,
+            sigil_kernel::PlanReviewAttemptStatus::Paused
+                | sigil_kernel::PlanReviewAttemptStatus::Blocked
+                | sigil_kernel::PlanReviewAttemptStatus::Failed
+                | sigil_kernel::PlanReviewAttemptStatus::Interrupted
+        ) && !matches!(
+            legacy_revision,
+            LegacyPlanRevisionCompatibility::Unsupported
+        ) {
+            let mut actions = vec![sigil_kernel::PublicPlanAction::RetryReview];
+            if candidate.as_ref().is_some_and(|candidate| {
+                candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete
+            }) {
+                actions.push(sigil_kernel::PublicPlanAction::AdoptCandidate);
+            }
+            actions
         } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::CompileFailed
             && draft.is_some()
             && !revision_running
@@ -2365,6 +2406,7 @@ impl PlanReviewDisplayProjection {
             allowed_actions,
             source: active_attempt.source.into(),
             stale,
+            candidate,
             revision: if let Some(recovery) = legacy_recovery {
                 let terminal = &self.attempts[recovery.terminal_attempt_index];
                 Some(sigil_kernel::PublicPlanRevisionSummaryV1 {

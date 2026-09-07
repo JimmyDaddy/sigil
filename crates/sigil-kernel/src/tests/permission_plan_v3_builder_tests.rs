@@ -9,7 +9,7 @@ use crate::permission_plan_v3_builder::{build_v3_decision, build_v3_plan};
 use crate::resource::{
     AuthorityGeneration, BoundedVec, CanonicalHash, EnforcementRequirementClassV1,
     OpaqueApprovalRequestId, OpaqueManagedFileAccessPlanId, OpaquePermissionDecisionId,
-    OpaquePermissionSubjectRef, OpaqueToolCallId, RequestedEnforcementV1, ResourceJournalScopeV1,
+    OpaquePermissionSubjectRef, OpaqueToolCallId, RequestedEnforcementV1, ResourceAuthorityScopeV1,
     ResourceRequirementSetV1,
 };
 
@@ -82,7 +82,7 @@ fn r71_v3_plan_hash_is_deterministic_and_binds_file_ref() {
         Vec::new(),
         Vec::new(),
         Some(file_ref()),
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement(),
     );
     let plan_b = build_v3_plan(
@@ -91,7 +91,7 @@ fn r71_v3_plan_hash_is_deterministic_and_binds_file_ref() {
         Vec::new(),
         Vec::new(),
         Some(file_ref()),
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement(),
     );
     assert_eq!(plan_a.plan_hash, plan_b.plan_hash);
@@ -107,7 +107,7 @@ fn r71_v3_plan_hash_is_deterministic_and_binds_file_ref() {
         Vec::new(),
         Vec::new(),
         None,
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement(),
     );
     assert_ne!(plan_a.plan_hash, no_file.plan_hash);
@@ -126,7 +126,7 @@ fn r71_v3_decision_digest_binds_plan_and_confirmation() {
         Vec::new(),
         Vec::new(),
         Some(file_ref()),
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement(),
     );
     let confirmation = PermissionConfirmationV3 {
@@ -172,7 +172,7 @@ fn r71_headless_v3_admission_rejects_missing_confirmation_and_grant_binding() {
         Vec::new(),
         Vec::new(),
         Some(file_ref()),
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement(),
     );
     let mut decision = build_v3_decision(

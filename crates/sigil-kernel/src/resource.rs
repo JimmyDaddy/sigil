@@ -712,7 +712,7 @@ pub enum ResourceEvidenceClassV1 {
     Identity,
     OwnerOrAcl,
     Quota,
-    Journal,
+    DurableState,
     Sandbox,
     AliasContainment,
     Storage,
@@ -759,11 +759,11 @@ pub enum ResourceBlockerScopeV1 {
     Artifact(OpaqueArtifactId),
 }
 
-/// Journal shard selection for one attempt.
+/// Authority domain used to resolve a protected namespace for one operation.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
-pub enum ResourceJournalScopeV1 {
+pub enum ResourceAuthorityScopeV1 {
     Application,
     Workspace(OpaqueWorkspaceId),
 }
@@ -780,7 +780,7 @@ pub struct ResourceRefV1 {
     pub resource_id: OpaqueResourceId,
     pub kind: ResourceKindV1,
     pub owner_scope: ResourceOwnerScopeV1,
-    pub journal_scope: ResourceJournalScopeV1,
+    pub authority_scope: ResourceAuthorityScopeV1,
     pub generation: u64,
 }
 
@@ -928,7 +928,7 @@ pub struct AuthorityGeneration {
 pub enum ManagedStorageCapabilityFamilyV1 {
     AppendLog,
     AtomicObject,
-    JournaledAtomicProjection,
+    AtomicProjection,
     StreamingArtifact,
     ArtifactStore,
     RebuildableDatabaseProjection,

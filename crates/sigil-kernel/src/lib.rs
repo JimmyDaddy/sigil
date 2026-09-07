@@ -60,6 +60,7 @@ pub mod resource;
 pub mod resource_recovery;
 pub mod resource_recovery_surface;
 pub mod resume;
+pub mod run_capability;
 pub mod secret;
 pub mod session;
 pub mod session_export;
@@ -228,25 +229,27 @@ pub use conversation_queue::{
     conversation_promotion_capability_digest, project_conversation_prompt_for_persistence,
 };
 pub use conversation_route::{
-    AutomaticRouteCapability, CONVERSATION_ROUTE_DECISION_DOMAIN, ConversationRoute,
-    ConversationRouteDecisionId, ConversationRouteDecisionProjection,
-    ConversationRouteDecisionProjectionEntry, ConversationRouteDecisionRecordedEntry,
-    ConversationRouteReason, MAX_PLAN_REVIEW_REASON_CODES, PLAN_REVIEW_ATTEMPT_ID_DOMAIN,
-    PLAN_REVIEW_CHILD_SESSION_DOMAIN, PLAN_REVIEW_ID_DOMAIN, PLAN_REVIEW_PLAN_ID_DOMAIN,
-    PLAN_REVIEW_ROUTING_POLICY_DOMAIN, PendingPlanHandoffBinding, PlanReviewAttemptEntry,
-    PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewDraftContext, PlanReviewHandoffBinding,
-    PlanReviewId, PlanReviewProjection, PlanReviewProjectionEntry, PlanReviewSource,
-    PlanReviewTerminalReason, REQUEST_PLAN_REVIEW_TOOL_NAME, SUBMIT_PLAN_DRAFT_TOOL_NAME,
+    AutomaticRouteCapability, CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
+    CONVERSATION_ROUTE_DECISION_DOMAIN, ConversationRoute, ConversationRouteDecisionId,
+    ConversationRouteDecisionProjection, ConversationRouteDecisionProjectionEntry,
+    ConversationRouteDecisionRecordedEntry, ConversationRouteReason, MAX_PLAN_REVIEW_REASON_CODES,
+    PLAN_REVIEW_ATTEMPT_ID_DOMAIN, PLAN_REVIEW_CHILD_SESSION_DOMAIN, PLAN_REVIEW_ID_DOMAIN,
+    PLAN_REVIEW_PLAN_ID_DOMAIN, PLAN_REVIEW_ROUTING_POLICY_DOMAIN, PendingPlanHandoffBinding,
+    PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus, PlanReviewDraftContext,
+    PlanReviewHandoffBinding, PlanReviewId, PlanReviewProjection, PlanReviewProjectionEntry,
+    PlanReviewSource, PlanReviewTerminalReason, REQUEST_PLAN_REVIEW_TOOL_NAME,
+    SUBMIT_PLAN_DRAFT_TOOL_NAME, confirm_plan_review_candidate_tool_spec,
     conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
     conversation_route_routing_contract_material,
-    direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
-    plan_review_attempt_id_for_revision, plan_review_attempt_id_for_revision_ordinal,
-    plan_review_child_session_ref, plan_review_finalizer_session_ref,
-    plan_review_id_for_explicit_command, plan_review_id_for_source,
-    plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
-    plan_review_policy_snapshot_hash, plan_review_reason_codes,
+    direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_retry,
+    plan_review_attempt_id_for_review, plan_review_attempt_id_for_revision,
+    plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
+    plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
+    plan_review_id_for_source, plan_review_no_draft_retry_contract_material,
+    plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash, plan_review_reason_codes,
     plan_review_system_prompt_contract_material, reconcile_plan_review_attempts,
     request_plan_review_tool_spec, submit_plan_draft_tool_spec,
+    submit_plan_review_result_tool_spec,
 };
 pub use conversation_run::{
     CONVERSATION_RUN_LIFECYCLE_SCHEMA_VERSION, ConversationRunFinalizedEntryV1,
@@ -498,24 +501,30 @@ pub use persistence::{
 pub use plan::{
     EXECUTABLE_PLAN_CANDIDATE_SCHEMA_VERSION, ExecutablePlanCandidateV1,
     MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES, PLAN_COMPILE_BINDING_SCHEMA_VERSION,
-    PLAN_COMPILER_VERSION, PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanArtifactProjection, PlanCompileBindingV1, PlanCompileDetailV1,
-    PlanCompileFailureV1, PlanCompileInputV1, PlanDecision, PlanDecisionActor,
+    PLAN_COMPILER_VERSION, PLAN_HASH_PREFIX, PLAN_REVIEW_CANDIDATE_PREVIEW_MAX_BYTES,
+    PLAN_REVIEW_CANDIDATE_SCHEMA_VERSION, PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION,
+    PLAN_REVIEW_RESULT_SCHEMA_VERSION, PLAN_REVIEW_RESULT_TOOL_NAME, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanArtifactProjection, PlanCompileBindingV1,
+    PlanCompileDetailV1, PlanCompileFailureV1, PlanCompileInputV1, PlanDecision, PlanDecisionActor,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanDraftStep, PlanExecutionAdoptedV1Entry,
     PlanExecutionAdoptionCommit, PlanId, PlanLineageV1, PlanPermissionGrantedEntry,
     PlanPermissionScopeCandidateV1, PlanReadyCommittedV1Entry, PlanReadyStateV1,
-    PlanReviewDetailV1, PlanReviewStepDetailV1, PlanRunCommandSource, PlanRunCommandV1,
+    PlanReviewCandidateCompletenessV1, PlanReviewCandidateRecordedV1, PlanReviewDetailV1,
+    PlanReviewResolutionActorV1, PlanReviewResolutionRecordedV1, PlanReviewResult,
+    PlanReviewResultEnvelope, PlanReviewResultOutcome, PlanReviewResultValidationError,
+    PlanReviewStepDetailV1, PlanReviewValidationIssue, PlanRunCommandSource, PlanRunCommandV1,
     PlanRunPermissionChoiceV1, PlanRunReceiptV1, PlanRunRejectionV1, PlanSourceRef,
     PlanSuggestedCheck, PlanTaskStartMode, PlanToTaskStepMapping, PreparedIntentAdmissionV1,
     TaskCreatedFromPlanEntry, TaskMaterializationAttemptStartedV1, TaskMaterializationBlockedV1,
     append_plan_approval_task_shell_at_frontier, append_plan_execution_adoption_at_frontier,
     append_task_materialization_prepared_at_frontier, bind_candidate_plan_intents,
-    candidate_canonical_hash, compile_executable_plan_candidate,
+    candidate_canonical_hash, compile_executable_plan_candidate, decode_plan_review_result,
     materialize_prepared_intent_admission, plain_text_plan_draft_entry,
     plain_text_plan_draft_entry_with_plan_id, plan_draft_created_entry,
-    plan_draft_created_entry_with_plan_id, plan_review_detail_from_entries,
+    plan_draft_created_entry_with_plan_id, plan_review_candidate_recorded_entry,
+    plan_review_candidate_recorded_entry_with_artifact, plan_review_detail_from_entries,
     plan_task_input_from_draft, plan_text_hash, plan_workspace_paths, submit_plan_draft_entry,
-    task_id_from_plan_draft, task_plan_from_plan_draft,
+    submit_plan_review_result, task_id_from_plan_draft, task_plan_from_plan_draft,
 };
 pub use plugin::{
     DEFAULT_PLUGIN_HOOK_OUTPUT_LIMIT_BYTES, DEFAULT_PLUGIN_HOOK_TIMEOUT_MS,
@@ -585,9 +594,9 @@ pub use provider_timeout::{
 };
 pub use public_task_event::{
     PublicConversationPhase, PublicConversationRoute, PublicPlanAction, PublicPlanReview,
-    PublicPlanReviewSource, PublicPlanReviewStatus, PublicPlanRevisionStatusV1,
-    PublicPlanRevisionSummaryV1, PublicTaskChecklistItemV1, PublicTaskEventProjector,
-    PublicTaskPhase, PublicTaskPlanStep,
+    PublicPlanReviewCandidateV1, PublicPlanReviewSource, PublicPlanReviewStatus,
+    PublicPlanRevisionStatusV1, PublicPlanRevisionSummaryV1, PublicTaskChecklistItemV1,
+    PublicTaskEventProjector, PublicTaskPhase, PublicTaskPlanStep,
 };
 pub use recovery::{
     AdapterKindV1, BoundaryOutcomeV1, EffectSettlementV1, FailureScopeV1, InterruptionReceiptV1,
@@ -600,6 +609,7 @@ pub use resume::{
     JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
     ResumeJobStateProjection, StepLeaseEntry, StepLeaseHeartbeatEntry, StepLeaseStatus,
 };
+pub use run_capability::{SessionPersistenceCapability, WorkspaceCapability};
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, ActiveConstraintV1, ActiveProjectionFrontier,
@@ -870,14 +880,14 @@ pub use tool::{
     DeclaredToolPermissionFacts, NetworkEffect, PreparedToolAuditBinding, PreparedToolCall,
     PreparedToolExecution, ScopedToolRegistry, Tool, ToolAccess, ToolCapability, ToolCategory,
     ToolConcurrencyClass, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolError,
-    ToolErrorKind, ToolExecutionId, ToolLifecycleOwner, ToolLifecycleRetirement,
-    ToolMutationTracking, ToolPreparation, ToolPreparationBinding, ToolPreparationDraft,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot,
-    ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink, ToolReceiptMetadata,
-    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope,
-    ToolReplayClassV1, ToolReplayContractV1, ToolResult, ToolResultMeta, ToolResultStatus,
-    ToolResultSummary, ToolRuntimeContract, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope, WeakToolRegistry, declared_tool_permission_plan,
+    ToolErrorKind, ToolExecutionGuardError, ToolExecutionId, ToolLifecycleOwner,
+    ToolLifecycleRetirement, ToolMutationTracking, ToolPreparation, ToolPreparationBinding,
+    ToolPreparationDraft, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolProgressEvent, ToolProgressSink,
+    ToolReceiptMetadata, ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry,
+    ToolRegistryScope, ToolReplayClassV1, ToolReplayContractV1, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolResultSummary, ToolRuntimeContract, ToolSpec, ToolSubject,
+    ToolSubjectKind, ToolSubjectScope, WeakToolRegistry, declared_tool_permission_plan,
 };
 pub use user_input::{
     AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION, AgentUserInputRouteEntryV1,

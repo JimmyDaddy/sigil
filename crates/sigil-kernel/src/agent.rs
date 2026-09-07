@@ -12,7 +12,8 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
 use crate::{
-    FrozenProviderRequestMaterial, PlanId, RuntimeContextCandidates,
+    FrozenProviderRequestMaterial, PLAN_REVIEW_RESULT_TOOL_NAME, PlanId, PlanReviewResultOutcome,
+    RuntimeContextCandidates,
     approval::{
         APPROVAL_REQUEST_NO_EXPIRY_MS, ApprovalHandler, ApprovalRequestIdentityV2,
         AutoApproveHandler, ToolApproval, ToolApprovalContext,
@@ -20,12 +21,13 @@ use crate::{
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
     conversation_route::{
-        AutomaticRouteCapability, ConversationRouteDecisionId, PlanReviewAttemptId,
-        PlanReviewDraftContext, PlanReviewHandoffBinding, PlanReviewId,
-        REQUEST_PLAN_REVIEW_TOOL_NAME, SUBMIT_PLAN_DRAFT_TOOL_NAME,
+        AutomaticRouteCapability, CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
+        ConversationRouteDecisionId, PlanReviewAttemptId, PlanReviewDraftContext,
+        PlanReviewHandoffBinding, PlanReviewId, REQUEST_PLAN_REVIEW_TOOL_NAME,
+        SUBMIT_PLAN_DRAFT_TOOL_NAME, confirm_plan_review_candidate_tool_spec,
         conversation_route_routing_contract_material,
         direct_conversation_continuation_prompt_contract_material, request_plan_review_tool_spec,
-        submit_plan_draft_tool_spec,
+        submit_plan_review_result_tool_spec,
     },
     event::{EventHandler, RunEvent},
     memory::{is_writable_memory_route_tool, writable_memory_route_tool_specs},
@@ -95,8 +97,10 @@ use approval_policy::{
 };
 use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
 use plan_draft::{
-    append_tool_ignored_after_plan_draft, handle_submit_plan_draft_call,
-    submit_plan_draft_call_is_accepted,
+    append_tool_ignored_after_plan_draft, confirm_plan_review_candidate_call_is_accepted,
+    handle_confirm_plan_review_candidate_call, handle_submit_plan_draft_call,
+    handle_submit_plan_review_result_call, submit_plan_draft_call_is_accepted,
+    submit_plan_review_result_call_outcome,
 };
 use plan_review::{
     append_tool_ignored_after_plan_review_decision, handle_request_plan_review_call,
@@ -499,6 +503,14 @@ pub struct AgentRunInput {
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
     tool_artifact_read_budget: Option<crate::session::ToolArtifactReadBudgetV1>,
+    /// Optional advisory prompt injected once at a safe model-turn boundary.
+    soft_checkpoint: Option<SoftCheckpoint>,
+}
+
+#[derive(Debug, Clone)]
+struct SoftCheckpoint {
+    after_turns: usize,
+    prompt: String,
 }
 
 impl fmt::Debug for AgentRunInput {
@@ -519,6 +531,13 @@ impl fmt::Debug for AgentRunInput {
             .field(
                 "tool_artifact_read_budget",
                 &self.tool_artifact_read_budget.is_some(),
+            )
+            .field(
+                "soft_checkpoint",
+                &self
+                    .soft_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.after_turns),
             )
             .field("task_plan_update", &self.task_plan_update)
             .field("task_checklist_update", &self.task_checklist_update)
@@ -594,6 +613,15 @@ impl fmt::Debug for AgentRunInput {
 }
 
 impl AgentRunOptions {
+    /// Returns the workspace capability encoded by this run's runtime composition.
+    ///
+    /// An empty workspace root represents an unavailable workspace capability. Durable
+    /// entrypoints always pass a concrete canonical workspace root.
+    #[must_use]
+    pub fn workspace_capability(&self) -> crate::WorkspaceCapability {
+        crate::WorkspaceCapability::from_path(&self.workspace_root)
+    }
+
     /// Attaches the tool authority facade (runtime composition provides the single instance).
     #[must_use]
     pub fn with_tool_authority(
@@ -651,6 +679,7 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
+            soft_checkpoint: None,
         }
     }
 
@@ -689,6 +718,7 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
+            soft_checkpoint: None,
         }
     }
 
@@ -726,6 +756,7 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
+            soft_checkpoint: None,
         }
     }
 
@@ -823,6 +854,20 @@ impl AgentRunInput {
     #[must_use]
     pub fn with_plan_review_submit_only(mut self) -> Self {
         self.plan_review_submit_only = true;
+        self
+    }
+
+    /// Adds a one-shot advisory checkpoint for a long-running multi-turn run. The prompt is
+    /// inserted only after the requested number of completed model turns and does not alter tool
+    /// authority, max-turn handling, or the run's terminal semantics.
+    #[must_use]
+    pub fn with_soft_checkpoint(mut self, after_turns: usize, prompt: impl Into<String>) -> Self {
+        if after_turns > 0 {
+            self.soft_checkpoint = Some(SoftCheckpoint {
+                after_turns,
+                prompt: prompt.into(),
+            });
+        }
         self
     }
 
@@ -2222,6 +2267,7 @@ where
             suppressed_tool_names,
             web_task_tree_budget,
             tool_artifact_read_budget,
+            soft_checkpoint,
         } = input;
         // An explicit per-run registrar is useful for constrained callers and tests; production
         // sessions fall back to their non-serializable session-scoped runtime attachment so live
@@ -2650,6 +2696,7 @@ where
         let tool_artifact_read_budget = tool_artifact_read_budget.unwrap_or_default();
 
         let mut model_turns = 0usize;
+        let mut soft_checkpoint_injected = false;
         let mut hosted_unavailable_noticed = false;
         loop {
             // RFC-0059 §10.3: per-model-turn window; no-op for delegated children.
@@ -2744,6 +2791,17 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
+            if !soft_checkpoint_injected
+                && soft_checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| model_turns >= checkpoint.after_turns)
+            {
+                if let Some(checkpoint) = soft_checkpoint.as_ref() {
+                    transient_context.push(ModelMessage::system(checkpoint.prompt.clone()));
+                }
+                soft_checkpoint_injected = true;
+            }
+
             // Safe-point follow-up injection: after the first provider turn, a queued
             // follow-up is promoted into the session and answered by the same run, without
             // interrupting it. Routing microturns and non-conversation runs are exempt.
@@ -2809,7 +2867,14 @@ where
                     tool_specs.push(update_task_checklist_tool_spec());
                 }
                 if plan_review_draft.is_some() {
-                    tool_specs.push(submit_plan_draft_tool_spec());
+                    if plan_review_draft
+                        .as_ref()
+                        .is_some_and(|context| context.candidate_content.is_some())
+                    {
+                        tool_specs.push(confirm_plan_review_candidate_tool_spec());
+                    } else {
+                        tool_specs.push(submit_plan_review_result_tool_spec());
+                    }
                 }
                 if task_guidance_assessment.is_some() {
                     tool_specs.push(task_guidance_apply_tool_spec());
@@ -3135,11 +3200,31 @@ where
                         .as_ref()
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
+                let accepted_plan_result_in_batch = !accepted_task_plan_in_batch
+                    && plan_review_draft.is_some()
+                    && completed_calls.iter().any(|call| {
+                        plan_review_draft.as_ref().is_some_and(|context| {
+                            confirm_plan_review_candidate_call_is_accepted(context, call)
+                                || submit_plan_draft_call_is_accepted(context, call)
+                                || matches!(
+                                    submit_plan_review_result_call_outcome(context, call),
+                                    Some(
+                                        PlanReviewResultOutcome::Draft
+                                            | PlanReviewResultOutcome::NoPlan
+                                    )
+                                )
+                        })
+                    });
                 let accepted_plan_draft_in_batch = !accepted_task_plan_in_batch
                     && plan_review_draft.is_some()
                     && completed_calls.iter().any(|call| {
                         plan_review_draft.as_ref().is_some_and(|context| {
-                            submit_plan_draft_call_is_accepted(context, call)
+                            confirm_plan_review_candidate_call_is_accepted(context, call)
+                                || submit_plan_draft_call_is_accepted(context, call)
+                                || matches!(
+                                    submit_plan_review_result_call_outcome(context, call),
+                                    Some(PlanReviewResultOutcome::Draft)
+                                )
                         })
                     });
                 let pending_plan_bound = plan_review_binding
@@ -3208,6 +3293,7 @@ where
                 }
                 let mut accepted_task_plan = false;
                 let mut accepted_plan_draft = false;
+                let mut accepted_plan_result = None;
                 let mut accepted_task_handoff = None;
                 let mut accepted_task_continuation = None;
                 let mut accepted_plan_review = None;
@@ -3274,12 +3360,22 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
-                    if plan_review_submit_only && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                    let submit_only_call_allowed = !plan_review_submit_only
+                        || if plan_review_draft
+                            .as_ref()
+                            .is_some_and(|context| context.candidate_content.is_some())
+                        {
+                            call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
+                        } else {
+                            call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME
+                                || call.name == PLAN_REVIEW_RESULT_TOOL_NAME
+                        };
+                    if !submit_only_call_allowed {
                         let mut result = ToolResult::error(
                             call.id.clone(),
                             call.name.clone(),
                             ToolErrorKind::Protocol,
-                            "submit_only_protocol_violation: plan finalization accepts only submit_plan_draft",
+                            "submit_only_protocol_violation: plan finalization accepts only the advertised Plan finalization tool",
                         );
                         attach_tool_call_context(&mut result, &call, &[]);
                         append_tool_execution_audit(
@@ -3380,7 +3476,24 @@ where
                         )?;
                         continue;
                     }
-                    if accepted_plan_draft_in_batch && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                    if accepted_plan_result_in_batch
+                        && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME
+                        && call.name != PLAN_REVIEW_RESULT_TOOL_NAME
+                        && call.name != CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
+                    {
+                        append_tool_ignored_after_plan_draft(
+                            session,
+                            &mut outcome,
+                            &call,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
+                    if accepted_plan_result.is_some()
+                        && (call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME
+                            || call.name == PLAN_REVIEW_RESULT_TOOL_NAME
+                            || call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME)
+                    {
                         append_tool_ignored_after_plan_draft(
                             session,
                             &mut outcome,
@@ -3762,6 +3875,86 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME {
+                        let Some(context) = plan_review_draft.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "confirm_plan_review_candidate is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        };
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let accepted = handle_confirm_plan_review_candidate_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                            now_ms,
+                            &mut assistant_batch_results,
+                        )?;
+                        if let Some(accepted) = accepted {
+                            accepted_plan_result = Some(accepted);
+                            accepted_plan_draft =
+                                accepted_plan_draft || accepted == PlanReviewResultOutcome::Draft;
+                        }
+                        continue;
+                    }
+                    if call.name == PLAN_REVIEW_RESULT_TOOL_NAME {
+                        let Some(context) = plan_review_draft.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "submit_plan_review_result is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        };
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let accepted = handle_submit_plan_review_result_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                            now_ms,
+                            &mut assistant_batch_results,
+                        )?;
+                        if let Some(accepted) = accepted {
+                            accepted_plan_result = Some(accepted);
+                            accepted_plan_draft =
+                                accepted_plan_draft || accepted == PlanReviewResultOutcome::Draft;
+                        }
+                        continue;
+                    }
                     if call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME {
                         let Some(context) = plan_review_draft.as_ref() else {
                             let mut result = ToolResult::error(
@@ -3796,6 +3989,9 @@ where
                             &mut assistant_batch_results,
                         )?;
                         accepted_plan_draft = accepted_plan_draft || accepted;
+                        if accepted {
+                            accepted_plan_result = Some(PlanReviewResultOutcome::Draft);
+                        }
                         continue;
                     }
                     if call.name == TASK_GUIDANCE_APPLY_TOOL_NAME {
@@ -4110,6 +4306,29 @@ where
                         disposition: AgentRunDisposition::TaskPlanAccepted,
                     });
                 }
+                if accepted_plan_result == Some(PlanReviewResultOutcome::NoPlan) {
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "completed",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::FinalAnswer,
+                    });
+                }
                 if accepted_plan_draft {
                     let Some(draft_context) = plan_review_draft.as_ref() else {
                         return Err(anyhow!(
@@ -4381,8 +4600,12 @@ where
             }
 
             outcome.tool_calls = total_tool_calls;
-            let readiness =
-                projected_agent_run_readiness(session, &options, &final_message_id, &outcome)?;
+            // Readiness is a durable workspace projection and must not inspect paths or emit a
+            // control receipt without durable workspace and session capabilities.
+            let readiness = (options.workspace_capability().is_available()
+                && session.persistence_capability().is_durable())
+            .then(|| projected_agent_run_readiness(session, &options, &final_message_id, &outcome))
+            .transpose()?;
             append_completed_run_lifecycle_events(
                 session,
                 outcome.terminal_reason,
@@ -4390,9 +4613,11 @@ where
                 total_tool_calls,
                 readiness.clone(),
             )?;
-            handler.handle(RunEvent::Control(ControlEntry::ReadinessEvaluated(
-                readiness,
-            )))?;
+            if let Some(readiness) = readiness {
+                handler.handle(RunEvent::Control(ControlEntry::ReadinessEvaluated(
+                    readiness,
+                )))?;
+            }
             return Ok(AgentRunOutput {
                 result: AgentRunResult {
                     final_text: assistant_text,

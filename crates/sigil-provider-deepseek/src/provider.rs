@@ -17,7 +17,6 @@ use sigil_kernel::{
 use crate::{
     DEFAULT_DEEPSEEK_V4_FLASH_PORTABLE_TARGET_OUTPUT_TOKENS,
     capabilities::{deepseek_capabilities, deepseek_context_capabilities},
-    client::build_http_client,
     config::{DeepSeekProviderConfig, DeepSeekProviderProfile},
     endpoint::DeepSeekEndpointClass,
     errors::{DeepSeekMessagesStreamReadError, DeepSeekProviderError},
@@ -70,7 +69,11 @@ impl DeepSeekProvider {
         config: DeepSeekProviderConfig,
         timeouts: ModelRequestTimeouts,
     ) -> Result<Self> {
-        Self::new_exact_with_client(config, timeouts, build_http_client()?)
+        Self::new_exact_with_client(
+            config,
+            timeouts,
+            sigil_provider_http::build_provider_http_client()?,
+        )
     }
 
     /// Builds an exact provider with a caller-owned HTTP client. Recovery surfaces use this to

@@ -5,40 +5,11 @@
 //! a compatibility-free host composition API and does not create a second authority.
 
 pub use crate::r71_authority_composition::{
-    BootAuthorityErrorV1, RuntimeAuthorityCompositionV1, RuntimeCurrentBootTransactionV1,
-    ValidatedAuthorityConfigSnapshotV1, authority_bootstrap_manifest_path,
+    BootAuthorityErrorV1, RuntimeAuthorityCompositionErrorV1, RuntimeAuthorityCompositionV1,
+    RuntimeCurrentBootTransactionV1, ValidatedAuthorityConfigSnapshotV1,
+    attach_boot_authority_to_services, authority_bootstrap_manifest_path, boot_current_schema,
+    boot_current_schema_with_expected_config,
 };
 pub use crate::r71_global_cutover::{
     CutoverSessionOpenErrorV1, RuntimeGlobalCutoverV1, guarded_session_open,
 };
-
-pub fn boot_current_schema(
-    config_path: &std::path::Path,
-    launch_cwd: &std::path::Path,
-) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
-    crate::r71_authority_composition::boot_current_schema(config_path, launch_cwd)
-}
-
-pub fn boot_current_schema_with_expected_config(
-    config_path: &std::path::Path,
-    launch_cwd: &std::path::Path,
-    expected: &sigil_kernel::RootConfig,
-) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
-    crate::r71_authority_composition::boot_current_schema_with_expected_config(
-        config_path,
-        launch_cwd,
-        expected,
-    )
-}
-
-pub fn attach_boot_authority_to_services(
-    services: crate::application_run::ApplicationRunServices,
-    config_path: &std::path::Path,
-    launch_cwd: &std::path::Path,
-) -> Result<crate::application_run::ApplicationRunServices, BootAuthorityErrorV1> {
-    crate::r71_authority_composition::attach_boot_authority_to_services(
-        services,
-        config_path,
-        launch_cwd,
-    )
-}

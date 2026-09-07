@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     path::{Component, Path, PathBuf},
 };
 
@@ -23,8 +24,21 @@ use crate::{
 
 /// Stable digest prefix used for approved plan text.
 pub const PLAN_HASH_PREFIX: &str = "sha256:";
+/// Version of the provider-neutral Plan review result envelope.
+pub const PLAN_REVIEW_RESULT_SCHEMA_VERSION: u32 = 1;
+/// Model-visible tool name for the small Plan review result envelope.
+pub const PLAN_REVIEW_RESULT_TOOL_NAME: &str = "submit_plan_review_result";
+/// Durable schema for a complete or incomplete plain-text Plan candidate captured before result
+/// classification. Candidate records are evidence only; they never imply DraftReady or Run.
+pub const PLAN_REVIEW_CANDIDATE_SCHEMA_VERSION: u16 = 1;
+/// Durable schema for a typed classification of one preserved Plan candidate.
+pub const PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION: u16 = 1;
+/// Maximum UTF-8 preview retained inline for a candidate whose complete body lives in managed
+/// artifact storage.
+pub const PLAN_REVIEW_CANDIDATE_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PLAN_INLINE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const PLAN_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+const PLAN_REVIEW_RESULT_ACTUAL_MAX_CHARS: usize = 256;
 
 /// Stable identifier for one durable plan artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -147,6 +161,291 @@ pub struct PlanDraftCreatedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<String>,
     pub created_at_ms: u64,
+}
+
+/// The only semantic outcomes a Plan review result may claim.
+///
+/// This enum deliberately contains no execution, task, permission, or intent authority. Those
+/// decisions remain host-owned and are made only after a user reviews a durable Plan draft.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewResultOutcome {
+    Draft,
+    NoPlan,
+}
+
+impl PlanReviewResultOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::NoPlan => "no_plan",
+        }
+    }
+}
+
+/// A validated, provider-neutral result from a Plan review.
+///
+/// `Draft` owns the exact policy-safe text that is persisted and hashed. `NoPlan` owns the
+/// bounded policy-safe explanation and intentionally carries no Plan identity or draft artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanReviewResult {
+    Draft(Box<PlanDraftCreatedEntry>),
+    NoPlan { reason: String },
+}
+
+/// Completeness proof attached to a preserved Plan candidate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewCandidateCompletenessV1 {
+    Complete,
+    Partial,
+    Unknown,
+}
+
+/// Actor that supplied a Plan review candidate classification.
+///
+/// The actor is deliberately limited to the two paths that can safely resolve a preserved
+/// candidate: a model confirmation receipt or an explicit user adoption command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewResolutionActorV1 {
+    Model,
+    User,
+}
+
+/// Append-only proof that one exact preserved candidate was classified as a draft or no-plan.
+///
+/// This record is evidence only. A `draft` outcome becomes `DraftReady` only when the enclosing
+/// terminal bundle also contains the corresponding `PlanDraftCreated` and attempt transition.
+/// `receipt_id` is a host-owned model result receipt or user command identity; it is never parsed
+/// as an instruction or used as execution authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewResolutionRecordedV1 {
+    pub schema_version: u16,
+    pub plan_review_id: PlanReviewId,
+    pub attempt_id: crate::PlanReviewAttemptId,
+    pub candidate_hash: String,
+    pub outcome: PlanReviewResultOutcome,
+    pub actor: PlanReviewResolutionActorV1,
+    pub receipt_id: String,
+    pub recorded_at_ms: u64,
+}
+
+impl PlanReviewResolutionRecordedV1 {
+    /// Validates the bounded, hash-bound resolution envelope before it enters the session log.
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version != PLAN_REVIEW_RESOLUTION_SCHEMA_VERSION {
+            bail!(
+                "unsupported plan review resolution schema version {}",
+                self.schema_version
+            );
+        }
+        if self.candidate_hash.is_empty()
+            || self.candidate_hash.len() > 256
+            || crate::safe_persistence_text(&self.candidate_hash) != self.candidate_hash
+        {
+            bail!("plan review resolution candidate hash is not bounded safe text");
+        }
+        if self.receipt_id.is_empty()
+            || self.receipt_id.len() > 512
+            || crate::safe_persistence_text(&self.receipt_id) != self.receipt_id
+        {
+            bail!("plan review resolution receipt id is not bounded safe text");
+        }
+        if self.recorded_at_ms == 0 {
+            bail!("plan review resolution timestamp must be non-zero");
+        }
+        Ok(())
+    }
+}
+
+/// Immutable, attempt-bound candidate text captured from a research or finalizer response.
+///
+/// Small bodies are retained inline. Larger bodies carry a bounded display preview plus a
+/// same-scope managed artifact descriptor; the durable hash always binds the complete body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewCandidateRecordedV1 {
+    pub schema_version: u16,
+    pub plan_review_id: PlanReviewId,
+    pub attempt_id: crate::PlanReviewAttemptId,
+    pub plan_id: PlanId,
+    pub source: PlanSourceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
+    pub content_hash: String,
+    pub content: String,
+    /// Optional managed artifact carrying the complete body when the inline preview is too large.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_artifact: Option<crate::session::ToolArtifactDescriptorV1>,
+    pub completeness: PlanReviewCandidateCompletenessV1,
+    pub recorded_at_ms: u64,
+}
+
+/// Captures a safe, bounded candidate body under the exact review attempt lineage.
+pub fn plan_review_candidate_recorded_entry(
+    plan_review_id: PlanReviewId,
+    attempt_id: crate::PlanReviewAttemptId,
+    plan_id: PlanId,
+    source: PlanSourceRef,
+    source_event_id: Option<String>,
+    content: &str,
+    completeness: PlanReviewCandidateCompletenessV1,
+    recorded_at_ms: u64,
+) -> Result<PlanReviewCandidateRecordedV1> {
+    let content = crate::safe_persistence_text(content.trim());
+    if content.is_empty() {
+        bail!("plan review candidate content must not be empty");
+    }
+    if content.len() > PLAN_INLINE_TEXT_MAX_BYTES {
+        bail!("plan review candidate exceeds the {PLAN_INLINE_TEXT_MAX_BYTES}-byte inline limit");
+    }
+    Ok(PlanReviewCandidateRecordedV1 {
+        schema_version: PLAN_REVIEW_CANDIDATE_SCHEMA_VERSION,
+        plan_review_id,
+        attempt_id,
+        plan_id,
+        source,
+        source_event_id,
+        content_hash: plan_text_hash(&content),
+        content,
+        content_artifact: None,
+        completeness,
+        recorded_at_ms,
+    })
+}
+
+/// Creates an attempt-bound candidate record whose complete body is stored in a managed artifact.
+/// The inline content is a bounded UTF-8 preview for product display; adoption must resolve the
+/// artifact and verify that its hash matches `content_hash` before creating a Plan draft.
+pub fn plan_review_candidate_recorded_entry_with_artifact(
+    plan_review_id: PlanReviewId,
+    attempt_id: crate::PlanReviewAttemptId,
+    plan_id: PlanId,
+    source: PlanSourceRef,
+    source_event_id: Option<String>,
+    preview: &str,
+    artifact: crate::session::ToolArtifactDescriptorV1,
+    completeness: PlanReviewCandidateCompletenessV1,
+    recorded_at_ms: u64,
+) -> Result<PlanReviewCandidateRecordedV1> {
+    artifact.validate()?;
+    if artifact.encoding != crate::session::ToolArtifactEncoding::Utf8 {
+        bail!("plan review candidate artifact must be UTF-8");
+    }
+    let content = crate::safe_persistence_text(preview.trim());
+    if content.is_empty() {
+        bail!("plan review candidate preview must not be empty");
+    }
+    if content.len() > PLAN_REVIEW_CANDIDATE_PREVIEW_MAX_BYTES {
+        bail!("plan review candidate preview exceeds the inline limit");
+    }
+    Ok(PlanReviewCandidateRecordedV1 {
+        schema_version: PLAN_REVIEW_CANDIDATE_SCHEMA_VERSION,
+        plan_review_id,
+        attempt_id: attempt_id.clone(),
+        plan_id,
+        source,
+        source_event_id,
+        content_hash: artifact.content_sha256.clone(),
+        content,
+        content_artifact: Some(artifact),
+        completeness,
+        recorded_at_ms,
+    })
+}
+
+impl PlanReviewResult {
+    #[must_use]
+    pub const fn outcome(&self) -> PlanReviewResultOutcome {
+        match self {
+            Self::Draft(_) => PlanReviewResultOutcome::Draft,
+            Self::NoPlan { .. } => PlanReviewResultOutcome::NoPlan,
+        }
+    }
+
+    #[must_use]
+    pub fn content(&self) -> &str {
+        match self {
+            Self::Draft(entry) => entry.inline_text.as_deref().unwrap_or_default(),
+            Self::NoPlan { reason } => reason,
+        }
+    }
+}
+
+/// Structured validation detail returned by the Plan result parser.
+///
+/// The actual value is projected through the normal durable-text safety policy and bounded before
+/// it is exposed to a caller. This lets runtime build corrective model input without making raw
+/// malformed payloads or secret-shaped text part of the feedback channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewValidationIssue {
+    pub code: String,
+    pub field_path: String,
+    pub expected: String,
+    pub bounded_safe_actual: String,
+    pub instruction: String,
+}
+
+/// Error raised when a typed Plan review result cannot be safely accepted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewResultValidationError {
+    pub issue: PlanReviewValidationIssue,
+}
+
+impl fmt::Display for PlanReviewResultValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "plan review result validation failed at {} ({}): expected {}; actual {}; {}",
+            self.issue.field_path,
+            self.issue.code,
+            self.issue.expected,
+            self.issue.bounded_safe_actual,
+            self.issue.instruction,
+        )
+    }
+}
+
+impl std::error::Error for PlanReviewResultValidationError {}
+
+impl PlanReviewValidationIssue {
+    fn new(
+        code: impl Into<String>,
+        field_path: impl Into<String>,
+        expected: impl Into<String>,
+        actual: impl AsRef<str>,
+        instruction: impl Into<String>,
+    ) -> Self {
+        let actual = crate::safe_persistence_text(actual.as_ref());
+        let bounded_safe_actual = actual
+            .chars()
+            .take(PLAN_REVIEW_RESULT_ACTUAL_MAX_CHARS)
+            .collect();
+        Self {
+            code: code.into(),
+            field_path: field_path.into(),
+            expected: expected.into(),
+            bounded_safe_actual,
+            instruction: instruction.into(),
+        }
+    }
+}
+
+fn plan_review_result_validation_error(
+    code: impl Into<String>,
+    field_path: impl Into<String>,
+    expected: impl Into<String>,
+    actual: impl AsRef<str>,
+    instruction: impl Into<String>,
+) -> anyhow::Error {
+    anyhow::Error::new(PlanReviewResultValidationError {
+        issue: PlanReviewValidationIssue::new(code, field_path, expected, actual, instruction),
+    })
 }
 
 /// Complete immutable detail for one structured plan-review step.
@@ -2458,6 +2757,118 @@ pub fn submit_plan_draft_entry(
         created_at_ms,
         workspace_snapshot_id,
     )
+}
+
+/// Core envelope for a provider-neutral Plan review result.
+///
+/// Presentation metadata is intentionally not part of this first version. Keeping the envelope
+/// small means a provider only has to choose the result type and provide the complete text; the
+/// host can add display-only projections later without making them acceptance or authority fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PlanReviewResultEnvelope {
+    pub schema_version: u32,
+    pub outcome: PlanReviewResultOutcome,
+    pub content: String,
+}
+
+/// Decodes and validates a provider-neutral Plan review result without assigning Plan identity.
+///
+/// This is useful when a caller is recovering a persisted tool result: it can classify the
+/// durable `draft`/`no_plan` envelope before deciding whether to materialize a Plan artifact.
+pub fn decode_plan_review_result(args_json: &str) -> Result<PlanReviewResultEnvelope> {
+    let args: PlanReviewResultEnvelope = serde_json::from_str(args_json).map_err(|error| {
+        plan_review_result_validation_error(
+            "invalid_result_envelope",
+            "$",
+            "schema_version, outcome, and content only",
+            error.to_string(),
+            "return exactly one schema_version, outcome, and content field",
+        )
+    })?;
+    if args.schema_version != PLAN_REVIEW_RESULT_SCHEMA_VERSION {
+        return Err(plan_review_result_validation_error(
+            "invalid_result_schema_version",
+            "$.schema_version",
+            PLAN_REVIEW_RESULT_SCHEMA_VERSION.to_string(),
+            args.schema_version.to_string(),
+            "use the currently advertised Plan review result schema version",
+        ));
+    }
+    Ok(PlanReviewResultEnvelope {
+        content: bounded_plan_review_result_content(&args.content)?,
+        ..args
+    })
+}
+
+/// Validates and materializes the small typed Plan review result envelope.
+///
+/// A `draft` result stores the complete policy-safe content as an immutable plain-text Plan. A
+/// `no_plan` result returns only a bounded explanation and never creates a Plan draft. This
+/// boundary is deliberately independent from the legacy v2 structured submission so callers can
+/// migrate the model-facing contract without making execution hints mandatory.
+///
+/// # Errors
+///
+/// Returns a [`PlanReviewResultValidationError`] wrapped in `anyhow::Error` for malformed JSON,
+/// unknown fields, an unsupported schema/outcome, empty content, or content beyond the durable
+/// inline bound. Callers can downcast the error to retain typed corrective feedback.
+pub fn submit_plan_review_result(
+    args_json: &str,
+    plan_id: PlanId,
+    source: PlanSourceRef,
+    created_at_ms: u64,
+    workspace_snapshot_id: Option<String>,
+) -> Result<PlanReviewResult> {
+    let args = decode_plan_review_result(args_json)?;
+
+    match args.outcome {
+        PlanReviewResultOutcome::Draft => {
+            let draft = plain_text_plan_draft_entry_with_plan_id(
+                plan_id,
+                &args.content,
+                source,
+                created_at_ms,
+                workspace_snapshot_id,
+            )?
+            .ok_or_else(|| {
+                plan_review_result_validation_error(
+                    "empty_result_content",
+                    "$.content",
+                    "a non-empty complete Plan",
+                    args.content,
+                    "provide the complete readable Plan body for a draft result",
+                )
+            })?;
+            Ok(PlanReviewResult::Draft(Box::new(draft)))
+        }
+        PlanReviewResultOutcome::NoPlan => Ok(PlanReviewResult::NoPlan {
+            reason: args.content,
+        }),
+    }
+}
+
+fn bounded_plan_review_result_content(content: &str) -> Result<String> {
+    let content = crate::safe_persistence_text(content.trim());
+    if content.trim().is_empty() {
+        return Err(plan_review_result_validation_error(
+            "empty_result_content",
+            "$.content",
+            "a non-empty complete Plan or no-plan explanation",
+            content,
+            "provide a bounded explanation or complete readable Plan body",
+        ));
+    }
+    if content.len() > PLAN_INLINE_TEXT_MAX_BYTES {
+        return Err(plan_review_result_validation_error(
+            "result_content_too_large",
+            "$.content",
+            format!("at most {PLAN_INLINE_TEXT_MAX_BYTES} bytes"),
+            format!("{} bytes", content.len()),
+            "shorten the content while preserving the complete result",
+        ));
+    }
+    Ok(content)
 }
 
 /// Builds the durable objective passed to the direct executor after a user approves a plan.

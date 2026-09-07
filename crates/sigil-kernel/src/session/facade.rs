@@ -1835,7 +1835,7 @@ impl Session {
     /// Returns the session-backed recorder used by a root cancellation owner.
     ///
     /// In-memory sessions receive a process-local recorder. This keeps cancellation's
-    /// idempotency/order guarantees available to provider-only safe mode without silently
+    /// idempotency/order guarantees available to process-local sessions without silently
     /// creating a JSONL store or any filesystem side effect.
     pub fn run_cancellation_recorder(
         &self,
@@ -1935,6 +1935,24 @@ impl Session {
 
     pub fn entries(&self) -> &[SessionLogEntry] {
         &self.entries
+    }
+
+    /// Returns the first durable user message with `message_id` from the raw session log.
+    ///
+    /// A direct [`SessionLogEntry::User`] entry and the durable user message owned by a
+    /// [`ControlEntry::ConversationInputPromoted`] entry are the only accepted sources. This
+    /// deliberately does not consult compaction or model-context projections.
+    #[must_use]
+    pub fn source_user_message(&self, message_id: &str) -> Option<&ModelMessage> {
+        self.entries.iter().find_map(|entry| match entry {
+            SessionLogEntry::User(message) if message.id == message_id => Some(message),
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                if promotion.durable_user_message.id == message_id =>
+            {
+                Some(&promotion.durable_user_message)
+            }
+            _ => None,
+        })
     }
 
     pub fn provider_name(&self) -> &str {
@@ -3361,6 +3379,16 @@ impl Session {
 
     pub fn store_path(&self) -> Option<&Path> {
         self.store.as_ref().map(JsonlSessionStore::path)
+    }
+
+    /// Returns whether this session can survive a process restart.
+    #[must_use]
+    pub fn persistence_capability(&self) -> crate::SessionPersistenceCapability {
+        if self.store.is_some() {
+            crate::SessionPersistenceCapability::Durable
+        } else {
+            crate::SessionPersistenceCapability::Ephemeral
+        }
     }
 
     /// Returns the next session-stream sequence for synthetic evidence tied to this session.

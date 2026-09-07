@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::{
     CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
@@ -33,6 +33,11 @@ pub fn projected_agent_run_readiness(
     final_message_id: &str,
     outcome: &AgentRunOutcome,
 ) -> Result<ReadinessEvaluatedEntry> {
+    if !options.workspace_capability().is_available()
+        || !session.persistence_capability().is_durable()
+    {
+        bail!("readiness projection requires durable workspace and session capabilities");
+    }
     let scope = EvidenceScope::Run(final_message_id.to_owned());
     let projection = session.verification_state_projection();
     let mut policy = projection

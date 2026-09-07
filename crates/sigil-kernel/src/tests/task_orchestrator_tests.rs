@@ -2915,34 +2915,6 @@ async fn run_resumes_started_planner_in_its_existing_child_session() -> Result<(
     Ok(())
 }
 
-#[test]
-fn new_with_child_runner_constructs_orchestrator() {
-    let _orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
-        super::TestAgentTaskChildSessionRunner::new(
-            boxed_agent(PlannerProvider, ToolRegistry::new()),
-            boxed_agent(
-                CapturingExecutorProvider {
-                    requests: Arc::new(Mutex::new(Vec::new())),
-                },
-                ToolRegistry::new(),
-            ),
-            boxed_agent(
-                CapturingExecutorProvider {
-                    requests: Arc::new(Mutex::new(Vec::new())),
-                },
-                ToolRegistry::new(),
-            ),
-            boxed_agent(
-                CapturingExecutorProvider {
-                    requests: Arc::new(Mutex::new(Vec::new())),
-                },
-                ToolRegistry::new(),
-            ),
-            boxed_agent(StaticSynthesisProvider, ToolRegistry::new()),
-        ),
-    );
-}
-
 struct StaticSynthesisProvider;
 
 #[async_trait]

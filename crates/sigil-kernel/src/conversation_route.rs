@@ -11,6 +11,10 @@ use crate::{
 
 pub const REQUEST_PLAN_REVIEW_TOOL_NAME: &str = "request_plan_review";
 pub const SUBMIT_PLAN_DRAFT_TOOL_NAME: &str = "submit_plan_draft";
+/// Model-visible tool used by a submit-only finalizer to confirm a previously preserved,
+/// attempt-bound complete candidate. The candidate body is supplied by the host context; the
+/// model only emits the bounded confirmation enum.
+pub const CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME: &str = "confirm_plan_review_candidate";
 pub const MAX_PLAN_REVIEW_REASON_CODES: usize = 6;
 
 /// Domain separators for retry-stable plan review identities. Each identity kind uses a distinct
@@ -443,6 +447,28 @@ pub fn plan_review_attempt_id_for_review(plan_review_id: &PlanReviewId) -> PlanR
     ))
 }
 
+/// Derives a retry-stable successor attempt identity from an explicit command receipt.
+///
+/// The command identity is part of the digest so concurrent retries with different commands do
+/// not accidentally share a physical attempt. Replaying the same command reproduces the same
+/// successor identity and lets the session writer enforce one durable winner at the frontier.
+#[must_use]
+pub fn plan_review_attempt_id_for_retry(
+    plan_review_id: &PlanReviewId,
+    predecessor_attempt_id: &PlanReviewAttemptId,
+    command_id: &str,
+) -> PlanReviewAttemptId {
+    PlanReviewAttemptId(stable_event_uuid(
+        PLAN_REVIEW_ATTEMPT_ID_DOMAIN,
+        &format!(
+            "{}|retry|{}|command|{}",
+            plan_review_id.as_str(),
+            predecessor_attempt_id.as_str(),
+            command_id
+        ),
+    ))
+}
+
 /// Derives the next attempt identity for a revision under the same plan review lifecycle.
 #[must_use]
 pub fn plan_review_attempt_id_for_revision(
@@ -493,7 +519,7 @@ pub fn plan_review_plan_id_for_attempt(
     .expect("stable event uuid is always a valid plan id")
 }
 
-/// Host-bound context for the typed `submit_plan_draft` internal tool.
+/// Host-bound context for the typed `submit_plan_review_result` internal tool.
 ///
 /// Carries the host-derived plan identity and source binding; the model supplies only the
 /// structured draft fields.
@@ -506,22 +532,28 @@ pub struct PlanReviewDraftContext {
     pub source: crate::PlanSourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<String>,
+    /// Complete candidate text already preserved by the host. When present, the model may only
+    /// confirm the candidate through `confirm_plan_review_candidate`; it must not restate or
+    /// replace the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_content: Option<String>,
 }
 
 /// Stable model-visible contract for one read-only plan review run.
 ///
-/// The run researches with read-only tools and should prefer a typed `submit_plan_draft` call.
-/// Complete final prose is a bounded review-only fallback and never becomes DAG authority.
+/// The run researches with read-only tools and should prefer a typed
+/// `submit_plan_review_result` call. Complete final prose remains a bounded review-only fallback
+/// and never becomes DAG authority.
 #[must_use]
 pub fn plan_review_system_prompt_contract_material() -> &'static str {
-    "You are running a read-only plan review for the current request. Perform only a small, targeted amount of workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Prefer submitting one validated plan draft by calling submit_plan_draft with schema_version 2, a summary, readable steps, target paths, and suggested checks. If you cannot reliably call that tool, return the complete readable Plan as final text; the host will preserve it for review without treating its prose as Task DAG authority. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
+    "You are running a read-only plan review for the current request. Perform targeted workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Continue until you can submit a result or the caller's ordinary model-turn budget is exhausted. Around the eighth research turn, reassess whether the evidence supports a result or a clarification request; this is a soft checkpoint and does not remove tools or force completion. Prefer submitting one validated result by calling submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. For draft, content is the complete readable Plan body; for no_plan, content is the reason. When the host supplies a complete preserved candidate and advertises confirm_plan_review_candidate, call that tool with decision accept; do not restate or modify the candidate body. If you cannot reliably call the advertised typed tool, return the complete readable Plan as final text; the host will preserve it as a candidate for review without treating its prose as Task DAG authority. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
 }
 
 /// Stable host-owned contract injected when an automatic plan review run finished without a
-/// typed draft; the retry is bounded to one additional turn.
+/// typed result; the retry is bounded to one additional turn.
 #[must_use]
 pub fn plan_review_no_draft_retry_contract_material() -> &'static str {
-    "The research phase is complete and this is the single plan-finalization turn. Do not request more workspace research or repeat reconnaissance. Prefer calling submit_plan_draft with schema_version 2, a summary, readable steps, target paths and suggested checks. The only tool available in this turn is submit_plan_draft. If you cannot reliably call that tool, return the complete readable Plan as final text instead; the host will preserve it for user review without treating prose as Task DAG authority. Return a short no-plan explanation only when the recorded evidence is truthfully insufficient to propose any Plan."
+    "The research phase is complete and this is the single plan-finalization turn. Do not request more workspace research or repeat reconnaissance. If a complete preserved candidate is supplied and confirm_plan_review_candidate is advertised, call it with decision accept; this is the only confirmation needed and the candidate body must remain byte-for-byte unchanged. Otherwise call submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. The only tool available in this turn is the advertised finalization tool. If you cannot reliably call that tool, return the complete readable Plan as final text instead; the host will preserve it for user review without treating prose as Task DAG authority. Return no_plan only when the recorded evidence is truthfully insufficient to propose any Plan."
 }
 
 /// Derives the retry-stable child session reference for one plan review attempt.
@@ -731,6 +763,57 @@ pub fn submit_plan_draft_tool_spec() -> ToolSpec {
                 "notes": {"type": "array", "items": {"type": "string"}}
             },
             "required": ["schema_version", "summary", "steps", "target_paths", "suggested_checks"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+/// Model-visible schema for the provider-neutral Plan review result envelope.
+///
+/// The host owns the Plan identity, source lineage, hash, timestamp, and every execution
+/// permission. The model only classifies a complete readable result as a draft or explains why
+/// no Plan is warranted.
+#[must_use]
+pub fn submit_plan_review_result_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: crate::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
+        description: "Submit one complete Plan review result. Use schema_version 1, outcome draft or no_plan, and bounded content. For draft, content is the complete readable Plan body; for no_plan, content is the reason. The host owns identity, hash, timestamps, approvals, and execution permissions.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "schema_version": {"type": "integer", "const": crate::PLAN_REVIEW_RESULT_SCHEMA_VERSION},
+                "outcome": {"type": "string", "enum": ["draft", "no_plan"]},
+                "content": {"type": "string", "minLength": 1, "maxLength": 65536}
+            },
+            "required": ["schema_version", "outcome", "content"],
+            "additionalProperties": false
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+/// Model-visible schema for confirming one complete host-preserved Plan candidate.
+///
+/// The candidate body is bound in [`PlanReviewDraftContext`]. This tool intentionally accepts no
+/// content field, so confirmation cannot silently alter the hash-bound candidate text.
+#[must_use]
+pub fn confirm_plan_review_candidate_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME.to_owned(),
+        description: "Confirm the complete Plan candidate already supplied by the host. Emit decision accept only; the host owns the exact candidate body, identity, hash, timestamps, permissions, and execution authority.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["accept"]}
+            },
+            "required": ["decision"],
             "additionalProperties": false
         }),
         category: ToolCategory::Custom,
@@ -1336,7 +1419,17 @@ impl PlanReviewProjection {
                     && entry.attempt_ordinal == previous.attempt_ordinal.saturating_add(1)
                     && previous.base_plan_id == entry.base_plan_id
                     && previous.base_plan_hash == entry.base_plan_hash;
-                if !legal_revision_retry {
+                let legal_terminal_retry = entry.status == PlanReviewAttemptStatus::Started
+                    && entry.attempt_ordinal == previous.attempt_ordinal.saturating_add(1)
+                    && entry.revision_request_id == previous.revision_request_id
+                    && entry.base_plan_id == previous.base_plan_id
+                    && entry.base_plan_hash == previous.base_plan_hash;
+                let legal_candidate_adoption = entry.status == PlanReviewAttemptStatus::DraftReady
+                    && entry.attempt_ordinal == previous.attempt_ordinal.saturating_add(1)
+                    && entry.revision_request_id == previous.revision_request_id
+                    && entry.base_plan_id == previous.base_plan_id
+                    && entry.base_plan_hash == previous.base_plan_hash;
+                if !legal_revision_retry && !legal_terminal_retry && !legal_candidate_adoption {
                     bail!(
                         "plan review {} terminal attempt cannot accept unrelated attempt {}",
                         entry.plan_review_id.as_str(),

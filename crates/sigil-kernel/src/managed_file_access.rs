@@ -83,12 +83,80 @@ pub enum ManagedFileExecutionInputV1 {
     Delete,
 }
 
+impl ManagedFileExecutionInputV1 {
+    /// Canonical, non-secret description used to bind an approved plan to the exact invocation
+    /// parameters. It is intentionally separate from the physical path and is recomputed by the
+    /// authority at execution time.
+    #[must_use]
+    pub fn operation_scope(&self) -> String {
+        fn frame(kind: &str, fields: impl IntoIterator<Item = String>) -> String {
+            let mut scope = format!("{kind}\0");
+            for field in fields {
+                // Length-prefix every field so an embedded NUL (or any other delimiter) cannot
+                // make two distinct invocations share an approval scope.
+                scope.push_str(&field.len().to_string());
+                scope.push(':');
+                scope.push_str(&field);
+                scope.push('\0');
+            }
+            scope
+        }
+        match self {
+            Self::Read {
+                offset,
+                limit,
+                max_bytes,
+            } => frame(
+                "read",
+                [offset.to_string(), limit.to_string(), max_bytes.to_string()],
+            ),
+            Self::List {
+                recursive,
+                limit,
+                max_depth,
+            } => frame(
+                "list",
+                [
+                    recursive.to_string(),
+                    limit.to_string(),
+                    max_depth.to_string(),
+                ],
+            ),
+            Self::Glob { pattern, limit } => frame("glob", [limit.to_string(), pattern.clone()]),
+            Self::Grep {
+                pattern,
+                limit,
+                max_bytes,
+            } => frame(
+                "grep",
+                [limit.to_string(), max_bytes.to_string(), pattern.clone()],
+            ),
+            Self::Write { content } => frame("write", [content.clone()]),
+            Self::Edit { old_text, new_text } => {
+                frame("edit", [old_text.clone(), new_text.clone()])
+            }
+            Self::Delete => frame("delete", []),
+        }
+    }
+}
+
 /// Authority-private executor request after kernel seal/issue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ManagedFileExecutionRequestV1 {
     pub access: ManagedFileAccessRequestV1,
     pub input: ManagedFileExecutionInputV1,
+    /// Session-owned mutation recorder. Read-only callers leave this absent; write effects are
+    /// refused unless the authority can append the existing mutation facts before returning.
+    pub mutation_recorder: Option<crate::MutationEventRecorder>,
 }
+
+impl PartialEq for ManagedFileExecutionRequestV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.access == other.access && self.input == other.input
+    }
+}
+
+impl Eq for ManagedFileExecutionRequestV1 {}
 
 /// Bounded result returned by the authority executor; callers do not perform a second filesystem
 /// read. `payload` is already policy-safe text/JSON and is bounded by the authority.
@@ -104,6 +172,11 @@ pub struct ManagedFileExecutionOutcomeV1 {
     pub returned_lines: u64,
     pub total_lines: u64,
     pub truncated: bool,
+    /// Workspace-relative paths whose contents or directory entries changed as part of this
+    /// operation. Read-only operations leave this empty; mutation callers must project it into
+    /// `ToolResultMeta.changed_files` rather than inferring it from free-form payload text.
+    #[serde(default)]
+    pub changed_files: Vec<String>,
 }
 
 /// Authority-owned pre-approval preview input. A preview may inspect only the exact pathless
@@ -210,6 +283,10 @@ pub struct ToolFileAccessAdmissionTokenV1 {
     binding: ManagedFileAdmissionBindingV1,
     subject_binding_hash: CanonicalHash,
     operation_digest: CanonicalHash,
+    /// Unique kernel-issued identity for this admission.  The authority uses this value for
+    /// one-shot replay tracking; subject/operation hashes describe *what* is allowed, while
+    /// this id describes *which call* is allowed.
+    claim_id: String,
     #[allow(dead_code)]
     claim: NonCloneOneShotClaim,
 }
@@ -221,11 +298,13 @@ impl ToolFileAccessAdmissionTokenV1 {
         binding: ManagedFileAdmissionBindingV1,
         subject_binding_hash: CanonicalHash,
         operation_digest: CanonicalHash,
+        claim_id: String,
     ) -> Self {
         Self {
             binding,
             subject_binding_hash,
             operation_digest,
+            claim_id,
             claim: NonCloneOneShotClaim {
                 _authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(
                     "broker-file-access".to_owned(),
@@ -242,10 +321,16 @@ impl ToolFileAccessAdmissionTokenV1 {
         subject_binding_hash: CanonicalHash,
         operation_digest: CanonicalHash,
     ) -> Self {
+        let claim_id = format!(
+            "qualification-{}-{}",
+            subject_binding_hash.to_hex(),
+            operation_digest.to_hex()
+        );
         Self {
             binding,
             subject_binding_hash,
             operation_digest,
+            claim_id,
             claim: NonCloneOneShotClaim {
                 _authenticator: OpaqueKernelCapabilityAuthenticatorV1::new(
                     "qualification".to_owned(),
@@ -264,6 +349,12 @@ impl ToolFileAccessAdmissionTokenV1 {
 
     pub fn operation_digest(&self) -> CanonicalHash {
         self.operation_digest
+    }
+
+    /// Stable opaque identity for replay adjudication. Consumers may compare or forward it,
+    /// but cannot mint a valid token from the value.
+    pub fn claim_id(&self) -> &str {
+        &self.claim_id
     }
 }
 
@@ -437,10 +528,6 @@ pub enum ManagedFileAccessErrorV1 {
         operation_id: String,
         binding_hash: CanonicalHash,
     },
-    #[error("managed file delete journal is corrupted: {0}")]
-    JournalCorrupted(String),
-    #[error("managed file delete journal is unavailable: {0}")]
-    JournalUnavailable(String),
     #[error("managed file physical execution failed: {0}")]
     PhysicalExecutionFailed(String),
 }

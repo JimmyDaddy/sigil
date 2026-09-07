@@ -115,3 +115,24 @@ fn r71_tool_authority_unregistered_subject_fails_closed() {
         )
     ));
 }
+
+#[test]
+fn r71_managed_file_operation_scope_frames_embedded_delimiters() {
+    use crate::managed_file_access::ManagedFileExecutionInputV1;
+
+    let first = ManagedFileExecutionInputV1::Edit {
+        old_text: "a\0b".to_owned(),
+        new_text: "c".to_owned(),
+    }
+    .operation_scope();
+    let second = ManagedFileExecutionInputV1::Edit {
+        old_text: "a".to_owned(),
+        new_text: "b\0c".to_owned(),
+    }
+    .operation_scope();
+
+    assert_ne!(
+        first, second,
+        "distinct edit arguments must never share an approval scope"
+    );
+}

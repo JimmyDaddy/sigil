@@ -1423,8 +1423,9 @@ impl RootConfig {
     /// This is used by multi-resource transactions that must keep credential and config updates
     /// under one cross-process lock.
     pub fn save_with_update_lock(&self, path: &Path, lock: &ConfigUpdateLockGuard) -> Result<()> {
+        let normalized_path = normalize_config_path_for_update_lock(path);
         anyhow::ensure!(
-            lock.config_path == path,
+            lock.config_path == normalized_path,
             "config update lock does not match publication path"
         );
         let rendered = self.persisted_toml()?;
@@ -1622,7 +1623,7 @@ impl ConfigUpdateLockGuard {
             }
         }
         Ok(Self {
-            config_path: config_path.to_path_buf(),
+            config_path: normalize_config_path_for_update_lock(config_path),
             file,
             #[cfg(unix)]
             _parent_directory: parent_directory,
@@ -1630,6 +1631,25 @@ impl ConfigUpdateLockGuard {
             _parent_guards: parent_guards,
         })
     }
+}
+
+/// Binds an update lock to the stable parent identity while preserving the final path component.
+///
+/// Boot authority snapshots canonicalize the config parent before publishing, whereas CLI and
+/// adapter callers may retain a lexical alias such as `/private/tmp` versus `/tmp` on macOS.
+/// Those paths address the same no-follow destination, so the lock association must compare the
+/// normalized parent identity without ever resolving a potentially malicious final symlink.
+fn normalize_config_path_for_update_lock(config_path: &Path) -> PathBuf {
+    let Some(file_name) = config_path.file_name() else {
+        return config_path.to_path_buf();
+    };
+    let Some(parent) = config_path.parent() else {
+        return config_path.to_path_buf();
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(file_name))
+        .unwrap_or_else(|_| config_path.to_path_buf())
 }
 
 impl Drop for ConfigUpdateLockGuard {

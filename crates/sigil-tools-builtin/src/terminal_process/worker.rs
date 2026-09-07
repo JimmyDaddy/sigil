@@ -1,9 +1,10 @@
 use super::*;
+use sigil_process::ProcessTreeOwnerGuard;
 
 #[cfg(unix)]
 use crate::process_group::{process_group_has_live_members, send_process_group_signal};
 #[cfg(windows)]
-use crate::process_owner::terminate_owned_process_tree;
+use sigil_process::terminate_owned_process_tree;
 
 pub(super) struct PtyRuntime {
     pub(super) process_owner: ProcessTreeOwnerGuard,

@@ -6,7 +6,6 @@ mod managed_execution;
 mod path;
 #[cfg(unix)]
 mod process_group;
-mod process_owner;
 mod registry;
 mod scratch_namespace;
 mod shell;
@@ -82,7 +81,7 @@ pub struct BuiltinTerminalPlatformCapability {
 pub fn inspect_builtin_terminal_platform_capability()
 -> anyhow::Result<BuiltinTerminalPlatformCapability> {
     let shell = shell_runtime::ResolvedShell::detect_default();
-    process_owner::validate_process_tree_owner()?;
+    sigil_process::validate_process_tree_owner()?;
     Ok(BuiltinTerminalPlatformCapability {
         resolved_shell: shell.program_string(),
         shell_dialect: shell.dialect().as_str(),

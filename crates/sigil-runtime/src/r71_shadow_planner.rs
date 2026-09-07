@@ -14,8 +14,8 @@ use sigil_kernel::managed_execution::{
 };
 use sigil_kernel::resource::{
     CanonicalHash, EnvironmentProfileClassV1, OpaqueExecutionPlanDraftId, OpaqueRequirementId,
-    OpaqueWorkspaceId, ResourceAccessV1, ResourceBlockerScopeV1, ResourceCleanupPolicyV1,
-    ResourceJournalScopeV1, ResourceKindV1, ResourceLeaseLifetimeV1, ResourceOwnerScopeV1,
+    OpaqueWorkspaceId, ResourceAccessV1, ResourceAuthorityScopeV1, ResourceBlockerScopeV1,
+    ResourceCleanupPolicyV1, ResourceKindV1, ResourceLeaseLifetimeV1, ResourceOwnerScopeV1,
     ResourcePurposeV1, ResourceQuotaClassV1, ResourceQuotaProfileV1, ResourceRequirementKeyV1,
     ResourceRequirementSetV1, ResourceRequirementV1, ResourceRetentionPolicyV1,
     ResourceVisibilityV1,
@@ -161,7 +161,7 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
                 .as_slice(),
         );
         let resource_requirements = self.resource_requirements_for(request.purpose);
-        let attempt_scope = ResourceJournalScopeV1::Workspace(OpaqueWorkspaceId::new(
+        let attempt_scope = ResourceAuthorityScopeV1::Workspace(OpaqueWorkspaceId::new(
             self.config.workspace_id.clone(),
         ));
         let capture_policy_hash = canonical_digest(
@@ -196,8 +196,8 @@ impl ManagedExecutionPlannerV1 for ShadowPlannerV1 {
             argv_digest,
             structured_command_digest: request.structured_command_digest,
             cwd_subject_binding_hash: canonical_digest(request.cwd_subject_ref.as_str().as_bytes()),
-            attempt_journal_scope: attempt_scope,
-            attempt_journal_scope_hash: canonical_digest(b"shadow-attempt-scope-hash-1"),
+            attempt_authority_scope: attempt_scope,
+            attempt_authority_scope_hash: canonical_digest(b"shadow-attempt-scope-hash-1"),
             resource_plan_hash: canonical_digest(b"shadow-resource-plan-hash-1"),
             resource_requirements,
             environment_profile: sigil_kernel::managed_execution::EnvironmentProfileRefV1 {

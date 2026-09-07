@@ -6,7 +6,7 @@ use sigil_kernel::{
 };
 
 use super::*;
-use crate::register_code_intelligence_tools_with_workspace_trust;
+use crate::register_code_intelligence_tools;
 
 #[tokio::test]
 async fn trust_required_blocks_unknown_restricted_and_denied_before_spawn() {
@@ -133,11 +133,12 @@ async fn trust_required_tool_error_is_permission_denied_and_write_specs_remain_s
     let temp = tempfile::tempdir().expect("workspace tempdir");
     let sentinel = prepare_workspace(temp.path());
     let mut registry = ToolRegistry::new();
-    register_code_intelligence_tools_with_workspace_trust(
+    register_code_intelligence_tools(
         &mut registry,
         &sentinel_config(temp.path(), CodeIntelStartup::Lazy, true),
         temp.path().to_path_buf(),
         WorkspaceTrust::Unknown,
+        None,
     )
     .expect("code intelligence tools should register");
 

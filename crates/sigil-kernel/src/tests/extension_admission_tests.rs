@@ -12,10 +12,10 @@ fn plan() -> ExtensionProcessPlanV1 {
         extension_kind: ExtensionKindV1::McpStdio,
         extension_id: OpaqueExtensionId::new("mcp-1".to_owned()),
         config_generation: 1,
-        attempt_journal_scope: ResourceJournalScopeV1::Workspace(OpaqueWorkspaceId::new(
+        attempt_authority_scope: ResourceAuthorityScopeV1::Workspace(OpaqueWorkspaceId::new(
             "w1".to_owned(),
         )),
-        attempt_journal_scope_hash: hash(1),
+        attempt_authority_scope_hash: hash(1),
         executable_and_args_digest: hash(2),
         config_policy_digest: hash(3),
         permission_upper_bound_hash: hash(4),
@@ -44,7 +44,7 @@ fn decision(
         },
         domain_event_id: OpaqueDomainEventId::new("event-1".to_owned()),
         extension_plan_hash: plan_hash,
-        attempt_journal_scope_hash: hash(1),
+        attempt_authority_scope_hash: hash(1),
         policy_version: "v1".to_owned(),
         authorization: auth,
         decision_hash: hash(14),

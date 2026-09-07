@@ -30,10 +30,7 @@ pub use process::{
     LanguageServerLaunchPortV1, LanguageServerLaunchRequestV1, LanguageServerProcessIoV1,
 };
 pub use service::{CodeDiagnostic, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol};
-pub use tools::{
-    register_code_intelligence_tools, register_code_intelligence_tools_with_workspace_trust,
-    register_code_intelligence_tools_with_workspace_trust_and_process_launcher,
-};
+pub use tools::register_code_intelligence_tools;
 pub use workspace::{
     EffectiveServerPlan, PlannedServerStatus, config_enabled, effective_server_plan,
 };

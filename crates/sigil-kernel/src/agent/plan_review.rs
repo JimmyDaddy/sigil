@@ -3,10 +3,9 @@ use serde_json::json;
 
 use crate::{
     AutomaticRouteCapability, ControlEntry, ConversationRoute, ConversationRouteDecisionProjection,
-    ConversationRouteDecisionRecordedEntry, ConversationTurnRef, EventHandler,
-    PlanReviewHandoffBinding, Session, SessionLogEntry, StartPlanReviewAction, TaskRoutingPolicy,
-    ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResult, ToolResultMeta,
-    plan_review_reason_codes,
+    ConversationRouteDecisionRecordedEntry, EventHandler, PlanReviewHandoffBinding, Session,
+    StartPlanReviewAction, TaskRoutingPolicy, ToolCall, ToolErrorKind, ToolExecutionStatus,
+    ToolResult, ToolResultMeta, plan_review_reason_codes,
 };
 
 use super::{
@@ -158,12 +157,15 @@ fn validate_binding_against_session(
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("plan review source belongs to a different session");
     }
-    let objective = source_turn_objective(session, &binding.source_turn).ok_or_else(|| {
-        anyhow!(
-            "plan review source user turn {} is not present",
-            binding.source_turn.message_id
-        )
-    })?;
+    let objective = session
+        .source_user_message(&binding.source_turn.message_id)
+        .map(|message| message.content.clone().unwrap_or_default())
+        .ok_or_else(|| {
+            anyhow!(
+                "plan review source user turn {} is not present",
+                binding.source_turn.message_id
+            )
+        })?;
     if objective != binding.objective {
         bail!("plan review objective does not match the persisted source turn");
     }
@@ -174,26 +176,6 @@ fn validate_binding_against_session(
         bail!("plan review route contract fingerprint is empty");
     }
     Ok(())
-}
-
-fn source_turn_objective(session: &Session, source_turn: &ConversationTurnRef) -> Option<String> {
-    session.entries().iter().find_map(|entry| match entry {
-        SessionLogEntry::User(message) if message.id == source_turn.message_id => {
-            Some(message.content.clone().unwrap_or_default())
-        }
-        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
-            if promoted.durable_user_message.id == source_turn.message_id =>
-        {
-            Some(
-                promoted
-                    .durable_user_message
-                    .content
-                    .clone()
-                    .unwrap_or_default(),
-            )
-        }
-        _ => None,
-    })
 }
 
 fn append_control<H>(session: &mut Session, handler: &mut H, control: ControlEntry) -> Result<()>

@@ -109,8 +109,8 @@ impl ManagedExecutionPlannerV1 for TestPlannerV1 {
             argv_digest: draft_hash,
             structured_command_digest: request.structured_command_digest,
             cwd_subject_binding_hash: zero_hash(),
-            attempt_journal_scope: ResourceJournalScopeV1::Application,
-            attempt_journal_scope_hash: zero_hash(),
+            attempt_authority_scope: ResourceAuthorityScopeV1::Application,
+            attempt_authority_scope_hash: zero_hash(),
             resource_plan_hash: zero_hash(),
             resource_requirements: ResourceRequirementSetV1 {
                 schema_version: 1,

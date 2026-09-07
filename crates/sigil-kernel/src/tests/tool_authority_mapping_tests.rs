@@ -179,7 +179,7 @@ fn r71_tool_authority_v3_context_adjudicates_or_defers() {
         Vec::new(),
         Vec::new(),
         Some(file_ref),
-        crate::resource::ResourceJournalScopeV1::Application,
+        crate::resource::ResourceAuthorityScopeV1::Application,
         crate::resource::RequestedEnforcementV1 {
             requirement: crate::resource::EnforcementRequirementClassV1::ExplicitUnconfined,
             deny_ambient_system_temp_write: false,

@@ -596,9 +596,12 @@ impl DesktopHttpClient {
         {
             return Err(DesktopClientError::InvalidResponse);
         }
-        validate_opaque_queue_generation(&receipt.generation.0)
-            .map_err(|_| DesktopClientError::InvalidResponse)?;
-        validate_conversation_queue_view(session_id, &receipt.queue)?;
+        if validate_opaque_queue_generation(&receipt.generation.0).is_err() {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if validate_conversation_queue_view(session_id, &receipt.queue).is_err() {
+            return Err(DesktopClientError::InvalidResponse);
+        }
         if receipt.generation != receipt.queue.generation {
             return Err(DesktopClientError::InvalidResponse);
         }
@@ -886,9 +889,29 @@ impl DesktopHttpClient {
         expected_plan_hash: &str,
         action: crate::DesktopPlanDecisionAction,
     ) -> Result<crate::DesktopPlanDecisionCommandReceipt, DesktopClientError> {
+        self.plan_decision_with_candidate(session_id, plan_id, expected_plan_hash, None, action)
+            .await
+    }
+
+    /// Applies one exact typed plan decision, optionally binding a preserved candidate hash for
+    /// terminal review retry/adoption.
+    pub async fn plan_decision_with_candidate(
+        &self,
+        session_id: &str,
+        plan_id: &str,
+        expected_plan_hash: &str,
+        expected_candidate_hash: Option<&str>,
+        action: crate::DesktopPlanDecisionAction,
+    ) -> Result<crate::DesktopPlanDecisionCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_stream_identity(plan_id)?;
-        if expected_plan_hash.is_empty() {
+        if expected_plan_hash.is_empty()
+            && !matches!(
+                action,
+                crate::DesktopPlanDecisionAction::RetryReview
+                    | crate::DesktopPlanDecisionAction::AdoptCandidate
+            )
+        {
             return Err(DesktopClientError::InvalidRoute);
         }
         let command = self.command(
@@ -898,6 +921,7 @@ impl DesktopHttpClient {
                 plan_id: plan_id.to_owned(),
                 expected_plan_hash: expected_plan_hash.to_owned(),
                 action,
+                expected_candidate_hash: expected_candidate_hash.map(str::to_owned),
             },
         );
         let command_id = command.command_id.clone();
@@ -918,7 +942,11 @@ impl DesktopHttpClient {
             || receipt.client_id != client_id
             || receipt.session_id != session_id
             || receipt.plan_id != plan_id
-            || receipt.plan_hash != expected_plan_hash
+            || (!matches!(
+                action,
+                crate::DesktopPlanDecisionAction::AdoptCandidate
+                    | crate::DesktopPlanDecisionAction::RetryReview
+            ) && receipt.plan_hash != expected_plan_hash)
         {
             return Err(DesktopClientError::InvalidResponse);
         }
@@ -1909,6 +1937,12 @@ fn validate_conversation_display_page(
         if let Some(risk) = plan_review.risk.as_deref() {
             validate_task_control_label(risk)?;
         }
+        if let Some(candidate) = plan_review.candidate.as_ref()
+            && (!valid_tool_artifact_hash(&candidate.content_hash)
+                || candidate.content.len() > 65_536)
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
         let actions_are_unique = plan_review
             .allowed_actions
             .iter()
@@ -1923,10 +1957,35 @@ fn validate_conversation_display_page(
         {
             return Err(DesktopClientError::InvalidResponse);
         }
+        let terminal_retry_actions_are_allowed =
+            matches!(
+                plan_review.status,
+                crate::DesktopPlanReviewStatus::Paused
+                    | crate::DesktopPlanReviewStatus::Blocked
+                    | crate::DesktopPlanReviewStatus::Failed
+                    | crate::DesktopPlanReviewStatus::Interrupted
+            ) && plan_review.allowed_actions.iter().all(|action| {
+                matches!(
+                    action,
+                    crate::DesktopPlanAction::RetryReview
+                        | crate::DesktopPlanAction::AdoptCandidate
+                )
+            });
         if !matches!(
             plan_review.status,
             crate::DesktopPlanReviewStatus::DraftReady
         ) && !plan_review.allowed_actions.is_empty()
+            && !terminal_retry_actions_are_allowed
+        {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if plan_review
+            .allowed_actions
+            .contains(&crate::DesktopPlanAction::AdoptCandidate)
+            && plan_review
+                .candidate
+                .as_ref()
+                .is_none_or(|candidate| candidate.completeness != "complete")
         {
             return Err(DesktopClientError::InvalidResponse);
         }

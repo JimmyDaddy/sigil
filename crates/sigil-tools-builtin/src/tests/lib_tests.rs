@@ -2479,12 +2479,6 @@ async fn sandbox_conformance_macos_seatbelt_missing_binary_fails_closed() -> Res
     Ok(())
 }
 
-#[test]
-#[cfg(not(target_os = "macos"))]
-fn sandbox_conformance_macos_seatbelt_is_skipped_with_reason_on_unsupported_platform() {
-    eprintln!("skipping macos_seatbelt conformance: backend is macOS-only");
-}
-
 #[tokio::test]
 async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -8527,6 +8521,40 @@ fn bash_path_subjects_and_tokenizer_cover_segmented_and_quoted_edges() -> Result
             .iter()
             .all(|subject| subject.original != "*.rs"),
         "find pattern operands are filters, not filesystem subjects"
+    );
+
+    let awk_subjects = super::bash_path_subjects(
+        workspace.path(),
+        "awk '/fn hello/,/^}/' crates/sigil-kernel/src/agent.rs",
+    )?;
+    assert!(
+        awk_subjects
+            .iter()
+            .all(|subject| !subject.original.contains("/fn hello/")),
+        "awk program operands are code, not filesystem subjects"
+    );
+    assert!(
+        awk_subjects
+            .iter()
+            .any(|subject| subject.normalized == "crates/sigil-kernel/src/agent.rs")
+    );
+
+    let awk_file_subjects =
+        super::bash_path_subjects(workspace.path(), "awk -f scripts/scan.awk notes.txt")?;
+    assert!(
+        awk_file_subjects
+            .iter()
+            .any(|subject| subject.normalized == "scripts/scan.awk"),
+        "awk -f file operands remain filesystem subjects"
+    );
+
+    let grep_subjects =
+        super::bash_path_subjects(workspace.path(), "grep '/fn hello/' src/lib.rs")?;
+    assert!(
+        grep_subjects
+            .iter()
+            .all(|subject| subject.original != "/fn hello/"),
+        "grep pattern operands are not filesystem subjects"
     );
     Ok(())
 }

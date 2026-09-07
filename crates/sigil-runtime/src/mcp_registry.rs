@@ -1334,7 +1334,7 @@ fn register_local_tools(
             )
         }
     };
-    let code_intelligence = sigil_code_intel::register_code_intelligence_tools_with_workspace_trust_and_process_launcher(
+    let code_intelligence = sigil_code_intel::register_code_intelligence_tools(
         registry,
         &root_config.code_intelligence,
         workspace_root.clone(),

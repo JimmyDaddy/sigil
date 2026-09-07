@@ -11,7 +11,7 @@ use crate::permission_plan_v3::{
     ToolPermissionPlanV3, ToolPermissionPolicyFacetsV3,
 };
 use crate::resource::{
-    CanonicalHash, RequestedEnforcementV1, ResourceJournalScopeV1, ResourceRequirementSetV1,
+    CanonicalHash, RequestedEnforcementV1, ResourceAuthorityScopeV1, ResourceRequirementSetV1,
 };
 
 use sha2::Digest;
@@ -65,7 +65,7 @@ pub fn build_v3_plan(
     execution_plan_drafts: Vec<ManagedExecutionPlanDraftRefV1>,
     managed_storage_plans: Vec<ManagedStoragePlanRefV1>,
     managed_file_access_plan: Option<ManagedFileAccessPlanDraftRefV1>,
-    attempt_journal_scope: ResourceJournalScopeV1,
+    attempt_authority_scope: ResourceAuthorityScopeV1,
     requested_enforcement: RequestedEnforcementV1,
 ) -> ToolPermissionPlanV3 {
     let mut hasher = sha2::Sha256::new();
@@ -85,7 +85,7 @@ pub fn build_v3_plan(
         hasher.update(file_ref.plan_hash.as_bytes());
         hasher.update(file_ref.subject_binding_hash.as_bytes());
     }
-    hasher.update(attempt_journal_scope_hash_bytes(&attempt_journal_scope));
+    hasher.update(attempt_authority_scope_hash_bytes(&attempt_authority_scope));
     let plan_hash = CanonicalHash::from_bytes(hasher.finalize().into());
     ToolPermissionPlanV3 {
         core,
@@ -93,8 +93,8 @@ pub fn build_v3_plan(
         execution_plan_drafts,
         managed_storage_plans,
         managed_file_access_plan,
-        attempt_journal_scope,
-        attempt_journal_scope_hash: plan_hash,
+        attempt_authority_scope,
+        attempt_authority_scope_hash: plan_hash,
         requested_enforcement,
         plan_hash,
     }
@@ -151,7 +151,7 @@ pub fn build_v3_decision(
             .managed_file_access_plan
             .as_ref()
             .map(|file_ref| file_ref.plan_hash),
-        attempt_journal_scope_hash: plan.attempt_journal_scope_hash,
+        attempt_authority_scope_hash: plan.attempt_authority_scope_hash,
         subject_binding_hash,
         requested_enforcement_hash: plan.requested_enforcement.profile_hash,
         policy_version: policy_version.to_owned(),
@@ -194,7 +194,7 @@ pub fn v3_plan_from_v2(
         Vec::new(),
         Vec::new(),
         v2_plan.managed_file_access.clone(),
-        ResourceJournalScopeV1::Application,
+        ResourceAuthorityScopeV1::Application,
         enforcement_from_containment(&v2_plan.containment),
     )
 }
@@ -230,10 +230,10 @@ fn enforcement_from_containment(
     }
 }
 
-fn attempt_journal_scope_hash_bytes(scope: &ResourceJournalScopeV1) -> &'static [u8] {
+fn attempt_authority_scope_hash_bytes(scope: &ResourceAuthorityScopeV1) -> &'static [u8] {
     match scope {
-        ResourceJournalScopeV1::Application => b"application",
-        ResourceJournalScopeV1::Workspace(_) => b"workspace",
+        ResourceAuthorityScopeV1::Application => b"application",
+        ResourceAuthorityScopeV1::Workspace(_) => b"workspace",
     }
 }
 

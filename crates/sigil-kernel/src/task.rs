@@ -368,6 +368,18 @@ pub enum TaskRunStatus {
 }
 
 impl TaskRunStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -815,6 +827,17 @@ pub enum TaskPlanStatus {
     Rejected,
 }
 
+impl TaskPlanStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Accepted => "accepted",
+            Self::Superseded => "superseded",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// Durable task step status.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -895,6 +918,19 @@ impl TaskIsolationMode {
 }
 
 impl TaskStepStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::Superseded => "superseded",
+        }
+    }
+
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
