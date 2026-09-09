@@ -6286,8 +6286,7 @@ fn seed_revision_session(
 }
 
 #[tokio::test]
-async fn production_revision_duplicate_registration_preserves_unstarted_guidance_and_allows_saving_base_plan()
- {
+async fn production_revision_duplicate_registration_preserves_queued_plan_and_rejects_save() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should create");
@@ -6496,10 +6495,10 @@ credential = {{ source = "none" }}
         "a rejected duplicate must not emit a replacement terminal event"
     );
 
-    // The original plan remains usable after the rejected registration. Saving is deliberately
-    // allowed only because no executor-owned revision attempt was ever recorded; this is a
-    // product recovery action, not a fabricated RevisionFailed terminal.
-    let saved = registry
+    // A duplicate owner is not proof of a failed dispatch. Keep the current queued revision
+    // immutable until its actual owner settles; Save cannot abandon accepted guidance.
+    let before = std::fs::read(&session.session_log_path).expect("read queued session bytes");
+    let save_error = registry
         .plan_decision_command(
             &session.id,
             HttpCommandEnvelope::new(
@@ -6515,8 +6514,12 @@ credential = {{ source = "none" }}
                 },
             ),
         )
-        .expect("an unstarted revision registration rejection must not strand Save");
-    assert_eq!(saved.action, HttpPlanDecisionAction::Save);
+        .expect_err("a queued revision cannot be abandoned by Save");
+    assert!(save_error.to_string().contains("unavailable"));
+    assert_eq!(
+        std::fs::read(&session.session_log_path).expect("read rejected Save bytes"),
+        before
+    );
     let reloaded = sigil_kernel::Session::load_from_store(
         "local-test",
         "gpt-4.1",
@@ -6529,8 +6532,8 @@ credential = {{ source = "none" }}
             .latest_decision(&original_plan_id)
             .expect("save decision must be durable")
             .decision,
-        sigil_kernel::PlanDecision::SavedOnly,
-        "the user can explicitly leave the original draft available after an unstarted duplicate"
+        sigil_kernel::PlanDecision::RevisionRequested,
+        "the duplicate owner must settle before the original Plan becomes actionable"
     );
 }
 

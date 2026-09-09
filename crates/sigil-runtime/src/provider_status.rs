@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -48,7 +48,21 @@ pub enum ProviderStatusTaskResult {
 pub struct ProviderStatusTaskManager {
     active_balance_refresh: Option<ActiveProviderStatusTask>,
     active_model_refresh: Option<ActiveProviderStatusTask>,
+    retired: Vec<JoinHandle<()>>,
+    task_panicked: bool,
     connection_catalog_services: HashMap<PathBuf, ProviderModelCatalogService>,
+}
+
+/// A provider observation owner's shutdown could not establish successful task cleanup.
+/// This reports local task ownership only; it does not change provider or model state.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderStatusShutdownError {
+    #[error(
+        "provider status shutdown deadline exceeded; pending_tasks={pending_tasks}; cleanup_complete=false"
+    )]
+    DeadlineExceeded { pending_tasks: usize },
+    #[error("provider status task panicked during shutdown; cleanup_complete=false")]
+    TaskPanicked,
 }
 
 struct ActiveProviderStatusTask {
@@ -69,7 +83,11 @@ impl ProviderStatusTaskManager {
         provider_config: ProviderStatusConfig,
         result_tx: mpsc::Sender<ProviderStatusTaskResult>,
     ) {
-        abort_task(&mut self.active_balance_refresh);
+        abort_task(
+            &mut self.active_balance_refresh,
+            &mut self.retired,
+            &mut self.task_panicked,
+        );
         let handle = runtime.spawn(async move {
             let snapshot = fetch_provider_balance_snapshot(&provider_config)
                 .await
@@ -92,7 +110,11 @@ impl ProviderStatusTaskManager {
         provider_config: ProviderStatusConfig,
         result_tx: mpsc::Sender<ProviderStatusTaskResult>,
     ) {
-        abort_task(&mut self.active_model_refresh);
+        abort_task(
+            &mut self.active_model_refresh,
+            &mut self.retired,
+            &mut self.task_panicked,
+        );
         let base_url = provider_config.base_url.clone();
         let handle = runtime.spawn(async move {
             let result = fetch_remote_model_ids(&provider_config)
@@ -116,7 +138,11 @@ impl ProviderStatusTaskManager {
         prepared_credential: Option<PreparedCredential>,
         result_tx: mpsc::Sender<ProviderStatusTaskResult>,
     ) {
-        abort_task(&mut self.active_model_refresh);
+        abort_task(
+            &mut self.active_model_refresh,
+            &mut self.retired,
+            &mut self.task_panicked,
+        );
         let request_id = request.request_id;
         let service = if let Some(service) = self.connection_catalog_services.get(&cache_root) {
             Some(service.clone())
@@ -163,11 +189,21 @@ impl ProviderStatusTaskManager {
     }
 
     pub fn accept_balance_result(&mut self, request_id: u64) -> bool {
-        accept_result(&mut self.active_balance_refresh, request_id)
+        accept_result(
+            &mut self.active_balance_refresh,
+            request_id,
+            &mut self.retired,
+            &mut self.task_panicked,
+        )
     }
 
     pub fn accept_models_result(&mut self, request_id: u64) -> bool {
-        accept_result(&mut self.active_model_refresh, request_id)
+        accept_result(
+            &mut self.active_model_refresh,
+            request_id,
+            &mut self.retired,
+            &mut self.task_panicked,
+        )
     }
 
     pub fn cancel_models_refresh(&mut self, request_id: u64) {
@@ -176,13 +212,60 @@ impl ProviderStatusTaskManager {
             .as_ref()
             .is_some_and(|task| task.request_id == request_id)
         {
-            abort_task(&mut self.active_model_refresh);
+            abort_task(
+                &mut self.active_model_refresh,
+                &mut self.retired,
+                &mut self.task_panicked,
+            );
         }
     }
 
     pub fn abort_all(&mut self) {
-        abort_task(&mut self.active_balance_refresh);
-        abort_task(&mut self.active_model_refresh);
+        abort_task(
+            &mut self.active_balance_refresh,
+            &mut self.retired,
+            &mut self.task_panicked,
+        );
+        abort_task(
+            &mut self.active_model_refresh,
+            &mut self.retired,
+            &mut self.task_panicked,
+        );
+    }
+
+    /// Cancels observation work and confirms task completion within the caller's shared budget.
+    /// Pending handles remain owned on timeout; aborting alone never establishes quiescence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderStatusShutdownError::DeadlineExceeded`] if any owned task remains
+    /// unfinished at `deadline`. Returns [`ProviderStatusShutdownError::TaskPanicked`] if a
+    /// task panicked, including a panic observed during earlier nonblocking result reaping.
+    /// Panic evidence stays latched across repeated calls; unfinished handles remain owned.
+    pub async fn shutdown_until(
+        &mut self,
+        deadline: Instant,
+    ) -> std::result::Result<(), ProviderStatusShutdownError> {
+        self.abort_all();
+        reap_finished_tasks(&mut self.retired, &mut self.task_panicked);
+        while let Some(handle) = self.retired.last_mut() {
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), handle).await {
+                Ok(result) => {
+                    self.task_panicked |= result.is_err_and(|error| error.is_panic());
+                    self.retired.pop();
+                }
+                Err(_) => {
+                    return Err(ProviderStatusShutdownError::DeadlineExceeded {
+                        pending_tasks: self.retired.len(),
+                    });
+                }
+            }
+        }
+        if self.task_panicked {
+            Err(ProviderStatusShutdownError::TaskPanicked)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -211,22 +294,58 @@ pub async fn fetch_remote_model_ids(config: &ProviderStatusConfig) -> Result<Vec
     Ok(models)
 }
 
-fn accept_result(active: &mut Option<ActiveProviderStatusTask>, request_id: u64) -> bool {
+fn accept_result(
+    active: &mut Option<ActiveProviderStatusTask>,
+    request_id: u64,
+    retired: &mut Vec<JoinHandle<()>>,
+    task_panicked: &mut bool,
+) -> bool {
     if active
         .as_ref()
         .is_some_and(|task| task.request_id == request_id)
     {
-        *active = None;
+        if let Some(task) = active.take() {
+            retain_task(retired, task.handle, task_panicked);
+        }
         true
     } else {
         false
     }
 }
 
-fn abort_task(active: &mut Option<ActiveProviderStatusTask>) {
+fn abort_task(
+    active: &mut Option<ActiveProviderStatusTask>,
+    retired: &mut Vec<JoinHandle<()>>,
+    task_panicked: &mut bool,
+) {
     if let Some(task) = active.take() {
         task.handle.abort();
+        retain_task(retired, task.handle, task_panicked);
     }
+}
+
+fn retain_task(
+    retired: &mut Vec<JoinHandle<()>>,
+    handle: JoinHandle<()>,
+    task_panicked: &mut bool,
+) {
+    retired.push(handle);
+    reap_finished_tasks(retired, task_panicked);
+}
+
+fn reap_finished_tasks(retired: &mut Vec<JoinHandle<()>>, task_panicked: &mut bool) {
+    retired.retain_mut(|handle| {
+        if !handle.is_finished() {
+            return true;
+        }
+        match futures::FutureExt::now_or_never(handle) {
+            Some(result) => {
+                *task_panicked |= result.is_err_and(|error| error.is_panic());
+                false
+            }
+            None => true,
+        }
+    });
 }
 
 pub async fn fetch_provider_balance_snapshot(

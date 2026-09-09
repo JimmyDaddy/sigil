@@ -116,7 +116,21 @@ struct ManagedArtifactStoreBackendV1 {
     staging_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
     store_lease: Mutex<Option<ManagedStorageWriterLeaseV1>>,
     operation_lock: Mutex<()>,
+    // Protected by operation_lock across quota admission and the corresponding physical write.
+    capture_usage: Mutex<Option<ManagedArtifactCaptureUsage>>,
+    #[cfg(test)]
+    inventory_scans: std::sync::atomic::AtomicUsize,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct ManagedArtifactCaptureUsage {
+    staging_bytes: u64,
+    staging_files: u64,
+    capacity_bytes: u64,
+    capacity_entries: u64,
+}
+
+const ARTIFACT_CAPTURE_CAPACITY_BATCH_BYTES: u64 = 1024 * 1024;
 
 impl ManagedArtifactStoreBackendV1 {
     fn new(
@@ -129,6 +143,9 @@ impl ManagedArtifactStoreBackendV1 {
             staging_lease: Mutex::new(Some(staging_lease)),
             store_lease: Mutex::new(Some(store_lease)),
             operation_lock: Mutex::new(()),
+            capture_usage: Mutex::new(None),
+            #[cfg(test)]
+            inventory_scans: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -139,12 +156,22 @@ impl ManagedArtifactStoreBackendV1 {
         extra_staging_bytes: u64,
         extra_store_bytes: u64,
     ) -> Result<()> {
-        let staging_bytes = directory_file_bytes(&staging_root.join("staging"))?
-            .saturating_add(extra_staging_bytes);
-        let store_bytes =
-            directory_file_bytes(&store_root.join("blobs"))?.saturating_add(extra_store_bytes);
-        let staging_entries = directory_file_count(&staging_root.join("staging"))?.max(1);
-        let store_entries = directory_file_count(&store_root.join("blobs"))?.max(1);
+        let mut usage = self
+            .capture_usage
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact capture accounting is poisoned"))?;
+        *usage = None;
+        #[cfg(test)]
+        self.inventory_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (staging_bytes, staging_files) = directory_file_usage(&staging_root.join("staging"))?;
+        let (store_bytes, store_files) = directory_file_usage(&store_root.join("blobs"))?;
+        let staging_entries = staging_files
+            .saturating_add(u64::from(extra_staging_bytes > 0))
+            .max(1);
+        let store_entries = store_files
+            .saturating_add(u64::from(extra_store_bytes > 0))
+            .max(1);
         let staging_guard = self
             .staging_lease
             .lock()
@@ -162,13 +189,92 @@ impl ManagedArtifactStoreBackendV1 {
         self.writer
             .reconcile_artifact_quota(
                 staging,
-                staging_bytes,
+                staging_bytes.saturating_add(extra_staging_bytes),
                 staging_entries,
                 store,
-                store_bytes,
+                store_bytes.saturating_add(extra_store_bytes),
                 store_entries,
             )
-            .map_err(|error| anyhow::anyhow!("managed artifact quota reconcile failed: {error}"))
+            .context("managed artifact quota reconcile failed")?;
+        if extra_staging_bytes == 0 && extra_store_bytes == 0 {
+            *usage = Some(ManagedArtifactCaptureUsage {
+                staging_bytes,
+                staging_files,
+                capacity_bytes: staging_bytes,
+                capacity_entries: staging_entries,
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_capture_accounting(&self, staging_root: &Path, store_root: &Path) -> Result<()> {
+        let initialized = self
+            .capture_usage
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact capture accounting is poisoned"))?
+            .is_some();
+        if !initialized {
+            self.reconcile_quota(staging_root, store_root, 0, 0)?;
+        }
+        Ok(())
+    }
+
+    /// The caller holds operation_lock until the admitted bytes are written or accounted as
+    /// uncertain. Capacity is shared by every capture in this namespace, not per stream/call.
+    fn reserve_capture_write(
+        &self,
+        bytes: u64,
+        creates_file: bool,
+        remaining_capture_bytes: u64,
+    ) -> Result<()> {
+        let mut usage_guard = self
+            .capture_usage
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact capture accounting is poisoned"))?;
+        let usage = usage_guard
+            .as_mut()
+            .context("managed artifact capture accounting is unavailable")?;
+        let minimum = usage
+            .staging_bytes
+            .checked_add(bytes)
+            .context("managed artifact staging byte count overflow")?;
+        let files = usage
+            .staging_files
+            .checked_add(u64::from(creates_file))
+            .context("managed artifact staging entry count overflow")?;
+        let entries = files.max(1);
+        if minimum > usage.capacity_bytes || entries > usage.capacity_entries {
+            let preferred = usage.staging_bytes.saturating_add(
+                bytes.max(remaining_capture_bytes.min(ARTIFACT_CAPTURE_CAPACITY_BATCH_BYTES)),
+            );
+            let staging_guard = self
+                .staging_lease
+                .lock()
+                .map_err(|_| anyhow::anyhow!("managed artifact staging lease is poisoned"))?;
+            let staging = staging_guard
+                .as_ref()
+                .context("managed artifact staging lease is closed")?;
+            let capacity = self
+                .writer
+                .reserve_artifact_staging_capacity(staging, minimum, preferred, entries)?;
+            anyhow::ensure!(
+                capacity >= minimum && capacity <= preferred,
+                "managed artifact authority returned an invalid capacity"
+            );
+            usage.capacity_bytes = capacity;
+            usage.capacity_entries = entries;
+        }
+        // Charge the entire admitted write pessimistically. Partial I/O invalidates this cache
+        // before any later operation; no failed write can make spare capacity appear larger.
+        usage.staging_bytes = minimum;
+        usage.staging_files = files;
+        Ok(())
+    }
+
+    fn invalidate_capture_accounting(&self) {
+        if let Ok(mut usage) = self.capture_usage.lock() {
+            *usage = None;
+        }
     }
 
     fn live_roots(&self) -> Result<(PathBuf, PathBuf)> {
@@ -330,8 +436,19 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => bytes.len() as u64,
             Err(error) => return Err(error.into()),
         };
-        self.reconcile_quota(&staging, &store, 0, extra_store_bytes)?;
-        Self::publish_blob_locked(&staging, &store, content_sha256, bytes)?;
+        let publication = (|| -> Result<()> {
+            self.reconcile_quota(&staging, &store, extra_store_bytes, extra_store_bytes)?;
+            Self::publish_blob_locked(&staging, &store, content_sha256, bytes)
+        })();
+        if let Err(error) = publication {
+            // Return unused admission after a denied/failed publication. A remaining partial
+            // staging file is measured and stays charged; reconciliation failure stays
+            // conservative and leaves the cache invalid for the next admitted operation.
+            if let Err(cleanup_error) = self.reconcile_quota(&staging, &store, 0, 0) {
+                tracing::error!(%cleanup_error, "failed to reconcile rejected artifact publication");
+            }
+            return Err(error);
+        }
         self.reconcile_quota(&staging, &store, 0, 0)
     }
 
@@ -756,14 +873,14 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
 
     fn begin_process_capture(
         self: Arc<Self>,
-        _config: ProcessStreamCaptureConfigV1,
+        config: ProcessStreamCaptureConfigV1,
     ) -> Result<Box<dyn ToolArtifactProcessCaptureBackendV1>> {
         let staging = {
-            let (_operation, staging, _store) = self.with_mutation_lock()?;
+            let (_operation, staging, store) = self.with_mutation_lock()?;
+            self.ensure_capture_accounting(&staging, &store)?;
             staging
         };
         let directory = staging.join("staging");
-        create_private_dir(&directory)?;
         Ok(Box::new(ManagedProcessCaptureBackend {
             owner: self,
             stdout_path: directory.join(format!("{}.stdout.part", Uuid::new_v4().simple())),
@@ -774,6 +891,9 @@ impl ToolArtifactStoreBackendV1 for ManagedArtifactStoreBackendV1 {
             stderr_bytes: 0,
             stdout_truncated: false,
             stderr_truncated: false,
+            per_stream_limit: config.artifact_staging_limit_bytes_per_stream,
+            storage_failed: false,
+            settled: false,
         }))
     }
 }
@@ -788,6 +908,9 @@ struct ManagedProcessCaptureBackend {
     stderr_bytes: u64,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    per_stream_limit: u64,
+    storage_failed: bool,
+    settled: bool,
 }
 
 impl std::fmt::Debug for ManagedProcessCaptureBackend {
@@ -802,10 +925,30 @@ impl std::fmt::Debug for ManagedProcessCaptureBackend {
 
 impl Drop for ManagedProcessCaptureBackend {
     fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        if let Err(error) = self.remove_staging() {
+            tracing::error!(%error, "failed to settle managed artifact staging quota");
+        }
+    }
+}
+
+impl ManagedProcessCaptureBackend {
+    fn remove_staging(&mut self) -> Result<()> {
+        let owner = Arc::clone(&self.owner);
+        let (_operation, staging, store) = owner.with_mutation_lock()?;
         self.stdout.take();
         self.stderr.take();
-        let _ = fs::remove_file(&self.stdout_path);
-        let _ = fs::remove_file(&self.stderr_path);
+        // Keep the conservative reservation if cleanup fails; a later admitted inventory can
+        // reconcile the remaining physical prefix, including after process death.
+        owner.invalidate_capture_accounting();
+        remove_capture_file(&self.stdout_path)?;
+        remove_capture_file(&self.stderr_path)?;
+        sync_parent(&staging.join("staging"))?;
+        owner.reconcile_quota(&staging, &store, 0, 0)?;
+        self.settled = true;
+        Ok(())
     }
 }
 
@@ -816,7 +959,20 @@ impl ToolArtifactProcessCaptureBackendV1 for ManagedProcessCaptureBackend {
         bytes: &[u8],
         limit: u64,
     ) -> Result<(u64, bool)> {
-        let _ = self.owner.live_roots()?;
+        if stream == ToolOutputStreamV1::Combined {
+            return Ok((0, false));
+        }
+        let limit = limit.min(self.per_stream_limit);
+        let remaining_capture_bytes = self
+            .per_stream_limit
+            .saturating_mul(2)
+            .saturating_sub(self.stdout_bytes.min(self.per_stream_limit))
+            .saturating_sub(self.stderr_bytes.min(self.per_stream_limit));
+        let owner = Arc::clone(&self.owner);
+        let _operation = owner
+            .operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("managed artifact operation lock is poisoned"))?;
         let (file, observed, truncated, path) = match stream {
             ToolOutputStreamV1::Stdout => (
                 &mut self.stdout,
@@ -832,42 +988,55 @@ impl ToolArtifactProcessCaptureBackendV1 for ManagedProcessCaptureBackend {
             ),
             ToolOutputStreamV1::Combined => return Ok((0, false)),
         };
-        if file.is_none() {
-            *file = Some(create_private_file(path)?);
-        }
         let before = *observed;
         *observed = observed.saturating_add(bytes.len() as u64);
-        if before < limit {
-            let allowed = (limit.saturating_sub(before) as usize).min(bytes.len());
+        let allowed = limit.saturating_sub(before).min(bytes.len() as u64) as usize;
+        *truncated |= allowed < bytes.len();
+        if self.storage_failed {
+            bail!("managed artifact capture storage is unavailable after an earlier write failure");
+        }
+        let written = (|| -> Result<()> {
+            let (staging_root, store_root) = owner.live_roots()?;
+            if allowed == 0 {
+                return Ok(());
+            }
+            owner.ensure_capture_accounting(&staging_root, &store_root)?;
+            owner.reserve_capture_write(allowed as u64, file.is_none(), remaining_capture_bytes)?;
+            if file.is_none() {
+                *file = Some(create_private_file(path)?);
+            }
             file.as_mut()
                 .context("managed capture file is unavailable")?
                 .write_all(&bytes[..allowed])?;
-            if allowed < bytes.len() {
-                *truncated = true;
-            }
-        } else {
-            *truncated = true;
+            Ok(())
+        })();
+        if let Err(error) = written {
+            self.storage_failed = true;
+            owner.invalidate_capture_accounting();
+            return Err(error);
         }
-        let (staging_root, store_root) = self.owner.live_roots()?;
-        self.owner
-            .reconcile_quota(&staging_root, &store_root, 0, 0)?;
         Ok((*observed, *truncated))
     }
 
     fn finish(mut self: Box<Self>) -> Result<ToolArtifactProcessCaptureSnapshotV1> {
-        if let Some(file) = self.stdout.as_mut() {
-            file.sync_all()?;
-        }
-        if let Some(file) = self.stderr.as_mut() {
-            file.sync_all()?;
-        }
-        let stdout = read_optional_file(&self.stdout_path)?;
-        let stderr = read_optional_file(&self.stderr_path)?;
-        let _ = fs::remove_file(&self.stdout_path);
-        let _ = fs::remove_file(&self.stderr_path);
-        let (staging_root, store_root) = self.owner.live_roots()?;
-        self.owner
-            .reconcile_quota(&staging_root, &store_root, 0, 0)?;
+        let (stdout, stderr) = {
+            let (_operation, _staging, _store) = self.owner.with_mutation_lock()?;
+            if let Some(file) = self.stdout.as_mut() {
+                file.sync_all()?;
+            }
+            if let Some(file) = self.stderr.as_mut() {
+                file.sync_all()?;
+            }
+            (
+                read_optional_file(&self.stdout_path)?,
+                read_optional_file(&self.stderr_path)?,
+            )
+        };
+        self.remove_staging()?;
+        anyhow::ensure!(
+            !self.storage_failed,
+            "managed artifact capture cannot complete after a storage write failure"
+        );
         Ok(ToolArtifactProcessCaptureSnapshotV1 {
             stdout_bytes: stdout,
             stderr_bytes: stderr,
@@ -1161,9 +1330,22 @@ fn read_optional_file(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+fn remove_capture_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn directory_file_bytes(root: &Path) -> Result<u64> {
+    directory_file_usage(root).map(|(bytes, _)| bytes)
+}
+
+fn directory_file_usage(root: &Path) -> Result<(u64, u64)> {
     let mut pending = vec![root.to_path_buf()];
     let mut total = 0_u64;
+    let mut count = 0_u64;
     while let Some(path) = pending.pop() {
         let entries = match fs::read_dir(&path) {
             Ok(entries) => entries,
@@ -1180,39 +1362,13 @@ fn directory_file_bytes(root: &Path) -> Result<u64> {
                 pending.push(entry.path());
             } else if metadata.is_file() {
                 total = total.saturating_add(metadata.len());
+                count = count.saturating_add(1);
             } else {
                 bail!("managed artifact inventory contains a non-file entry");
             }
         }
     }
-    Ok(total)
-}
-
-fn directory_file_count(root: &Path) -> Result<u64> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut total = 0_u64;
-    while let Some(path) = pending.pop() {
-        let entries = match fs::read_dir(&path) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() {
-                bail!("managed artifact inventory contains a symlink");
-            }
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else if metadata.is_file() {
-                total = total.saturating_add(1);
-            } else {
-                bail!("managed artifact inventory contains a non-file entry");
-            }
-        }
-    }
-    Ok(total)
+    Ok((total, count))
 }
 
 fn modified_at(metadata: &fs::Metadata) -> u64 {

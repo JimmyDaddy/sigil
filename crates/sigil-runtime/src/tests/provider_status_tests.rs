@@ -560,3 +560,141 @@ async fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
     assert_eq!(snapshot.status, "CNY 18.50");
     let _ = server.join();
 }
+
+#[test]
+fn provider_status_shutdown_retains_a_blocking_owner_until_it_finishes() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build provider shutdown test runtime");
+    let (entered, entry) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let handle = runtime.spawn_blocking(move || {
+        entered.send(()).expect("announce blocking task entry");
+        released.recv().expect("wait for blocking task release");
+    });
+    entry
+        .recv_timeout(Duration::from_secs(1))
+        .expect("blocking task starts before shutdown");
+    let mut manager = ProviderStatusTaskManager::new();
+    manager.active_model_refresh = Some(super::ActiveProviderStatusTask {
+        request_id: 1,
+        handle,
+    });
+    let result =
+        runtime.block_on(manager.shutdown_until(Instant::now() + Duration::from_millis(30)));
+    let retained = manager.retired.len();
+    let unfinished = manager.retired.iter().any(|task| !task.is_finished());
+    release.send(()).expect("release blocking task");
+    assert!(matches!(
+        result,
+        Err(super::ProviderStatusShutdownError::DeadlineExceeded { pending_tasks: 1 })
+    ));
+    assert_eq!(retained, 1);
+    assert!(unfinished);
+    runtime
+        .block_on(manager.shutdown_until(Instant::now() + Duration::from_secs(1)))
+        .expect("join released provider task");
+    assert!(manager.retired.is_empty());
+}
+
+#[test]
+fn provider_status_shutdown_joins_an_inflight_http_observation() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let _environment_guard = crate::test_env::lock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build HTTP observation test runtime");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind observation fixture");
+    let address = listener
+        .local_addr()
+        .expect("read observation fixture address");
+    let (observed, received) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept provider observation");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bound observation fixture read");
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            if stream.read(&mut byte).expect("read observation request") == 0 {
+                return false;
+            }
+            request.push(byte[0]);
+        }
+        observed.send(()).expect("announce received observation");
+        matches!(stream.read(&mut byte), Ok(0))
+    });
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = format!("http://{address}");
+    let (result_tx, _result_rx) = mpsc::channel();
+    let mut manager = ProviderStatusTaskManager::new();
+    manager.refresh_models(&runtime, 1, config, result_tx);
+    received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("provider observation reaches fixture");
+    let result = runtime.block_on(manager.shutdown_until(Instant::now() + Duration::from_secs(1)));
+    let disconnected = server.join().expect("join observation fixture");
+    result.expect("join provider observation during shutdown");
+    assert!(
+        disconnected,
+        "joining the observation releases its in-flight HTTP socket"
+    );
+    assert!(manager.retired.is_empty());
+    assert!(manager.active_model_refresh.is_none());
+}
+
+#[test]
+fn provider_status_finished_panic_survives_replacement_acceptance_and_shutdown() {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let _environment_guard = crate::test_env::lock();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build provider panic test runtime");
+    for operation in 0..3 {
+        let handle = runtime.spawn(async { panic!("provider observation fixture panic") });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(handle.is_finished());
+        let mut manager = ProviderStatusTaskManager::new();
+        manager.active_model_refresh = Some(super::ActiveProviderStatusTask {
+            request_id: 1,
+            handle,
+        });
+        match operation {
+            0 => manager.abort_all(),
+            1 => assert!(manager.accept_models_result(1)),
+            _ => {
+                let mut config = provider_config(Some("test-key"));
+                config.base_url = "://invalid-test-url".to_owned();
+                manager.refresh_models(&runtime, 2, config, mpsc::channel().0);
+            }
+        }
+        assert!(manager.task_panicked);
+        assert!(
+            manager.retired.is_empty(),
+            "finished handles are consumed, not accumulated"
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                runtime.block_on(manager.shutdown_until(deadline)),
+                Err(super::ProviderStatusShutdownError::TaskPanicked)
+            ));
+        }
+    }
+}

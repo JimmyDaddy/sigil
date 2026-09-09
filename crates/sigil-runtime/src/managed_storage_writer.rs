@@ -197,6 +197,14 @@ pub enum ManagedStorageWriterErrorV1 {
     FinalizeFailed(String),
     #[error("managed storage lease rejected: {0}")]
     LeaseRejected(String),
+    #[error(
+        "managed storage quota exceeded for {dimension:?}: requested={requested} limit={limit}"
+    )]
+    QuotaExceeded {
+        dimension: sigil_kernel::managed_storage::ManagedStorageQuotaDimensionV1,
+        requested: u64,
+        limit: u64,
+    },
     #[error("writer leaf resolves outside the state anchor")]
     LeafEscapesAnchor,
     #[error("writer leaf is a symlink (no-follow)")]
@@ -1141,7 +1149,55 @@ impl ManagedStorageWriterAdapterV1 {
                 self.service
                     .reconcile_namespace_quota(&store.handle, store_bytes, store_entries)
             })
-            .map_err(|error| ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()))
+            .map_err(artifact_quota_error)
+    }
+
+    /// Expands this live staging namespace before a bounded physical write. The returned
+    /// capacity is authority-issued and may be smaller than preferred under quota pressure.
+    /// The caller retains the same lease and mutation lock through the write; minimum and
+    /// preferred bytes are total capacities and must satisfy `minimum_bytes <= preferred_bytes`.
+    ///
+    /// # Errors
+    /// Rejects a non-staging or stale lease, an invalid capacity range, insufficient quota, or
+    /// authority CAS/persistence failure. Failed growth does not release the preceding charge;
+    /// the authority blocks further mutation after uncertain durability until verified reopen.
+    pub(crate) fn reserve_artifact_staging_capacity(
+        &self,
+        staging: &ManagedStorageWriterLeaseV1,
+        minimum_bytes: u64,
+        preferred_bytes: u64,
+        entries: u64,
+    ) -> Result<u64, ManagedStorageWriterErrorV1> {
+        if staging.channel != StorageWriterChannelV1::ArtifactStaging {
+            return Err(ManagedStorageWriterErrorV1::LeaseRejected(
+                "artifact capacity requires the staging namespace".to_owned(),
+            ));
+        }
+        self.service
+            .reserve_namespace_quota_capacity(
+                &staging.handle,
+                minimum_bytes,
+                preferred_bytes,
+                entries,
+            )
+            .map_err(artifact_quota_error)
+    }
+}
+
+fn artifact_quota_error(
+    error: sigil_kernel::managed_storage::ManagedStorageErrorV1,
+) -> ManagedStorageWriterErrorV1 {
+    match error {
+        sigil_kernel::managed_storage::ManagedStorageErrorV1::QuotaExceeded {
+            dimension,
+            requested,
+            limit,
+        } => ManagedStorageWriterErrorV1::QuotaExceeded {
+            dimension,
+            requested,
+            limit,
+        },
+        _ => ManagedStorageWriterErrorV1::LeaseRejected(error.to_string()),
     }
 }
 

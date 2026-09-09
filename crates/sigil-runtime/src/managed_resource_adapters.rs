@@ -12,10 +12,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex};
+
+mod output_capture;
+use output_capture::ManagedOutputCaptureBridge;
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::capability_issuer::{KernelCapabilityIssuerV1, VerifiedExecutionBundleViewV1};
@@ -895,79 +895,6 @@ pub struct RuntimeManagedCommandExecutionRouteV1 {
     process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 }
 
-/// Bridges the pre-spawn artifact handle into the sandbox's concurrent readers. The bridge is
-/// explicitly closeable because a descendant-held pipe may outlive the bounded receipt path;
-/// late chunks then fail closed instead of mutating a finalized sink.
-struct ManagedOutputCaptureBridge {
-    handle: Mutex<Option<sigil_kernel::ExecutionCaptureHandle>>,
-    failed: AtomicBool,
-    closed: AtomicBool,
-    observed_bytes: AtomicU64,
-}
-
-impl ManagedOutputCaptureBridge {
-    fn new(handle: sigil_kernel::ExecutionCaptureHandle) -> Self {
-        Self {
-            handle: Mutex::new(Some(handle)),
-            failed: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-            observed_bytes: AtomicU64::new(0),
-        }
-    }
-
-    fn take_handle(&self) -> Option<sigil_kernel::ExecutionCaptureHandle> {
-        self.closed.store(true, Ordering::SeqCst);
-        self.handle.lock().ok()?.take()
-    }
-
-    fn failed(&self) -> bool {
-        self.failed.load(Ordering::SeqCst)
-    }
-
-    fn observed_bytes(&self) -> u64 {
-        self.observed_bytes.load(Ordering::SeqCst)
-    }
-}
-
-impl sigil_sandbox::managed::ManagedOutputCaptureSinkV1 for ManagedOutputCaptureBridge {
-    fn write_chunk(
-        &self,
-        channel: ManagedProcessOutputChannelV1,
-        bytes: &[u8],
-    ) -> Result<(), sigil_kernel::managed_execution::ManagedExecutionErrorV1> {
-        if self.closed.load(Ordering::SeqCst) {
-            self.failed.store(true, Ordering::SeqCst);
-            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
-        }
-        let mut handle = self.handle.lock().map_err(|_| {
-            self.failed.store(true, Ordering::SeqCst);
-            sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain
-        })?;
-        if self.closed.load(Ordering::SeqCst) {
-            self.failed.store(true, Ordering::SeqCst);
-            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
-        }
-        let stream = match channel {
-            ManagedProcessOutputChannelV1::Stdout => ToolOutputStreamV1::Stdout,
-            ManagedProcessOutputChannelV1::Stderr => ToolOutputStreamV1::Stderr,
-            ManagedProcessOutputChannelV1::Pty => ToolOutputStreamV1::Combined,
-        };
-        let Some(handle) = handle.as_mut() else {
-            self.failed.store(true, Ordering::SeqCst);
-            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
-        };
-        self.observed_bytes
-            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
-        if let Err(error) = handle.sink.write_stream(stream, bytes) {
-            handle.sink.mark_process_write_failed();
-            self.failed.store(true, Ordering::SeqCst);
-            let _ = error;
-            return Err(sigil_kernel::managed_execution::ManagedExecutionErrorV1::OutcomeUncertain);
-        }
-        Ok(())
-    }
-}
-
 impl std::fmt::Debug for RuntimeManagedCommandExecutionRouteV1 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1415,7 +1342,10 @@ impl RuntimeManagedCommandExecutionRouteV1 {
         let capture_bridge = request
             .capture
             .take()
-            .map(|handle| Arc::new(ManagedOutputCaptureBridge::new(handle)));
+            .map(|handle| {
+                ManagedOutputCaptureBridge::new(handle, cancellation.as_ref()).map(Arc::new)
+            })
+            .transpose()?;
         let proof = self.broker.seal_execution_proof(
             sigil_kernel::capability_issuer::ProofKindV1::ExecutionOneShot,
             "builtin-command",
@@ -1478,26 +1408,26 @@ impl RuntimeManagedCommandExecutionRouteV1 {
             sigil_kernel::managed_execution::ProcessTerminationV1::Exited { code } => Some(code),
             _ => None,
         };
-        let capture_outcome = capture_bridge.and_then(|capture_bridge| {
-            let sink_failed = capture_bridge.failed();
-            let capture_observed_bytes = capture_bridge.observed_bytes();
-            capture_bridge.take_handle().map(|mut capture| {
-                // The managed process summary is a bounded projection and can legitimately be
-                // smaller than the bytes already handed to the durable capture sink. The sink's
-                // own staging limit and completeness ledger are authoritative for artifact
-                // storage; only an actual sink failure makes the storage unavailable.
-                if sink_failed {
-                    capture.sink.mark_process_write_failed();
-                }
-                let source = source_completeness(&process.termination);
-                ExecutionCaptureOutcome {
+        let capture_outcome = if let Some(capture_bridge) = capture_bridge {
+            match capture_bridge.finish().await {
+                Ok(capture) => Some(ExecutionCaptureOutcome {
                     sink: capture.sink,
-                    source,
-                    observed_bytes: output.combined_total_bytes.max(capture_observed_bytes),
-                    reader_failed: false,
+                    source: source_completeness(process),
+                    observed_bytes: output.combined_total_bytes,
+                    reader_failed: [&process.stdout_summary, &process.stderr_summary].iter().any(
+                        |summary| summary.source == sigil_kernel::managed_execution::ManagedOutputSourceV1::ReadFailed,
+                    ),
+                }),
+                Err(error) => {
+                    // The executed command must not become retryable because its capture failed.
+                    // The absent sink projects the existing storage-unavailable terminal fallback.
+                    tracing::warn!(error = %error, "managed process capture unavailable");
+                    None
                 }
-            })
-        });
+            }
+        } else {
+            None
+        };
         Ok(ExecutionReceipt {
             backend: ExecutionBackendKind::Local,
             capabilities: ExecutionBackendCapabilities::default(),
@@ -1676,19 +1606,25 @@ fn map_termination(
 }
 
 fn source_completeness(
-    termination: &sigil_kernel::managed_execution::ProcessTerminationV1,
+    process: &sigil_kernel::managed_execution::ProcessExecutionReceiptV1,
 ) -> sigil_kernel::ToolSourceCompletenessV1 {
-    match termination {
-        sigil_kernel::managed_execution::ProcessTerminationV1::Exited { .. } => {
-            sigil_kernel::ToolSourceCompletenessV1::Complete
+    use sigil_kernel::ToolSourceCompletenessV1;
+    use sigil_kernel::managed_execution::{ManagedOutputSourceV1, ProcessTerminationV1};
+    let sources = [process.stdout_summary.source, process.stderr_summary.source];
+    if sources.contains(&ManagedOutputSourceV1::ReadFailed) {
+        return ToolSourceCompletenessV1::ReaderFailed;
+    }
+    if sources.contains(&ManagedOutputSourceV1::Incomplete) {
+        return ToolSourceCompletenessV1::Interrupted;
+    }
+    match process.termination {
+        ProcessTerminationV1::Exited { .. } | ProcessTerminationV1::Signaled { .. } => {
+            ToolSourceCompletenessV1::Complete
         }
-        sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
-            sigil_kernel::ToolSourceCompletenessV1::Interrupted
+        ProcessTerminationV1::TimedOut | ProcessTerminationV1::Cancelled => {
+            ToolSourceCompletenessV1::Interrupted
         }
-        sigil_kernel::managed_execution::ProcessTerminationV1::Cancelled => {
-            sigil_kernel::ToolSourceCompletenessV1::Interrupted
-        }
-        _ => sigil_kernel::ToolSourceCompletenessV1::ReaderFailed,
+        _ => ToolSourceCompletenessV1::ReaderFailed,
     }
 }
 

@@ -2942,6 +2942,101 @@ impl PlanReviewCoordinator {
         Ok(Some(request))
     }
 
+    /// Records a confirmed failure to start an accepted revision before its attempt exists.
+    ///
+    /// The caller owns the rejected dispatch. This restores the original Plan without creating
+    /// an execution attempt or changing a running/terminal attempt's outcome.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale guidance, changed base Plans, and any revision that already has an attempt.
+    pub fn record_unstarted_plan_revision_failure(
+        session: &mut Session,
+        request: &PlanReviewRunRequest,
+        reason: &str,
+        now_ms: u64,
+    ) -> Result<PlanDecisionRecordedEntry> {
+        validate_plan_review_request_objective(session, request)?;
+        let request_id = request
+            .revision_request_id
+            .as_ref()
+            .context("revision start failure requires an exact revision request")?;
+        let base_plan_id = request
+            .base_plan_id
+            .as_ref()
+            .context("revision start failure requires its base Plan")?;
+        let base_plan_hash = request
+            .base_plan_hash
+            .as_deref()
+            .context("revision start failure requires its base Plan hash")?;
+        let reviews = PlanReviewProjection::from_entries(session.entries());
+        if reviews.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        if reviews
+            .reviews()
+            .flat_map(|review| review.attempts.iter())
+            .any(|attempt| {
+                attempt.revision_request_id.as_ref() == Some(request_id)
+                    && attempt.attempt_ordinal >= request.attempt_ordinal
+            })
+        {
+            bail!("revision start failure cannot replace an existing attempt");
+        }
+        let inputs = session.user_input_projection()?;
+        let current_request = inputs.public_requests().into_iter().filter(|input| {
+            matches!(&input.source,
+                sigil_kernel::UserInputSourceV1::PlanRevision { base_plan_id: id, base_plan_hash: hash }
+                if id == base_plan_id && hash == base_plan_hash)
+        }).max_by_key(|input| input.identity.generation)
+            .context("revision start failure lost its guidance request")?;
+        if current_request.identity.request_id != *request_id
+            || current_request.status != sigil_kernel::UserInputStatusV1::Resolved
+            || current_request.resolution != Some(sigil_kernel::UserInputResolutionV1::Consumed)
+        {
+            bail!("revision start failure does not bind the current accepted guidance");
+        }
+        let expected = Self::plan_review_revision_request(
+            session,
+            base_plan_id,
+            base_plan_hash,
+            request_id.clone(),
+            &accepted_revision_guidance_for_request(session, request)?,
+            request.workspace_snapshot_id.clone(),
+        )?;
+        if expected != *request {
+            bail!("revision start failure does not bind the expected unstarted attempt");
+        }
+        let plans = session.plan_artifact_projection();
+        if plans
+            .plans
+            .get(base_plan_id)
+            .is_none_or(|draft| draft.plan_hash != base_plan_hash)
+        {
+            bail!("revision start failure base Plan is stale");
+        }
+        let decision = plans
+            .latest_decision(base_plan_id)
+            .filter(|decision| decision.plan_hash == base_plan_hash)
+            .context("revision start failure lost its exact base decision")?;
+        if decision.decision == PlanDecision::RevisionFailed {
+            return Ok(decision.clone());
+        }
+        if decision.decision != PlanDecision::RevisionRequested {
+            bail!("revision start failure cannot replace the current Plan decision");
+        }
+        let failure = PlanDecisionRecordedEntry {
+            plan_id: base_plan_id.clone(),
+            plan_hash: base_plan_hash.to_owned(),
+            decision: PlanDecision::RevisionFailed,
+            decided_by: PlanDecisionActor::System,
+            decided_at_ms: now_ms,
+            reason: Some(safe_persistence_text(reason)),
+        };
+        session.append_control(ControlEntry::PlanDecisionRecorded(failure.clone()))?;
+        Ok(failure)
+    }
+
     /// Resumes an ordinary or revision Plan review through one exact terminal-frontier CAS.
     ///
     /// The predecessor remains terminal forever. The deterministic successor identity is derived
@@ -3500,14 +3595,6 @@ impl PlanReviewCoordinator {
                 PlanDecision::RevisionFailed | PlanDecision::TaskCreationFailed
             ) {
                 // The preceding host action never started; the original plan remains actionable.
-            } else if existing.decision == PlanDecision::RevisionRequested
-                && command.decision == PlanDecision::SavedOnly
-                && revision_request_has_no_attempt_for_base(session, &plan_id, &draft.plan_hash)
-            {
-                // Accepted revision guidance is durable before HTTP claims an adapter slot. If
-                // that claim is rejected before the executor writes `Started`, the user can
-                // deliberately retain the unchanged base plan. A real revision attempt (in any
-                // state) is never abandoned through this ordinary Save action.
             } else {
                 bail!(
                     "plan {} already has decision {}",
@@ -5652,24 +5739,6 @@ fn ensure_plan_action_allowed(
         );
     }
     Ok(())
-}
-
-/// Returns true only when accepted revision guidance never reached an executor-owned attempt.
-/// The decision itself is not an execution fact, so this is the narrow recovery boundary in
-/// which a user may save the original draft after an adapter registration rejection.
-fn revision_request_has_no_attempt_for_base(
-    session: &Session,
-    plan_id: &PlanId,
-    plan_hash: &str,
-) -> bool {
-    !PlanReviewProjection::from_entries(session.entries())
-        .reviews()
-        .flat_map(|review| review.attempts.iter())
-        .any(|attempt| {
-            attempt.revision_request_id.is_some()
-                && attempt.base_plan_id.as_ref() == Some(plan_id)
-                && attempt.base_plan_hash.as_deref() == Some(plan_hash)
-        })
 }
 
 /// Builds the current workspace snapshot id bound to plan handoff artifacts.

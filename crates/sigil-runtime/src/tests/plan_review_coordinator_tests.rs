@@ -3361,7 +3361,137 @@ fn plan_revision_guidance_is_durable_before_dispatch_and_retry_uses_a_fresh_atte
     assert_eq!(retry.attempt_ordinal, 2);
     assert_ne!(retry.attempt_id, first.attempt_id);
     assert_eq!(retry.revision_request_id, first.revision_request_id);
+    let queued = public_plan_review_from_session(&session)?;
+    assert!(queued.allowed_actions.is_empty());
+    assert_eq!(
+        queued.revision.as_ref().map(|revision| revision.status),
+        Some(sigil_kernel::PublicPlanRevisionStatusV1::Queued)
+    );
+    assert!(
+        queued
+            .revision
+            .as_ref()
+            .is_some_and(|revision| revision.attempt_id.is_none())
+    );
     ensure_test_plan_review_attempt_started(&mut session, &retry, 26)?;
+    Ok(())
+}
+
+#[test]
+fn plan_revision_queued_disables_save_until_confirmed_start_failure() -> Result<()> {
+    let (_temp, mut session, _base_request, base) = durable_session_with_ready_plan()?;
+    let request = submit_revision_guidance(&mut session, &base)?;
+    let queued = public_plan_review_from_session(&session)?;
+    assert!(queued.allowed_actions.is_empty());
+    assert_eq!(
+        queued.revision.as_ref().map(|revision| revision.status),
+        Some(sigil_kernel::PublicPlanRevisionStatusV1::Queued)
+    );
+    let save = PlanDecisionCommand {
+        plan_id: base.plan_id.as_str().to_owned(),
+        expected_plan_hash: base.plan_hash.clone(),
+        decision: PlanDecision::SavedOnly,
+    };
+    let queued_entries = session.entries().to_vec();
+    assert!(PlanReviewCoordinator::record_plan_decision(&mut session, &save, 30).is_err());
+    assert_eq!(
+        serde_json::to_value(session.entries())?,
+        serde_json::to_value(queued_entries)?
+    );
+    let failure = PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+        &mut session,
+        &request,
+        "route owner rejected this dispatch",
+        31,
+    )?;
+    assert_eq!(failure.decision, PlanDecision::RevisionFailed);
+    let failed = public_plan_review_from_session(&session)?;
+    assert_eq!(failed.plan_id, base.plan_id.as_str());
+    assert_eq!(failed.plan_hash.as_deref(), Some(base.plan_hash.as_str()));
+    assert_eq!(
+        failed.revision.as_ref().map(|revision| revision.status),
+        Some(sigil_kernel::PublicPlanRevisionStatusV1::Failed)
+    );
+    for action in [
+        sigil_kernel::PublicPlanAction::Run,
+        sigil_kernel::PublicPlanAction::Save,
+        sigil_kernel::PublicPlanAction::Revise,
+        sigil_kernel::PublicPlanAction::Reject,
+    ] {
+        assert!(failed.allowed_actions.contains(&action));
+    }
+    assert!(
+        PlanReviewProjection::from_entries(session.entries())
+            .review(&request.plan_review_id)
+            .expect("review")
+            .attempts
+            .iter()
+            .all(|attempt| attempt.attempt_id != request.attempt_id)
+    );
+    let before_replay = session.entries().to_vec();
+    assert_eq!(
+        PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+            &mut session,
+            &request,
+            "same rejected dispatch",
+            32
+        )?,
+        failure
+    );
+    assert_eq!(
+        serde_json::to_value(session.entries())?,
+        serde_json::to_value(before_replay)?
+    );
+    assert_eq!(
+        PlanReviewCoordinator::record_plan_decision(&mut session, &save, 33)?.decision,
+        PlanDecision::SavedOnly
+    );
+    Ok(())
+}
+
+#[test]
+fn plan_revision_start_failure_rejects_started_or_changed_attempts() -> Result<()> {
+    let (_temp, mut session, _base_request, base) = durable_session_with_ready_plan()?;
+    let request = submit_revision_guidance(&mut session, &base)?;
+    let mut changed = request.clone();
+    changed.attempt_ordinal += 1;
+    let before = session.entries().to_vec();
+    assert!(
+        PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+            &mut session,
+            &changed,
+            "stale owner",
+            30
+        )
+        .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(session.entries())?,
+        serde_json::to_value(before)?
+    );
+    ensure_test_plan_review_attempt_started(&mut session, &request, 31)?;
+    let started = session.entries().to_vec();
+    assert!(
+        PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+            &mut session,
+            &request,
+            "too late",
+            32
+        )
+        .is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(session.entries())?,
+        serde_json::to_value(started)?
+    );
+    assert_eq!(
+        session
+            .plan_artifact_projection()
+            .latest_decision(&base.plan_id)
+            .expect("decision")
+            .decision,
+        PlanDecision::RevisionRequested
+    );
     Ok(())
 }
 
