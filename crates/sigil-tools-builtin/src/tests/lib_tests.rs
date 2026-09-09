@@ -30,6 +30,10 @@ use sigil_kernel::{
 };
 use tokio::time::{Duration, Instant, sleep};
 
+#[path = "file_tool_fixture.rs"]
+pub(crate) mod file_tool_fixture;
+use file_tool_fixture::FileToolTestExt;
+
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
     DockerExecutionBackend, EditFileTool, GlobTool, GrepTool, LinuxBubblewrapExecutionBackend,
@@ -238,28 +242,31 @@ fn managed_file_access_every_in_process_file_tool_declares_a_managed_file_access
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
     let refs = [
         ReadFileTool
-            .permission_plan(&ctx, &json!({ "path": "src/lib.rs" }))?
+            .permission_plan_with_file_authority(&ctx, &json!({ "path": "src/lib.rs" }))?
             .managed_file_access,
         WriteFileTool
-            .permission_plan(&ctx, &json!({ "path": "src/lib.rs", "content": "x" }))?
+            .permission_plan_with_file_authority(
+                &ctx,
+                &json!({ "path": "src/lib.rs", "content": "x" }),
+            )?
             .managed_file_access,
         EditFileTool
-            .permission_plan(
+            .permission_plan_with_file_authority(
                 &ctx,
                 &json!({ "path": "src/lib.rs", "old_text": "a", "new_text": "b" }),
             )?
             .managed_file_access,
         DeleteFileTool
-            .permission_plan(&ctx, &json!({ "path": "src/lib.rs" }))?
+            .permission_plan_with_file_authority(&ctx, &json!({ "path": "src/lib.rs" }))?
             .managed_file_access,
         ListTool
-            .permission_plan(&ctx, &json!({ "path": "src" }))?
+            .permission_plan_with_file_authority(&ctx, &json!({ "path": "src" }))?
             .managed_file_access,
         GlobTool
-            .permission_plan(&ctx, &json!({ "pattern": "**/*.rs" }))?
+            .permission_plan_with_file_authority(&ctx, &json!({ "pattern": "**/*.rs" }))?
             .managed_file_access,
         GrepTool
-            .permission_plan(&ctx, &json!({ "pattern": "fn", "path": "src" }))?
+            .permission_plan_with_file_authority(&ctx, &json!({ "pattern": "fn", "path": "src" }))?
             .managed_file_access,
     ];
     for file_ref in refs {
@@ -539,7 +546,7 @@ async fn read_file_streams_large_slice_into_artifact_with_bounded_inline_content
     );
 
     let result = ReadFileTool
-        .execute(
+        .execute_with_file_authority(
             context,
             "read-large".to_owned(),
             json!({"path": "large.txt", "limit": 2_000}),
@@ -579,7 +586,7 @@ async fn grep_streams_all_matches_while_bounding_inline_projection() -> Result<(
     );
 
     let result = GrepTool
-        .execute(
+        .execute_with_file_authority(
             context,
             "grep-large".to_owned(),
             json!({"pattern": "needle", "path": ".", "limit": 1_000}),
@@ -3519,8 +3526,8 @@ fn bash_session_scope_ignores_output_filters_but_binds_validation_arguments() ->
         .analysis_bindings
         .get("environment_binding")
         .expect("environment binding");
-    assert!(first_binding.starts_with("shell-env-v1:"));
-    assert_eq!(first_binding.len(), "shell-env-v1:".len() + 64);
+    assert!(first_binding.starts_with("shell-env-v2:"));
+    assert_eq!(first_binding.len(), "shell-env-v2:".len() + 64);
     let second =
         second_tool.permission_plan(&context, &json!({ "command": "cargo check --workspace" }))?;
     assert_ne!(
@@ -3542,6 +3549,11 @@ fn bash_execution_request_uses_restricted_environment_only_for_complete_known_co
         sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
     );
     assert!(restricted.env.contains_key("PATH"));
+    for toolchain_root in ["CARGO_HOME", "RUSTUP_HOME"] {
+        if let Ok(expected) = std::env::var(toolchain_root) {
+            assert_eq!(restricted.env.get(toolchain_root), Some(&expected));
+        }
+    }
     assert_eq!(
         restricted
             .env
@@ -3549,7 +3561,7 @@ fn bash_execution_request_uses_restricted_environment_only_for_complete_known_co
             .map(String::as_str),
         Some(scratch.to_string_lossy().as_ref())
     );
-    for inherited_name in ["BASH_ENV", "ENV", "PROMPT_COMMAND", "GITHUB_TOKEN"] {
+    for inherited_name in ["HOME", "BASH_ENV", "ENV", "PROMPT_COMMAND", "GITHUB_TOKEN"] {
         assert!(!restricted.env.contains_key(inherited_name));
     }
 
@@ -3783,8 +3795,16 @@ fn builtin_tool_paths_workspace_defaults_are_stable() {
 #[test]
 fn temporary_file_guidance_is_model_visible() {
     let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
+    let write_spec = WriteFileTool.spec();
+    assert!(write_spec.description.contains("workspace-relative"));
+    assert!(write_spec.description.contains("$SIGIL_SCRATCH_DIR"));
+    assert!(write_spec.description.contains("cache/tmp"));
+    assert!(
+        !write_spec
+            .description
+            .contains("permission.external_directory")
+    );
     for spec in [
-        WriteFileTool.spec(),
         BashTool {
             scratch_label: "cache/tmp".to_owned(),
             scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
@@ -3897,25 +3917,33 @@ fn terminal_process_managers_reuse_relative_artifact_roots() -> Result<()> {
 }
 
 #[test]
-fn write_file_permission_operation_classifies_create_overwrite_and_external() -> Result<()> {
+fn write_file_permission_operation_classifies_create_overwrite_and_rejects_host_paths() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("existing.txt"), "old")?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
-    let overwrite =
-        WriteFileTool.permission_plan(&ctx, &json!({"path":"existing.txt", "content":"new"}))?;
-    assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
-    let create =
-        WriteFileTool.permission_plan(&ctx, &json!({"path":"new.txt", "content":"new"}))?;
-    assert_eq!(create.operation, ToolOperation::CreateFile);
-    let absolute_create = WriteFileTool.permission_plan(
+    let overwrite = WriteFileTool.permission_plan_with_file_authority(
         &ctx,
-        &json!({"path": temp.path().join("abs-new.txt"), "content":"new"}),
+        &json!({"path":"existing.txt", "content":"new"}),
     )?;
-    assert_eq!(absolute_create.operation, ToolOperation::CreateFile);
+    assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
+    let create = WriteFileTool
+        .permission_plan_with_file_authority(&ctx, &json!({"path":"new.txt", "content":"new"}))?;
+    assert_eq!(create.operation, ToolOperation::CreateFile);
+    let absolute_create = WriteFileTool
+        .permission_plan_with_file_authority(
+            &ctx,
+            &json!({"path": temp.path().join("abs-new.txt"), "content":"new"}),
+        )
+        .expect_err("managed file tools require a workspace-relative path");
+    assert!(absolute_create.to_string().contains("alias collision"));
     assert!(
         WriteFileTool
-            .permission_plan(&ctx, &json!({"path":"../outside.txt", "content":"new"}),)
+            .permission_plan_with_file_authority(
+                &ctx,
+                &json!({"path":"../outside.txt", "content":"new"}),
+            )
             .is_err()
     );
     Ok(())
@@ -3927,28 +3955,33 @@ fn typed_file_mutation_plans_publish_exact_read_write_delete_facts() -> Result<(
     fs::write(temp.path().join("existing.txt"), "old")?;
     let ctx = ToolContext::new(temp.path(), 5);
 
-    let create =
-        WriteFileTool.permission_plan(&ctx, &json!({ "path": "new.txt", "content": "new" }))?;
+    let create = WriteFileTool.permission_plan_with_file_authority(
+        &ctx,
+        &json!({ "path": "new.txt", "content": "new" }),
+    )?;
     assert_eq!(create.operation, ToolOperation::CreateFile);
     assert_eq!(
         create.effects,
         BTreeSet::from([ToolPermissionEffect::FileWrite])
     );
 
-    let overwrite = WriteFileTool
-        .permission_plan(&ctx, &json!({ "path": "existing.txt", "content": "new" }))?;
+    let overwrite = WriteFileTool.permission_plan_with_file_authority(
+        &ctx,
+        &json!({ "path": "existing.txt", "content": "new" }),
+    )?;
     assert_eq!(overwrite.operation, ToolOperation::OverwriteFile);
     assert!(overwrite.effects.contains(&ToolPermissionEffect::FileRead));
     assert!(overwrite.effects.contains(&ToolPermissionEffect::FileWrite));
 
-    let edit = EditFileTool.permission_plan(
+    let edit = EditFileTool.permission_plan_with_file_authority(
         &ctx,
         &json!({ "path": "existing.txt", "old_text": "old", "new_text": "new" }),
     )?;
     assert!(edit.effects.contains(&ToolPermissionEffect::FileRead));
     assert!(edit.effects.contains(&ToolPermissionEffect::FileWrite));
 
-    let delete = DeleteFileTool.permission_plan(&ctx, &json!({ "path": "existing.txt" }))?;
+    let delete = DeleteFileTool
+        .permission_plan_with_file_authority(&ctx, &json!({ "path": "existing.txt" }))?;
     assert_eq!(delete.operation, ToolOperation::DeleteFile);
     assert!(delete.effects.contains(&ToolPermissionEffect::FileRead));
     assert!(delete.effects.contains(&ToolPermissionEffect::FileDelete));
@@ -3964,11 +3997,18 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
     fs::write(&file, "hello old")?;
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
     let read = ReadFileTool
-        .execute(ctx.clone(), "1".to_owned(), json!({ "path": "note.txt" }))
+        .execute_with_file_authority(ctx.clone(), "1".to_owned(), json!({ "path": "note.txt" }))
         .await?;
     assert_eq!(read.content, "hello old");
+    let receipt: sigil_kernel::managed_execution::BorrowedResourceAccessReceiptV1 =
+        serde_json::from_value(read.metadata.details["managed_access_receipt"].clone())?;
+    assert_ne!(
+        receipt.receipt_hash,
+        sigil_kernel::resource::CanonicalHash::from_bytes([0; 32])
+    );
+    assert!(receipt.identity_before.is_some());
     EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "2".to_owned(),
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
@@ -3979,9 +4019,29 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
 }
 
 #[tokio::test]
+async fn file_read_without_authority_and_sealed_decision_fails_closed() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("private.txt"), "fixture payload")?;
+    let error = ReadFileTool
+        .execute(
+            ToolContext::new(workspace.path(), 5),
+            "unprepared-read".to_owned(),
+            json!({"path": "private.txt"}),
+        )
+        .await
+        .expect_err("tests must use the same authority gate as production");
+    assert!(
+        error
+            .downcast_ref::<sigil_kernel::ToolExecutionGuardError>()
+            .is_some()
+    );
+    assert!(!error.to_string().contains("fixture payload"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn file_write_results_use_workspace_relative_paths() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let write_path = temp.path().join("written.txt");
     let edit_path = temp.path().join("edited.txt");
     let delete_path = temp.path().join("deleted.txt");
     fs::write(&edit_path, "old")?;
@@ -3989,21 +4049,21 @@ async fn file_write_results_use_workspace_relative_paths() -> Result<()> {
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let write = WriteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "write".to_owned(),
-            json!({ "path": write_path, "content": "new" }),
+            json!({ "path": "written.txt", "content": "new" }),
         )
         .await?;
     let edit = EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "edit".to_owned(),
-            json!({ "path": edit_path, "old_text": "old", "new_text": "new" }),
+            json!({ "path": "edited.txt", "old_text": "old", "new_text": "new" }),
         )
         .await?;
     let delete = DeleteFileTool
-        .execute(ctx, "delete".to_owned(), json!({ "path": delete_path }))
+        .execute_with_file_authority(ctx, "delete".to_owned(), json!({ "path": "deleted.txt" }))
         .await?;
 
     for (result, expected) in [
@@ -4032,7 +4092,7 @@ async fn write_file_records_controlled_mutation_events_when_session_store_is_ava
         .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
 
     let result = WriteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "write-call".to_owned(),
             json!({ "path": "note.txt", "content": "hello\n" }),
@@ -4052,6 +4112,179 @@ async fn write_file_records_controlled_mutation_events_when_session_store_is_ava
     Ok(())
 }
 
+#[test]
+fn queued_file_write_timeout_cannot_apply_after_the_blocking_pool_is_released() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    let workspace = tempfile::tempdir()?;
+    let audit = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(audit.path().join("mutations.jsonl"))?;
+    let owner = RunCancellationOwner::new();
+    let ctx = ToolContext::new(workspace.path(), 1)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()))
+        .with_cancellation(owner.handle());
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    // Dropping this sender also releases the worker on an assertion failure, so runtime drop
+    // cannot wait forever for the deliberately saturated blocking pool.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let blocker = runtime.spawn_blocking(move || {
+        started_tx.send(()).expect("report occupied blocking pool");
+        let _ = release_rx.recv();
+    });
+    started_rx.recv_timeout(Duration::from_secs(5))?;
+
+    let result = runtime.block_on(WriteFileTool.execute_with_file_authority(
+        ctx,
+        "queued-write-timeout".to_owned(),
+        json!({ "path": "late.txt", "content": "must never be written" }),
+    ));
+    drop(release_tx);
+    runtime.block_on(blocker)?;
+    assert_eq!(
+        runtime.block_on(owner.wait_for_quiescence(Duration::from_secs(5))),
+        sigil_kernel::RunQuiescenceOutcome::Quiescent,
+        "the expired physical attempt must release its registered task"
+    );
+    let error = result.expect_err("a queued write must time out while the pool is occupied");
+    assert!(matches!(
+        error.downcast_ref::<sigil_kernel::ToolExecutionGuardError>(),
+        Some(
+            sigil_kernel::ToolExecutionGuardError::EffectReconciliationRequired
+                | sigil_kernel::ToolExecutionGuardError::ManagedFile {
+                    kind: ToolErrorKind::Timeout,
+                    ..
+                }
+        )
+    ));
+    assert!(!workspace.path().join("late.txt").exists());
+    assert!(stored_event_types(&store)?.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_discovery_does_not_require_read_permission_for_ignored_or_listed_files() -> Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join(".gitignore"), "ignored.txt\n")?;
+    fs::write(workspace.path().join("visible.txt"), "needle visible\n")?;
+    let ignored = workspace.path().join("ignored.txt");
+    fs::write(&ignored, "needle ignored\n")?;
+    fs::set_permissions(&ignored, fs::Permissions::from_mode(0o000))?;
+    // Privileged test hosts may bypass mode bits; all discovery assertions still apply there.
+    let mode_bits_are_enforced = fs::File::open(&ignored).is_err();
+    let ctx = ToolContext::new(workspace.path(), 5);
+    let listing = ListTool
+        .execute_with_file_authority(ctx.clone(), "list-unreadable".to_owned(), json!({}))
+        .await?;
+    let listed: Vec<String> = serde_json::from_str(&listing.content)?;
+    assert!(listed.iter().any(|path| path == "ignored.txt"));
+    let glob = GlobTool
+        .execute_with_file_authority(
+            ctx.clone(),
+            "glob-ignored-unreadable".to_owned(),
+            json!({ "pattern": "**/*.txt" }),
+        )
+        .await?;
+    let globbed: Vec<String> = serde_json::from_str(&glob.content)?;
+    assert_eq!(globbed, vec!["visible.txt"]);
+    let grep = GrepTool
+        .execute_with_file_authority(
+            ctx.clone(),
+            "grep-ignored-unreadable".to_owned(),
+            json!({ "pattern": "needle" }),
+        )
+        .await?;
+    let matches: Vec<Value> = serde_json::from_str(&grep.content)?;
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0]["path"], "visible.txt");
+    assert!(!grep.metadata.truncated);
+
+    let unreadable = workspace.path().join("unreadable.txt");
+    fs::write(&unreadable, "needle unreadable\n")?;
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))?;
+    let glob = GlobTool
+        .execute_with_file_authority(
+            ctx.clone(),
+            "glob-listed-unreadable".to_owned(),
+            json!({ "pattern": "**/*.txt" }),
+        )
+        .await?;
+    let globbed: Vec<String> = serde_json::from_str(&glob.content)?;
+    assert_eq!(globbed, vec!["unreadable.txt", "visible.txt"]);
+    let grep = GrepTool
+        .execute_with_file_authority(
+            ctx,
+            "grep-visible-with-unreadable-neighbor".to_owned(),
+            json!({ "pattern": "needle" }),
+        )
+        .await?;
+    let matches: Vec<Value> = serde_json::from_str(&grep.content)?;
+    assert!(matches.iter().any(|entry| entry["path"] == "visible.txt"));
+    if mode_bits_are_enforced {
+        assert_eq!(matches.len(), 1);
+        assert!(grep.metadata.truncated);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_gitignore_rules_are_scoped_to_their_own_directory() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir_all(workspace.path().join("src/deep"))?;
+    fs::create_dir(workspace.path().join("other"))?;
+    fs::write(workspace.path().join(".gitignore"), "/top-hidden.txt\n")?;
+    fs::write(
+        workspace.path().join("src/.gitignore"),
+        "/scoped.txt\n*.tmp\n",
+    )?;
+    fs::write(workspace.path().join("src/deep/.gitignore"), "!keep.tmp\n")?;
+    let expected = [
+        "other/outside.tmp",
+        "other/scoped.txt",
+        "outside.tmp",
+        "scoped.txt",
+        "src/deep/keep.tmp",
+        "src/visible.txt",
+    ];
+    for path in expected.into_iter().chain([
+        "top-hidden.txt",
+        "src/scoped.txt",
+        "src/hidden.tmp",
+        "src/deep/hidden.tmp",
+    ]) {
+        fs::write(workspace.path().join(path), "needle\n")?;
+    }
+    let ctx = ToolContext::new(workspace.path(), 5);
+    let glob = GlobTool
+        .execute_with_file_authority(
+            ctx.clone(),
+            "glob-nested-ignore".to_owned(),
+            json!({ "pattern": "**/*" }),
+        )
+        .await?;
+    let mut globbed: Vec<String> = serde_json::from_str(&glob.content)?;
+    globbed.retain(|path| path.ends_with(".txt") || path.ends_with(".tmp"));
+    assert_eq!(globbed, expected);
+    let grep = GrepTool
+        .execute_with_file_authority(
+            ctx,
+            "grep-nested-ignore".to_owned(),
+            json!({ "pattern": "needle" }),
+        )
+        .await?;
+    let matches: Vec<Value> = serde_json::from_str(&grep.content)?;
+    let paths = matches
+        .iter()
+        .map(|entry| entry["path"].as_str().expect("match path"))
+        .collect::<Vec<_>>();
+    assert_eq!(paths, expected);
+    assert!(!grep.metadata.truncated);
+    Ok(())
+}
+
 #[tokio::test]
 async fn edit_and_delete_file_record_controlled_mutation_events_when_session_store_is_available()
 -> Result<()> {
@@ -4063,14 +4296,14 @@ async fn edit_and_delete_file_record_controlled_mutation_events_when_session_sto
         .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
 
     let edit = EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "edit-call".to_owned(),
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
         )
         .await?;
     let delete = DeleteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "delete-call".to_owned(),
             json!({ "path": "doomed.txt" }),
@@ -4101,7 +4334,7 @@ async fn write_file_preview_contains_diff() -> Result<()> {
     fs::write(&file, "alpha\nbeta\n")?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = WriteFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx,
             json!({ "path": "note.txt", "content": "alpha\nbeta\ngamma\n" }),
         )
@@ -4122,7 +4355,7 @@ async fn write_file_preview_for_new_file_contains_create_diff() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = WriteFileTool
-        .preview(ctx, json!({ "path": "new-note.txt", "content": "hello\n" }))
+        .preview_with_file_authority(ctx, json!({ "path": "new-note.txt", "content": "hello\n" }))
         .await?
         .expect("expected preview");
 
@@ -4150,7 +4383,7 @@ async fn write_file_preview_errors_for_unreadable_existing_file() -> Result<()> 
     fs::write(&file, [0xff_u8, 0xfe, 0xfd])?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let error = WriteFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx,
             json!({ "path": "note.txt", "content": "hello\nworld\n" }),
         )
@@ -4167,7 +4400,7 @@ async fn edit_file_preview_contains_replacement() -> Result<()> {
     fs::write(&file, "hello old\n")?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = EditFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx,
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
         )
@@ -4189,7 +4422,7 @@ async fn delete_file_preview_contains_delete_diff() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let preview = DeleteFileTool
-        .preview(ctx, json!({ "path": "note.txt" }))
+        .preview_with_file_authority(ctx, json!({ "path": "note.txt" }))
         .await?
         .expect("expected preview");
 
@@ -4212,7 +4445,7 @@ async fn delete_file_execute_deletes_regular_file() -> Result<()> {
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = DeleteFileTool
-        .execute(ctx, "delete".to_owned(), json!({ "path": "note.txt" }))
+        .execute_with_file_authority(ctx, "delete".to_owned(), json!({ "path": "note.txt" }))
         .await?;
 
     assert!(!file.exists());
@@ -4233,7 +4466,7 @@ async fn delete_file_errors_for_missing_file() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
-        .execute(ctx, "delete".to_owned(), json!({ "path": "missing.txt" }))
+        .execute_with_file_authority(ctx, "delete".to_owned(), json!({ "path": "missing.txt" }))
         .await
         .expect_err("expected missing file to fail");
 
@@ -4248,7 +4481,7 @@ async fn delete_file_errors_for_directory_path() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
-        .execute(ctx, "delete".to_owned(), json!({ "path": "dir" }))
+        .execute_with_file_authority(ctx, "delete".to_owned(), json!({ "path": "dir" }))
         .await
         .expect_err("expected directory delete to fail");
 
@@ -4335,7 +4568,12 @@ fn unavailable_registration_binds_fail_closed_terminal_port() -> Result<()> {
         BuiltinToolPaths::workspace_defaults(workspace.path()),
     );
 
-    assert!(handles.terminal.managed_execution_is_bound());
+    assert!(
+        handles
+            .terminal
+            .expect("enabled terminal")
+            .managed_execution_is_bound()
+    );
     Ok(())
 }
 
@@ -4597,7 +4835,7 @@ fn terminal_read_no_change_points_to_event_driven_wait() -> Result<()> {
 fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("existing.txt"), "old")?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let ctx = file_tool_fixture::file_authority_context(ToolContext::new(temp.path(), 5))?;
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -5695,7 +5933,7 @@ async fn read_file_supports_offset_limit_and_truncation_metadata() -> Result<()>
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "read".to_owned(),
             json!({ "path": "big.txt", "offset": 1, "limit": 2 }),
@@ -5720,7 +5958,7 @@ async fn read_file_reports_code_preview_metadata() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
-        .execute(ctx, "read".to_owned(), json!({ "path": "lib.rs" }))
+        .execute_with_file_authority(ctx, "read".to_owned(), json!({ "path": "lib.rs" }))
         .await?;
 
     assert_eq!(result.metadata.details["path"], "lib.rs");
@@ -5734,7 +5972,7 @@ async fn read_file_reports_directory_as_safe_invalid_input() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
-        .execute(ctx, "read-directory".to_owned(), json!({ "path": "." }))
+        .execute_with_file_authority(ctx, "read-directory".to_owned(), json!({ "path": "." }))
         .await?;
 
     let ToolResultStatus::Error(error) = result.status else {
@@ -5756,7 +5994,7 @@ async fn read_file_reports_missing_path_without_disclosing_host_workspace() -> R
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "read-missing".to_owned(),
             json!({ "path": "missing/review.md" }),
@@ -5791,17 +6029,17 @@ async fn list_glob_and_grep_report_limit_metadata() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let list = ListTool
-        .execute(ctx.clone(), "ls".to_owned(), json!({ "limit": 2 }))
+        .execute_with_file_authority(ctx.clone(), "ls".to_owned(), json!({ "limit": 2 }))
         .await?;
     let glob = GlobTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "glob".to_owned(),
             json!({ "pattern": "*.txt", "limit": 2 }),
         )
         .await?;
     let grep = GrepTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "grep".to_owned(),
             json!({ "pattern": "needle", "limit": 2 }),
@@ -5996,23 +6234,19 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
 
 #[cfg(unix)]
 #[test]
-fn read_file_reports_symlink_escape_as_external_subject() -> Result<()> {
+fn read_file_rejects_symlink_escape_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let outside_file = outside.path().join("secret.txt");
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
-    let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let plan = ReadFileTool.permission_plan(&ctx, &json!({ "path": "leak.txt" }))?;
-    let subjects = &plan.subjects;
-
-    assert_eq!(subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(
-        subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
+    let error = ReadFileTool
+        .permission_plan_with_file_authority(&ctx, &json!({ "path": "leak.txt" }))
+        .expect_err("read planning must reject a symlink escape");
+    assert!(error.to_string().contains("alias collision"));
+    assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
 
@@ -6027,13 +6261,13 @@ fn write_file_rejects_existing_symlink_escape_before_planning() -> Result<()> {
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let error = WriteFileTool
-        .permission_plan(
+        .permission_plan_with_file_authority(
             &ctx,
             &json!({ "path": "leak.txt", "content": "replacement" }),
         )
         .expect_err("workspace write planning must reject a symlink escape");
 
-    assert!(error.to_string().contains("outside workspace"));
+    assert!(error.to_string().contains("alias collision"));
     assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
@@ -6047,91 +6281,79 @@ fn write_file_rejects_symlink_parent_escape_before_planning() -> Result<()> {
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let error = WriteFileTool
-        .permission_plan(
+        .permission_plan_with_file_authority(
             &ctx,
             &json!({ "path": "outside-dir/new.txt", "content": "new" }),
         )
         .expect_err("workspace write planning must reject a symlink-parent escape");
 
-    assert!(error.to_string().contains("outside workspace"));
+    assert!(error.to_string().contains("alias collision"));
     assert!(!outside.path().join("new.txt").exists());
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn edit_file_reports_symlink_escape_as_external_subject() -> Result<()> {
+fn edit_file_rejects_symlink_escape_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let outside_file = outside.path().join("secret.txt");
     fs::write(&outside_file, "hello old")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
-    let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let plan = EditFileTool.permission_plan(
-        &ctx,
-        &json!({ "path": "leak.txt", "old_text": "old", "new_text": "new" }),
-    )?;
-    let subjects = &plan.subjects;
-
-    assert_eq!(subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(
-        subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
+    let error = EditFileTool
+        .permission_plan_with_file_authority(
+            &ctx,
+            &json!({ "path": "leak.txt", "old_text": "old", "new_text": "new" }),
+        )
+        .expect_err("edit planning must reject a symlink escape");
+    assert!(error.to_string().contains("alias collision"));
     assert_eq!(fs::read_to_string(outside_file)?, "hello old");
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn delete_file_reports_symlink_escape_as_external_subject() -> Result<()> {
+fn delete_file_rejects_symlink_escape_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let outside_file = outside.path().join("secret.txt");
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
-    let expected = fs::canonicalize(&outside_file)?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let plan = DeleteFileTool.permission_plan(&ctx, &json!({ "path": "leak.txt" }))?;
-    let subjects = &plan.subjects;
-
-    assert_eq!(subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(
-        subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
+    let error = DeleteFileTool
+        .permission_plan_with_file_authority(&ctx, &json!({ "path": "leak.txt" }))
+        .expect_err("delete planning must reject a symlink escape");
+    assert!(error.to_string().contains("alias collision"));
     assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn list_and_grep_report_external_symlink_roots_as_external_subjects() -> Result<()> {
+fn list_and_grep_reject_external_symlink_roots_before_planning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     fs::write(outside.path().join("secret.txt"), "secret")?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
-    let expected = outside.path().canonicalize()?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let list_plan = ListTool.permission_plan(&ctx, &json!({ "path": "outside-dir" }))?;
-    let grep_plan =
-        GrepTool.permission_plan(&ctx, &json!({ "path": "outside-dir", "pattern": "secret" }))?;
-    let list_subjects = &list_plan.subjects;
-    let grep_subjects = &grep_plan.subjects;
-
-    assert_eq!(list_subjects[0].scope, ToolSubjectScope::External);
-    assert_eq!(grep_subjects[0].scope, ToolSubjectScope::External);
+    let list_error = ListTool
+        .permission_plan_with_file_authority(&ctx, &json!({ "path": "outside-dir" }))
+        .expect_err("list planning must reject an external symlink root");
+    let grep_error = GrepTool
+        .permission_plan_with_file_authority(
+            &ctx,
+            &json!({ "path": "outside-dir", "pattern": "secret" }),
+        )
+        .expect_err("grep planning must reject an external symlink root");
+    assert!(list_error.to_string().contains("alias collision"));
+    assert!(grep_error.to_string().contains("alias collision"));
     assert_eq!(
-        list_subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
-    );
-    assert_eq!(
-        grep_subjects[0].canonical_path.as_deref(),
-        Some(expected.as_path())
+        fs::read_to_string(outside.path().join("secret.txt"))?,
+        "secret"
     );
     Ok(())
 }
@@ -6147,7 +6369,7 @@ async fn list_recursive_does_not_traverse_external_symlink_children() -> Result<
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let result = ListTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "list".to_owned(),
             json!({ "path": ".", "recursive": true }),
@@ -6170,7 +6392,7 @@ async fn glob_does_not_traverse_external_symlink_targets() -> Result<()> {
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let result = GlobTool
-        .execute(ctx, "glob".to_owned(), json!({ "pattern": "**/*.txt" }))
+        .execute_with_file_authority(ctx, "glob".to_owned(), json!({ "pattern": "**/*.txt" }))
         .await?;
 
     assert!(result.content.contains("visible.txt"));
@@ -6512,7 +6734,7 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = GrepTool
-        .execute(ctx, "grep".to_owned(), json!({ "pattern": "needle" }))
+        .execute_with_file_authority(ctx, "grep".to_owned(), json!({ "pattern": "needle" }))
         .await?;
 
     assert!(!result.is_error());
@@ -6528,7 +6750,7 @@ async fn write_file_execute_creates_missing_parent_directories() -> Result<()> {
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = WriteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "write".to_owned(),
             json!({ "path": "nested/deep/note.txt", "content": "hello" }),
@@ -6550,7 +6772,7 @@ async fn edit_file_errors_for_missing_and_ambiguous_old_text() -> Result<()> {
     fs::write(temp.path().join("note.txt"), "repeat old repeat old")?;
 
     let missing = EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "edit-missing".to_owned(),
             json!({ "path": "note.txt", "old_text": "absent", "new_text": "new" }),
@@ -6560,7 +6782,7 @@ async fn edit_file_errors_for_missing_and_ambiguous_old_text() -> Result<()> {
     assert!(missing.to_string().contains("old_text not found"));
 
     let ambiguous = EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "edit-ambiguous".to_owned(),
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
@@ -6582,7 +6804,7 @@ async fn delete_file_rejects_symlink_target() -> Result<()> {
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "delete-link".to_owned(),
             json!({ "path": "linked.txt" }),
@@ -6590,7 +6812,7 @@ async fn delete_file_rejects_symlink_target() -> Result<()> {
         .await
         .expect_err("symlink deletes should fail");
 
-    assert!(error.to_string().contains("outside workspace"));
+    assert!(error.to_string().contains("alias collision"));
     assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
@@ -6647,7 +6869,7 @@ async fn read_file_treats_nullable_bounds_as_omitted() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "read-nullable-bounds".to_owned(),
             json!({ "path": "note.txt", "offset": null, "limit": null }),
@@ -6669,18 +6891,24 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     for (tool_name, result) in [
-        ("read_file", ReadFileTool.permission_plan(&ctx, &json!({}))),
+        (
+            "read_file",
+            ReadFileTool.permission_plan_with_file_authority(&ctx, &json!({})),
+        ),
         (
             "write_file",
-            WriteFileTool.permission_plan(&ctx, &json!({ "content": "hello" })),
+            WriteFileTool.permission_plan_with_file_authority(&ctx, &json!({ "content": "hello" })),
         ),
         (
             "edit_file",
-            EditFileTool.permission_plan(&ctx, &json!({ "old_text": "a", "new_text": "b" })),
+            EditFileTool.permission_plan_with_file_authority(
+                &ctx,
+                &json!({ "old_text": "a", "new_text": "b" }),
+            ),
         ),
         (
             "delete_file",
-            DeleteFileTool.permission_plan(&ctx, &json!({})),
+            DeleteFileTool.permission_plan_with_file_authority(&ctx, &json!({})),
         ),
     ] {
         let error = result.expect_err(tool_name);
@@ -6709,7 +6937,7 @@ async fn edit_file_preview_surfaces_missing_and_ambiguous_matches() -> Result<()
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let missing = EditFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx.clone(),
             json!({ "path": "note.txt", "old_text": "absent", "new_text": "new" }),
         )
@@ -6718,7 +6946,7 @@ async fn edit_file_preview_surfaces_missing_and_ambiguous_matches() -> Result<()
     assert!(missing.to_string().contains("old_text not found"));
 
     let ambiguous = EditFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx,
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
         )
@@ -6734,7 +6962,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let read_error = ReadFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "read".to_owned(),
             json!({ "path": "missing.txt", "limit": "lots" }),
@@ -6748,7 +6976,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
     );
 
     let list_error = ListTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "ls".to_owned(),
             json!({ "path": "missing-dir" }),
@@ -6758,7 +6986,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
     assert!(!list_error.to_string().is_empty());
 
     let glob_error = GlobTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "glob".to_owned(),
             json!({ "pattern": "[", "limit": 5 }),
@@ -6768,7 +6996,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
     assert!(!glob_error.to_string().is_empty());
 
     let grep_error = GrepTool
-        .execute(ctx.clone(), "grep".to_owned(), json!({ "pattern": "[" }))
+        .execute_with_file_authority(ctx.clone(), "grep".to_owned(), json!({ "pattern": "[" }))
         .await
         .expect_err("invalid regex should fail");
     assert!(!grep_error.to_string().is_empty());
@@ -8129,7 +8357,7 @@ async fn write_file_execute_creates_parent_dirs_and_reports_bytes() -> Result<()
     let ctx = tool_context_with_mutation_recorder(temp.path(), 5)?;
 
     let result = WriteFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx,
             "write".to_owned(),
             json!({ "path": "nested/dir/note.txt", "content": "hello" }),
@@ -8153,7 +8381,7 @@ async fn edit_file_execute_and_preview_reject_missing_and_ambiguous_matches() ->
     fs::write(&file, "hello old old\n")?;
 
     let ambiguous = EditFileTool
-        .execute(
+        .execute_with_file_authority(
             ctx.clone(),
             "edit".to_owned(),
             json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
@@ -8163,7 +8391,7 @@ async fn edit_file_execute_and_preview_reject_missing_and_ambiguous_matches() ->
     assert!(ambiguous.to_string().contains("ambiguous"));
 
     let missing = EditFileTool
-        .preview(
+        .preview_with_file_authority(
             ctx,
             json!({ "path": "note.txt", "old_text": "missing", "new_text": "new" }),
         )
@@ -8255,7 +8483,7 @@ fn windows_prefixed_workspace_paths_resolve_existing_and_missing_targets() -> Re
 
 #[cfg(unix)]
 #[test]
-fn delete_file_and_path_resolution_helpers_cover_external_and_symlink_paths() -> Result<()> {
+fn managed_delete_planning_rejects_absolute_and_external_symlink_paths() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
     let workspace_file = workspace.path().join("note.txt");
@@ -8263,29 +8491,24 @@ fn delete_file_and_path_resolution_helpers_cover_external_and_symlink_paths() ->
     fs::write(&workspace_file, "hello")?;
     fs::write(&outside_file, "secret")?;
 
-    let target = super::resolve_delete_file_target(
-        workspace.path(),
-        workspace_file.to_str().expect("utf8 path"),
-    )?;
-    assert_eq!(target.path, workspace_file);
-    assert_eq!(target.display_path, target.path.display().to_string());
-
-    let outside_error = super::resolve_delete_file_target(
-        workspace.path(),
-        outside_file.to_str().expect("utf8 path"),
-    )
-    .expect_err("external delete targets should be rejected");
-    assert!(outside_error.to_string().contains("outside workspace"));
+    let context = ToolContext::new(workspace.path(), 5);
+    let target = DeleteFileTool
+        .permission_plan_with_file_authority(&context, &json!({"path": "note.txt"}))?;
+    assert!(target.managed_file_access.is_some());
+    for absolute_path in [&workspace_file, &outside_file] {
+        let error = DeleteFileTool
+            .permission_plan_with_file_authority(&context, &json!({"path": absolute_path}))
+            .expect_err("absolute delete targets must be rejected");
+        assert!(error.to_string().contains("alias collision"));
+    }
 
     symlink(&outside_file, workspace.path().join("link.txt"))?;
-    let symlink_error =
-        super::validate_delete_file_target(&workspace.path().join("link.txt"), "link.txt")
-            .expect_err("symlink delete targets should be rejected");
-    assert!(
-        symlink_error
-            .to_string()
-            .contains("does not support symlink")
-    );
+    let symlink_error = DeleteFileTool
+        .permission_plan_with_file_authority(&context, &json!({"path": "link.txt"}))
+        .expect_err("symlink delete targets should be rejected");
+    assert!(symlink_error.to_string().contains("alias collision"));
+    assert_eq!(fs::read_to_string(workspace_file)?, "hello");
+    assert_eq!(fs::read_to_string(outside_file)?, "secret");
     Ok(())
 }
 

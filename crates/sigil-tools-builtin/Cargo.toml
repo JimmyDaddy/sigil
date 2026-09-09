@@ -51,6 +51,7 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 sigil-kernel = { path = "../sigil-kernel", features = ["test-support"] }
+sigil-resource-authority = { path = "../sigil-resource-authority" }
 serial_test = "3"
 
 [lints]

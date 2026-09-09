@@ -47,7 +47,7 @@ use crate::{
 };
 
 const SHELL_SEMANTIC_REGISTRY_VERSION: u32 = 2;
-const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 1;
+const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 2;
 const FILE_PRESENCE_EXECUTION_BINDING_KEY: &str = "file_presence_execution_binding";
 const FILE_PRESENCE_EXECUTION_PROFILE_VERSION: u32 = 1;
 const WORKSPACE_CHECK_MIN_AVAILABLE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -3191,10 +3191,36 @@ fn bash_execution_request_from_containment(
 }
 
 fn controlled_shell_environment() -> BTreeMap<String, String> {
+    controlled_shell_environment_with(|name| std::env::var(name).ok())
+}
+
+fn controlled_shell_environment_with(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
-    for name in ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ"] {
-        if let Ok(value) = std::env::var(name) {
+    for name in [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+    ] {
+        if let Some(value) = lookup(name) {
             environment.insert(name.to_owned(), value);
+        }
+    }
+    // Bind the same closed toolchain roots as managed verification before approval
+    // and execution. HOME itself remains owned by the fresh ExecutionTemp profile.
+    if let Some(parent_home) = lookup("HOME") {
+        for (name, relative) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+            environment.entry(name.to_owned()).or_insert_with(|| {
+                PathBuf::from(&parent_home)
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned()
+            });
         }
     }
     environment.entry("PATH".to_owned()).or_insert_with(|| {
@@ -3448,13 +3474,22 @@ fn shell_environment_binding_with_profile(
     if let Some(profile) = file_presence_profile {
         profile.apply_to_environment(&mut environment);
     }
+    let shell_program = file_presence_profile.map_or_else(
+        || shell.program_string(),
+        |profile| profile.shell_program.to_string_lossy().into_owned(),
+    );
+    shell_environment_binding_for_environment(&shell_program, restricted, &environment)
+}
+
+fn shell_environment_binding_for_environment(
+    shell_program: &str,
+    restricted: bool,
+    environment: &BTreeMap<String, String>,
+) -> Result<String> {
     let canonical = serde_json::to_vec(&json!({
         "policy_version": SHELL_ENVIRONMENT_POLICY_VERSION,
         "profile": if restricted { "restricted" } else { "user_inherited" },
-        "shell_program": file_presence_profile.map_or_else(
-            || shell.program_string(),
-            |profile| profile.shell_program.to_string_lossy().into_owned(),
-        ),
+        "shell_program": shell_program,
         "environment": environment,
     }))?;
     Ok(format!(
@@ -5881,6 +5916,10 @@ pub(crate) fn redirection_target(word: &str) -> Option<&str> {
 #[cfg(test)]
 #[path = "tests/shell_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/shell_environment_tests.rs"]
+mod shell_environment_tests;
 
 pub(crate) fn is_path_argument(command: &str, word: &str) -> bool {
     if word.starts_with('-') || word.contains("://") {

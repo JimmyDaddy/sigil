@@ -16,18 +16,6 @@ pub(crate) struct ResolvedToolPath {
     pub(crate) scope: ToolSubjectScope,
 }
 
-#[derive(Debug, Clone)]
-#[cfg(test)]
-pub(crate) struct DeleteFileTarget {
-    pub(crate) path: PathBuf,
-    pub(crate) display_path: String,
-}
-
-#[cfg(test)]
-pub(crate) fn resolve_workspace_path(workspace_root: &Path, requested: &str) -> Result<PathBuf> {
-    Ok(resolve_tool_path(workspace_root, requested)?.canonical)
-}
-
 pub(crate) fn tool_path_subject(workspace_root: &Path, requested: &str) -> Result<ToolSubject> {
     let resolved = resolve_tool_path(workspace_root, requested)?;
     Ok(ToolSubject::path_with_scope(
@@ -44,43 +32,6 @@ pub(crate) fn resolve_tool_path(
 ) -> Result<ResolvedToolPath> {
     let workspace_root = canonical_workspace_root(workspace_root)?;
     resolve_tool_path_from_base(&workspace_root, &workspace_root, requested)
-}
-
-#[cfg(test)]
-pub(crate) fn resolve_delete_file_target(
-    workspace_root: &Path,
-    requested: &str,
-) -> Result<DeleteFileTarget> {
-    let workspace_root = canonical_workspace_root(workspace_root)?;
-    let resolved = resolve_tool_path_from_base(&workspace_root, &workspace_root, requested)?;
-    if resolved.scope != ToolSubjectScope::Workspace {
-        bail!("delete_file path is outside workspace: {requested}");
-    }
-    let requested_path = Path::new(requested);
-    let path = if requested_path.is_absolute() {
-        lexically_normalize_path(requested_path)?
-    } else {
-        lexically_normalize_path(&workspace_root.join(requested_path))?
-    };
-    Ok(DeleteFileTarget {
-        path,
-        display_path: requested.to_owned(),
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn validate_delete_file_target(path: &Path, display_path: &str) -> Result<fs::Metadata> {
-    let symlink_metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    if symlink_metadata.file_type().is_symlink() {
-        bail!("delete_file does not support symlink paths: {display_path}");
-    }
-    let metadata =
-        fs::metadata(path).with_context(|| format!("failed to inspect {}", path.display()))?;
-    if !metadata.is_file() {
-        bail!("delete_file only supports regular files: {display_path}");
-    }
-    Ok(metadata)
 }
 
 pub(crate) fn resolve_tool_path_from_base(

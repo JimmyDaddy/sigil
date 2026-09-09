@@ -33,10 +33,11 @@ pub use managed_execution::{
     UnavailableManagedCommandExecutionPortV1,
 };
 pub use registry::{
-    BuiltinToolHandles, BuiltinToolPaths, register_builtin_tools,
-    register_builtin_tools_with_managed_execution_and_terminal_config,
+    BuiltinTerminalOptions, BuiltinToolHandles, BuiltinToolPaths, BuiltinToolSelection,
+    register_builtin_tools, register_builtin_tools_with_managed_execution_and_terminal_config,
     register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal,
-    register_builtin_tools_with_paths, register_builtin_tools_with_unavailable_managed_execution,
+    register_builtin_tools_with_paths, register_builtin_tools_with_selection,
+    register_builtin_tools_with_unavailable_managed_execution,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use registry::{

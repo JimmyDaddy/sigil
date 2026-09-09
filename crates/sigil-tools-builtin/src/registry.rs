@@ -32,8 +32,47 @@ use sigil_kernel::{ExecutionBackend, ExecutionConfig};
 /// session-scoped scratch lease registry used by maintenance GC.
 #[derive(Debug, Clone)]
 pub struct BuiltinToolHandles {
-    pub terminal: TerminalTaskControlHandle,
+    pub terminal: Option<TerminalTaskControlHandle>,
     pub scratch: ScratchNamespaceControl,
+}
+
+/// Optional built-in capabilities selected before their runtime owners are constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinToolSelection {
+    /// Persistent terminal tasks and their lifecycle owner.
+    pub terminal: bool,
+    /// Multi-file changeset application.
+    pub changesets: bool,
+}
+
+impl BuiltinToolSelection {
+    /// File, artifact, VCS and one-shot command tools without optional runtime owners.
+    #[must_use]
+    pub const fn core() -> Self {
+        Self {
+            terminal: false,
+            changesets: false,
+        }
+    }
+
+    /// All built-in capabilities.
+    #[must_use]
+    pub const fn standard() -> Self {
+        Self {
+            terminal: true,
+            changesets: true,
+        }
+    }
+}
+
+/// Authority-owned terminal inputs prepared only when terminal tasks are selected.
+pub struct BuiltinTerminalOptions {
+    /// Selected execution and confinement policy for persistent tasks.
+    pub execution_config: TerminalExecutionConfig,
+    /// Session-bound sink or factory that records terminal lifecycle events.
+    pub lifecycle_route: Option<TerminalLifecycleRoute>,
+    /// Runtime-owned authority route; built-ins never create a direct production backend.
+    pub executor: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,14 +307,46 @@ pub fn register_builtin_tools_with_managed_execution_and_terminal_config_and_man
     external_scratch_control: Option<ScratchNamespaceControl>,
     managed_terminal: Arc<dyn crate::ManagedTerminalExecutionPortV1>,
 ) -> BuiltinToolHandles {
-    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+    register_builtin_tools_with_selection(
         registry,
         paths,
         managed_executor,
-        terminal_execution_config,
-        terminal_lifecycle_route,
+        BuiltinToolSelection::standard(),
         external_scratch_control,
-        TerminalManagerExecutionOwnerV1::Managed(managed_terminal),
+        || BuiltinTerminalOptions {
+            execution_config: terminal_execution_config,
+            lifecycle_route: terminal_lifecycle_route,
+            executor: managed_terminal,
+        },
+    )
+}
+
+/// Registers selected built-ins through the shared file and command implementations.
+///
+/// `terminal` is called only when terminal tasks are selected. Callers can therefore defer
+/// terminal configuration and authority-port preparation without constructing an unused owner.
+pub fn register_builtin_tools_with_selection(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    selection: BuiltinToolSelection,
+    external_scratch_control: Option<ScratchNamespaceControl>,
+    terminal: impl FnOnce() -> BuiltinTerminalOptions,
+) -> BuiltinToolHandles {
+    register_builtin_tools_with_selection_impl(
+        registry,
+        paths,
+        managed_executor,
+        selection,
+        external_scratch_control,
+        || {
+            let terminal = terminal();
+            (
+                terminal.execution_config,
+                terminal.lifecycle_route,
+                TerminalManagerExecutionOwnerV1::Managed(terminal.executor),
+            )
+        },
     )
 }
 
@@ -288,29 +359,35 @@ fn register_builtin_tools_with_legacy_terminal(
     terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
     external_scratch_control: Option<ScratchNamespaceControl>,
 ) -> BuiltinToolHandles {
-    register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+    register_builtin_tools_with_selection_impl(
         registry,
         paths,
         managed_executor,
-        terminal_execution_config,
-        terminal_lifecycle_route,
+        BuiltinToolSelection::standard(),
         external_scratch_control,
-        TerminalManagerExecutionOwnerV1::LegacyDirect,
+        || {
+            (
+                terminal_execution_config,
+                terminal_lifecycle_route,
+                TerminalManagerExecutionOwnerV1::LegacyDirect,
+            )
+        },
     )
 }
 
-fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
+fn register_builtin_tools_with_selection_impl(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
     managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
-    terminal_execution_config: TerminalExecutionConfig,
-    terminal_lifecycle_route: Option<TerminalLifecycleRoute>,
+    selection: BuiltinToolSelection,
     external_scratch_control: Option<ScratchNamespaceControl>,
-    terminal_owner: TerminalManagerExecutionOwnerV1,
+    terminal: impl FnOnce() -> (
+        TerminalExecutionConfig,
+        Option<TerminalLifecycleRoute>,
+        TerminalManagerExecutionOwnerV1,
+    ),
 ) -> BuiltinToolHandles {
     let default_shell = ResolvedShell::detect_default();
-    let terminal_execution_config =
-        terminal_execution_config.with_default_shell(default_shell.clone());
     let scratch_control = external_scratch_control.unwrap_or_else(|| {
         #[cfg(test)]
         {
@@ -321,36 +398,17 @@ fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
             ScratchNamespaceControl::unavailable()
         }
     });
-    let terminal_managers = match terminal_owner {
-        TerminalManagerExecutionOwnerV1::Managed(managed_terminal) => {
-            TerminalProcessManagers::new_managed(terminal_execution_config, managed_terminal)
-        }
-        #[cfg(any(test, feature = "test-support"))]
-        TerminalManagerExecutionOwnerV1::LegacyDirect => {
-            TerminalProcessManagers::new_legacy(terminal_execution_config)
-        }
-    };
-    let terminal_managers = Arc::new(
-        terminal_managers
-            .with_lifecycle_route(terminal_lifecycle_route)
-            .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
-    );
-    let terminal_tasks_root = paths.terminal_tasks_root;
-    let terminal_tasks_label_root = paths.terminal_tasks_label_root;
-    let terminal_control = TerminalTaskControlHandle::new(
-        Arc::clone(&terminal_managers),
-        terminal_tasks_root.clone(),
-        terminal_tasks_label_root.clone(),
-    );
     registry.register(Arc::new(ReadFileTool));
     registry.register(Arc::new(ReadToolArtifactTool));
     registry.register(Arc::new(WriteFileTool));
     registry.register(Arc::new(EditFileTool));
     registry.register(Arc::new(DeleteFileTool));
-    registry.register(Arc::new(ApplyChangeSetTool {
-        artifact_root: paths.changesets_root,
-        artifact_label_root: paths.changesets_label_root,
-    }));
+    if selection.changesets {
+        registry.register(Arc::new(ApplyChangeSetTool {
+            artifact_root: paths.changesets_root.clone(),
+            artifact_label_root: paths.changesets_label_root.clone(),
+        }));
+    }
     registry.register(Arc::new(ListTool));
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
@@ -361,8 +419,54 @@ fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
         scratch_control: scratch_control.clone(),
         scratch_namespaces: Arc::clone(&scratch_control.namespaces),
         executor: managed_executor,
-        shell: default_shell,
+        shell: default_shell.clone(),
     }));
+    let terminal_control = selection.terminal.then(|| {
+        let (execution_config, lifecycle_route, owner) = terminal();
+        register_terminal_tools(
+            registry,
+            paths,
+            &scratch_control,
+            execution_config.with_default_shell(default_shell),
+            lifecycle_route,
+            owner,
+        )
+    });
+    BuiltinToolHandles {
+        terminal: terminal_control,
+        scratch: scratch_control,
+    }
+}
+
+fn register_terminal_tools(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    scratch_control: &ScratchNamespaceControl,
+    execution_config: TerminalExecutionConfig,
+    lifecycle_route: Option<TerminalLifecycleRoute>,
+    owner: TerminalManagerExecutionOwnerV1,
+) -> TerminalTaskControlHandle {
+    let terminal_managers = match owner {
+        TerminalManagerExecutionOwnerV1::Managed(managed_terminal) => {
+            TerminalProcessManagers::new_managed(execution_config, managed_terminal)
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        TerminalManagerExecutionOwnerV1::LegacyDirect => {
+            TerminalProcessManagers::new_legacy(execution_config)
+        }
+    };
+    let terminal_managers = Arc::new(
+        terminal_managers
+            .with_lifecycle_route(lifecycle_route)
+            .with_scratch_task_leases(Some(Arc::clone(&scratch_control.tasks))),
+    );
+    let terminal_tasks_root = paths.terminal_tasks_root;
+    let terminal_tasks_label_root = paths.terminal_tasks_label_root;
+    let terminal_control = TerminalTaskControlHandle::new(
+        Arc::clone(&terminal_managers),
+        terminal_tasks_root.clone(),
+        terminal_tasks_label_root.clone(),
+    );
     registry.register(Arc::new(TerminalStartTool {
         managers: Arc::clone(&terminal_managers),
         artifact_root: terminal_tasks_root.clone(),
@@ -399,8 +503,9 @@ fn register_builtin_tools_with_managed_execution_and_terminal_config_impl(
         managers: terminal_managers,
         scratch: scratch_control.clone(),
     }));
-    BuiltinToolHandles {
-        terminal: terminal_control,
-        scratch: scratch_control,
-    }
+    terminal_control
 }
+
+#[cfg(test)]
+#[path = "tests/registry_tests.rs"]
+mod tests;
