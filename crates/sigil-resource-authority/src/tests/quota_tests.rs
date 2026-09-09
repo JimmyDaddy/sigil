@@ -126,6 +126,10 @@ fn r71_quota_durable_book_authorizes_exact_monotonic_cap_migration() {
         book.reserve_owned("session-a", &prof, 40, 4)
             .expect("reserve before migration");
     }
+    let mut expected_snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("old snapshot"))
+            .expect("old snapshot shape");
+    expected_snapshot["workspace_cap"] = 300.into();
 
     let migrated = QuotaBookV1::open_with_previous_cap(&path, 300, 200)
         .expect("authorize exact monotonic migration");
@@ -137,6 +141,10 @@ fn r71_quota_durable_book_authorizes_exact_monotonic_cap_migration() {
             .reserved_bytes,
         40
     );
+    let actual_snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("migrated snapshot"))
+            .expect("migrated snapshot shape");
+    assert_eq!(actual_snapshot, expected_snapshot);
     drop(migrated);
 
     let reopened = QuotaBookV1::open(&path, 300).expect("migration persists current cap");
@@ -160,6 +168,35 @@ fn r71_quota_durable_book_rejects_unapproved_or_decreasing_cap_migration() {
     let strict_drift =
         QuotaBookV1::open(&path, 300).expect_err("strict open must reject undeclared cap drift");
     assert!(matches!(strict_drift, QuotaErrorV1::Journal(_)));
+}
+
+#[test]
+fn r71_quota_cap_migration_rejects_history_exceeding_previous_cap() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    {
+        let mut book = QuotaBookV1::open(&path, 300).expect("larger-cap journal");
+        let profile = profile(400, 10);
+        let reservation = book
+            .reserve_owned("settled-owner", &profile, 250, 1)
+            .expect("reservation valid under original larger cap");
+        book.release(&profile, &reservation)
+            .expect("settle historical reservation");
+    }
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal bytes"))
+            .expect("journal shape");
+    snapshot["workspace_cap"] = 200.into();
+    let tampered = serde_json::to_vec(&snapshot).expect("tampered snapshot");
+    std::fs::write(&path, &tampered).expect("claim smaller predecessor cap");
+
+    let error = QuotaBookV1::open_with_previous_cap(&path, 300, 200)
+        .expect_err("migration cannot legitimize a peak above the predecessor cap");
+    assert!(matches!(
+        error,
+        QuotaErrorV1::Journal(message) if message == "quota journal replay exceeds a declared cap"
+    ));
+    assert_eq!(std::fs::read(&path).expect("unchanged journal"), tampered);
 }
 
 #[test]

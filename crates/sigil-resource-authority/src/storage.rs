@@ -119,28 +119,64 @@ impl AuthorityManagedStorageServiceV1 {
         authority_generation: AuthorityGeneration,
         state_root: impl AsRef<Path>,
     ) -> Result<Self, QuotaErrorV1> {
-        let root = state_root.as_ref().to_path_buf();
         let quota_cap = quota_workspace_cap(&table);
+        Self::new_with_state_root_and_workspace_cap(
+            table,
+            authority_generation,
+            state_root,
+            quota_cap,
+            None,
+        )
+    }
+
+    /// Opens current grants under an explicit, stable workspace policy. Grant profiles still
+    /// constrain every reservation independently of this shared workspace ceiling. A cold
+    /// reopen may authorize one exact upward cap migration; an active in-process book must
+    /// already have the requested cap, so existing leases are never reset or replaced.
+    pub fn new_with_state_root_and_workspace_cap(
+        table: AuthorityStorageGrantTableV1,
+        authority_generation: AuthorityGeneration,
+        state_root: impl AsRef<Path>,
+        workspace_cap: u64,
+        authorized_previous_cap: Option<u64>,
+    ) -> Result<Self, QuotaErrorV1> {
+        let root = state_root.as_ref().to_path_buf();
         let quota_path = root.join(".authority-quota").join("managed-storage.json");
         let canonical_root = root.canonicalize().map_err(storage_quota_io_error)?;
         let states = STORAGE_PROCESS_STATES.get_or_init(|| Mutex::new(BTreeMap::new()));
         let mut states = states.lock().map_err(|_| {
             QuotaErrorV1::Journal("storage process registry is poisoned".to_owned())
         })?;
-        let process_state =
-            if let Some(process_state) = states.get(&canonical_root).and_then(Weak::upgrade) {
-                process_state
-            } else {
-                let process_lock = acquire_storage_process_lock(&root)?;
-                let mut quota = QuotaBookV1::open(quota_path, quota_cap)?;
-                quota.release_all_active()?;
-                let process_state = Arc::new(StorageProcessStateV1 {
-                    _process_lock: process_lock,
-                    quota: Arc::new(Mutex::new(quota)),
-                });
-                states.insert(canonical_root, Arc::downgrade(&process_state));
-                process_state
+        let process_state = if let Some(process_state) =
+            states.get(&canonical_root).and_then(Weak::upgrade)
+        {
+            let current_cap = process_state
+                .quota
+                .lock()
+                .map_err(|_| QuotaErrorV1::Journal("storage quota book is poisoned".to_owned()))?
+                .workspace_cap();
+            if current_cap != workspace_cap {
+                return Err(QuotaErrorV1::Journal(
+                    "active managed storage workspace cap mismatch".to_owned(),
+                ));
+            }
+            process_state
+        } else {
+            let process_lock = acquire_storage_process_lock(&root)?;
+            let mut quota = match authorized_previous_cap {
+                Some(previous_cap) => {
+                    QuotaBookV1::open_with_previous_cap(quota_path, workspace_cap, previous_cap)?
+                }
+                None => QuotaBookV1::open(quota_path, workspace_cap)?,
             };
+            quota.release_all_active()?;
+            let process_state = Arc::new(StorageProcessStateV1 {
+                _process_lock: process_lock,
+                quota: Arc::new(Mutex::new(quota)),
+            });
+            states.insert(canonical_root, Arc::downgrade(&process_state));
+            process_state
+        };
         drop(states);
         Ok(Self {
             table,

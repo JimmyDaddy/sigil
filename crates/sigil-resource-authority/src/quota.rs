@@ -141,8 +141,11 @@ impl QuotaJournalV1 {
                     "quota journal workspace cap mismatch".to_owned(),
                 ));
             }
-            let mut book = QuotaBookV1::new(workspace_cap);
+            // A policy increase cannot make an invalid predecessor journal valid. Verify every
+            // historical reservation under its original ceiling before applying the new cap.
+            let mut book = QuotaBookV1::new(snapshot.workspace_cap);
             verify_and_replay_records(&mut book, &snapshot.records)?;
+            book.workspace_cap = workspace_cap;
             let expected_predecessor = snapshot.clone();
             let journal = Self {
                 path,
@@ -618,6 +621,10 @@ impl QuotaBookV1 {
             return Ok(());
         }
         self.release_active(reservation.reservation_epoch, active)
+    }
+
+    pub(crate) const fn workspace_cap(&self) -> u64 {
+        self.workspace_cap
     }
 
     pub fn workspace_used_bytes(&self) -> u64 {

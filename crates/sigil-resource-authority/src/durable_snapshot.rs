@@ -9,7 +9,23 @@ use std::path::Path;
 
 use fs2::FileExt;
 
-pub(crate) fn open_owner_only_snapshot_writer_lock(snapshot: &Path) -> std::io::Result<File> {
+#[derive(Debug)]
+pub(crate) struct SnapshotWriterLockGuard {
+    file: File,
+}
+
+impl Drop for SnapshotWriterLockGuard {
+    fn drop(&mut self) {
+        // flock belongs to the open file description. A descriptor duplicated by a concurrent
+        // process spawn can outlive this writer, so closing our descriptor alone does not end
+        // the writer's exclusion. Release it explicitly while this owner still holds the file.
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+pub(crate) fn open_owner_only_snapshot_writer_lock(
+    snapshot: &Path,
+) -> std::io::Result<SnapshotWriterLockGuard> {
     let file_name = snapshot
         .file_name()
         .and_then(|name| name.to_str())
@@ -61,7 +77,7 @@ pub(crate) fn open_owner_only_snapshot_writer_lock(snapshot: &Path) -> std::io::
             format!("snapshot writer lock is unavailable: {error}"),
         )
     })?;
-    Ok(file)
+    Ok(SnapshotWriterLockGuard { file })
 }
 
 #[cfg(test)]

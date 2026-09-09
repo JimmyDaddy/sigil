@@ -87,6 +87,7 @@ impl AuthorityBootstrapRoots {
 const AUTHORITY_BOOTSTRAP_DIRECTORY_NAME: &str = "authority-bootstrap-v1";
 const AUTHORITY_BOOTSTRAP_PUBLICATION_LOCK: &str = "authority-bootstrap-publication.lock";
 const AUTHORITY_BOOTSTRAP_TRANSACTION_LOCK: &str = "authority-bootstrap-transaction.lock";
+const AUTHORITY_BOOTSTRAP_ADMISSION_LOCK_SUFFIX: &str = ".admission.lock";
 const AUTHORITY_CONFIG_GENERATION_FILE: &str = "authority-config-generation.json";
 const CUTOVER_POINTER_FILE: &str = ".sigil-cutover-manifest.json";
 const MAX_BOOTSTRAP_METADATA_BYTES: u64 = 2 * 1024 * 1024;
@@ -137,6 +138,26 @@ impl AuthorityBootstrapStoreV1 {
     /// config file handle. It intentionally does not resolve the filesystem path a second time,
     /// so a concurrent config-parent replacement cannot redirect metadata to another store.
     pub fn for_canonical_config_path(config_path: &Path) -> Result<Self, BootstrapErrorV1> {
+        let root = Self::root_for_canonical_config_path(config_path)?;
+        Self::open(root.clone(), root, 1)
+    }
+
+    /// Opens one boot owner and acquires its publication transaction without exposing the gap
+    /// between creating a fresh root and acquiring the existing publication locks.
+    ///
+    /// The host-private admission lock precedes both publication locks. It is released only
+    /// after this owner holds publication, so another boot cannot observe the new directory
+    /// and overtake its initializer. Callers already holding publication must not enter here.
+    /// If initialization is interrupted after root creation, later opens remain existing and
+    /// must reject missing durable metadata rather than treating the root as fresh again.
+    pub fn for_canonical_config_path_with_publication(
+        config_path: &Path,
+    ) -> Result<(Self, AuthorityBootstrapPublicationGuard), BootstrapErrorV1> {
+        let root = Self::root_for_canonical_config_path(config_path)?;
+        Self::open_with_publication(root, 1)
+    }
+
+    fn root_for_canonical_config_path(config_path: &Path) -> Result<PathBuf, BootstrapErrorV1> {
         if !config_path.is_absolute() {
             return Err(BootstrapErrorV1::HardeningFailed(
                 "canonical bootstrap config path must be absolute".to_owned(),
@@ -162,10 +183,30 @@ impl AuthorityBootstrapStoreV1 {
             )
         })?);
         ensure_owner_only_directory(&user_root)?;
-        let root = user_root
+        Ok(user_root
             .join(AUTHORITY_BOOTSTRAP_DIRECTORY_NAME)
-            .join(config_key);
-        Self::open(root.clone(), root, 1)
+            .join(config_key))
+    }
+
+    fn open_with_publication(
+        root: PathBuf,
+        authority_epoch: u64,
+    ) -> Result<(Self, AuthorityBootstrapPublicationGuard), BootstrapErrorV1> {
+        let admission_path = bootstrap_admission_lock_path(&root)?;
+        ensure_owner_only_directory(admission_path.parent().ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed("bootstrap admission lock has no parent".to_owned())
+        })?)?;
+        let admission = open_private_lock_file(&admission_path)?;
+        admission
+            .lock_exclusive()
+            .map_err(|_| BootstrapErrorV1::WriterLockContended)?;
+        validate_bootstrap_admission_lock(&admission_path, &admission)?;
+        let store = Self::open(root.clone(), root, authority_epoch)?;
+        #[cfg(test)]
+        admitted_bootstrap_open_test_hook();
+        let publication = store.acquire_publication()?;
+        drop(admission);
+        Ok((store, publication))
     }
 
     /// Opens a root after the host-owned resolver has selected its stable location.
@@ -390,6 +431,57 @@ impl AuthorityBootstrapStoreV1 {
         }
         ensure_owner_only_directory(&self.namespace)?;
         ensure_owner_only_directory(&self.root)
+    }
+}
+
+fn bootstrap_admission_lock_path(root: &Path) -> Result<PathBuf, BootstrapErrorV1> {
+    let parent = root.parent().ok_or_else(|| {
+        BootstrapErrorV1::HardeningFailed("bootstrap root has no parent".to_owned())
+    })?;
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            BootstrapErrorV1::HardeningFailed("bootstrap root has no valid instance key".to_owned())
+        })?;
+    Ok(parent.join(format!("{name}{AUTHORITY_BOOTSTRAP_ADMISSION_LOCK_SUFFIX}")))
+}
+
+fn validate_bootstrap_admission_lock(path: &Path, file: &File) -> Result<(), BootstrapErrorV1> {
+    validate_private_open_file(path, file, false)?;
+    let path_identity = crate::identity::canonical_identity(path)
+        .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+    #[cfg(windows)]
+    let opened_identity = crate::identity::canonical_identity_from_handle(path, file)
+        .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?;
+    #[cfg(not(windows))]
+    let opened_identity = crate::identity::canonical_identity_from_metadata(
+        path,
+        &file
+            .metadata()
+            .map_err(|error| BootstrapErrorV1::HardeningFailed(error.to_string()))?,
+    );
+    if !path_identity.is_regular_file
+        || path_identity.is_symlink
+        || path_identity.link_count != 1
+        || path_identity != opened_identity
+    {
+        return Err(BootstrapErrorV1::IdentityDrift);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static ADMITTED_BOOTSTRAP_OPEN_TEST_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn admitted_bootstrap_open_test_hook() {
+    let hook = ADMITTED_BOOTSTRAP_OPEN_TEST_HOOK.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 
