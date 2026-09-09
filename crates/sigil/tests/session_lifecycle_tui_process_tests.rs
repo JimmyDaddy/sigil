@@ -866,8 +866,10 @@ fn real_tui_process_opens_session_actions_and_exports_safe_transcript() -> Resul
 
     let result = (|| -> Result<()> {
         wait_for_text(&output, "deepseek-v4-flash")?;
+        let resume_offset = captured_len(&output);
         write_input(writer.as_mut(), b"/resume")?;
-        wait_for_text(&output, "Ctrl-O actions")?;
+        // The shortcut hint renders before the asynchronous catalog supplies a selectable row.
+        wait_for_text_after(&output, resume_offset, "process lifecycle fixture")?;
         write_input(writer.as_mut(), &[0x0f])?;
         wait_for_text(&output, "Session Actions")?;
         wait_for_text(&output, "Export safe transcript")?;

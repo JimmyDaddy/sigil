@@ -29,7 +29,7 @@ use super::{
 };
 use crate::application_run::{
     ApplicationRunInteraction, ApplicationRunRequest, ApplicationRunServices,
-    ApplicationTranscriptRole, application_session_transcript_page, bind_application_session,
+    ApplicationTranscriptRole, application_session_transcript_page,
     prepare_application_run_with_exact_first_request,
 };
 
@@ -435,6 +435,7 @@ impl sigil_kernel::EgressDisclosurePresenter for RejectingDisclosurePresenter {
 }
 
 struct ApplicationOwnedQueueFixture {
+    services: ApplicationRunServices,
     config_path: PathBuf,
     session_log_path: PathBuf,
     session_scope_id: String,
@@ -513,8 +514,28 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 "#
         ),
     )?;
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+        &config_path,
+        root,
+    )?;
+    services.require_current_schema_authority()?;
+    let writer = Arc::clone(
+        &services
+            .authority_composition()
+            .expect("fixture has real boot authority")
+            .storage_writer,
+    );
     let session_path = root.join("state/sessions/queued.jsonl");
-    let binding = bind_application_session(&config_path, root, Some(&session_path))?;
+    let (binding, attachment) = crate::application_run::bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+        &config_path,
+        root,
+        Some(&session_path),
+        None,
+        None,
+        Some(writer),
+    )?;
+    drop(attachment);
     let store = JsonlSessionStore::new(&binding.session_log_path)?;
     let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
     let queue_id = ConversationInputQueueId::new("queue-hook")?;
@@ -557,6 +578,7 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         ApplicationQueuedPromptMaterial::PersistedSafe
     };
     Ok(ApplicationOwnedQueueFixture {
+        services,
         config_path,
         session_log_path: binding.session_log_path,
         session_scope_id: binding.session_scope_id,
@@ -586,7 +608,7 @@ async fn application_assembly_freezes_exact_first_request_without_persisting_it(
     let exact_prompt = fixture.exact_prompt.clone();
     drop(fixture.session);
 
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = fixture.services.clone();
     let (prepared, assembly) = prepare_application_run_with_exact_first_request(
         run_request,
         &services,
@@ -638,7 +660,9 @@ async fn auto_routed_queue_assembly_freezes_the_routing_only_first_request() -> 
     let durable_message_id = fixture.promotion.durable_user_message.id.clone();
     let exact_prompt = fixture.exact_prompt.clone();
     drop(fixture.session);
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
+    let services = fixture
+        .services
+        .clone()
         .with_task_role_provider_builder(Arc::new(QueueTaskRoleProviderBuilder));
 
     let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&fixture.config_path)?)?;
@@ -715,7 +739,7 @@ async fn application_owned_queued_run_commits_one_promoted_user_event_and_no_exa
     let session_log_path = fixture.session_log_path.clone();
     drop(fixture.session);
 
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = fixture.services.clone();
     let committed = prepare_application_queued_run(
         ApplicationQueuedRunRequest {
             run,
@@ -850,7 +874,7 @@ async fn stale_promotion_returns_no_executable_run_and_persists_no_user_message(
         ))?;
     drop(fixture.session);
 
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = fixture.services.clone();
     let error = match prepare_application_queued_run(
         ApplicationQueuedRunRequest {
             run,

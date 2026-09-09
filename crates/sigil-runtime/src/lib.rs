@@ -101,6 +101,10 @@ mod provider_pressure; // task-role provider route cooldown and shared backpress
 mod reasoning_effort; // exact provider+model effort admission and stale bindings.
 pub use reasoning_effort::admitted_reasoning_effort;
 mod remote_mcp; // user-root Streamable HTTP activation and raw tool adapters.
+mod session_composition;
+pub use session_composition::{
+    bind_session_composition, validate_boot_composition, validate_session_composition,
+};
 mod run_options; // shared run options and scoped tool registry views.
 mod task_completion_progress; // process-local task completion arrival diagnostics.
 
@@ -118,6 +122,8 @@ pub mod application_queue;
 pub mod application_recovery;
 pub mod application_reservation_store;
 pub mod application_run;
+pub use application_run::ApplicationRunEventRecorder;
+pub use application_run::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
 pub mod application_service;
 pub mod command_permission;
 pub mod context;
@@ -209,7 +215,9 @@ pub use application_intent_stack::{
     ApplicationIntentStackError, ApplicationIntentStackErrorClass,
     execute_application_intent_stack_command, execute_durable_application_intent_stack_command,
 };
-pub use application_projection::RuntimeSessionProjectionBinding;
+pub use application_projection::{
+    ConversationDisplayQuery, RuntimeSessionProjectionBinding, RuntimeSessionProjectionOwner,
+};
 pub use application_reservation_store::ManagedApplicationReservationStore;
 pub use application_service::{
     RuntimeApplicationCommandExecutor, RuntimeApplicationDeliveryAcker, RuntimeApplicationDispatch,
@@ -282,12 +290,11 @@ pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
     PlanApprovalReceiptV2, PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator,
     PlanReviewRetryCommand, PlanReviewRetryReceipt, PlanReviewRunOutcome, PlanReviewRunRequest,
-    PlanTaskMaterializationOutcomeV1, RejectPlanRequest, RejectedPlan,
-    TASK_ADMISSION_MIN_DISK_SPACE_BYTES, TaskAdmissionProbeContext, admit_adopted_task,
-    application_plan_decision, application_plan_review_research_input_decision,
-    application_plan_revision_guidance_decision, build_task_admission_probes, now_ms,
-    plan_handoff_workspace_snapshot_id, plan_review_context_digest_for_attempt,
-    plan_run_rejection_message,
+    RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
+    TaskAdmissionProbeContext, admit_adopted_task, application_plan_decision,
+    application_plan_review_research_input_decision, application_plan_revision_guidance_decision,
+    build_task_admission_probes, now_ms, plan_handoff_workspace_snapshot_id,
+    plan_review_context_digest_for_attempt, plan_run_rejection_message,
 };
 pub use plugins::{
     ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,

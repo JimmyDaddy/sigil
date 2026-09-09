@@ -47,7 +47,7 @@ enum TerminalLifecyclePublication {
     DomainOnly,
     ApplicationPublic {
         handler: Arc<dyn ApplicationTerminalLifecycleHandler>,
-        events: ApplicationRunEventSequence,
+        events: Box<ApplicationRunEventSequence>,
     },
 }
 
@@ -69,7 +69,10 @@ impl ApplicationTerminalLifecycleRouter {
         handler: Arc<dyn ApplicationTerminalLifecycleHandler>,
         events: ApplicationRunEventSequence,
     ) -> Self {
-        self.publication = TerminalLifecyclePublication::ApplicationPublic { handler, events };
+        self.publication = TerminalLifecyclePublication::ApplicationPublic {
+            handler,
+            events: Box::new(events),
+        };
         self
     }
 }

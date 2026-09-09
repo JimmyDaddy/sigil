@@ -89,6 +89,31 @@ fn canonical_execute_command_denies_read_only_before_creating_authority() -> Res
 }
 
 #[test]
+fn intent_drop_rejects_changed_composition_before_workspace_authority() -> Result<()> {
+    let mut config = root_config("manual")?;
+    let mut session = Session::new("provider", "model");
+    crate::bind_session_composition(&mut session, &config)?;
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::TaskOrchestration],
+    );
+    let error = execute_application_intent_stack_command(
+        &session,
+        &config,
+        Path::new("missing-workspace"),
+        &ApplicationIntentStackCommandV1::ExecuteDrop {
+            request: drop_request()?,
+        },
+        ApplicationIntentConfirmationSource::Http,
+    )
+    .expect_err("changed composition cannot acquire drop authority");
+    assert_eq!(error.class(), ApplicationIntentStackErrorClass::Conflict);
+    assert!(error.to_string().contains("composition"));
+    assert_eq!(session.entries().len(), 1);
+    Ok(())
+}
+
+#[test]
 fn canonical_command_wire_contains_no_host_authority_or_file_payload() -> Result<()> {
     let value = serde_json::to_value(ApplicationIntentStackCommandV1::ExecuteDrop {
         request: drop_request()?,

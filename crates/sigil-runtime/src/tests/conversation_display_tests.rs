@@ -25,16 +25,105 @@ use sigil_kernel::{
 
 use crate::conversation_display::{
     ConversationDisplayAssistantPhaseV1, ConversationDisplayCheckpointConflictReasonV1,
-    ConversationDisplayContentV1, ConversationDisplayItemKindV1, ConversationDisplayMessageRoleV1,
-    ConversationDisplayProjectionError, ConversationDisplayStatusV1,
-    ConversationLiveProvisionalSlotV1, MAX_CONVERSATION_DISPLAY_CONTENT_BYTES,
-    MAX_CONVERSATION_DISPLAY_PAGE_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_SIZE,
-    MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS, MAX_CONVERSATION_TASK_CONTROL_ITEMS,
-    MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES, PlanReviewCompatibilityStatusV1,
-    conversation_display_page, conversation_display_page_from_records,
-    conversation_live_provisional_id, plan_review_compatibility_from_entries,
-    public_plan_review_from_entries,
+    ConversationDisplayContentV1, ConversationDisplayIndex, ConversationDisplayItemKindV1,
+    ConversationDisplayMessageRoleV1, ConversationDisplayPagePlan, ConversationDisplayPageV1,
+    ConversationDisplayProjectionError, ConversationDisplayRecordPosition,
+    ConversationDisplayStatusV1, ConversationLiveProvisionalSlotV1,
+    MAX_CONVERSATION_DISPLAY_CONTENT_BYTES, MAX_CONVERSATION_DISPLAY_PAGE_BYTES,
+    MAX_CONVERSATION_DISPLAY_PAGE_SIZE, MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS,
+    MAX_CONVERSATION_TASK_CONTROL_ITEMS, MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES,
+    conversation_display_page as canonical_display_page,
+    conversation_display_page_from_records as canonical_display_page_from_records,
+    conversation_live_provisional_id, public_plan_review_from_entries,
 };
+
+fn display_index(records: &[SessionStreamRecord]) -> Result<ConversationDisplayIndex> {
+    let mut index = ConversationDisplayIndex::default();
+    let mut offset = 0_u64;
+    for record in records {
+        let end = offset + u64::try_from(serde_json::to_vec(record.stored_event())?.len())? + 1;
+        index.apply_record(
+            record,
+            ConversationDisplayRecordPosition {
+                offset,
+                end,
+                sequence: record.stream_sequence(),
+                checksum: record.record_checksum().to_owned(),
+            },
+        )?;
+        offset = end;
+    }
+    Ok(index)
+}
+
+fn finish_indexed_page(
+    plan: ConversationDisplayPagePlan,
+    records: &[SessionStreamRecord],
+    store: Option<&ToolArtifactStore>,
+) -> Result<ConversationDisplayPageV1> {
+    let raw_bytes = plan
+        .positions()
+        .iter()
+        .map(|position| position.end - position.offset)
+        .sum::<u64>();
+    assert!(raw_bytes <= 4 * 1024 * 1024);
+    let selected = plan
+        .positions()
+        .iter()
+        .map(|position| {
+            records[usize::try_from(position.sequence - 1).expect("fixture sequence")].clone()
+        })
+        .collect::<Vec<_>>();
+    let page = plan.finish(&selected, store)?;
+    assert!(serde_json::to_vec(&page)?.len() <= 1024 * 1024);
+    Ok(page)
+}
+
+// Every successful canonical surface fixture below also exercises the production incremental
+// index, including its hidden source reduction, reconciliation identities and cursor encoding.
+fn conversation_display_page_from_records(
+    records: &[SessionStreamRecord],
+    scope: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    workspace: Option<&str>,
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
+    let page = canonical_display_page_from_records(records, scope, cursor, limit, workspace)?;
+    let index = display_index(records)?;
+    let indexed = finish_indexed_page(
+        index.prepare_page(scope, cursor, limit, workspace)?,
+        records,
+        None,
+    )?;
+    assert_eq!(
+        indexed, page,
+        "incremental display must match canonical source projection"
+    );
+    Ok(page)
+}
+
+fn conversation_display_page(
+    path: &std::path::Path,
+    scope: &str,
+    cursor: Option<&str>,
+    limit: usize,
+    workspace: Option<&str>,
+) -> std::result::Result<ConversationDisplayPageV1, ConversationDisplayProjectionError> {
+    let page = canonical_display_page(path, scope, cursor, limit, workspace)?;
+    let records = JsonlSessionStore::read_event_records(path)?;
+    let index = display_index(&records)?;
+    let store = ToolArtifactStore::for_session_path(path);
+    let indexed = finish_indexed_page(
+        index.prepare_page(scope, cursor, limit, workspace)?,
+        &records,
+        Some(&store),
+    )?;
+    assert_eq!(
+        indexed, page,
+        "incremental display must match canonical source projection"
+    );
+    Ok(page)
+}
 
 fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> {
     let temp = tempfile::tempdir()?;
@@ -44,6 +133,493 @@ fn durable_session() -> Result<(tempfile::TempDir, JsonlSessionStore, Session)> 
         .with_store(store.clone())
         .with_tool_artifact_store_override(artifact_store);
     Ok((temp, store, session))
+}
+
+fn synthetic_display_record(sequence: u64, entry: SessionLogEntry) -> Result<SessionStreamRecord> {
+    let event_type = match &entry {
+        SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
+        SessionLogEntry::Control(ControlEntry::AgentUserInputRoute(_)) => {
+            DurableEventType::SessionEntryRecorded
+        }
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(_)) => {
+            DurableEventType::PlanReviewAttempt
+        }
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(_)) => {
+            DurableEventType::PlanDraftCreated
+        }
+        SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(_)) => {
+            DurableEventType::PlanDecisionRecorded
+        }
+        SessionLogEntry::Control(control)
+            if sigil_kernel::UserInputLifecycleEntryV1::from_control(control).is_some() =>
+        {
+            DurableEventType::UserInputLifecycleChanged
+        }
+        SessionLogEntry::Control(_) => DurableEventType::TaskStatusChanged,
+        _ => unreachable!("bounded source fixture only needs user and Task controls"),
+    };
+    let event_class = event_type
+        .expected_event_class()
+        .context("display fixture event type has no canonical class")?;
+    let event = StoredEvent::new(
+        event_type,
+        event_class,
+        format!("display-bound-{sequence}"),
+        "scope-display-bound".to_owned(),
+        sequence,
+        json!({"session_log_entry": entry}),
+    )?;
+    event.to_json_line()?;
+    Ok(SessionStreamRecord::Stored(event))
+}
+
+#[test]
+fn conversation_display_index_accepts_verified_blank_gaps_and_rejects_overlap() -> Result<()> {
+    let records = (1..=3)
+        .map(|sequence| {
+            synthetic_display_record(
+                sequence,
+                SessionLogEntry::User(ModelMessage::user(format!("message {sequence}"))),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut index = ConversationDisplayIndex::default();
+    let mut offset = 2;
+    for record in &records {
+        let end = offset + u64::try_from(serde_json::to_vec(record.stored_event())?.len())? + 1;
+        index.apply_record(
+            record,
+            ConversationDisplayRecordPosition {
+                offset,
+                end,
+                sequence: record.stream_sequence(),
+                checksum: record.record_checksum().to_owned(),
+            },
+        )?;
+        offset = end + 3;
+    }
+    let first = finish_indexed_page(
+        index.prepare_page("scope-display-bound", None, 1, None)?,
+        &records,
+        None,
+    )?;
+    let expected =
+        canonical_display_page_from_records(&records, "scope-display-bound", None, 1, None)?;
+    assert_eq!(first, expected);
+    let second = finish_indexed_page(
+        index.prepare_page("scope-display-bound", first.next_cursor.as_deref(), 1, None)?,
+        &records,
+        None,
+    )?;
+    assert_eq!(
+        second,
+        canonical_display_page_from_records(
+            &records,
+            "scope-display-bound",
+            expected.next_cursor.as_deref(),
+            1,
+            None
+        )?
+    );
+    let fourth = synthetic_display_record(4, SessionLogEntry::User(ModelMessage::user("overlap")))?;
+    assert!(
+        index
+            .apply_record(
+                &fourth,
+                ConversationDisplayRecordPosition {
+                    offset: offset - 4,
+                    end: offset + 100,
+                    sequence: 4,
+                    checksum: fourth.record_checksum().to_owned(),
+                }
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_index_rejects_noncurrent_cursors_without_rehashing_pages() -> Result<()> {
+    let records = (1..=6)
+        .map(|sequence| {
+            synthetic_display_record(
+                sequence,
+                SessionLogEntry::User(ModelMessage::user(format!("message {sequence}"))),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let first =
+        canonical_display_page_from_records(&records[..5], "scope-display-bound", None, 2, None)?;
+    let cursor = first.next_cursor.context("fixed-frontier cursor missing")?;
+    let current: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&cursor)?)?;
+    assert_eq!(current["schema_version"], 2);
+    let scope = "scope-display-bound";
+    let index = display_index(&records)?;
+    let initial_hash_work = index.hash_metrics();
+    assert_eq!(initial_hash_work.prefix_records_hashed, 6);
+    for version in [0, 1, 3] {
+        let mut unsupported = current.clone();
+        unsupported["schema_version"] = json!(version);
+        let unsupported = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&unsupported)?);
+        assert!(matches!(
+            index
+                .prepare_page(scope, Some(&unsupported), 2, None)
+                .expect_err("noncurrent cursor"),
+            crate::conversation_display::ConversationDisplayProjectionError::InvalidCursor { .. },
+        ));
+        assert!(matches!(
+            canonical_display_page_from_records(&records, scope, Some(&unsupported), 2, None)
+                .expect_err("noncurrent canonical cursor"),
+            crate::conversation_display::ConversationDisplayProjectionError::InvalidCursor { .. },
+        ));
+    }
+    let page = finish_indexed_page(
+        index.prepare_page(scope, Some(&cursor), 2, None)?,
+        &records,
+        None,
+    )?;
+    assert_eq!(
+        page,
+        canonical_display_page_from_records(&records, scope, Some(&cursor), 2, None)?
+    );
+    assert_eq!(page.through_session_stream_sequence, 5);
+    let next = page.next_cursor.context("current cursor missing")?;
+    let next_json: serde_json::Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&next)?)?;
+    assert_eq!(next_json["schema_version"], 2);
+    let work = index.hash_metrics();
+    for _ in 0..20 {
+        let plan = index.prepare_page(scope, Some(&next), 2, None)?;
+        assert!(plan.positions().is_empty());
+        let page = finish_indexed_page(plan, &records, None)?;
+        assert_eq!(
+            page,
+            canonical_display_page_from_records(&records, scope, Some(&next), 2, None)?
+        );
+        let latest = index.prepare_page(scope, None, 2, None)?;
+        assert!(latest.positions().is_empty());
+    }
+    assert_eq!(
+        index.hash_metrics(),
+        work,
+        "v2 fixed-cut and hot pages must not rehash historical metadata"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_index_shrinks_older_pages_to_the_raw_hydration_budget() -> Result<()> {
+    let records = (1..=20)
+        .map(|sequence| {
+            synthetic_display_record(
+                sequence,
+                SessionLogEntry::User(ModelMessage::user(format!(
+                    "{sequence:02}-{}",
+                    "x".repeat(900_000)
+                ))),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let index = display_index(&records)?;
+    let hash_work = index.hash_metrics();
+    let canonical =
+        canonical_display_page_from_records(&records, "scope-display-bound", None, 10, None)?;
+    let mut first = None;
+    for _ in 0..20 {
+        let plan = index.prepare_page("scope-display-bound", None, 10, None)?;
+        assert!(
+            plan.positions().is_empty(),
+            "the bounded hot window must not reread transcript bodies"
+        );
+        let page = finish_indexed_page(plan, &records, None)?;
+        assert_eq!(page, canonical);
+        first = Some(page);
+    }
+    let first = first.context("hot page missing")?;
+    let plan = index.prepare_page(
+        "scope-display-bound",
+        first.next_cursor.as_deref(),
+        10,
+        None,
+    )?;
+    assert_eq!(
+        plan.positions().len(),
+        4,
+        "900 kB records must shrink the older page before hydration"
+    );
+    let second = finish_indexed_page(plan, &records, None)?;
+    let canonical_second = canonical_display_page_from_records(
+        &records,
+        "scope-display-bound",
+        first.next_cursor.as_deref(),
+        10,
+        None,
+    )?;
+    assert_eq!(
+        second.items,
+        canonical_second.items[canonical_second.items.len() - second.items.len()..]
+    );
+    let mut seen = first
+        .items
+        .iter()
+        .chain(&second.items)
+        .map(|item| item.display_id.clone())
+        .collect::<HashSet<_>>();
+    let mut cursor = second.next_cursor;
+    while let Some(next) = cursor {
+        let plan = index.prepare_page("scope-display-bound", Some(&next), 10, None)?;
+        let page = finish_indexed_page(plan, &records, None)?;
+        for item in &page.items {
+            assert!(
+                seen.insert(item.display_id.clone()),
+                "shrunk pages must not duplicate rows"
+            );
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(seen.len(), 20, "shrunk pages must not skip rows");
+    assert_eq!(
+        index.hash_metrics(),
+        hash_work,
+        "new cursors use cached prefix digests on hot and historical pages"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_index_caches_only_the_bounded_surface_of_a_large_task_source() -> Result<()>
+{
+    let private_detail = format!("PRIVATE_AGGREGATE_BODY_{}", "x".repeat(900_000));
+    let task = ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: TaskId::new("large-task-source")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("large-task-step")?,
+            title: "Visible bounded title".to_owned(),
+            display_name: None,
+            detail: Some(private_detail),
+            role: AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: Some(TaskStepMode::Read),
+            isolation: Some(TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: None,
+    });
+    let records = vec![synthetic_display_record(1, SessionLogEntry::Control(task))?];
+    let source_bytes = serde_json::to_vec(records[0].stored_event())?.len();
+    assert!(source_bytes > 900_000);
+    records[0].stored_event().to_json_line()?;
+    assert!(source_bytes <= sigil_kernel::session::MAX_SESSION_RAW_RECORD_BYTES);
+    let index = display_index(&records)?;
+    assert!(!format!("{index:?}").contains("PRIVATE_AGGREGATE_BODY_"));
+    let plan = index.prepare_page("scope-display-bound", None, 10, None)?;
+    assert!(
+        plan.positions().is_empty(),
+        "large private aggregate source must use its bounded public cache"
+    );
+    let page = finish_indexed_page(plan, &records, None)?;
+    assert_eq!(
+        page,
+        canonical_display_page_from_records(&records, "scope-display-bound", None, 10, None)?
+    );
+    assert_eq!(
+        page.task_control.context("Task summary missing")?.steps[0].title,
+        "Visible bounded title"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_display_index_rejects_an_indivisible_over_budget_summary() -> Result<()> {
+    let mut records = Vec::new();
+    for index in 0..64 {
+        let options = (0..12).map(|option| json!({
+            "id": format!("option-{option}"), "label": format!("Option {option}"), "description": "界".repeat(240)
+        })).collect::<Vec<_>>();
+        let questions = (0..2).map(|question| json!({
+            "id": format!("question-{question}"), "header": "Choice", "question": "Choose one option", "required": true,
+            "field": {"kind": "single_select", "options": options, "allow_other": false}
+        })).collect::<Vec<_>>();
+        let requested = sigil_kernel::UserInputRequestedV1::new(serde_json::from_value(json!({
+            "schema_version": 1,
+            "identity": {"session_scope_id": "scope-display-bound", "root_logical_run_id": format!("root-{index}"),
+                "source_thread_id": format!("child-{index}"), "request_id": format!("request-{index}"), "generation": 1,
+                "source_binding_hash": format!("sha256:{}", "a".repeat(64))},
+            "source": "agent", "purpose": "clarification", "prompt": "界".repeat(500), "questions": questions,
+            "allowed_actions": ["submit", "decline"], "requested_at_unix_ms": index + 10,
+            "continuation": {"assistant_message_id": "assistant", "tool_call_id": "call", "provider_name": "test", "model_name": "model"}
+        }))?)?;
+        let public = sigil_kernel::UserInputRequestStateV1 {
+            requested,
+            status: sigil_kernel::UserInputStatusV1::Requested,
+            decision: None,
+            claim: None,
+            continuation: None,
+            resolution: None,
+        }
+        .public_view();
+        let route: sigil_kernel::AgentUserInputRouteEntryV1 = serde_json::from_value(json!({
+            "schema_version": 1, "route_id": format!("route-{index}"), "source_thread_id": format!("child-{index}"),
+            "source_attempt_id": format!("attempt-{index}"), "profile_id": "explore", "parent_thread_id": "root", "batch_id": null,
+            "budget_scope_id": "input-budget", "isolation": "shared_read_only", "child_session_ref": SessionRef::new_relative(format!("children/{index}.jsonl"))?,
+            "request": public, "status": "requested", "updated_at_unix_ms": index + 10,
+        }))?;
+        route.validate()?;
+        records.push(synthetic_display_record(
+            index + 1,
+            SessionLogEntry::Control(ControlEntry::AgentUserInputRoute(route)),
+        )?);
+    }
+    let canonical =
+        canonical_display_page_from_records(&records, "scope-display-bound", None, 10, None)?;
+    assert!(
+        serde_json::to_vec(&canonical)?.len() > 1024 * 1024,
+        "64 individually legal forms exceed the aggregate response bound"
+    );
+    let index = display_index(&records)?;
+    let plan = index.prepare_page("scope-display-bound", None, 10, None)?;
+    let selected = plan
+        .positions()
+        .iter()
+        .map(|position| {
+            records[usize::try_from(position.sequence - 1).expect("fixture sequence")].clone()
+        })
+        .collect::<Vec<_>>();
+    let error = plan.finish(&selected, None).expect_err(
+        "an indivisible attention summary cannot silently exceed the response contract",
+    );
+    assert!(error.to_string().contains("1 MiB output budget"));
+    Ok(())
+}
+
+#[test]
+fn conversation_display_index_preserves_input_queue_lifecycle_at_old_frontiers() -> Result<()> {
+    use sigil_kernel::{
+        AgentProfileId, AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentThreadId,
+        AgentUserInputRouteEntryV1, LogicalRunId, SessionScopeId, UserInputActionV1,
+        UserInputCommandId, UserInputContinuationBindingV1, UserInputDecisionAcceptedV1,
+        UserInputDecisionV1, UserInputFieldKindV1, UserInputIdentityV1, UserInputPurposeV1,
+        UserInputQuestionV1, UserInputRequestId, UserInputRequestStateV1, UserInputRequestV1,
+        UserInputRequestedV1, UserInputResolutionV1, UserInputResolvedV1, UserInputSourceV1,
+        UserInputStatusV1,
+    };
+    let request = UserInputRequestedV1::new(UserInputRequestV1 {
+        schema_version: 1,
+        identity: UserInputIdentityV1 {
+            session_scope_id: SessionScopeId::new("scope-display-bound")?,
+            root_logical_run_id: LogicalRunId::new("input-root")?,
+            source_thread_id: AgentThreadId::new("input-child")?,
+            request_id: UserInputRequestId::new("input-one")?,
+            generation: 1,
+            source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+        },
+        source: UserInputSourceV1::Agent,
+        purpose: UserInputPurposeV1::Clarification,
+        prompt: "Direct request prompt".to_owned(),
+        questions: vec![UserInputQuestionV1 {
+            id: "scope".to_owned(),
+            header: "Scope".to_owned(),
+            question: "Which scope?".to_owned(),
+            description: None,
+            required: true,
+            field: UserInputFieldKindV1::Text {
+                multiline: false,
+                max_chars: 256,
+            },
+        }],
+        allowed_actions: vec![UserInputActionV1::Submit, UserInputActionV1::Decline],
+        requested_at_unix_ms: 10,
+        continuation: Some(UserInputContinuationBindingV1 {
+            assistant_message_id: "input-assistant".to_owned(),
+            tool_call_id: "input-call".to_owned(),
+            provider_name: "test".to_owned(),
+            model_name: "model".to_owned(),
+        }),
+    })?;
+    let mut route = AgentUserInputRouteEntryV1 {
+        schema_version: 1,
+        route_id: AgentRouteId::new("input-route")?,
+        source_thread_id: request.request.identity.source_thread_id.clone(),
+        source_attempt_id: AgentRunAttemptId::new("input-attempt")?,
+        profile_id: AgentProfileId::new("explore")?,
+        parent_thread_id: AgentThreadId::new("root")?,
+        batch_id: None,
+        budget_scope_id: TaskId::new("input-budget")?,
+        isolation: TaskIsolationMode::SharedReadOnly,
+        child_session_ref: SessionRef::new_relative("children/input.jsonl")?,
+        request: UserInputRequestStateV1 {
+            requested: request.clone(),
+            status: UserInputStatusV1::Requested,
+            decision: None,
+            claim: None,
+            continuation: None,
+            resolution: None,
+        }
+        .public_view(),
+        status: AgentRouteStatus::Requested,
+        updated_at_unix_ms: 10,
+    };
+    route.request.prompt = "Child route prompt".to_owned();
+    let mut controls = vec![
+        ControlEntry::UserInputRequested(Box::new(request.clone())),
+        ControlEntry::AgentUserInputRoute(route.clone()),
+    ];
+    route.status = AgentRouteStatus::Registered;
+    route.updated_at_unix_ms = 20;
+    controls.push(ControlEntry::AgentUserInputRoute(route.clone()));
+    controls.push(ControlEntry::UserInputDecisionAccepted(Box::new(
+        UserInputDecisionAcceptedV1::new(
+            &request,
+            UserInputCommandId::new("input-decline")?,
+            UserInputDecisionV1::Declined,
+            30,
+        )?,
+    )));
+    controls.push(ControlEntry::UserInputResolved(UserInputResolvedV1 {
+        schema_version: 1,
+        identity: request.request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        resolution: UserInputResolutionV1::Declined,
+        resolved_at_unix_ms: 40,
+    }));
+    route.status = AgentRouteStatus::Resolved;
+    route.updated_at_unix_ms = 50;
+    controls.push(ControlEntry::AgentUserInputRoute(route));
+    let mut records = vec![
+        synthetic_display_record(1, SessionLogEntry::User(ModelMessage::user("one")))?,
+        synthetic_display_record(2, SessionLogEntry::User(ModelMessage::user("two")))?,
+    ];
+    let mut old_pages = Vec::new();
+    for control in controls {
+        records.push(synthetic_display_record(
+            u64::try_from(records.len())? + 1,
+            SessionLogEntry::Control(control),
+        )?);
+        let page =
+            conversation_display_page_from_records(&records, "scope-display-bound", None, 1, None)?;
+        old_pages.push(page);
+    }
+    let index = display_index(&records)?;
+    for old_page in old_pages {
+        let cursor = old_page
+            .next_cursor
+            .context("fixed-frontier fixture needs one older row")?;
+        let indexed = finish_indexed_page(
+            index.prepare_page("scope-display-bound", Some(&cursor), 1, None)?,
+            &records,
+            None,
+        )?;
+        let canonical = canonical_display_page_from_records(
+            &records,
+            "scope-display-bound",
+            Some(&cursor),
+            1,
+            None,
+        )?;
+        assert_eq!(indexed, canonical);
+    }
+    Ok(())
 }
 
 fn terminal_outbox(
@@ -1468,6 +2044,163 @@ fn durable_task_control_does_not_carry_step_status_across_plan_versions() -> Res
 }
 
 #[test]
+fn plan_review_pending_inputs_follow_each_attempt_latest_generation_and_status() -> Result<()> {
+    use sigil_kernel::{PlanReviewAttemptEntry, PlanReviewAttemptStatus, PublicUserInputRequestV1};
+
+    let (_temp, store, mut session) = durable_session()?;
+    let scope = session.session_scope_id().to_owned();
+    let make_attempt = |label: &str| -> Result<PlanReviewAttemptEntry> {
+        let source = sigil_kernel::ConversationTurnRef::new(&scope, label, label)?;
+        let review = sigil_kernel::plan_review_id_for_source(&source);
+        let attempt = sigil_kernel::plan_review_attempt_id_for_review(&review);
+        Ok(PlanReviewAttemptEntry {
+            plan_review_id: review.clone(),
+            attempt_id: attempt.clone(),
+            plan_id: sigil_kernel::plan_review_plan_id_for_attempt(&review, &attempt),
+            source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
+            source_turn: source,
+            explicit_objective: Some("Resolve the plan question".to_owned()),
+            route_decision_id: None,
+            child_session_ref: sigil_kernel::plan_review_child_session_ref(&review, &attempt),
+            finalizer_session_ref: None,
+            revision_request_id: None,
+            attempt_ordinal: 1,
+            base_plan_id: None,
+            base_plan_hash: None,
+            workspace_snapshot_id: None,
+            pending_user_input: None,
+            status: PlanReviewAttemptStatus::Started,
+            terminal_reason: None,
+            recorded_at_ms: 1,
+        })
+    };
+    let question =
+        |attempt: &PlanReviewAttemptEntry, generation: u32| -> Result<PublicUserInputRequestV1> {
+            Ok(PublicUserInputRequestV1 {
+                identity: sigil_kernel::UserInputIdentityV1 {
+                    session_scope_id: sigil_kernel::SessionScopeId::new(format!(
+                        "child-{}",
+                        attempt.attempt_id.as_str()
+                    ))?,
+                    root_logical_run_id: sigil_kernel::LogicalRunId::new("review-run")?,
+                    source_thread_id: sigil_kernel::AgentThreadId::new("main")?,
+                    request_id: sigil_kernel::UserInputRequestId::new(format!(
+                        "question-{generation}"
+                    ))?,
+                    generation,
+                    source_binding_hash: format!("sha256:{}", "a".repeat(64)),
+                },
+                request_hash: format!("sha256:{generation:064x}"),
+                source: sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                    plan_review_id: attempt.plan_review_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                },
+                purpose: sigil_kernel::UserInputPurposeV1::Clarification,
+                prompt: format!("Question generation {generation}"),
+                questions: vec![sigil_kernel::UserInputQuestionV1 {
+                    id: "scope".to_owned(),
+                    header: "Scope".to_owned(),
+                    question: "Which scope?".to_owned(),
+                    description: None,
+                    required: true,
+                    field: sigil_kernel::UserInputFieldKindV1::Text {
+                        multiline: false,
+                        max_chars: 256,
+                    },
+                }],
+                allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
+                requested_at_unix_ms: u64::from(generation),
+                status: sigil_kernel::UserInputStatusV1::Requested,
+                answer_receipt: None,
+                resolution: None,
+            })
+        };
+    let mut first = make_attempt("first-review")?;
+    let mut second = make_attempt("second-review")?;
+    let append = |session: &mut Session,
+                  attempt: &mut PlanReviewAttemptEntry,
+                  status,
+                  pending|
+     -> Result<()> {
+        attempt.status = status;
+        attempt.pending_user_input = pending;
+        attempt.recorded_at_ms += 1;
+        session.append_control(ControlEntry::PlanReviewAttempt(attempt.clone()))
+    };
+    session.append_control(ControlEntry::PlanReviewAttempt(first.clone()))?;
+    session.append_control(ControlEntry::PlanReviewAttempt(second.clone()))?;
+    let first_question = question(&first, 1)?;
+    let second_question = question(&second, 4)?;
+    append(
+        &mut session,
+        &mut first,
+        PlanReviewAttemptStatus::WaitingForInput,
+        Some(Box::new(first_question)),
+    )?;
+    append(
+        &mut session,
+        &mut second,
+        PlanReviewAttemptStatus::WaitingForInput,
+        Some(Box::new(second_question.clone())),
+    )?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    assert_eq!(page.user_inputs.len(), 2);
+
+    append(
+        &mut session,
+        &mut first,
+        PlanReviewAttemptStatus::Started,
+        None,
+    )?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    assert_eq!(page.user_inputs, vec![second_question.clone()]);
+
+    let next_question = question(&first, 2)?;
+    append(
+        &mut session,
+        &mut first,
+        PlanReviewAttemptStatus::WaitingForInput,
+        Some(Box::new(next_question.clone())),
+    )?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    assert_eq!(
+        page.user_inputs,
+        vec![next_question, second_question.clone()]
+    );
+
+    append(
+        &mut session,
+        &mut first,
+        PlanReviewAttemptStatus::Started,
+        None,
+    )?;
+    append(
+        &mut session,
+        &mut first,
+        PlanReviewAttemptStatus::DraftReady,
+        None,
+    )?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    assert_eq!(page.user_inputs, vec![second_question]);
+    append(
+        &mut session,
+        &mut second,
+        PlanReviewAttemptStatus::Started,
+        None,
+    )?;
+    append(
+        &mut session,
+        &mut second,
+        PlanReviewAttemptStatus::DraftReady,
+        None,
+    )?;
+    let page = conversation_display_page(store.path(), &scope, None, 10, None)?;
+    assert!(page.user_inputs.is_empty());
+    assert!(page.user_input.is_none());
+    Ok(())
+}
+
+#[test]
 fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Result<()> {
     let (_temp, store, mut session) = durable_session()?;
     let scope = session.session_scope_id().to_owned();
@@ -1606,14 +2339,9 @@ fn plan_review_attempt_without_draft_still_projects_its_terminal_status() -> Res
 
 #[derive(Debug, serde::Deserialize)]
 struct LegacyPlanReviewFixtureV1 {
-    schema_version: u16,
-    source_session_id: String,
-    redacted: bool,
     source: LegacyPlanReviewSourceFixtureV1,
     base: LegacyPlanReviewBaseFixtureV1,
     revision: LegacyPlanReviewRevisionFixtureV1,
-    legacy_finalizer_evidence: LegacyPlanReviewFinalizerFixtureV1,
-    expected: LegacyPlanReviewExpectedFixtureV1,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1644,20 +2372,6 @@ struct LegacyPlanReviewRevisionFixtureV1 {
     terminal_at_ms: u64,
     terminal_status: sigil_kernel::PlanReviewAttemptStatus,
     terminal_reason: sigil_kernel::PlanReviewTerminalReason,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LegacyPlanReviewFinalizerFixtureV1 {
-    attempted_tool: String,
-    legacy_error: String,
-    current_classification: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct LegacyPlanReviewExpectedFixtureV1 {
-    active_plan_status: sigil_kernel::PublicPlanReviewStatus,
-    revision_status: sigil_kernel::PublicPlanRevisionStatusV1,
-    retry_requires_guidance: bool,
 }
 
 fn legacy_plan_review_fixture_entries() -> Result<(
@@ -1798,35 +2512,68 @@ fn legacy_plan_review_fixture_entries() -> Result<(
 }
 
 #[test]
-fn legacy_session_5aeeb257_restores_the_base_plan_and_failed_revision() -> Result<()> {
-    let (fixture, entries) = legacy_plan_review_fixture_entries()?;
-    assert_eq!(fixture.schema_version, 1);
-    assert_eq!(
-        fixture.source_session_id,
-        "5aeeb257-83fb-41c5-809b-68edcc0be15a"
-    );
-    assert!(fixture.redacted);
-    assert_eq!(fixture.legacy_finalizer_evidence.attempted_tool, "grep");
-    assert_eq!(
-        fixture.legacy_finalizer_evidence.legacy_error,
-        "unknown tool grep"
-    );
-    assert_eq!(
-        fixture.legacy_finalizer_evidence.current_classification,
-        sigil_kernel::PlanReviewTerminalReason::SubmitOnlyProtocolViolation.as_str()
-    );
+fn old_plan_revision_is_rejected_instead_of_recovering_a_synthetic_request() -> Result<()> {
+    let (_, entries) = legacy_plan_review_fixture_entries()?;
+    for prefix in [&entries[..5], entries.as_slice()] {
+        let error = public_plan_review_from_entries(prefix, None)
+            .expect_err("old revision cannot expose a recovered plan");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Plan revision format")
+        );
+        assert!(crate::conversation_display::public_user_inputs_from_entries(prefix).is_err());
+        let records = prefix
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| synthetic_display_record(index as u64 + 1, entry.clone()))
+            .collect::<Result<Vec<_>>>()?;
+        assert!(
+            canonical_display_page_from_records(&records, "scope-display-bound", None, 50, None,)
+                .is_err()
+        );
+        assert!(display_index(&records).is_err());
+    }
+    Ok(())
+}
 
-    assert_eq!(
-        plan_review_compatibility_from_entries(&entries),
-        PlanReviewCompatibilityStatusV1::LegacyRecovered
-    );
-    let review = public_plan_review_from_entries(&entries, None)
-        .context("legacy review should remain publicly reviewable")?;
-    assert_eq!(review.status, fixture.expected.active_plan_status);
+#[test]
+fn current_plan_revision_keeps_its_exact_request_and_base_after_terminal_failure() -> Result<()> {
+    let (fixture, mut entries) = legacy_plan_review_fixture_entries()?;
+    let request_id = sigil_kernel::UserInputRequestId::new("current-revision-request")?;
+    for entry in &mut entries {
+        if let SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) = entry {
+            attempt.finalizer_session_ref = Some(sigil_kernel::plan_review_finalizer_session_ref(
+                &attempt.plan_review_id,
+                &attempt.attempt_id,
+                1,
+            ));
+        }
+    }
+    for entry in &mut entries[4..] {
+        let SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt)) = entry else {
+            anyhow::bail!("revision fixture lost its attempt");
+        };
+        attempt.revision_request_id = Some(request_id.clone());
+        attempt.base_plan_id = Some(sigil_kernel::PlanId::new(fixture.base.plan_id.clone())?);
+        attempt.base_plan_hash = Some(fixture.base.plan_hash.clone());
+    }
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::PlanDecisionRecorded(sigil_kernel::PlanDecisionRecordedEntry {
+            plan_id: sigil_kernel::PlanId::new(fixture.base.plan_id.clone())?,
+            plan_hash: fixture.base.plan_hash.clone(),
+            decision: sigil_kernel::PlanDecision::RevisionFailed,
+            decided_by: sigil_kernel::PlanDecisionActor::System,
+            decided_at_ms: fixture.revision.terminal_at_ms,
+            reason: None,
+        }),
+    ));
+    let review = public_plan_review_from_entries(&entries, None)?
+        .context("current revision must keep its base visible")?;
     assert_eq!(review.plan_id, fixture.base.plan_id);
     assert_eq!(
-        review.plan_hash.as_deref(),
-        Some(fixture.base.plan_hash.as_str())
+        review.status,
+        sigil_kernel::PublicPlanReviewStatus::DraftReady
     );
     assert!(
         review
@@ -1836,47 +2583,19 @@ fn legacy_session_5aeeb257_restores_the_base_plan_and_failed_revision() -> Resul
     assert!(
         review
             .allowed_actions
-            .contains(&sigil_kernel::PublicPlanAction::Run),
-        "RFC-0069 keeps a legacy readable plan runnable; materialization owns the missing candidate"
+            .contains(&sigil_kernel::PublicPlanAction::Run)
     );
-    assert!(fixture.expected.retry_requires_guidance);
     let revision = review
         .revision
-        .context("legacy terminal revision should remain visible")?;
-    assert_eq!(revision.status, fixture.expected.revision_status);
+        .context("exact revision must remain visible")?;
+    assert_eq!(revision.request_id, request_id.as_str());
     assert_eq!(
         revision.attempt_id.as_deref(),
         Some(fixture.revision.attempt_id.as_str())
     );
     assert_eq!(
-        revision.terminal_reason.as_deref(),
-        Some(fixture.revision.terminal_reason.as_str())
+        revision.status,
+        sigil_kernel::PublicPlanRevisionStatusV1::Failed
     );
-    Ok(())
-}
-
-#[test]
-fn ambiguous_legacy_revision_lineage_fails_closed() -> Result<()> {
-    let (_fixture, mut entries) = legacy_plan_review_fixture_entries()?;
-    let Some(sigil_kernel::SessionLogEntry::Control(
-        sigil_kernel::ControlEntry::PlanReviewAttempt(candidate),
-    )) = entries.get_mut(4)
-    else {
-        anyhow::bail!("legacy fixture lost its candidate start");
-    };
-    candidate.source_turn =
-        sigil_kernel::ConversationTurnRef::new("other-session", "other-message", "other-run")?;
-
-    assert_eq!(
-        plan_review_compatibility_from_entries(&entries),
-        PlanReviewCompatibilityStatusV1::UnsupportedLegacy
-    );
-    let review = public_plan_review_from_entries(&entries, None)
-        .context("unsupported legacy terminal should remain visible without authority")?;
-    assert_eq!(
-        review.status,
-        sigil_kernel::PublicPlanReviewStatus::Interrupted
-    );
-    assert!(review.allowed_actions.is_empty());
     Ok(())
 }

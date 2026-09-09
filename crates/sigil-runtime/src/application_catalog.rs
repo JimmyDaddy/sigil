@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use sigil_kernel::{
-    AgentProfileKind, AgentProfileSource, AgentTrustState, RootConfig, SessionLogEntry,
-    SkillRunMode, SkillTrustState, default_user_config_dir, safe_persistence_text,
+    AgentProfileKind, AgentProfileSource, AgentTrustState, OptionalCapability, RootConfig,
+    SessionLogEntry, SkillRunMode, SkillTrustState, default_user_config_dir, safe_persistence_text,
 };
 
 use crate::{AgentProfileRegistry, discover_skill_index_with_user_dir};
@@ -252,117 +252,144 @@ pub fn application_extension_catalog_view(
     workspace_root: &Path,
     entries: &[SessionLogEntry],
 ) -> Result<ApplicationExtensionCatalogView> {
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
+    let selected = root_config.selected_capabilities();
     let commands = APPLICATION_COMMANDS
         .iter()
-        .map(|spec| ApplicationCommandCatalogEntry {
-            canonical: spec.canonical.to_owned(),
-            aliases: spec
-                .aliases
-                .iter()
-                .map(|alias| (*alias).to_owned())
-                .collect(),
-            label: spec.label.to_owned(),
-            description: spec.description.to_owned(),
-            argument_hint: spec.argument_hint.map(str::to_owned),
-            completes_with_space: spec.completes_with_space,
-            client_action: spec.client_action,
-            available: spec.client_action.is_some(),
-            unavailable_reason: spec
-                .client_action
-                .is_none()
-                .then(|| "This command does not yet have a desktop application route.".to_owned()),
-        })
-        .collect();
-
-    let user_config_dir = default_user_config_dir().ok();
-    let skill_report = discover_skill_index_with_user_dir(
-        workspace_root,
-        user_config_dir.as_deref(),
-        &root_config.skills,
-    )?;
-    let fingerprint = skill_report.snapshot.fingerprint.clone();
-    let skills = skill_report
-        .snapshot
-        .descriptors
-        .iter()
-        .filter(|descriptor| descriptor.run_as == SkillRunMode::Inline)
-        .take(MAX_CATALOG_ENTRIES_PER_KIND)
-        .map(|descriptor| {
-            let unavailable_reason = skill_unavailable_reason(descriptor);
-            let available = unavailable_reason.is_none();
-            ApplicationSkillCatalogEntry {
-                id: descriptor.id.clone(),
-                invocation_token: skill_invocation_token(descriptor),
-                name: bounded_catalog_text(if descriptor.name.trim().is_empty() {
-                    &descriptor.id
-                } else {
-                    &descriptor.name
-                }),
-                description: bounded_catalog_text(&descriptor.description),
-                source: descriptor.source.as_str().to_owned(),
-                run_mode: descriptor.run_as.as_str().to_owned(),
-                trust: descriptor.trust.as_str().to_owned(),
-                available,
-                unavailable_reason,
-                binding: available.then(|| ApplicationSkillBinding {
-                    skill_id: descriptor.id.clone(),
-                    skill_sha256: descriptor.sha256.clone(),
-                    index_fingerprint: fingerprint.clone(),
-                }),
-            }
-        })
-        .collect();
-
-    let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-        root_config,
-        workspace_root,
-        entries,
-    )?;
-    let agents = registry
-        .profiles()
-        .iter()
-        .filter(|profile| profile.profile.kind != AgentProfileKind::System)
-        .take(MAX_CATALOG_ENTRIES_PER_KIND)
-        .map(|profile| {
-            let snapshot = registry.capture_snapshot(profile.id()).ok();
-            let enabled = profile.effective_enabled();
-            let user_invocable = profile.effective_user_invocation_allowed();
-            let unavailable_reason = if !enabled {
-                Some("This agent profile is disabled.".to_owned())
-            } else if profile.trust_state != AgentTrustState::Trusted {
-                Some("Review and trust this agent profile before invoking it.".to_owned())
-            } else if !user_invocable {
-                Some("This agent profile cannot be invoked directly by a user.".to_owned())
-            } else if snapshot.is_none() {
-                Some("The exact agent profile snapshot could not be captured.".to_owned())
-            } else {
-                None
+        .map(|spec| {
+            let unavailable_reason = match spec.client_action {
+                None => {
+                    Some("This command does not yet have a desktop application route.".to_owned())
+                }
+                Some(ApplicationClientAction::PreviewCompaction)
+                    if !selected.contains(&OptionalCapability::Compaction) =>
+                {
+                    Some("Compaction is not selected for this session composition.".to_owned())
+                }
+                Some(
+                    ApplicationClientAction::OpenAgentWorkbench
+                    | ApplicationClientAction::OpenIntentStack,
+                ) if !selected.contains(&OptionalCapability::TaskOrchestration) => Some(
+                    "Task orchestration is not selected for this session composition.".to_owned(),
+                ),
+                Some(_) => None,
             };
-            let snapshot_id = snapshot.map(|snapshot| snapshot.snapshot_id.as_str().to_owned());
-            let binding = unavailable_reason
-                .is_none()
-                .then(|| ApplicationAgentBinding {
-                    profile_id: profile.id().as_str().to_owned(),
-                    snapshot_id: snapshot_id
-                        .clone()
-                        .expect("available agent profiles have an exact snapshot"),
-                });
-            ApplicationAgentCatalogEntry {
-                id: profile.id().as_str().to_owned(),
-                invocation_token: agent_invocation_token(profile),
-                description: bounded_catalog_text(&profile.profile.description),
-                source: agent_source_label(&profile.source).to_owned(),
-                kind: agent_kind_label(profile.profile.kind).to_owned(),
-                trust: agent_trust_label(profile.trust_state).to_owned(),
-                enabled,
-                user_invocable,
+            ApplicationCommandCatalogEntry {
+                canonical: spec.canonical.to_owned(),
+                aliases: spec
+                    .aliases
+                    .iter()
+                    .map(|alias| (*alias).to_owned())
+                    .collect(),
+                label: spec.label.to_owned(),
+                description: spec.description.to_owned(),
+                argument_hint: spec.argument_hint.map(str::to_owned),
+                completes_with_space: spec.completes_with_space,
+                client_action: spec.client_action,
                 available: unavailable_reason.is_none(),
                 unavailable_reason,
-                snapshot_id,
-                binding,
             }
         })
         .collect();
+
+    let skills = if selected.contains(&OptionalCapability::Skills) {
+        let user_config_dir = default_user_config_dir().ok();
+        let skill_report = discover_skill_index_with_user_dir(
+            workspace_root,
+            user_config_dir.as_deref(),
+            &root_config.skills,
+        )?;
+        let fingerprint = skill_report.snapshot.fingerprint.clone();
+        skill_report
+            .snapshot
+            .descriptors
+            .iter()
+            .filter(|descriptor| descriptor.run_as == SkillRunMode::Inline)
+            .take(MAX_CATALOG_ENTRIES_PER_KIND)
+            .map(|descriptor| {
+                let unavailable_reason = skill_unavailable_reason(descriptor);
+                let available = unavailable_reason.is_none();
+                ApplicationSkillCatalogEntry {
+                    id: descriptor.id.clone(),
+                    invocation_token: skill_invocation_token(descriptor),
+                    name: bounded_catalog_text(if descriptor.name.trim().is_empty() {
+                        &descriptor.id
+                    } else {
+                        &descriptor.name
+                    }),
+                    description: bounded_catalog_text(&descriptor.description),
+                    source: descriptor.source.as_str().to_owned(),
+                    run_mode: descriptor.run_as.as_str().to_owned(),
+                    trust: descriptor.trust.as_str().to_owned(),
+                    available,
+                    unavailable_reason,
+                    binding: available.then(|| ApplicationSkillBinding {
+                        skill_id: descriptor.id.clone(),
+                        skill_sha256: descriptor.sha256.clone(),
+                        index_fingerprint: fingerprint.clone(),
+                    }),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let agents = if selected.contains(&OptionalCapability::TaskOrchestration) {
+        let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            root_config,
+            workspace_root,
+            entries,
+        )?;
+        registry
+            .profiles()
+            .iter()
+            .filter(|profile| profile.profile.kind != AgentProfileKind::System)
+            .take(MAX_CATALOG_ENTRIES_PER_KIND)
+            .map(|profile| {
+                let snapshot = registry.capture_snapshot(profile.id()).ok();
+                let enabled = profile.effective_enabled();
+                let user_invocable = profile.effective_user_invocation_allowed();
+                let unavailable_reason = if !enabled {
+                    Some("This agent profile is disabled.".to_owned())
+                } else if profile.trust_state != AgentTrustState::Trusted {
+                    Some("Review and trust this agent profile before invoking it.".to_owned())
+                } else if !user_invocable {
+                    Some("This agent profile cannot be invoked directly by a user.".to_owned())
+                } else if snapshot.is_none() {
+                    Some("The exact agent profile snapshot could not be captured.".to_owned())
+                } else {
+                    None
+                };
+                let snapshot_id = snapshot.map(|snapshot| snapshot.snapshot_id.as_str().to_owned());
+                let binding = unavailable_reason
+                    .is_none()
+                    .then(|| ApplicationAgentBinding {
+                        profile_id: profile.id().as_str().to_owned(),
+                        snapshot_id: snapshot_id
+                            .clone()
+                            .expect("available agent profiles have an exact snapshot"),
+                    });
+                ApplicationAgentCatalogEntry {
+                    id: profile.id().as_str().to_owned(),
+                    invocation_token: agent_invocation_token(profile),
+                    description: bounded_catalog_text(&profile.profile.description),
+                    source: agent_source_label(&profile.source).to_owned(),
+                    kind: agent_kind_label(profile.profile.kind).to_owned(),
+                    trust: agent_trust_label(profile.trust_state).to_owned(),
+                    enabled,
+                    user_invocable,
+                    available: unavailable_reason.is_none(),
+                    unavailable_reason,
+                    snapshot_id,
+                    binding,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(ApplicationExtensionCatalogView {
         commands,

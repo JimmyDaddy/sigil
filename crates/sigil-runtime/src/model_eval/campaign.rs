@@ -172,6 +172,10 @@ pub fn write_isolated_model_eval_config(
     run_root: &Path,
 ) -> Result<ModelEvalIsolatedConfig> {
     let mut config = RootConfig::load(source_config_path)?;
+    // This is a new fixture configuration, never a publication back to the user's document.
+    // Keep the selected composition while discarding inactive raw module payloads before the
+    // fixture deliberately replaces module settings below.
+    config.composition = config.composition.selection_only();
     if config.permission.mode == PermissionMode::ReadOnly
         || (config.permission.mode == PermissionMode::Manual
             && fixture.tool_scope.names.iter().any(|name| {
@@ -275,7 +279,7 @@ pub fn write_isolated_model_eval_config(
     let config_bytes = fs::read(&config_path)
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     std::str::from_utf8(&config_bytes).context("isolated config is not UTF-8")?;
-    let reloaded = RootConfig::load(&config_path)?;
+    let reloaded = RootConfig::load(&config_path)?.with_effective_composition()?;
     let reloaded_connections = crate::provider_connections::load_provider_connections(&reloaded);
     if reloaded.workspace.root != config.workspace.root
         || reloaded_connections.default_model.as_ref() != Some(&default_model)

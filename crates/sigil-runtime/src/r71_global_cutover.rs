@@ -11,9 +11,11 @@
 
 use std::collections::BTreeSet;
 
+use sigil_kernel::RuntimeCompositionConfig;
 use sigil_kernel::cutover_manifest::{
-    AdapterReadinessProbeV1, CutoverErrorV1, CutoverManifestV1, MandatoryAdapterKindV1,
-    StartupEpochV1, compute_manifest_hash, validate_cutover_manifest,
+    AdapterReadinessProbeV1, CUTOVER_MANIFEST_SCHEMA_VERSION, CutoverErrorV1, CutoverManifestV1,
+    MandatoryAdapterKindV1, StartupEpochV1, compute_manifest_hash, required_adapter_kinds_v1,
+    validate_cutover_manifest,
 };
 use sigil_kernel::managed_storage::{
     ManagedStorageAdmissionRequestV1, StorageAdmissionSourceV1,
@@ -170,11 +172,20 @@ fn storage_family_probe(
         request,
         ValidatedStorageAdmissionCapabilityV1::startup_probe(),
     ) {
-        Ok(handle) => services
+        Ok(handle) => match services
             .storage
             .finalize_namespace(handle, "startup-readiness-probe".into())
-            .is_ok(),
-        Err(_) => false,
+        {
+            Ok(_) => true,
+            Err(error) => {
+                report_storage_probe_failure(kind, "finalize", &error);
+                false
+            }
+        },
+        Err(error) => {
+            report_storage_probe_failure(kind, "admit", &error);
+            false
+        }
     };
     AdapterReadinessProbeV1 {
         adapter: kind,
@@ -187,7 +198,21 @@ fn storage_family_probe(
     }
 }
 
-/// Mandatory adapter probe plan over a concrete runtime surface (exactly 18 probes).
+fn report_storage_probe_failure(
+    adapter: MandatoryAdapterKindV1,
+    operation: &'static str,
+    error: &sigil_kernel::managed_storage::ManagedStorageErrorV1,
+) {
+    let detail = sigil_kernel::safe_persistence_text(&format!("{error:?}"));
+    tracing::warn!(
+        ?adapter,
+        operation,
+        error = %detail,
+        "mandatory storage readiness probe failed"
+    );
+}
+
+/// Standard composition adapter probe plan over a concrete runtime surface (18 probes).
 /// The execution/file-access seams are read from the composed surface itself, so a probe can
 /// never claim a seam the composition does not hold.
 pub fn probe_mandatory_adapters(
@@ -196,7 +221,26 @@ pub fn probe_mandatory_adapters(
     cutover_manifest_hash: CanonicalHash,
     application_generation: u64,
 ) -> Vec<AdapterReadinessProbeV1> {
-    let mut out = Vec::with_capacity(18);
+    probe_selected_adapters(
+        services,
+        recovery,
+        cutover_manifest_hash,
+        application_generation,
+        &RuntimeCompositionConfig::default(),
+    )
+}
+
+/// Probes the fixed dependency closure for the selected composition. Inactive storage owners
+/// are never admitted, so readiness cannot create or validate an unselected capability.
+pub fn probe_selected_adapters(
+    services: &RuntimeManagedResourceServicesV1,
+    recovery: &ApplicationResourceRecoveryFacadeV1,
+    cutover_manifest_hash: CanonicalHash,
+    application_generation: u64,
+    composition: &RuntimeCompositionConfig,
+) -> Vec<AdapterReadinessProbeV1> {
+    let required = required_adapter_kinds_v1(composition);
+    let mut out = Vec::with_capacity(required.len());
 
     let execution = matches!(
         services.execution_seam,
@@ -211,6 +255,9 @@ pub fn probe_mandatory_adapters(
         (MandatoryAdapterKindV1::ExecutionTerminal, execution),
         (MandatoryAdapterKindV1::ExecutionExtension, extension),
     ] {
+        if !required.contains(&kind) {
+            continue;
+        }
         out.push(AdapterReadinessProbeV1 {
             adapter: kind,
             passed,
@@ -232,6 +279,9 @@ pub fn probe_mandatory_adapters(
     });
 
     for channel in storage_channels() {
+        if !required.contains(&channel.0) {
+            continue;
+        }
         out.push(storage_family_probe(
             services,
             *channel,
@@ -313,6 +363,9 @@ pub fn probe_mandatory_adapters(
             services.borrowed_release_output_seam,
         ),
     ] {
+        if !required.contains(&kind) {
+            continue;
+        }
         let passed = matches!(
             seam,
             RuntimeProductStateSeamV1::ProductOwnerAtomicBacked
@@ -335,7 +388,13 @@ pub fn probe_mandatory_adapters(
         evidence_digest: CanonicalHash::from_bytes([0xb7; 32]),
     });
 
-    debug_assert_eq!(out.len(), 18);
+    debug_assert_eq!(out.len(), required.len());
+    debug_assert!(required.iter().all(|required_adapter| {
+        out.iter()
+            .filter(|probe| probe.adapter == *required_adapter)
+            .count()
+            == 1
+    }));
     out
 }
 
@@ -366,6 +425,7 @@ impl RuntimeGlobalCutoverV1 {
             services,
             recovery,
             probe_source::probe(application_generation),
+            &RuntimeCompositionConfig::default(),
         )
     }
 
@@ -380,18 +440,25 @@ impl RuntimeGlobalCutoverV1 {
         services: &RuntimeManagedResourceServicesV1,
         recovery: &ApplicationResourceRecoveryFacadeV1,
         source_binding: CanonicalHash,
+        composition: &RuntimeCompositionConfig,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
-            schema_version: 1,
+            schema_version: CUTOVER_MANIFEST_SCHEMA_VERSION,
             application_instance_id: instance_id.into(),
             selected_epoch: StartupEpochV1::NewCurrentSchema,
             application_generation,
             authority_generation_digest: authority_generation.instance_hash,
+            composition: composition.selection_only(),
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };
-        manifest.mandatory_readiness =
-            probe_mandatory_adapters(services, recovery, source_binding, application_generation);
+        manifest.mandatory_readiness = probe_selected_adapters(
+            services,
+            recovery,
+            source_binding,
+            application_generation,
+            composition,
+        );
         manifest.manifest_hash = compute_manifest_hash(&manifest);
         let gate_error = validate_cutover_manifest(&manifest).err();
         Self {
@@ -421,11 +488,12 @@ impl RuntimeGlobalCutoverV1 {
         }
         let instance_id = instance_id.into();
         let mut manifest = CutoverManifestV1 {
-            schema_version: 1,
+            schema_version: CUTOVER_MANIFEST_SCHEMA_VERSION,
             application_instance_id: instance_id,
             selected_epoch,
             application_generation,
             authority_generation_digest: authority_generation.instance_hash,
+            composition: RuntimeCompositionConfig::default(),
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };
@@ -514,11 +582,12 @@ impl RuntimeGlobalCutoverV1 {
         authority_generation: AuthorityGeneration,
     ) -> Self {
         let mut manifest = CutoverManifestV1 {
-            schema_version: 1,
+            schema_version: CUTOVER_MANIFEST_SCHEMA_VERSION,
             application_instance_id: instance_id.into(),
             selected_epoch: StartupEpochV1::Legacy,
             application_generation,
             authority_generation_digest: authority_generation.instance_hash,
+            composition: RuntimeCompositionConfig::default(),
             mandatory_readiness: Vec::new(),
             manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
         };

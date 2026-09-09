@@ -725,3 +725,91 @@ fn runtime_service_rejects_invalid_delivery_ack_before_delegation() {
     .expect_err("empty event id must fail");
     assert!(matches!(error, ApplicationError::InvalidRequest(_)));
 }
+
+#[tokio::test]
+async fn runtime_page_cancellation_drops_the_active_source_future() -> anyhow::Result<()> {
+    struct PendingSource {
+        started: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicUsize>,
+    }
+    struct SourceDrop(Arc<AtomicUsize>);
+    impl Drop for SourceDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl RuntimeApplicationProjectionSource for PendingSource {
+        fn open_projection(
+            &self,
+            _request: OpenProjectionRequest,
+        ) -> BoxFuture<'static, Result<ProjectionSnapshot, ApplicationError>> {
+            Box::pin(async { Err(ApplicationError::Unavailable) })
+        }
+        fn page(
+            &self,
+            _request: ProjectionPageRequest,
+        ) -> BoxFuture<'static, Result<ProjectionPage, ApplicationError>> {
+            let started = self.started.clone();
+            let dropped = self.dropped.clone();
+            Box::pin(async move {
+                let _drop = SourceDrop(dropped);
+                started.notify_one();
+                futures::future::pending().await
+            })
+        }
+    }
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let service = Arc::new(RuntimeApplicationService::new(
+        Arc::new(PendingSource {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        }),
+        Arc::new(SettlingExecutor {
+            calls: Arc::default(),
+        }),
+        Arc::new(TestReservationStore::default()),
+        Arc::new(Acker),
+    ));
+    let scope = request("unused", 1).admission.scope;
+    let request = ProjectionPageRequest {
+        request_id: PageRequestId::new("cancel-active-page")?,
+        scope: scope.clone(),
+        source_generation: 1,
+        at_frontier: ApplicationFrontier {
+            schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+            scope,
+            writer_generation: 1,
+            stream_generation: 1,
+            through_sequence: 1,
+            durable_cursor: "session-stream:1".into(),
+        },
+        query: sigil_application::PageQueryFingerprint::new("transcript")?,
+        anchor: sigil_application::PageAnchor {
+            item_id: None,
+            intra_item_row: 0,
+            cursor: None,
+        },
+        direction: sigil_application::PageDirection::Older,
+        limit: std::num::NonZeroUsize::new(1).expect("positive limit"),
+        width_bucket: 80,
+    };
+    let source = service.clone();
+    let page = request.clone();
+    let loading = tokio::spawn(async move { source.page(page).await });
+    started.notified().await;
+    assert_eq!(
+        service.cancel_page(request.request_id.clone()).await,
+        PageCancellationReceipt::CancelledBeforeLoad
+    );
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), loading).await??,
+        Err(ApplicationError::ResetRequired)
+    ));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        service.page(request).await,
+        Err(ApplicationError::ResetRequired)
+    ));
+    Ok(())
+}

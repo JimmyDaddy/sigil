@@ -684,6 +684,45 @@ fn isolated_model_eval_config_removes_secrets_and_external_surfaces() {
 }
 
 #[test]
+fn isolated_model_eval_core_config_preserves_selection_without_dormant_payloads() {
+    let fixture = load_model_eval_fixture(fixture_root("small-code-edit")).expect("load fixture");
+    let temp = tempdir().expect("temp dir");
+    let run_root = temp.path().join("run");
+    fs::create_dir(&run_root).expect("run root");
+    let materialized = materialize_model_eval_fixture(&fixture, run_root.join("workspace"))
+        .expect("materialize fixture");
+    let source_config = temp.path().join("source.toml");
+    write_source_config(&source_config, "http://127.0.0.1:9", "auto-edit");
+    let mut source: toml::Value =
+        toml::from_str(&fs::read_to_string(&source_config).expect("source")).expect("toml");
+    let source_table = source.as_table_mut().expect("source config table");
+    source_table.insert(
+        "composition".to_owned(),
+        toml::toml! { profile = "core" enhancements = [] }.into(),
+    );
+    source_table.insert(
+        "memory".to_owned(),
+        toml::Value::String("unselected module is intentionally malformed".to_owned()),
+    );
+    fs::write(&source_config, toml::to_string(&source).expect("serialize")).expect("write source");
+    let isolated = write_isolated_model_eval_config(&source_config, &materialized, &run_root)
+        .expect("isolate core source without activating memory");
+    let config = sigil_kernel::RootConfig::load(&isolated.config_path)
+        .expect("load")
+        .with_effective_composition()
+        .expect("compose");
+    assert!(config.selected_capabilities().is_empty());
+    assert!(!config.task.enabled);
+    assert!(!config.memory.enabled);
+    assert!(!config.web.enabled);
+    assert!(
+        !fs::read_to_string(&isolated.config_path)
+            .expect("config")
+            .contains("intentionally malformed")
+    );
+}
+
+#[test]
 fn orchestration_fixture_classification_is_manifest_owned_and_enables_auto_routing() {
     let source = fixture_root("small-code-edit");
     let fixture_temp = tempdir().expect("fixture temp dir");

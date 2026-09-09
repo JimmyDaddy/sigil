@@ -267,7 +267,11 @@ pub async fn accept_application_task_integration_review_with_attachment(
         .clone();
     let request = request.clone();
     let preparation = tokio::task::spawn_blocking(move || {
-        let root_config = RootConfig::load(&config_path)?;
+        let root_config = RootConfig::load(&config_path)?.with_effective_composition()?;
+        anyhow::ensure!(
+            root_config.task.enabled,
+            "task orchestration is not selected for this session composition"
+        );
         let workspace_root =
             resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
         let store = JsonlSessionStore::new(&session_path)?;
@@ -281,6 +285,7 @@ pub async fn accept_application_task_integration_review_with_attachment(
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before integration acceptance");
         }
+        crate::validate_session_composition(&session, &root_config)?;
         let secret_redactor = crate::secret_redactor_for_root_config(&root_config);
         Ok::<_, anyhow::Error>((
             session,

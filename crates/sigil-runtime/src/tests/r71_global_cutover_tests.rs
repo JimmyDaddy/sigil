@@ -167,6 +167,125 @@ fn resource_global_cutover_storage_roundtrip_probe_is_real() {
     }
 }
 
+#[derive(Default)]
+struct RecordingUnavailableStorage {
+    attempted: std::sync::Mutex<Vec<ManagedStorageSemanticOwnerV1>>,
+}
+
+impl sigil_kernel::managed_storage::ManagedStorageServiceV1 for RecordingUnavailableStorage {
+    fn admit_namespace(
+        &self,
+        request: ManagedStorageAdmissionRequestV1,
+        _capability: ValidatedStorageAdmissionCapabilityV1,
+    ) -> Result<
+        sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
+        sigil_kernel::managed_storage::ManagedStorageErrorV1,
+    > {
+        self.attempted
+            .lock()
+            .expect("attempts")
+            .push(request.semantic_owner);
+        Err(sigil_kernel::managed_storage::ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn validate_namespace_write(
+        &self,
+        _handle: &sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), sigil_kernel::managed_storage::ManagedStorageErrorV1> {
+        Err(sigil_kernel::managed_storage::ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn finalize_namespace(
+        &self,
+        _handle: sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
+        _reason: String,
+    ) -> Result<
+        sigil_kernel::managed_storage::ManagedStorageStorageReceiptV1,
+        sigil_kernel::managed_storage::ManagedStorageErrorV1,
+    > {
+        Err(sigil_kernel::managed_storage::ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn finalize_namespace_with_physical_frontier(
+        &self,
+        _handle: sigil_kernel::managed_storage::ManagedStorageNamespaceHandleV1,
+        _byte_length: u64,
+        _record_count: u64,
+        _content_hash: CanonicalHash,
+        _reason: String,
+    ) -> Result<
+        sigil_kernel::managed_storage::ManagedStorageStorageReceiptV1,
+        sigil_kernel::managed_storage::ManagedStorageErrorV1,
+    > {
+        Err(sigil_kernel::managed_storage::ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+}
+
+#[test]
+fn core_probe_does_not_admit_unselected_storage_or_claim_optional_readiness() {
+    let mut services = shadow_services(mock_issuer());
+    let storage = Arc::new(RecordingUnavailableStorage::default());
+    services.storage = storage.clone();
+    let recovery = ApplicationResourceRecoveryFacadeV1::new();
+    let selected = RuntimeCompositionConfig::core();
+    let probes = probe_selected_adapters(
+        &services,
+        &recovery,
+        CanonicalHash::from_bytes([0xd1; 32]),
+        1,
+        &selected,
+    );
+    assert_eq!(probes.len(), 13);
+    let attempts = storage.attempted.lock().expect("attempts").clone();
+    assert_eq!(attempts.len(), 6);
+    assert!(
+        !attempts
+            .iter()
+            .any(|owner| matches!(owner, ManagedStorageSemanticOwnerV1::DurableMemory(_)))
+    );
+    assert!(!probes.iter().any(|probe| matches!(
+        probe.adapter,
+        MandatoryAdapterKindV1::ExecutionTerminal
+            | MandatoryAdapterKindV1::ExecutionExtension
+            | MandatoryAdapterKindV1::StorageMemory
+            | MandatoryAdapterKindV1::ProductStateUpdater
+            | MandatoryAdapterKindV1::BorrowedReleaseOutput
+    )));
+    assert!(
+        probes.iter().any(
+            |probe| probe.adapter == MandatoryAdapterKindV1::StorageSessionLog && !probe.passed
+        )
+    );
+
+    let mut selected = selected;
+    selected
+        .enhancements
+        .insert(sigil_kernel::OptionalCapability::Memory);
+    let probes = probe_selected_adapters(
+        &services,
+        &recovery,
+        CanonicalHash::from_bytes([0xd1; 32]),
+        1,
+        &selected,
+    );
+    let memory = probes
+        .iter()
+        .find(|probe| probe.adapter == MandatoryAdapterKindV1::StorageMemory)
+        .expect("selected memory probe");
+    assert!(
+        !memory.passed,
+        "selected unavailable adapter must fail closed"
+    );
+    assert!(
+        storage
+            .attempted
+            .lock()
+            .expect("attempts")
+            .iter()
+            .any(|owner| matches!(owner, ManagedStorageSemanticOwnerV1::DurableMemory(_)))
+    );
+}
+
 fn storage_grant(
     grant_id: &str,
     owner: sigil_kernel::resource::ManagedStorageSemanticOwnerV1,
@@ -753,6 +872,7 @@ fn r71_full_composition_gate() {
         &composition.services,
         &recovery,
         CanonicalHash::from_bytes([0x55; 32]),
+        &RuntimeCompositionConfig::standard(),
     );
     match cutover.gate() {
         Ok(()) => {}

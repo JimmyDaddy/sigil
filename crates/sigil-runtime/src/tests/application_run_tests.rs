@@ -72,6 +72,9 @@ use super::{
     replay_pending_application_outbox, rerun_application_verification, validate_execution_contract,
 };
 
+#[path = "application_continuation_file_tests.rs"]
+mod continuation_file_tests;
+
 fn application_conversation_lifecycle(
     path: &Path,
 ) -> Result<Vec<ConversationRunLifecycleRecordV1>> {
@@ -272,34 +275,38 @@ fn with_application_test_managed_authority(
     root: &Path,
     services: ApplicationRunServices,
 ) -> Result<ApplicationRunServices> {
-    let fixture_id = uuid::Uuid::new_v4().simple().to_string();
-    let state = root.join(format!("authority-state-{fixture_id}"));
-    let execution_temp = root.join(format!("authority-exec-{fixture_id}"));
-    std::fs::create_dir_all(state.join("cache"))?;
-    std::fs::create_dir_all(&execution_temp)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&execution_temp, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let planner: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
-        Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-        ));
-    let composition = crate::r71_authority_composition::compose_runtime_authority(
-        &state,
-        &execution_temp,
-        sigil_kernel::resource::CanonicalHash::from_bytes([0x4a; 32]),
-        sigil_kernel::resource::AuthorityGeneration {
-            epoch: 1,
-            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
-        },
-        planner,
-        &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &root.join("sigil.toml"),
+        root,
     )?;
-    Ok(services.with_authority_composition(composition))
+    services.require_current_schema_authority()?;
+    Ok(services)
+}
+
+fn bind_application_test_managed_session(
+    config_path: &Path,
+    root: &Path,
+    requested_path: &Path,
+    services: &ApplicationRunServices,
+) -> Result<super::ApplicationSessionBinding> {
+    let writer = Arc::clone(
+        &services
+            .authority_composition()
+            .expect("fixture boot provides the production authority")
+            .storage_writer,
+    );
+    let (binding, attachment) =
+        crate::application_run::bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+            config_path,
+            root,
+            Some(requested_path),
+            None,
+            None,
+            Some(writer),
+        )?;
+    drop(attachment);
+    Ok(binding)
 }
 
 fn seed_application_user_input_request(
@@ -385,10 +392,14 @@ async fn submitted_user_input_is_durable_before_one_supervised_continuation() ->
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?;
     let session_path = temp.path().join("state/sessions/user-input.jsonl");
-    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let binding =
+        bind_application_test_managed_session(&config_path, temp.path(), &session_path, &services)?;
     let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
 
     let prepared = prepare_application_user_input_decision(
         ApplicationUserInputDecisionRequest {
@@ -509,12 +520,16 @@ async fn submitted_user_input_remains_retryable_when_provider_preparation_fails(
     );
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?;
     let session_path = temp
         .path()
         .join("state/sessions/user-input-provider-failure.jsonl");
-    let binding = bind_application_session(&config_path, temp.path(), Some(&session_path))?;
+    let binding =
+        bind_application_test_managed_session(&config_path, temp.path(), &session_path, &services)?;
     let requested = seed_application_user_input_request(&config_path, temp.path(), &binding)?;
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
     let command_id = UserInputCommandId::new("user-input-provider-failure-command")?;
 
     let error = match prepare_application_user_input_decision(
@@ -2477,6 +2492,12 @@ async fn builtin_plan_agent_binding_prepares_an_unstarted_explicit_review() -> R
     request.agent_binding = plan.binding.clone();
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
 
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let prepared = prepare_application_run(request, &services).await?;
 
     assert!(matches!(
@@ -2953,16 +2974,13 @@ fn public_event_bridge_rejects_a_root_terminal_without_a_durable_finalizer() -> 
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2]
+        vec![1]
     );
     assert!(matches!(
         recorder.0[0].event,
         PublicRunEventKind::RunStarted { .. }
     ));
-    assert!(matches!(
-        recorder.0[1].event,
-        PublicRunEventKind::TextDelta { .. }
-    ));
+    assert_eq!(recorder.0.len(), 1, "live previews cannot be public events");
     assert!(
         recorder
             .0
@@ -3659,7 +3677,11 @@ fn public_event_sequence_rejects_a_root_terminal_without_a_durable_finalizer() -
             )
             .is_ok()
     );
-    assert_eq!(recorder.0.len(), 2);
+    assert_eq!(
+        recorder.0.len(),
+        1,
+        "transient previews are not public events"
+    );
     Ok(())
 }
 
@@ -3831,6 +3853,12 @@ async fn application_execution_does_not_rewrite_an_unconfirmed_public_append_as_
         "run-unconfirmed-public-append",
     );
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let prepared = prepare_application_run(request, &services).await?;
     let session_id = prepared.execution.session_id.clone();
     let run_id = prepared.execution.run_id.clone();
@@ -4602,6 +4630,38 @@ fn durable_task_handoff_never_projects_as_application_success() -> Result<()> {
 }
 
 #[tokio::test]
+async fn application_manual_run_does_not_prepare_plan_review() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    write_unauthenticated_application_test_config(&config_path)?;
+    let mut config = RootConfig::load(&config_path)?;
+    config.task.enabled = false;
+    config.task.routing_policy = TaskRoutingPolicy::Manual;
+    config.save(&config_path)?;
+    let request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "read the source file",
+        "run-manual-core",
+    );
+    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
+    let prepared = prepare_application_run(request, &services).await?;
+    assert!(matches!(
+        prepared.execution.kind,
+        ApplicationRunExecutionKind::Main { .. }
+    ));
+    assert!(prepared.execution.plan_review_runtime.is_none());
+    assert!(prepared.execution.task_execution.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn application_auto_routing_stays_manual_without_attached_task_executor() -> Result<()> {
     let _environment_guard = crate::test_env::lock();
@@ -4643,10 +4703,17 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     );
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
 
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let prepared = prepare_application_run(request, &services).await?;
 
     assert!(!services.task_executor_attached());
     assert!(prepared.execution.task_execution.is_none());
+    assert!(prepared.execution.plan_review_runtime.is_some());
     let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
         panic!("ordinary application request must prepare the main agent");
     };
@@ -4715,6 +4782,12 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
     let _rollout_guard =
         crate::tests::rollout_manifest_test_support::qualified_rollout_manifest_guard(&root_config);
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let prepared = prepare_application_run(request, &services).await?;
 
     assert!(services.task_executor_attached());
@@ -4920,15 +4993,28 @@ credential = {{ source = "none" }}
     root_config.task.enabled = true;
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let requested_session_path = temp.path().join("session.jsonl");
-    let binding =
-        bind_application_session(&config_path, temp.path(), Some(&requested_session_path))?;
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?;
+    let binding = bind_application_test_managed_session(
+        &config_path,
+        temp.path(),
+        &requested_session_path,
+        &services,
+    )?;
     let session_path = binding.session_log_path.clone();
     let store = JsonlSessionStore::new(&session_path)?;
     let mut session =
         Session::load_from_store("application-task-test", "application-task-model", store)?;
     let session_scope_id = binding.session_scope_id;
     let task_id = TaskId::new("task-application-planner-question")?;
-    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    let parent_session_ref = SessionRef::new_relative(
+        session_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("managed session leaf"),
+    )?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref,
@@ -5024,11 +5110,7 @@ credential = {{ source = "none" }}
     );
     drop(session);
 
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(provider_builder);
+    let services = services.with_task_role_provider_builder(provider_builder);
     let command = sigil_kernel::UserInputDecisionCommandV1 {
         identity: route.request.identity.clone(),
         request_hash: route.request.request_hash.clone(),
@@ -5407,7 +5489,18 @@ async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_r
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
-    let session_path = temp.path().join("session.jsonl");
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+    let binding = bind_application_test_managed_session(
+        &config_path,
+        temp.path(),
+        &temp.path().join("session.jsonl"),
+        &services,
+    )?;
+    let session_path = binding.session_log_path;
     let store = JsonlSessionStore::new(&session_path)?;
     let root_config = RootConfig::load(&config_path)?;
     let (provider_name, route) =
@@ -5419,10 +5512,16 @@ async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_r
         Some(route),
         store.clone(),
     )?;
+    crate::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new("task-public-append-failure")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        parent_session_ref: SessionRef::new_relative(
+            session_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("managed session leaf"),
+        )?,
         objective: "continue without inventing a terminal on publication failure".to_owned(),
         title: None,
         status: TaskRunStatus::Paused,
@@ -5430,11 +5529,6 @@ async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_r
     }))?;
     let session_scope_id = session.session_scope_id().to_owned();
     drop(session);
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path,
@@ -5499,7 +5593,18 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
-    let session_path = temp.path().join("session.jsonl");
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?
+    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
+    let binding = bind_application_test_managed_session(
+        &config_path,
+        temp.path(),
+        &temp.path().join("session.jsonl"),
+        &services,
+    )?;
+    let session_path = binding.session_log_path;
     let store = JsonlSessionStore::new(&session_path)?;
     let root_config = RootConfig::load(&config_path)?;
     let (provider_name, route) =
@@ -5511,10 +5616,16 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
         Some(route),
         store,
     )?;
+    crate::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new("task-application-continuation")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        parent_session_ref: SessionRef::new_relative(
+            session_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("managed session leaf"),
+        )?,
         objective: "continue the application task".to_owned(),
         title: None,
         status: TaskRunStatus::Paused,
@@ -5529,11 +5640,6 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
     );
     let session_scope_id = session.session_scope_id().to_owned();
     drop(session);
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path,
@@ -5655,6 +5761,7 @@ async fn application_task_continuation_reopens_exact_task_and_returns_synthesis(
 }
 
 struct ApplicationGuidanceRecoveryFixture {
+    services: ApplicationRunServices,
     config_path: std::path::PathBuf,
     session_path: std::path::PathBuf,
     session_scope_id: String,
@@ -5677,7 +5784,17 @@ fn application_guidance_recovery_fixture(
 ) -> Result<ApplicationGuidanceRecoveryFixture> {
     let config_path = root.join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
-    let session_path = root.join("session.jsonl");
+    let services = with_application_test_managed_authority(
+        root,
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
+    )?;
+    let binding = bind_application_test_managed_session(
+        &config_path,
+        root,
+        &root.join("session.jsonl"),
+        &services,
+    )?;
+    let session_path = binding.session_log_path;
     let store = JsonlSessionStore::new(&session_path)?;
     let root_config = RootConfig::load(&config_path)?;
     let (provider_name, route) =
@@ -5689,6 +5806,7 @@ fn application_guidance_recovery_fixture(
         Some(route),
         store,
     )?;
+    crate::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new(match (exact_prompt_required, boundary) {
         (true, ApplicationGuidanceRecoveryBoundary::Materialized) => {
             "task-application-guidance-exact-recovery"
@@ -5719,7 +5837,12 @@ fn application_guidance_recovery_fixture(
     };
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        parent_session_ref: SessionRef::new_relative(
+            session_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("managed session leaf"),
+        )?,
         objective: "recover materialized application guidance".to_owned(),
         title: None,
         status: initial_task_status,
@@ -5863,6 +5986,7 @@ fn application_guidance_recovery_fixture(
     }
 
     Ok(ApplicationGuidanceRecoveryFixture {
+        services,
         config_path,
         session_path,
         session_scope_id: session.session_scope_id().to_owned(),
@@ -5882,14 +6006,13 @@ async fn application_continuation_recovers_safe_materialized_guidance_after_relo
     )?;
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -5956,14 +6079,13 @@ async fn application_continuation_recovers_exact_required_materialized_guidance_
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -6030,14 +6152,13 @@ async fn application_continuation_recovers_safe_selection_only_guidance_after_re
     let task_id = fixture.task_id.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -6165,14 +6286,13 @@ async fn application_continuation_explicitly_retries_selection_owned_uncertain_p
     let task_id = fixture.task_id.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -6273,14 +6393,13 @@ async fn application_continuation_recovers_exact_selection_only_guidance_after_r
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -6350,16 +6469,16 @@ fn application_exact_reentry_preserves_active_task_then_recovers_started_planner
                     let exact_guidance = fixture.exact_guidance.clone();
                     let executor_requests = Arc::new(Mutex::new(Vec::new()));
                     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-                    let services = with_application_test_managed_authority(
-                        temp.path(),
-                        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-                    )?
-                    .with_task_role_provider_builder(Arc::new(
-                        CapturingApplicationTaskRoleProviderBuilder {
-                            executor_requests: Arc::clone(&executor_requests),
-                            guidance_review_requests: Arc::clone(&guidance_review_requests),
-                        },
-                    ));
+                    let services =
+                        fixture
+                            .services
+                            .clone()
+                            .with_task_role_provider_builder(Arc::new(
+                                CapturingApplicationTaskRoleProviderBuilder {
+                                    executor_requests: Arc::clone(&executor_requests),
+                                    guidance_review_requests: Arc::clone(&guidance_review_requests),
+                                },
+                            ));
 
                     let prepared = prepare_application_task_continuation(
                         ApplicationTaskContinuationRequest {
@@ -6482,14 +6601,13 @@ async fn application_continuation_reenters_exact_selection_only_guidance_with_or
     let exact_guidance = fixture.exact_guidance.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -6576,14 +6694,13 @@ async fn application_continuation_rejects_mismatched_exact_selection_before_prov
     let session_path = fixture.session_path.clone();
     let executor_requests = Arc::new(Mutex::new(Vec::new()));
     let guidance_review_requests = Arc::new(AtomicUsize::new(0));
-    let services = with_application_test_managed_authority(
-        temp.path(),
-        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
-    )?
-    .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
-        executor_requests: Arc::clone(&executor_requests),
-        guidance_review_requests: Arc::clone(&guidance_review_requests),
-    }));
+    let services = fixture
+        .services
+        .clone()
+        .with_task_role_provider_builder(Arc::new(CapturingApplicationTaskRoleProviderBuilder {
+            executor_requests: Arc::clone(&executor_requests),
+            guidance_review_requests: Arc::clone(&guidance_review_requests),
+        }));
     let prepared = prepare_application_task_continuation(
         ApplicationTaskContinuationRequest {
             config_path: fixture.config_path,
@@ -7620,6 +7737,12 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
         "run-application-plan-review",
     );
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let prepared = prepare_application_run(request, &services).await?;
     let ApplicationRunExecutionKind::Main { input, .. } = &prepared.execution.kind else {
         panic!("ordinary application request must prepare the main agent");
@@ -7638,6 +7761,19 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     );
     drop(prepared);
 
+    let session_path = temp.path().join("plan-review-parent.jsonl");
+    let mut session = Session::load_from_store(
+        "application-plan-review",
+        "planned-model",
+        JsonlSessionStore::new(&session_path)?,
+    )?;
+    // This routing outcome is simulated in a separate parent from the preparation fixture.
+    // Bind the real source message and its decision to that parent's durable identity.
+    let source_turn = sigil_kernel::ConversationTurnRef::new(
+        session.session_scope_id(),
+        source_turn.message_id,
+        source_turn.logical_run_id,
+    )?;
     // Simulate the routing microturn outcome: the model requests a plan review.
     let agent_output = AgentRunOutput {
         result: sigil_kernel::AgentRunResult {
@@ -7653,12 +7789,6 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
             source_turn: source_turn.clone(),
         }),
     };
-    let session_path = temp.path().join("plan-review-parent.jsonl");
-    let mut session = Session::load_from_store(
-        "application-plan-review",
-        "planned-model",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
     start_application_public_control_run(&session, "run-application-plan-review")?;
     let mut message = ModelMessage::user("design the coordinator migration");
     message.id = source_turn.message_id.clone();
@@ -7913,6 +8043,12 @@ async fn explicit_application_plan_review_starts_once_and_projects_its_parent_co
     );
     request.agent_binding = plan.binding;
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter));
+    let services = crate::r71_authority_composition::attach_boot_authority_to_services(
+        services,
+        &config_path,
+        temp.path(),
+    )?;
+    services.require_current_schema_authority()?;
     let mut prepared = prepare_application_run(request, &services).await?;
     let plan_review_request = match &prepared.execution.kind {
         ApplicationRunExecutionKind::ExplicitPlanReview { request } => (**request).clone(),
@@ -8607,77 +8743,43 @@ max_plan_steps = 64
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // Serializes CA environment reads during provider preparation.
 async fn r71_application_prepare_injects_composed_tool_authority() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
-    let state = temp.path().join("state");
-    let exec = temp.path().join("exec");
-    std::fs::create_dir_all(&state)?;
-    std::fs::create_dir_all(state.join("cache"))?;
-    std::fs::create_dir_all(&exec)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-        std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let planner: std::sync::Arc<dyn sigil_kernel::managed_execution::ManagedExecutionPlannerV1> =
-        std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
-            crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
-        ));
-    let composition = crate::r71_authority_composition::compose_runtime_authority(
-        &state,
-        &exec,
-        sigil_kernel::resource::CanonicalHash::from_bytes([0x5a; 32]),
-        sigil_kernel::resource::AuthorityGeneration {
-            epoch: 1,
-            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x75; 32]),
-        },
-        planner,
-        &[crate::managed_storage_writer::StorageWriterChannelV1::SessionLog],
+    let services = with_application_test_managed_authority(
+        temp.path(),
+        ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter)),
     )?;
-    let recovery = sigil_application::ApplicationResourceRecoveryFacadeV1::new();
-    let cutover = crate::r71_global_cutover::RuntimeGlobalCutoverV1::evaluate(
-        "inst-apprun-authority",
-        1,
-        sigil_kernel::resource::AuthorityGeneration {
-            epoch: 1,
-            instance_hash: sigil_kernel::resource::CanonicalHash::from_bytes([0x71; 32]),
-        },
-        &composition.services,
-        &recovery,
-        sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema,
-    );
-    assert!(
-        cutover.gate().is_err(),
-        "the shadow surface stays RED until every mandatory adapter is composed"
-    );
-    let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
-        .with_global_cutover(cutover)
-        .with_authority_composition(composition);
-    let request = ApplicationRunRequest::non_interactive(
+    let managed_path = services
+        .authority_composition()
+        .expect("real boot composition")
+        .storage_writer
+        .session_log_path_for_key("composed-authority")?;
+    let mut request = ApplicationRunRequest::non_interactive(
         &config_path,
         temp.path(),
         "inspect the workspace",
         "run-composed-authority",
     );
+    request.session_path = Some(temp.path().join("composed-authority.jsonl"));
     let prepared = prepare_application_run(request, &services).await?;
     assert!(
         prepared.run_options().tool_authority.is_some(),
         "a new-epoch binary must hand the composed tool authority to the agent run"
     );
-    assert!(
-        prepared
-            .session_log_path()
-            .starts_with(state.canonicalize()?.join("managed/session-log")),
+    assert_eq!(
+        prepared.session_log_path(),
+        managed_path.join("records.jsonl"),
         "current-schema runs must use the composed managed SessionLog source"
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn r71_application_prepare_keeps_legacy_tool_authority_absent() -> Result<()> {
+async fn r71_application_prepare_rejects_legacy_composition() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config_path = temp.path().join("sigil.toml");
     write_unauthenticated_application_test_config(&config_path)?;
@@ -8718,22 +8820,33 @@ async fn r71_application_prepare_keeps_legacy_tool_authority_absent() -> Result<
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
         .with_global_cutover(cutover)
         .with_authority_composition(composition);
-    let request = ApplicationRunRequest::non_interactive(
+    let requested_path = temp.path().join("legacy-session.jsonl");
+    let managed_path = services
+        .authority_composition()
+        .expect("the rejected fixture still has a physical authority")
+        .storage_writer
+        .session_log_path_for_key("legacy-session")?;
+    assert!(!requested_path.exists());
+    assert!(!managed_path.exists());
+    let mut request = ApplicationRunRequest::non_interactive(
         &config_path,
         temp.path(),
         "inspect the workspace",
         "run-legacy-authority",
     );
-    let prepared = prepare_application_run(request, &services).await?;
-    assert!(
-        prepared.run_options().tool_authority.is_none(),
-        "the legacy epoch must keep the V2 path (file-tool adjudication defers)"
-    );
-    assert!(
-        !prepared
-            .session_log_path()
-            .starts_with(state.canonicalize()?.join("managed/session-log")),
-        "legacy runs must keep the direct compatibility session-log path"
-    );
+    request.session_path = Some(requested_path.clone());
+    let error = match prepare_application_run(request, &services).await {
+        Ok(_) => anyhow::bail!("a legacy composition cannot prepare an application run"),
+        Err(error) => error,
+    };
+    let ApplicationRunPrepareError::Configuration { source } = error else {
+        anyhow::bail!("legacy epoch must produce its typed configuration refusal: {error:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<sigil_kernel::cutover_manifest::CutoverErrorV1>(),
+        Some(sigil_kernel::cutover_manifest::CutoverErrorV1::LegacySessionUnavailable)
+    ));
+    assert!(!requested_path.exists());
+    assert!(!managed_path.exists());
     Ok(())
 }

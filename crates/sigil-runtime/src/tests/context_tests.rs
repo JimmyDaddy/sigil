@@ -1393,3 +1393,31 @@ fn context_source_symbol_candidates_preserve_explicit_path_precision() -> Result
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn disabled_repository_context_does_not_open_workspace() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let missing_workspace = temp.path().join("not-created");
+    let resolver = RequestContextResolver::request_local(missing_workspace.clone())
+        .with_repository_context(false);
+    let context = resolver.resolve("read src/lib.rs").await?;
+    assert!(context.items.is_empty());
+    assert!(context.snippets.is_empty());
+    assert!(!missing_workspace.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn repository_context_can_be_reenabled_without_changing_core_tools() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(
+        temp.path().join("README.md"),
+        "Repository composition fixture",
+    )?;
+    let disabled = RequestContextResolver::request_local(temp.path().to_path_buf())
+        .with_repository_context(false);
+    assert!(disabled.resolve("README.md").await?.items.is_empty());
+    let enabled = disabled.with_repository_context(true);
+    assert!(!enabled.resolve("README.md").await?.items.is_empty());
+    Ok(())
+}

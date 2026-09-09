@@ -335,8 +335,7 @@ pub async fn prepare_application_user_input_decision(
                 message: "suspended plan-review request has an invalid source".to_owned(),
             });
         }
-        let root_config = RootConfig::load(&request.config_path)
-            .map_err(ApplicationRunPrepareError::execution)?;
+        let root_config = load_application_root_config(&request.config_path)?;
         let child_resource_provisioner = services
             .authority_composition()
             .map(|composition| composition.plan_review_child_resource_provisioner())
@@ -506,8 +505,7 @@ pub async fn prepare_application_user_input_decision(
         initial_state.requested.request.source,
         sigil_kernel::UserInputSourceV1::PlanRevision { .. }
     ) {
-        let root_config = RootConfig::load(&request.config_path)
-            .map_err(ApplicationRunPrepareError::execution)?;
+        let root_config = load_application_root_config(&request.config_path)?;
         let workspace_root = sigil_kernel::resolve_workspace_root(
             &request.config_path,
             &request.launch_cwd,
@@ -556,6 +554,8 @@ pub async fn prepare_application_user_input_decision(
     };
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_executor_attached();
+    let tool_authority = current_schema_tool_authority(services);
+    let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
@@ -563,7 +563,8 @@ pub async fn prepare_application_user_input_decision(
             blocking_request,
             session_leases,
             task_executor_attached,
-            None,
+            tool_authority,
+            expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
         )
@@ -629,15 +630,19 @@ pub async fn prepare_application_user_input_decision(
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
-    let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
-        session.provider_name(),
-        session.model_name(),
-        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
-    );
-    orchestration_route_guard
-        .enforce(&mut session, current_unix_time_ms())
-        .map_err(ApplicationRunPrepareError::execution)?;
-    orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
+    let orchestration_route_guard = root_config.task.enabled.then(|| {
+        crate::OrchestrationRouteGuard::new(
+            session.provider_name(),
+            session.model_name(),
+            crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+        )
+    });
+    if let Some(guard) = orchestration_route_guard.as_ref() {
+        guard
+            .enforce(&mut session, current_unix_time_ms())
+            .map_err(ApplicationRunPrepareError::execution)?;
+        guard.apply_effective_task_config(&session, &mut root_config.task);
+    }
     let conversation_start =
         ConversationRunStartedEntryV1::new(run_id.clone(), current_unix_time_ms()).map_err(
             |error| ApplicationRunPrepareError::InvalidInvocation {
@@ -704,11 +709,13 @@ pub async fn prepare_application_user_input_decision(
             .unwrap_or("session.jsonl"),
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    let conversation_coordinator = crate::ConversationCoordinator::new(
-        root_config.task.enabled,
-        root_config.task.routing_policy,
-    )
-    .with_orchestration_route_guard(orchestration_route_guard);
+    let conversation_coordinator = orchestration_route_guard.map(|guard| {
+        crate::ConversationCoordinator::new(
+            root_config.task.enabled,
+            root_config.task.routing_policy,
+        )
+        .with_orchestration_route_guard(guard)
+    });
     let conversation_lifecycle = session
         .conversation_run_lifecycle_recorder()
         .map_err(ApplicationRunPrepareError::execution)?;

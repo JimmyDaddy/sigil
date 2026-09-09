@@ -17,9 +17,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 
 #[test]
-fn default_setup_root_config_enables_readable_and_writable_memory() {
+fn default_setup_root_config_selects_core_and_preserves_optional_memory_preferences() {
     let config = default_setup_root_config();
 
+    assert_eq!(
+        config.composition.profile,
+        sigil_kernel::RuntimeCompositionProfile::Core
+    );
+    assert!(config.selected_capabilities().is_empty());
     assert!(config.memory.enabled);
     assert!(config.memory.writable);
 }

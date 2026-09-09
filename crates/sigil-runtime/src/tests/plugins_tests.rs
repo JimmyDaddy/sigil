@@ -2308,7 +2308,9 @@ timeout_ms = 5000
             &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
         )
         .expect("managed authority composition should build");
-    let runner = composition.plugin_hook_runner();
+    let runner = composition
+        .plugin_hook_runner()
+        .expect("plugin hooks selected");
     let wrong_purpose_registration = registration.clone();
 
     let outcome = runner
@@ -2395,7 +2397,11 @@ timeout_ms = 5000
         cancellation: None,
     };
     let error = super::ManagedPluginHookExecutionPortV1::execute_plugin_hook(
-        composition.plugin_hook_execution.as_ref(),
+        composition
+            .plugin_hook_execution
+            .as_ref()
+            .expect("plugin hooks selected")
+            .as_ref(),
         wrong_request,
     )
     .await
@@ -2466,7 +2472,9 @@ timeout_ms = 15000
             &[crate::managed_storage_writer::StorageWriterChannelV1::ApplicationControlLog],
         )
         .expect("managed authority composition should build");
-    let runner = composition.plugin_hook_runner();
+    let runner = composition
+        .plugin_hook_runner()
+        .expect("plugin hooks selected");
     let cancellation_owner = sigil_kernel::RunCancellationOwner::new();
     let request = PluginHookExecutionRequest::new(registration, workspace.path().to_path_buf())
         .with_cancellation(cancellation_owner.handle());

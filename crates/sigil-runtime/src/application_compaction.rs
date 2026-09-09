@@ -421,7 +421,7 @@ pub fn preview_application_compaction_with_attachment(
     ApplicationCompactionReview,
     Option<PendingApplicationCompactionPreview>,
 )> {
-    let root_config = RootConfig::load(config_path)?;
+    let root_config = RootConfig::load(config_path)?.with_effective_composition()?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = JsonlSessionStore::new(session_path)?;
@@ -646,7 +646,7 @@ async fn prepare_application_compaction_for_preview(
     ApplicationCompactionReview,
     Option<PendingApplicationCompaction>,
 )> {
-    let root_config = RootConfig::load(config_path)?;
+    let root_config = RootConfig::load(config_path)?.with_effective_composition()?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = JsonlSessionStore::new(session_path)?;
@@ -660,6 +660,7 @@ async fn prepare_application_compaction_for_preview(
     if session.session_scope_id() != expected_session_scope_id {
         bail!("application compaction session scope mismatch");
     }
+    crate::validate_session_composition(&session, &root_config)?;
     let _route_execution_owner = attachment
         .route_mutation_authority(session.session_scope_id())?
         .acquire_execution_owner()

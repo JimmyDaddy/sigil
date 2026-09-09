@@ -17,6 +17,7 @@ use sigil_kernel::managed_file_access::ManagedFileAccessServiceV1;
 use sigil_kernel::managed_projection::ManagedProjectionServiceV1;
 use sigil_kernel::managed_storage::ManagedStorageServiceV1;
 use sigil_kernel::resource::{AuthorityGeneration, CanonicalHash, ResourceAuthorityScopeV1};
+use sigil_kernel::{OptionalCapability, RuntimeCompositionConfig};
 
 use crate::managed_resource_adapters::RuntimeManagedResourceServicesV1;
 use crate::managed_resource_adapters::{
@@ -24,6 +25,16 @@ use crate::managed_resource_adapters::{
     RuntimeManagedPluginHookExecutionRouteV1,
 };
 use crate::managed_storage_writer::{ManagedStorageWriterAdapterV1, StorageWriterChannelV1};
+
+mod bootstrap_predecessor;
+
+use bootstrap_predecessor::{ExistingBootPointerV1, load_validated_boot_pointer};
+
+// This durable workspace ceiling is product policy, independent of enabled writer grants:
+// two 256 MiB artifact families plus ten 1 MiB state grants. Disabling memory removes its
+// grants, not the workspace policy. The sole older Core policy omitted its two 1 MiB grants.
+const MANAGED_STORAGE_WORKSPACE_CAP_V1: u64 = 522 * 1024 * 1024;
+const PREVIOUS_CORE_STORAGE_WORKSPACE_CAP_V1: u64 = 520 * 1024 * 1024;
 
 /// Composed runtime authority surface (everything a new-epoch boot needs once).
 pub struct RuntimeAuthorityCompositionV1 {
@@ -37,9 +48,9 @@ pub struct RuntimeAuthorityCompositionV1 {
     /// through this (one-shot tool tokens; never fabricated by a tool).
     pub tool_authority: sigil_kernel::tool_authority::KernelToolAuthorityV1,
     /// Managed Extension route used by eager/lazy MCP stdio activation.
-    pub extension_execution: std::sync::Arc<RuntimeManagedExtensionExecutionRouteV1>,
+    pub extension_execution: Option<std::sync::Arc<RuntimeManagedExtensionExecutionRouteV1>>,
     /// Extension-purpose route used exclusively by trusted plugin hook execution.
-    pub plugin_hook_execution: std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>,
+    pub plugin_hook_execution: Option<std::sync::Arc<RuntimeManagedPluginHookExecutionRouteV1>>,
     /// Managed one-shot command route used by the built-in Bash surface.
     pub command_execution: std::sync::Arc<RuntimeManagedCommandExecutionRouteV1>,
     authority_generation: AuthorityGeneration,
@@ -51,10 +62,10 @@ pub struct RuntimeAuthorityCompositionV1 {
 impl RuntimeAuthorityCompositionV1 {
     /// Creates a hook runner already bound to this composition's Extension-purpose authority.
     #[must_use]
-    pub fn plugin_hook_runner(&self) -> crate::plugins::PluginHookExecutionRunner {
+    pub fn plugin_hook_runner(&self) -> Option<crate::plugins::PluginHookExecutionRunner> {
         let route: Arc<dyn crate::plugins::ManagedPluginHookExecutionPortV1> =
-            self.plugin_hook_execution.clone();
-        crate::plugins::PluginHookExecutionRunner::new(route)
+            self.plugin_hook_execution.clone()?;
+        Some(crate::plugins::PluginHookExecutionRunner::new(route))
     }
 
     /// Returns the only production child-resource provisioner. It closes the child over the
@@ -117,6 +128,7 @@ impl RuntimeAuthorityCompositionV1 {
 /// workspace registration.
 pub struct RuntimeCurrentBootTransactionV1 {
     config: sigil_kernel::RootConfig,
+    runtime_config: sigil_kernel::RootConfig,
     workspace_root: PathBuf,
     resolved_paths: crate::paths::SigilPaths,
     cutover: crate::r71_global_cutover::RuntimeGlobalCutoverV1,
@@ -130,6 +142,13 @@ impl RuntimeCurrentBootTransactionV1 {
     #[must_use]
     pub fn config(&self) -> &sigil_kernel::RootConfig {
         &self.config
+    }
+
+    /// Returns the immutable execution view. Its inactive modules are disabled; callers must
+    /// retain `config()` for edits and publication because this view cannot be saved.
+    #[must_use]
+    pub fn runtime_config(&self) -> &sigil_kernel::RootConfig {
+        &self.runtime_config
     }
 
     /// Returns the frozen effective workspace root.
@@ -218,6 +237,7 @@ pub enum RuntimeAuthorityCompositionErrorV1 {
 pub struct ValidatedAuthorityConfigSnapshotV1 {
     config_path: PathBuf,
     config: sigil_kernel::RootConfig,
+    effective_composition: RuntimeCompositionConfig,
     workspace_root: PathBuf,
     launch_cwd: PathBuf,
     resolved_paths: crate::paths::SigilPaths,
@@ -321,6 +341,13 @@ impl ValidatedAuthorityConfigSnapshotV1 {
         launch_cwd: &Path,
         config_path_identity: CanonicalHash,
     ) -> Result<Self, BootAuthorityErrorV1> {
+        let effective_config = config
+            .with_effective_composition()
+            .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
+        let effective_composition = RuntimeCompositionConfig::new(
+            sigil_kernel::RuntimeCompositionProfile::Core,
+            effective_config.selected_capabilities(),
+        );
         let config_path = std::fs::canonicalize(config_path)
             .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
         let launch_cwd = std::fs::canonicalize(launch_cwd)
@@ -347,6 +374,7 @@ impl ValidatedAuthorityConfigSnapshotV1 {
         Ok(Self {
             config_path,
             config,
+            effective_composition,
             workspace_root,
             launch_cwd,
             resolved_paths,
@@ -387,6 +415,12 @@ impl ValidatedAuthorityConfigSnapshotV1 {
         &self.config
     }
 
+    /// Closed owner selection after both the profile and each module's enable flag are applied.
+    #[must_use]
+    pub(crate) fn effective_composition(&self) -> &RuntimeCompositionConfig {
+        &self.effective_composition
+    }
+
     #[must_use]
     pub(crate) fn config_path(&self) -> &Path {
         &self.config_path
@@ -423,6 +457,7 @@ impl std::fmt::Debug for ValidatedAuthorityConfigSnapshotV1 {
             .field("config_path_identity", &self.config_path_identity)
             .field("workspace_identity", &self.workspace_identity)
             .field("config_hash", &self.config_hash)
+            .field("effective_composition", &self.effective_composition)
             .finish_non_exhaustive()
     }
 }
@@ -451,6 +486,7 @@ pub fn compose_runtime_authority(
         declared,
         None,
         sigil_kernel::ExecutionConfig::default(),
+        &RuntimeCompositionConfig::default(),
         1,
         None,
     )
@@ -478,6 +514,7 @@ pub fn compose_runtime_authority_for_test_execution(
         declared,
         None,
         sigil_kernel::ExecutionConfig::default(),
+        &RuntimeCompositionConfig::default(),
         1,
         Some(Arc::new(
             sigil_resource_authority::InMemoryAuthorityProcessInventoryV1::default(),
@@ -534,17 +571,29 @@ pub(crate) fn compose_runtime_authority_with_product_updater_at_generation(
     process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
     let execution_config = config_snapshot.config().execution.clone();
+    let selected = config_snapshot.effective_composition();
+    let declared = declared
+        .iter()
+        .copied()
+        .filter(|channel| {
+            *channel != StorageWriterChannelV1::DurableMemory
+                || selected.allows(OptionalCapability::Memory)
+        })
+        .collect::<Vec<_>>();
     let mut composition = compose_runtime_authority_inner(
         state_anchor,
         execution_temp_root,
         cutover_manifest_hash,
         authority,
         planner,
-        declared,
-        Some(Arc::new(
-            sigil_updater::ProductUpdaterState::from_cache_root(cache_root),
-        )),
+        &declared,
+        selected.allows(OptionalCapability::Updater).then(|| {
+            Arc::new(sigil_updater::ProductUpdaterState::from_cache_root(
+                cache_root,
+            ))
+        }),
         execution_config,
+        selected,
         application_generation,
         Some(process_inventory),
     )?;
@@ -555,17 +604,18 @@ pub(crate) fn compose_runtime_authority_with_product_updater_at_generation(
             config_snapshot.config_path(),
         ),
     );
-    let release_output: Arc<
-        dyn sigil_resource_authority::release_output::BorrowedReleaseOutputServiceV1,
-    > = Arc::new(
-        sigil_resource_authority::release_output::AuthorityBorrowedReleaseOutputServiceV1::new(
-            state_anchor.join("release-output"),
-        ),
-    );
+    let release_output = selected.allows(OptionalCapability::Updater).then(|| {
+        Arc::new(
+            sigil_resource_authority::release_output::AuthorityBorrowedReleaseOutputServiceV1::new(
+                state_anchor.join("release-output"),
+            ),
+        )
+            as Arc<dyn sigil_resource_authority::release_output::BorrowedReleaseOutputServiceV1>
+    });
     composition.services = composition
         .services
         .with_optional_borrowed_configuration(Some(configuration_service))
-        .with_optional_borrowed_release_output(Some(release_output));
+        .with_optional_borrowed_release_output(release_output);
     Ok(composition)
 }
 
@@ -579,6 +629,7 @@ fn compose_runtime_authority_inner(
     declared: &[StorageWriterChannelV1],
     product_updater: Option<Arc<sigil_updater::ProductUpdaterState>>,
     execution_config: sigil_kernel::ExecutionConfig,
+    selected: &RuntimeCompositionConfig,
     application_generation: u64,
     process_inventory: Option<Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>>,
 ) -> Result<RuntimeAuthorityCompositionV1, RuntimeAuthorityCompositionErrorV1> {
@@ -632,10 +683,12 @@ fn compose_runtime_authority_inner(
         })?;
     }
     let storage_service =
-        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new_with_state_root(
+        sigil_resource_authority::storage::AuthorityManagedStorageServiceV1::new_with_state_root_and_workspace_cap(
             table,
             authority,
             state_anchor,
+            MANAGED_STORAGE_WORKSPACE_CAP_V1,
+            Some(PREVIOUS_CORE_STORAGE_WORKSPACE_CAP_V1),
         )
         .map_err(|error| {
             RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
@@ -668,16 +721,20 @@ fn compose_runtime_authority_inner(
     }
     let execution: Arc<dyn sigil_kernel::managed_execution::ManagedExecutionServiceV1> =
         Arc::new(sandbox_execution);
-    let mut extension_route = RuntimeManagedExtensionExecutionRouteV1::new(
-        Arc::clone(&planner),
-        Arc::clone(&broker),
-        execution_temp_root.to_path_buf(),
-    )
-    .with_authority_generation(authority);
-    if let Some(inventory) = &process_inventory {
-        extension_route = extension_route.with_process_inventory(Arc::clone(inventory));
-    }
-    let extension_execution = std::sync::Arc::new(extension_route);
+    let extension_execution = (selected.allows(OptionalCapability::Mcp)
+        || selected.allows(OptionalCapability::Skills))
+    .then(|| {
+        let mut route = RuntimeManagedExtensionExecutionRouteV1::new(
+            Arc::clone(&planner),
+            Arc::clone(&broker),
+            execution_temp_root.to_path_buf(),
+        )
+        .with_authority_generation(authority);
+        if let Some(inventory) = &process_inventory {
+            route = route.with_process_inventory(Arc::clone(inventory));
+        }
+        Arc::new(route)
+    });
     let mut command_route = RuntimeManagedCommandExecutionRouteV1::new(
         Arc::clone(&planner),
         Arc::clone(&broker),
@@ -699,17 +756,20 @@ fn compose_runtime_authority_inner(
             state_anchor.to_path_buf(),
         ),
     );
-    let services =
-        RuntimeManagedResourceServicesV1::compose_sandbox_backed_with_extension_execution(
-            bundle,
-            broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
-            records_projection as Arc<dyn ManagedProjectionServiceV1>,
-            execution,
-            Arc::clone(&file_access),
-            crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
-            Arc::clone(&extension_execution),
-        )
-        .with_optional_product_updater(product_updater);
+    let mut services = RuntimeManagedResourceServicesV1::compose_sandbox_backed(
+        bundle,
+        broker.clone() as Arc<dyn KernelCapabilityIssuerV1>,
+        records_projection as Arc<dyn ManagedProjectionServiceV1>,
+        execution,
+        Arc::clone(&file_access),
+        crate::r71_global_cutover::RuntimeFileAccessSeamV1::AuthorityBacked,
+    )
+    .with_optional_product_updater(product_updater);
+    if let Some(route) = &extension_execution {
+        services.extension_execution_seam =
+            crate::r71_global_cutover::RuntimeExecutionExtensionSeamV1::ManagedExecutionBacked;
+        services.extension_execution = Some(Arc::clone(route));
+    }
     let artifact_staging_grant =
         crate::managed_storage_writer::grant_for_channel_with_application_generation(
             StorageWriterChannelV1::ArtifactStaging,
@@ -748,16 +808,26 @@ fn compose_runtime_authority_inner(
         )
         .with_artifact_retire_authority(artifact_retire_authority),
     );
-    let plugin_hook_execution = std::sync::Arc::new(
-        RuntimeManagedPluginHookExecutionRouteV1::new(
-            Arc::clone(&extension_execution),
-            execution_config,
-            Arc::clone(&storage_writer),
-        )
-        .map_err(|error| {
-            RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(error.to_string())
-        })?,
-    );
+    let plugin_hook_execution = if selected.allows(OptionalCapability::Skills) {
+        extension_execution
+            .as_ref()
+            .map(|route| {
+                RuntimeManagedPluginHookExecutionRouteV1::new(
+                    Arc::clone(route),
+                    execution_config,
+                    Arc::clone(&storage_writer),
+                )
+                .map(Arc::new)
+                .map_err(|error| {
+                    RuntimeAuthorityCompositionErrorV1::ExecutionConfigurationInvalid(
+                        error.to_string(),
+                    )
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     Ok(RuntimeAuthorityCompositionV1 {
         services,
         storage_writer,
@@ -897,6 +967,7 @@ fn load_authority_config_generation(
 fn candidate_authority_config_generation(
     current: Option<AuthorityConfigGenerationRecordV1>,
     config_hash: CanonicalHash,
+    predecessor: Option<&ExistingBootPointerV1>,
 ) -> Result<u64, BootAuthorityErrorV1> {
     let generation = match current.as_ref() {
         Some(record) if record.config_hash == config_hash => record.generation,
@@ -905,6 +976,17 @@ fn candidate_authority_config_generation(
         })?,
         None => 1,
     };
+    if let Some(ExistingBootPointerV1::Schema1(predecessor)) = predecessor {
+        let successor = predecessor
+            .application_generation()
+            .checked_add(1)
+            .ok_or_else(|| {
+                BootAuthorityErrorV1::Config("cutover predecessor generation overflow".to_owned())
+            })?;
+        // An interrupted prior boot may already have published the candidate configuration
+        // generation. Reuse that forward generation instead of advancing again on every retry.
+        return Ok(generation.max(successor));
+    }
     Ok(generation)
 }
 
@@ -1008,16 +1090,17 @@ fn build_current_boot_transaction_inner(
     config_snapshot: ValidatedAuthorityConfigSnapshotV1,
     require_source_stability: bool,
 ) -> Result<RuntimeCurrentBootTransactionV1, BootAuthorityErrorV1> {
+    let runtime_config = config_snapshot
+        .config()
+        .with_effective_composition()
+        .map_err(|error| BootAuthorityErrorV1::Config(error.to_string()))?;
     let config = config_snapshot.config().clone();
     let workspace_root = config_snapshot.workspace_root().to_path_buf();
     let resolved_paths = config_snapshot.resolved_paths().clone();
-    let bootstrap =
-        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path(
+    let (bootstrap, publication) =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path_with_publication(
             config_snapshot.config_path(),
         )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
-    let publication = bootstrap
-        .acquire_publication()
         .map_err(BootAuthorityErrorV1::Bootstrap)?;
     let (cutover, composition) = compose_current_boot_authority_locked(
         &config_snapshot,
@@ -1042,6 +1125,7 @@ fn build_current_boot_transaction_inner(
     drop(publication);
     Ok(RuntimeCurrentBootTransactionV1 {
         config,
+        runtime_config,
         workspace_root,
         resolved_paths,
         cutover,
@@ -1157,13 +1241,10 @@ pub fn compose_current_boot_authority(
     ),
     BootAuthorityErrorV1,
 > {
-    let bootstrap =
-        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path(
+    let (bootstrap, publication) =
+        sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_canonical_config_path_with_publication(
             config_snapshot.config_path(),
         )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?;
-    let publication = bootstrap
-        .acquire_publication()
         .map_err(BootAuthorityErrorV1::Bootstrap)?;
     compose_current_boot_authority_locked(
         config_snapshot,
@@ -1173,6 +1254,28 @@ pub fn compose_current_boot_authority(
         &bootstrap,
         &publication,
     )
+}
+
+/// Durable control, session, artifact and adapter records remain authority-backed in every
+/// composition. The durable memory family exists only when memory is selected.
+fn selected_storage_channels(selected: &RuntimeCompositionConfig) -> Vec<StorageWriterChannelV1> {
+    use StorageWriterChannelV1 as Ch;
+    [
+        Ch::ApplicationControlLog,
+        Ch::SessionLog,
+        Ch::SessionLifecycleLog,
+        Ch::InputHistory,
+        Ch::DurableMemory,
+        Ch::SessionCatalog,
+        Ch::ArtifactStaging,
+        Ch::ArtifactStore,
+        Ch::AdapterDurableState,
+        Ch::AdapterEgressDisclosure,
+        Ch::AdapterIdempotencyLedger,
+    ]
+    .into_iter()
+    .filter(|channel| *channel != Ch::DurableMemory || selected.allows(OptionalCapability::Memory))
+    .collect()
 }
 
 fn compose_current_boot_authority_locked(
@@ -1190,7 +1293,6 @@ fn compose_current_boot_authority_locked(
     BootAuthorityErrorV1,
 > {
     let paths = config_snapshot.resolved_paths();
-    ensure_authority_anchors(paths)?;
     if state_anchor != paths.state_root
         || cache_root != paths.cache_root
         || execution_temp_root != paths.scratch_root
@@ -1199,13 +1301,20 @@ fn compose_current_boot_authority_locked(
             "authority anchors do not match the frozen configuration snapshot".to_owned(),
         ));
     }
-    use crate::managed_storage_writer::StorageWriterChannelV1 as Ch;
     let instance_id = host_application_instance_id(config_snapshot.config_path());
     let current_config_generation = load_authority_config_generation(bootstrap, publication)?;
+    let predecessor = load_validated_boot_pointer(
+        bootstrap,
+        publication,
+        &instance_id,
+        current_config_generation.as_ref(),
+    )?;
     let application_generation = candidate_authority_config_generation(
         current_config_generation.clone(),
         config_snapshot.config_hash(),
+        predecessor.as_ref(),
     )?;
+    ensure_authority_anchors(paths)?;
     let observer_binding = sigil_process_observer::canonical_digest(
         format!(
             "sigil-runtime-process-observer-v2\0{}\0{}\0{}",
@@ -1256,19 +1365,8 @@ fn compose_current_boot_authority_locked(
             .authority_instance_hash(publication)
             .map_err(BootAuthorityErrorV1::Bootstrap)?,
     };
-    let declared = [
-        Ch::ApplicationControlLog,
-        Ch::SessionLog,
-        Ch::SessionLifecycleLog,
-        Ch::InputHistory,
-        Ch::DurableMemory,
-        Ch::SessionCatalog,
-        Ch::ArtifactStaging,
-        Ch::ArtifactStore,
-        Ch::AdapterDurableState,
-        Ch::AdapterEgressDisclosure,
-        Ch::AdapterIdempotencyLedger,
-    ];
+    let selected = config_snapshot.effective_composition();
+    let declared = selected_storage_channels(selected);
     let planner = std::sync::Arc::new(crate::r71_shadow_planner::ShadowPlannerV1::new(
         crate::r71_shadow_planner::ShadowPlannerConfigV1::default(),
     ));
@@ -1301,6 +1399,7 @@ fn compose_current_boot_authority_locked(
             &provisional.services,
             &recovery,
             provisional_hash,
+            selected,
         );
     first.gate().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
@@ -1334,6 +1433,7 @@ fn compose_current_boot_authority_locked(
             &composition.services,
             &recovery,
             first.manifest().manifest_hash,
+            selected,
         );
     decision.gate().map_err(|error| {
         BootAuthorityErrorV1::Cutover(crate::r71_global_cutover::CutoverBootErrorV1::Guard(
@@ -1348,13 +1448,8 @@ fn publish_current_boot_manifest(
     publication: &sigil_resource_authority::bootstrap::AuthorityBootstrapPublicationGuard,
     decision: &crate::r71_global_cutover::RuntimeGlobalCutoverV1,
 ) -> Result<(), BootAuthorityErrorV1> {
-    let generation = bootstrap
-        .read_json::<AuthorityConfigGenerationRecordV1>(
-            publication,
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::AuthorityConfigGeneration,
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?
-        .ok_or_else(|| {
+    let generation =
+        load_authority_config_generation(bootstrap, publication)?.ok_or_else(|| {
             BootAuthorityErrorV1::Bootstrap(
                 sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
                     "authority config generation is missing before cutover publication".to_owned(),
@@ -1370,33 +1465,20 @@ fn publish_current_boot_manifest(
             )),
         ));
     }
-    let existing = bootstrap
-        .read_bytes(
-            publication,
-            sigil_resource_authority::bootstrap::AuthorityBootstrapObjectClassV1::CutoverPointer,
-        )
-        .map_err(BootAuthorityErrorV1::Bootstrap)?
-        .map(|bytes| {
-            crate::r71_global_cutover::RuntimeGlobalCutoverV1::validate_manifest_bytes(&bytes)
-                .map_err(|error| {
-                    BootAuthorityErrorV1::Bootstrap(
-                        sigil_resource_authority::bootstrap::BootstrapErrorV1::MetadataCorrupted(
-                            format!("cutover pointer validation failed: {error}"),
-                        ),
-                    )
-                })
-        })
-        .transpose()?;
+    let existing = load_validated_boot_pointer(
+        bootstrap,
+        publication,
+        &decision.manifest().application_instance_id,
+        Some(&generation),
+    )?;
     if let Some(existing) = existing {
-        if existing == *decision.manifest() {
+        if matches!(&existing, ExistingBootPointerV1::Current(manifest) if manifest == decision.manifest())
+        {
             return Ok(());
         }
-        let is_current_generation_advance = existing.selected_epoch
+        let is_current_generation_advance = decision.manifest().selected_epoch
             == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
-            && decision.manifest().selected_epoch
-                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
-            && existing.application_instance_id == decision.manifest().application_instance_id
-            && decision.manifest().application_generation > existing.application_generation;
+            && decision.manifest().application_generation > existing.application_generation();
         if !is_current_generation_advance {
             // The application identity is host-owned and stable. A changed manifest for the
             // same generation, a generation rollback, a different owner, or a legacy decision is

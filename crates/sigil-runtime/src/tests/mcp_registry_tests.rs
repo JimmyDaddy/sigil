@@ -13,6 +13,208 @@ use std::os::unix::{fs::PermissionsExt, fs::symlink};
 
 use super::*;
 
+fn core_config_with_unselected_payloads(workspace: &Path) -> Result<RootConfig> {
+    let mut config = RootConfig::parse_persisted(
+        r#"
+config_version = 2
+memory = "unselected invalid memory"
+skills = "unselected invalid skills"
+code_intelligence = "unselected invalid code intelligence"
+web = "unselected invalid web"
+mcp_servers = "unselected invalid MCP"
+[agent]
+connection = "fixture"
+model = "fixture"
+[composition]
+profile = "core"
+"#,
+    )?;
+    // Public builders must apply composition even when callers mutate a parsed RootConfig.
+    config.memory.enabled = true;
+    config.memory.writable = true;
+    config.skills.enabled = true;
+    config.code_intelligence.enabled = true;
+    config.web.enabled = true;
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(workspace.join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(workspace.join("cache").display().to_string());
+    Ok(config)
+}
+
+fn assert_core_tools_only(registry: &ToolRegistry) {
+    let actual = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected = [
+        "read_file",
+        "read_tool_artifact",
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "ls",
+        "glob",
+        "grep",
+        "vcs_inspect",
+        "bash",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn core_public_builders_apply_selection_before_optional_configuration() -> Result<()> {
+    let _environment = crate::test_env::lock();
+    let fixture = tempfile::tempdir()?;
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(
+        workspace.join("README.md"),
+        "must not retrieve this repository context",
+    )?;
+    let config = core_config_with_unselected_payloads(&workspace)?;
+    let capabilities = provider_capabilities_for_name("deepseek").expect("capabilities");
+    let surface = build_tool_surface_without_eager_mcp_with_workspace_trust(
+        &config,
+        &capabilities,
+        workspace.clone(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        WorkspaceTrust::Trusted,
+    )?;
+    assert_core_tools_only(&surface.registry);
+    assert!(surface.terminal_control.is_none());
+    assert!(!surface.context_resolver.has_shared_code_intelligence());
+    assert!(config.memory.writable && config.skills.enabled && config.code_intelligence.enabled);
+    let eager = build_tool_registry(&config, &capabilities, workspace.clone()).await?;
+    assert_core_tools_only(&eager);
+    assert!(!workspace.join("state").exists());
+    assert!(!workspace.join("cache").exists());
+    fs::remove_dir_all(&workspace)?;
+    let context = surface.context_resolver.resolve("README.md").await?;
+    assert!(context.items.is_empty());
+    assert!(context.snippets.is_empty());
+    assert!(!workspace.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn core_explicit_mcp_activation_refresh_and_registration_are_unavailable() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let config = core_config_with_unselected_payloads(fixture.path())?;
+    let capabilities = provider_capabilities_for_name("deepseek").expect("capabilities");
+    let mut registry = ToolRegistry::new();
+    let activation = activate_lazy_mcp_tools_detailed(
+        &mut registry,
+        &config,
+        &capabilities,
+        fixture.path().to_path_buf(),
+        Some("server"),
+    )
+    .await
+    .expect_err("unselected MCP must not report a successful no-op activation");
+    assert!(activation.to_string().contains("MCP is unavailable"));
+    let refresh = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &capabilities,
+        fixture.path().to_path_buf(),
+        "server",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+    .expect_err("unselected MCP must not report a successful no-op refresh");
+    assert!(refresh.to_string().contains("MCP is unavailable"));
+    let registration = match register_mcp_server_declarations(
+        &mut registry,
+        &config,
+        &capabilities,
+        fixture.path().to_path_buf(),
+        &[],
+        McpDeclarationRegistrationOptions::new(McpServerStartup::Eager),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("unselected MCP registration must fail before inspecting declarations"),
+    };
+    assert!(registration.to_string().contains("MCP is unavailable"));
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[test]
+fn selecting_optional_owner_reactivates_its_configuration_validation() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let config = core_config_with_unselected_payloads(fixture.path())?;
+    let capabilities = provider_capabilities_for_name("deepseek").expect("capabilities");
+    for capability in [
+        sigil_kernel::OptionalCapability::Memory,
+        sigil_kernel::OptionalCapability::Skills,
+        sigil_kernel::OptionalCapability::CodeIntelligence,
+        sigil_kernel::OptionalCapability::Web,
+        sigil_kernel::OptionalCapability::Mcp,
+    ] {
+        let mut selected = config.clone();
+        selected.composition.enhancements.insert(capability);
+        let result = build_tool_surface_without_eager_mcp_with_workspace_trust(
+            &selected,
+            &capabilities,
+            fixture.path().to_path_buf(),
+            sigil_mcp::unsupported_mcp_elicitation_handler(),
+            sigil_mcp::unsupported_mcp_runtime_event_handler(),
+            WorkspaceTrust::Trusted,
+        );
+        assert!(
+            result.is_err(),
+            "selected {capability:?} must validate its deferred configuration"
+        );
+    }
+    Ok(())
+}
+
+struct UnexpectedCoreDisclosurePresenter;
+
+#[async_trait::async_trait]
+impl sigil_kernel::EgressDisclosurePresenter for UnexpectedCoreDisclosurePresenter {
+    async fn present(
+        &self,
+        _disclosure: sigil_kernel::PreEgressDisclosure,
+    ) -> std::result::Result<
+        sigil_kernel::DisclosurePresentationReceipt,
+        sigil_kernel::DisclosurePresentationError,
+    > {
+        panic!("core must not activate a web or MCP owner");
+    }
+}
+
+#[test]
+fn core_presenter_attachment_does_not_register_optional_tools() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let config = core_config_with_unselected_payloads(fixture.path())?;
+    let capabilities = provider_capabilities_for_name("deepseek").expect("capabilities");
+    let mut registry = ToolRegistry::new();
+    attach_remote_mcp_activation_presenter(
+        &mut registry,
+        &config,
+        &capabilities,
+        fixture.path().to_path_buf(),
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+        Arc::new(UnexpectedCoreDisclosurePresenter),
+    )?;
+    assert!(registry.specs().is_empty());
+    assert!(!fixture.path().join("state").exists());
+    assert!(!fixture.path().join("cache").exists());
+    Ok(())
+}
+
 fn write_file(path: &Path, content: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("fixture parent should create");

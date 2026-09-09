@@ -55,6 +55,7 @@ fn session_with_messages(path: &Path, config_path: &Path, messages: &[&str]) -> 
         model_name: "deepseek-v4-flash".to_owned(),
         resolved_model_route: Some(route),
     })?;
+    crate::bind_session_composition(&mut session, &root)?;
     for message in messages {
         session.append_user_message(ModelMessage::user(*message))?;
         session.append_assistant_message(ModelMessage::assistant(
@@ -63,6 +64,39 @@ fn session_with_messages(path: &Path, config_path: &Path, messages: &[&str]) -> 
         ))?;
     }
     Ok(session.session_scope_id().to_owned())
+}
+
+#[tokio::test]
+async fn compaction_rejects_changed_session_composition_before_provider_preparation() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let session_path = temp.path().join("session.jsonl");
+    write_config(&config_path, true)?;
+    let mut config = RootConfig::load(&config_path)?;
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    config.save(&config_path)?;
+    let scope = session_with_messages(&session_path, &config_path, &["hello"])?;
+    let before = std::fs::read(&session_path)?;
+    config
+        .composition
+        .enhancements
+        .insert(sigil_kernel::OptionalCapability::Compaction);
+    config.save(&config_path)?;
+    let error = match prepare_application_compaction(
+        &config_path,
+        temp.path(),
+        &session_path,
+        &scope,
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("changed composition must fail before creating a provider"),
+    };
+    assert!(error.to_string().contains("composition"));
+    assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
 }
 
 #[tokio::test]
@@ -387,6 +421,7 @@ enabled = true
         model_name: "deepseek-v4-flash".to_owned(),
         resolved_model_route: Some(persisted_route),
     })?;
+    crate::bind_session_composition(&mut session, &root)?;
     for index in 0..4 {
         let message = format!("user turn {index}: {}", "u".repeat(20_000));
         session.append_user_message(ModelMessage::user(message.clone()))?;

@@ -30,13 +30,19 @@ pub struct ApplicationTaskContinuationRequest {
 pub struct PreparedApplicationTaskContinuation {
     execution: ApplicationTaskContinuationExecution,
     control: ApplicationRunControl,
-    terminal_control: ApplicationTerminalTaskControl,
+    terminal_control: Option<ApplicationTerminalTaskControl>,
 }
 
 impl PreparedApplicationTaskContinuation {
+    /// Returns projection and delivery capabilities from this continuation's actual session owner.
+    #[must_use]
+    pub fn session_projection_owner(&self) -> crate::RuntimeSessionProjectionOwner {
+        self.execution.events.projection_owner.clone()
+    }
+
     /// Returns the typed persistent-terminal owner retained beyond the foreground Task turn.
     #[must_use]
-    pub fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+    pub fn terminal_control(&self) -> Option<ApplicationTerminalTaskControl> {
         self.terminal_control.clone()
     }
 
@@ -184,6 +190,8 @@ pub async fn prepare_application_task_continuation(
         constraints: None,
     };
     let session_leases = Arc::clone(&services.session_leases);
+    let tool_authority = current_schema_tool_authority(services);
+    let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
@@ -191,7 +199,8 @@ pub async fn prepare_application_task_continuation(
             blocking_request,
             session_leases,
             true,
-            None,
+            tool_authority,
+            expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
         )
@@ -388,7 +397,8 @@ impl ApplicationTaskContinuationExecution {
         A: ApprovalHandler + Send,
     {
         validate_execution_contract(self.interaction, approval_handler, false)?;
-        self.execute_inner(handler, approval_handler).await
+        // Keep the orchestration future off the adapter's bounded controller stack.
+        Box::pin(self.execute_inner(handler, approval_handler)).await
     }
 
     /// Executes an externally interactive Task continuation on an owned blocking worker.
@@ -409,7 +419,9 @@ impl ApplicationTaskContinuationExecution {
         validate_execution_contract(self.interaction, &approval_handler, true)?;
         let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            runtime.block_on(self.execute_inner(&mut handler, &mut approval_handler))
+            runtime.block_on(Box::pin(
+                self.execute_inner(&mut handler, &mut approval_handler),
+            ))
         })
         .await
         .context("application Task continuation owned blocking worker failed")?
@@ -450,7 +462,7 @@ impl ApplicationTaskContinuationExecution {
             verification_execution_port,
         } = self.task_execution;
         let continuation_entry_frontier = self.session.entries().len();
-        let result = crate::agent_supervisor::task_execution::continue_task_execution(
+        let result = Box::pin(crate::agent_supervisor::task_execution::continue_task_execution(
             &mut self.session,
             crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                 requested_task_id: Some(self.task.task_id.clone()),
@@ -472,7 +484,7 @@ impl ApplicationTaskContinuationExecution {
                 tool_artifact_read_budget: None,
             },
             approval_handler,
-        )
+        ))
         .await;
         let result = match result {
             Err(error) if is_application_public_outbox_append_error(&error) => {

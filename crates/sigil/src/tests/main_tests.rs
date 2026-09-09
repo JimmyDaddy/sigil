@@ -12,14 +12,16 @@ use clap::{CommandFactory, Parser};
 use futures::{Stream, stream};
 use sigil_kernel::{
     ApprovalMode, EventHandler, JsonlSessionStore, ModelMessage, PermissionConfirmation,
-    PermissionDecision, ProviderChunk, PublicRunEventKind, PublicTaskPhase, RootConfig, RunEvent,
-    SessionConfig, StorageConfig, ToolAccess, ToolCall, ToolCategory, ToolErrorKind,
-    ToolExecutionId, ToolPreview, ToolPreviewCapability, ToolProgressEvent, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceTrust, resolve_workspace_root,
-    workspace_trust_from_entries,
+    PermissionDecision, ProviderChunk, PublicRunEvent, PublicRunEventKind, PublicTaskPhase,
+    RootConfig, RunEvent, SessionConfig, StorageConfig, ToolAccess, ToolCall, ToolCategory,
+    ToolErrorKind, ToolExecutionId, ToolPreview, ToolPreviewCapability, ToolProgressEvent,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceTrust,
+    resolve_workspace_root, workspace_trust_from_entries,
 };
 use sigil_runtime::SessionCatalogProjectionError;
-use sigil_runtime::application_run::{application_run_input, default_application_session_path};
+use sigil_runtime::application_run::{
+    ApplicationRunEventHandler, application_run_input, default_application_session_path,
+};
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use sigil_runtime::machine_protocol::MachineExitCode;
 use tokio::{
@@ -2174,4 +2176,72 @@ fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
         body
     )
     .into_bytes()
+}
+
+#[test]
+fn machine_run_event_handler_jsonl_suppresses_transient_events() -> Result<()> {
+    use super::MachineRunEventHandler;
+
+    // A bounded live-preview delta is not a durable fact; JSONL machine output must not emit it.
+    let mut transient_buffer = Vec::new();
+    let mut transient_handler = MachineRunEventHandler {
+        output: RunOutput::Jsonl,
+        writer: &mut transient_buffer,
+    };
+    transient_handler.handle_public_event(PublicRunEvent::new(
+        "session",
+        "run",
+        1,
+        PublicRunEventKind::TextDelta {
+            text: "live-preview".to_owned(),
+        },
+    ))?;
+    assert!(
+        transient_buffer.is_empty(),
+        "transient live-preview event must not be written to the JSONL machine record stream"
+    );
+
+    // A durable event is still emitted as a machine record for JSONL output.
+    let mut durable_buffer = Vec::new();
+    let mut durable_handler = MachineRunEventHandler {
+        output: RunOutput::Jsonl,
+        writer: &mut durable_buffer,
+    };
+    durable_handler.handle_public_event(PublicRunEvent::new(
+        "session",
+        "run",
+        2,
+        PublicRunEventKind::Notice {
+            message: "durable".to_owned(),
+        },
+    ))?;
+    assert!(
+        !durable_buffer.is_empty(),
+        "durable event must still be written to the JSONL machine record stream"
+    );
+    Ok(())
+}
+
+#[test]
+fn machine_run_event_handler_non_jsonl_never_writes_machine_records() -> Result<()> {
+    use super::MachineRunEventHandler;
+
+    let mut buffer = Vec::new();
+    let mut handler = MachineRunEventHandler {
+        output: RunOutput::Text,
+        writer: &mut buffer,
+    };
+    handler.handle_public_event(PublicRunEvent::new(
+        "session",
+        "run",
+        1,
+        PublicRunEventKind::Notice {
+            message: "durable".to_owned(),
+        },
+    ))?;
+    assert!(
+        buffer.is_empty(),
+        "machine records are only written for JSONL output"
+    );
+    Ok(())
 }

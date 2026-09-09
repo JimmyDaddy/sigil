@@ -28,6 +28,12 @@ use sigil_application::{
 /// snapshots and pages.  They must not expose paths, provider payloads, or physical authority
 /// objects through the application contract.
 pub trait RuntimeApplicationProjectionSource: Send + Sync {
+    fn delivery_batch(
+        &self,
+        _request: sigil_application::DurableDeliveryRequest,
+    ) -> BoxFuture<'static, Result<sigil_application::DurableDeliveryBatch, ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::NotFound) })
+    }
     fn open_projection(
         &self,
         request: OpenProjectionRequest,
@@ -162,11 +168,30 @@ pub trait RuntimeApplicationReservationStore: Send + Sync {
     ) -> BoxFuture<'static, Result<(), ApplicationError>>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct PageRecord {
     request: ProjectionPageRequest,
     result: Option<ProjectionPage>,
     cancelled: bool,
+    abort: futures::future::AbortHandle,
+}
+
+struct PageLoadGuard {
+    state: Arc<Mutex<RuntimeApplicationState>>,
+    request_id: PageRequestId,
+    complete: bool,
+}
+
+impl Drop for PageLoadGuard {
+    fn drop(&mut self) {
+        if !self.complete
+            && let Ok(mut state) = self.state.lock()
+            && let Some(record) = state.pages.get_mut(&self.request_id)
+        {
+            record.cancelled = true;
+            record.abort.abort();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -285,6 +310,12 @@ impl RuntimeApplicationService {
 }
 
 impl ApplicationPort for RuntimeApplicationService {
+    fn delivery_batch(
+        &self,
+        request: sigil_application::DurableDeliveryRequest,
+    ) -> BoxFuture<'static, Result<sigil_application::DurableDeliveryBatch, ApplicationError>> {
+        self.projection.delivery_batch(request)
+    }
     fn open_projection(
         &self,
         request: OpenProjectionRequest,
@@ -304,6 +335,7 @@ impl ApplicationPort for RuntimeApplicationService {
                     "page limit exceeds application bound".to_owned(),
                 ));
             }
+            let (abort, registration) = futures::future::AbortHandle::new_pair();
             {
                 let mut state = state.lock().map_err(|_| ApplicationError::Unavailable)?;
                 if let Some(record) = state.pages.get(&request.request_id) {
@@ -318,17 +350,37 @@ impl ApplicationPort for RuntimeApplicationService {
                     }
                     return Err(ApplicationError::Unavailable);
                 }
+                // Page results are a disposable presentation cache. Keep active requests and a
+                // bounded set of completed/cancelled requests instead of retaining every body.
+                if state.pages.len() >= 32 {
+                    let retired = state
+                        .pages
+                        .iter()
+                        .find(|(_, record)| record.cancelled || record.result.is_some())
+                        .map(|(id, _)| id.clone())
+                        .ok_or(ApplicationError::Unavailable)?;
+                    state.pages.remove(&retired);
+                }
                 state.pages.insert(
                     request.request_id.clone(),
                     PageRecord {
                         request: request.clone(),
                         result: None,
                         cancelled: false,
+                        abort,
                     },
                 );
             }
 
-            let result = projection.page(request.clone()).await;
+            let mut guard = PageLoadGuard {
+                state: Arc::clone(&state),
+                request_id: request.request_id.clone(),
+                complete: false,
+            };
+            let result =
+                futures::future::Abortable::new(projection.page(request.clone()), registration)
+                    .await
+                    .map_err(|_| ApplicationError::ResetRequired)?;
             let mut state = state.lock().map_err(|_| ApplicationError::Unavailable)?;
             let record = state
                 .pages
@@ -349,6 +401,7 @@ impl ApplicationPort for RuntimeApplicationService {
                 ));
             }
             record.result = Some(page.clone());
+            guard.complete = true;
             Ok(page)
         })
     }
@@ -366,6 +419,7 @@ impl ApplicationPort for RuntimeApplicationService {
                 return PageCancellationReceipt::Completed;
             }
             record.cancelled = true;
+            record.abort.abort();
             PageCancellationReceipt::CancelledBeforeLoad
         })
     }

@@ -71,6 +71,39 @@ fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<(
     )
 }
 
+fn spawn_paused_preview_fixture() -> (String, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("preview fixture should bind");
+    let address = listener.local_addr().expect("preview fixture address");
+    let (proceed, gate) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("provider request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("timeout");
+        read_http_message(&mut stream);
+        let deltas =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n"
+                .repeat(100_000);
+        let finish =
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", deltas.len() + finish.len()).expect("headers");
+        stream.flush().expect("flush headers");
+        gate.recv_timeout(Duration::from_secs(45))
+            .expect("first native subscriber");
+        stream
+            .write_all(deltas.as_bytes())
+            .expect("provider deltas");
+        stream.flush().expect("flush deltas");
+        gate.recv_timeout(Duration::from_secs(45))
+            .expect("reconnected snapshot consumed");
+        stream
+            .write_all(finish.as_bytes())
+            .expect("provider terminal");
+        stream.flush().expect("flush terminal");
+    });
+    (format!("http://{address}"), handle, proceed)
+}
+
 fn spawn_model_catalog_fixture(model_id: &'static str) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("model catalog fixture should bind");
     let address = listener
@@ -567,14 +600,14 @@ fn desktop_server_isolates_invalid_current_protocol_replay_state() {
     let server_root = http_server_state_root(&workspace, "http-server-v4");
     fs::create_dir_all(&server_root).expect("current state root should create");
     let journal_path = server_root.join("protocol-events.json");
-    let invalid_state = br#"{"schema_version":3,"events":[{"invalid":true}],"high_watermarks":[]}"#;
+    let invalid_state = br#"{"schema_version":3,"events":[{"schema_version":3,"invalid":true}],"high_watermarks":[]}"#;
     fs::write(&journal_path, invalid_state).expect("invalid current journal should write");
 
     let server = spawn_desktop_serve(&workspace, &config_path, token);
 
     assert!(
         !journal_path.exists(),
-        "the quarantined legacy journal should not be recreated before its first event"
+        "the quarantined current journal should not be recreated before its first event"
     );
     let quarantined = fs::read_dir(&server_root)
         .expect("server state directory should remain readable")
@@ -594,6 +627,72 @@ fn desktop_server_isolates_invalid_current_protocol_replay_state() {
     let output = close_desktop_owner_and_wait(server);
     assert_eq!(output.status.code(), Some(0));
     fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[test]
+fn desktop_server_rejects_noncurrent_protocol_data_without_rewriting_it() {
+    for version in [None, Some(2)] {
+        let workspace = test_workspace("desktop-noncurrent-protocol-state");
+        let config_path = workspace.join("sigil.toml");
+        write_config(&config_path, "http://127.0.0.1:1");
+        let server_root = http_server_state_root(&workspace, "http-server-v4");
+        fs::create_dir_all(&server_root).expect("state root should create");
+        let journal_path = server_root.join("protocol-events.json");
+        let mut event = serde_json::json!({"unsupported": true});
+        if let Some(version) = version {
+            event["schema_version"] = serde_json::json!(version);
+        }
+        let original = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 3,
+            "events": [event],
+            "high_watermarks": [],
+        }))
+        .expect("unsupported journal fixture should encode");
+        fs::write(&journal_path, &original).expect("unsupported journal should write");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_sigil"));
+        common::isolated_child_environment(&workspace)
+            .expect("serve environment should create")
+            .apply_to_command(&mut command);
+        command
+            .current_dir(&workspace)
+            .env("SIGIL_HTTP_TOKEN", "noncurrent-protocol-test-token")
+            .args([
+                "--config",
+                config_path.to_str().expect("UTF-8 config path"),
+                "serve",
+                "--startup-output",
+                "json",
+                "--shutdown-on-stdin-close",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("serve process should spawn");
+        let output = wait_for_child_output(child, Duration::from_secs(10));
+        assert!(!output.status.success());
+        assert!(
+            output.stdout.is_empty(),
+            "unsupported data cannot expose a listener"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("unsupported http event envelope schema")
+        );
+        assert_eq!(
+            fs::read(&journal_path).expect("original should remain"),
+            original
+        );
+        assert!(
+            !fs::read_dir(&server_root)
+                .expect("state root should remain")
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("protocol-events.json.invalid-"))
+        );
+        fs::remove_dir_all(workspace).expect("test workspace should remove");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1092,8 +1191,12 @@ async fn desktop_config_repair_refuses_to_overwrite_a_concurrently_valid_config(
 async fn desktop_typed_client_streams_and_replays_real_run_events() {
     let workspace = test_workspace("desktop-run-events");
     let config_path = workspace.join("sigil.toml");
-    let (base_url, provider) = spawn_provider_fixture("desktop streamed answer");
+    let (base_url, provider, proceed) = spawn_paused_preview_fixture();
     write_config(&config_path, &base_url);
+    let config = fs::read_to_string(&config_path)
+        .expect("preview config")
+        .replace("request_timeout_secs = 5", "request_timeout_secs = 60");
+    fs::write(&config_path, config).expect("preview request timeout");
     let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
     let opened = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
@@ -1148,12 +1251,25 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         )
         .await
         .expect("authenticated SSE should connect");
+    proceed
+        .send(())
+        .expect("release streaming deltas after native attach");
     let mut kinds = Vec::new();
+    let mut latest_cursor = None;
+    let mut reconnected = false;
+    let mut resumed = false;
+    let mut full_message = None;
+    let mut last_durable_sequence = 0;
+    let mut live_frames = 0;
+    let mut latest_live_revision = 0;
+    let mut latest_preview_bytes = 0;
     let mut first_cursor = None;
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(15), stream.next_event())
+        let event = tokio::time::timeout(Duration::from_secs(40), stream.next_event())
             .await
-            .expect("real run event should arrive before timeout")
+            .unwrap_or_else(|error| panic!(
+                "real event timed out: {error}; live_frames={live_frames}, latest_revision={latest_live_revision}, preview_bytes={latest_preview_bytes}, reconnected={reconnected}, durable_sequence={last_durable_sequence}, kinds={kinds:?}"
+            ))
             .expect("real run event should decode");
         let Some(event) = event else {
             break;
@@ -1161,23 +1277,77 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         if first_cursor.is_none() {
             first_cursor = event.replay_id.clone();
         }
-        kinds.push(
-            event
-                .into_timeline(
-                    &opened.id,
-                    &session.durable_session_scope_id,
-                    &receipt.run.id,
-                    &session.id,
-                )
-                .expect("real event should narrow for renderer")
-                .kind,
-        );
+        if let Some(public) = &event.run_event {
+            assert!(public.sequence > last_durable_sequence);
+            last_durable_sequence = public.sequence;
+            latest_cursor = event.replay_id.clone();
+        }
+        if let Some(update) = &event.live_update {
+            assert!(event.run_event.is_none());
+            assert!(event.replay_id.is_none());
+            assert!(update.base_durable_sequence <= last_durable_sequence);
+            live_frames += 1;
+            latest_live_revision = update.live_revision;
+            latest_preview_bytes = update.preview.as_str().len();
+            if update.preview.as_str() == "x".repeat(65_536)
+                && update.truncated
+                && update.live_revision >= 100_000
+            {
+                if !reconnected {
+                    drop(stream);
+                    stream = client
+                        .run_events(
+                            &session.id,
+                            &session.durable_session_scope_id,
+                            &receipt.run.id,
+                            &owner.owner_revision,
+                            latest_cursor.as_deref(),
+                        )
+                        .await
+                        .expect("active owner should reconnect at durable cursor");
+                    reconnected = true;
+                    continue;
+                }
+                if !resumed {
+                    proceed
+                        .send(())
+                        .expect("finish after current snapshot was restored");
+                    resumed = true;
+                }
+            }
+        }
+        let timeline = event
+            .into_timeline(
+                &opened.id,
+                &session.durable_session_scope_id,
+                &receipt.run.id,
+                &session.id,
+            )
+            .expect("real event should narrow for renderer");
+        if timeline.kind == sigil_desktop::DesktopTimelineEventKind::AssistantMessage
+            && timeline.assistant_kind.as_deref() != Some("reasoning_trace")
+        {
+            full_message = timeline.text.clone();
+        }
+        kinds.push(timeline.kind);
     }
     assert!(
         kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunStarted),
         "run stream omitted start event: {kinds:?}"
     );
-    assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantDelta));
+    assert!(
+        reconnected && resumed,
+        "reconnect must restore the paused current snapshot"
+    );
+    assert!(
+        (2..100_000).contains(&live_frames),
+        "preview frames must be coalesced"
+    );
+    assert_eq!(full_message.as_deref(), Some("x".repeat(100_000).as_str()));
+    assert!(
+        last_durable_sequence < 1000,
+        "live revision must not consume durable sequence"
+    );
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::AssistantMessage));
     assert!(kinds.contains(&sigil_desktop::DesktopTimelineEventKind::RunFinished));
 

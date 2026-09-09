@@ -4,12 +4,22 @@ use std::collections::BTreeMap;
 
 use crate::mcp_declaration::declarations_by_effective_name;
 
+fn require_mcp_composition(root_config: &RootConfig) -> Result<()> {
+    if !root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+    {
+        bail!("MCP is unavailable in the selected runtime composition");
+    }
+    Ok(())
+}
+
 /// Local/extension tool registry plus the request-context resolver that shares its code-intel
 /// service instance.
 pub struct RuntimeToolSurface {
     pub registry: ToolRegistry,
     pub context_resolver: crate::context::RequestContextResolver,
-    pub terminal_control: sigil_tools_builtin::TerminalTaskControlHandle,
+    pub terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     /// Session-scoped scratch lease registry shared by bash/terminal tools; maintenance GC and
     /// session delete use it to avoid reclaiming live namespaces.
     pub scratch_control: sigil_tools_builtin::ScratchNamespaceControl,
@@ -164,6 +174,9 @@ pub async fn register_mcp_server_declarations(
     declarations: &[ResolvedMcpServerDeclaration],
     options: McpDeclarationRegistrationOptions,
 ) -> Result<McpToolRegistrationReport> {
+    require_mcp_composition(root_config)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let stdio_declarations = declarations
         .iter()
         .filter(|declaration| declaration.config().stdio().is_some())
@@ -555,8 +568,8 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
-    let declarations =
-        resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let mut registry = ToolRegistry::new();
     let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
         &mut registry,
@@ -569,8 +582,17 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         managed_command_execution,
     )?;
     let mut context_resolver =
-        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
-    if root_config.memory.writable {
+        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence)
+            .with_repository_context(
+                root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::RepositoryContext),
+            );
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Memory)
+        && root_config.memory.writable
+    {
         let paths =
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
         let memory_store = match managed_memory_writer {
@@ -582,36 +604,44 @@ async fn build_tool_surface_with_mcp_handlers_and_mutation_recorder(
         };
         context_resolver = context_resolver.with_writable_memory(memory_store);
     }
-    let mut registration_options = McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
-        .with_handlers(
-            Arc::clone(&elicitation_handler),
-            Arc::clone(&runtime_event_handler),
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+    {
+        let declarations =
+            resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+        let mut registration_options =
+            McpDeclarationRegistrationOptions::new(McpServerStartup::Eager)
+                .with_handlers(
+                    Arc::clone(&elicitation_handler),
+                    Arc::clone(&runtime_event_handler),
+                )
+                .with_network_admission(network_admission);
+        if let Some(route) = managed_extension_execution.clone() {
+            registration_options = registration_options.with_managed_extension_execution(route);
+        }
+        if let Some(recorder) = mutation_recorder {
+            registration_options = registration_options.with_mutation_recorder(recorder);
+        }
+        register_mcp_server_declarations(
+            &mut registry,
+            root_config,
+            provider_capabilities,
+            workspace_root.clone(),
+            &declarations,
+            registration_options,
         )
-        .with_network_admission(network_admission);
-    if let Some(route) = managed_extension_execution.clone() {
-        registration_options = registration_options.with_managed_extension_execution(route);
+        .await?;
+        register_lazy_mcp_activation_tool(
+            &mut registry,
+            root_config,
+            provider_capabilities,
+            workspace_root,
+            elicitation_handler,
+            runtime_event_handler,
+            managed_extension_execution,
+        );
     }
-    if let Some(recorder) = mutation_recorder {
-        registration_options = registration_options.with_mutation_recorder(recorder);
-    }
-    register_mcp_server_declarations(
-        &mut registry,
-        root_config,
-        provider_capabilities,
-        workspace_root.clone(),
-        &declarations,
-        registration_options,
-    )
-    .await?;
-    register_lazy_mcp_activation_tool(
-        &mut registry,
-        root_config,
-        provider_capabilities,
-        workspace_root,
-        elicitation_handler,
-        runtime_event_handler,
-        managed_extension_execution,
-    );
     Ok(RuntimeToolSurface {
         registry,
         context_resolver,
@@ -849,8 +879,15 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         Arc<crate::managed_resource_adapters::RuntimeManagedCommandExecutionRouteV1>,
     >,
 ) -> Result<RuntimeToolSurface> {
-    let _declarations =
-        resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+    {
+        let _declarations =
+            resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
+    }
     let mut registry = ToolRegistry::new();
     let (code_intelligence, terminal_control, scratch_control) = register_local_tools(
         &mut registry,
@@ -863,8 +900,17 @@ fn build_tool_surface_without_eager_mcp_with_workspace_trust_and_optional_termin
         managed_command_execution,
     )?;
     let mut context_resolver =
-        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence);
-    if root_config.memory.writable {
+        crate::context::RequestContextResolver::new(workspace_root.clone(), code_intelligence)
+            .with_repository_context(
+                root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::RepositoryContext),
+            );
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Memory)
+        && root_config.memory.writable
+    {
         let paths =
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
         context_resolver =
@@ -1114,6 +1160,9 @@ pub async fn activate_mcp_tools_from_product_surface_with_managed_extension_exec
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<LazyMcpActivationResult> {
+    require_mcp_composition(root_config)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let remote_servers = root_config
         .mcp_servers
         .iter()
@@ -1183,6 +1232,9 @@ async fn activate_lazy_mcp_tools_detailed_inner(
     >,
     network_admission: ExtensionProcessNetworkAdmission,
 ) -> Result<LazyMcpActivationResult> {
+    require_mcp_composition(root_config)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let selected_declarations = declarations
@@ -1255,7 +1307,7 @@ fn register_local_tools(
     >,
 ) -> Result<(
     Option<sigil_code_intel::CodeIntelligenceService>,
-    sigil_tools_builtin::TerminalTaskControlHandle,
+    Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     sigil_tools_builtin::ScratchNamespaceControl,
 )> {
     if managed_command_execution.is_none()
@@ -1269,22 +1321,12 @@ fn register_local_tools(
         bail!(error);
     }
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let managed_terminal: Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1> =
+    let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
         managed_command_execution
             .as_ref()
             .map(|route| {
-                Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
+                Arc::clone(route) as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>
             })
-            .unwrap_or_else(|| {
-                Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
-            });
-    let managed_code_intel: Option<Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>> =
-        managed_command_execution.as_ref().map(|route| {
-            Arc::clone(route) as Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>
-        });
-    let managed_executor: Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1> =
-        managed_command_execution
-            .map(|route| route as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>)
             .unwrap_or_else(|| {
                 Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
             });
@@ -1299,56 +1341,78 @@ fn register_local_tools(
     };
     let scratch_control = external_scratch_control
         .unwrap_or_else(|| crate::authority_scratch_control(paths.scratch_root.clone()));
-    let handles = match terminal_lifecycle_route {
-        Some(RuntimeTerminalLifecycleRoute::Factory(factory)) => {
-            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
-                registry,
-                builtin_paths,
-                Arc::clone(&managed_executor),
-                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
-                    &root_config.execution,
-                ),
-                Some(sigil_tools_builtin::TerminalLifecycleRoute::Factory(
-                    factory,
-                )),
-                Some(scratch_control.clone()),
-                Arc::clone(&managed_terminal),
-            )
-        }
-        route => {
-            let sink = match route {
-                Some(RuntimeTerminalLifecycleRoute::Bound(sink)) => Some(sink),
-                Some(RuntimeTerminalLifecycleRoute::Factory(_)) => unreachable!(),
-                None => None,
-            };
-            sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config_and_managed_terminal(
-                registry,
-                builtin_paths,
-                managed_executor,
-                sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
-                    &root_config.execution,
-                ),
-                sink.map(sigil_tools_builtin::TerminalLifecycleRoute::Bound),
-                Some(scratch_control.clone()),
-                managed_terminal,
-            )
-        }
+    let handles = sigil_tools_builtin::register_builtin_tools_with_selection(
+        registry,
+        builtin_paths,
+        managed_executor,
+        sigil_tools_builtin::BuiltinToolSelection {
+            terminal: root_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Terminal),
+            changesets: root_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::ChangeSets),
+        },
+        Some(scratch_control.clone()),
+        || sigil_tools_builtin::BuiltinTerminalOptions {
+            execution_config: sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                &root_config.execution,
+            ),
+            lifecycle_route: terminal_lifecycle_route.map(|route| match route {
+                RuntimeTerminalLifecycleRoute::Factory(factory) => {
+                    sigil_tools_builtin::TerminalLifecycleRoute::Factory(factory)
+                }
+                RuntimeTerminalLifecycleRoute::Bound(sink) => {
+                    sigil_tools_builtin::TerminalLifecycleRoute::Bound(sink)
+                }
+            }),
+            executor: managed_command_execution
+                .as_ref()
+                .map(|route| {
+                    Arc::clone(route)
+                        as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>
+                })
+                .unwrap_or_else(|| {
+                    Arc::new(sigil_tools_builtin::UnavailableManagedCommandExecutionPortV1)
+                }),
+        },
+    );
+    let code_intelligence = if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::CodeIntelligence)
+        && root_config.code_intelligence.enabled
+    {
+        let managed_code_intel = managed_command_execution.as_ref().map(|route| {
+            Arc::clone(route) as Arc<dyn sigil_code_intel::LanguageServerLaunchPortV1>
+        });
+        sigil_code_intel::register_code_intelligence_tools(
+            registry,
+            &root_config.code_intelligence,
+            workspace_root.clone(),
+            workspace_trust,
+            managed_code_intel,
+        )
+    } else {
+        None
     };
-    let code_intelligence = sigil_code_intel::register_code_intelligence_tools(
-        registry,
-        &root_config.code_intelligence,
-        workspace_root.clone(),
-        workspace_trust,
-        managed_code_intel,
-    );
-    let user_config_dir = default_user_config_dir().ok();
-    let _ = skills::register_skill_tools(
-        registry,
-        &workspace_root,
-        user_config_dir.as_deref(),
-        &root_config.skills,
-    );
-    if root_config.memory.writable {
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Skills)
+        && root_config.skills.enabled
+    {
+        let user_config_dir = default_user_config_dir().ok();
+        let _ = skills::register_skill_tools(
+            registry,
+            &workspace_root,
+            user_config_dir.as_deref(),
+            &root_config.skills,
+        );
+    }
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Memory)
+        && root_config.memory.writable
+    {
         let memory_store = match managed_memory_writer.as_ref() {
             Some(writer) => crate::WritableMemoryStore::with_managed_writer(
                 paths.workspace_id.as_str(),
@@ -1897,6 +1961,9 @@ pub async fn refresh_mcp_server_tools_from_product_surface_with_managed_extensio
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<McpRefreshResult> {
+    require_mcp_composition(root_config)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let server = root_config
         .mcp_servers
         .iter()
@@ -1946,6 +2013,9 @@ async fn refresh_mcp_server_tools_inner(
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) -> Result<McpRefreshResult> {
+    require_mcp_composition(root_config)?;
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
     let declarations =
         resolve_user_root_mcp_declarations(&root_config.mcp_servers, &workspace_root)?;
     let selected_declarations = declarations
@@ -2073,9 +2143,13 @@ pub(super) fn register_lazy_mcp_activation_tool(
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
 ) {
-    if !root_config.mcp_servers.iter().any(|server| {
-        server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()
-    }) {
+    if !root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+        || !root_config.mcp_servers.iter().any(|server| {
+            server.startup == McpServerStartup::Lazy || server.streamable_http().is_some()
+        })
+    {
         return;
     }
     registry.register(Arc::new(McpActivateServerTool {
@@ -2092,6 +2166,10 @@ pub(super) fn register_lazy_mcp_activation_tool(
 
 /// Replaces the default fail-closed activation tool with one bound to a concrete product-surface
 /// disclosure presenter. This is required before a user-root Streamable HTTP server can connect.
+///
+/// # Errors
+///
+/// Returns an error when a selected optional module has invalid configuration.
 pub fn attach_remote_mcp_activation_presenter(
     registry: &mut ToolRegistry,
     root_config: &RootConfig,
@@ -2100,7 +2178,7 @@ pub fn attach_remote_mcp_activation_presenter(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     presenter: Arc<dyn sigil_kernel::EgressDisclosurePresenter>,
-) {
+) -> Result<()> {
     attach_remote_mcp_activation_presenter_with_managed_extension_execution(
         registry,
         root_config,
@@ -2110,10 +2188,14 @@ pub fn attach_remote_mcp_activation_presenter(
         runtime_event_handler,
         presenter,
         None,
-    );
+    )
 }
 
 /// Rebinds the activation tool to both the remote disclosure presenter and managed stdio route.
+///
+/// # Errors
+///
+/// Returns an error when a selected optional module has invalid configuration.
 pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
     registry: &mut ToolRegistry,
     root_config: &RootConfig,
@@ -2125,30 +2207,45 @@ pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
     managed_extension_execution: Option<
         Arc<crate::managed_resource_adapters::RuntimeManagedExtensionExecutionRouteV1>,
     >,
-) {
-    crate::web_fetch_tool::register_web_fetch_tool(registry, root_config, Arc::clone(&presenter));
-    crate::web_search_tool::register_web_search_tool(
-        registry,
-        root_config,
-        provider_capabilities.tool_name_max_chars,
-        Arc::clone(&presenter),
-    );
-    registry.set_run_input_preparer_for_tools(
-        Arc::new(crate::hosted_web_search::HostedWebSearchInputPreparer::new(
-            root_config.clone(),
-            Arc::clone(&presenter),
-        )),
-        sigil_kernel::ToolRegistryScope::from_names_and_prefixes(
-            ["websearch"],
-            std::iter::empty::<&str>(),
-        ),
-    );
-    if !root_config
-        .mcp_servers
-        .iter()
-        .any(|server| server.streamable_http().is_some())
+) -> Result<()> {
+    let effective_config = root_config.with_effective_composition()?;
+    let root_config = &effective_config;
+    if root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Web)
+        && root_config.web.enabled
     {
-        return;
+        crate::web_fetch_tool::register_web_fetch_tool(
+            registry,
+            root_config,
+            Arc::clone(&presenter),
+        );
+        crate::web_search_tool::register_web_search_tool(
+            registry,
+            root_config,
+            provider_capabilities.tool_name_max_chars,
+            Arc::clone(&presenter),
+        );
+        registry.set_run_input_preparer_for_tools(
+            Arc::new(crate::hosted_web_search::HostedWebSearchInputPreparer::new(
+                root_config.clone(),
+                Arc::clone(&presenter),
+            )),
+            sigil_kernel::ToolRegistryScope::from_names_and_prefixes(
+                ["websearch"],
+                std::iter::empty::<&str>(),
+            ),
+        );
+    }
+    if !root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::Mcp)
+        || !root_config
+            .mcp_servers
+            .iter()
+            .any(|server| server.streamable_http().is_some())
+    {
+        return Ok(());
     }
     registry.register(Arc::new(McpActivateServerTool {
         registry: registry.downgrade(),
@@ -2160,6 +2257,7 @@ pub fn attach_remote_mcp_activation_presenter_with_managed_extension_execution(
         managed_extension_execution,
         remote_presenter: Some(presenter),
     }));
+    Ok(())
 }
 
 #[derive(Clone)]

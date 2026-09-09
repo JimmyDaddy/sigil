@@ -179,6 +179,15 @@ pub fn execute_application_intent_stack_command(
     command: &ApplicationIntentStackCommandV1,
     confirmation_source: ApplicationIntentConfirmationSource,
 ) -> Result<ApplicationIntentStackCommandOutputV1, ApplicationIntentStackError> {
+    if !root_config.task.enabled
+        || !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+    {
+        return Err(ApplicationIntentStackError::unavailable(anyhow!(
+            "task orchestration is not selected for this session composition"
+        )));
+    }
     match command {
         ApplicationIntentStackCommandV1::Inspect => {
             let state = session
@@ -195,6 +204,8 @@ pub fn execute_application_intent_stack_command(
             Ok(ApplicationIntentStackCommandOutputV1::DropPreview { preview })
         }
         ApplicationIntentStackCommandV1::ExecuteDrop { request } => {
+            crate::validate_session_composition(session, root_config)
+                .map_err(ApplicationIntentStackError::conflict)?;
             if root_config.permission.mode == PermissionMode::ReadOnly {
                 return Err(ApplicationIntentStackError::permission_required(anyhow!(
                     "read-only permission mode denies Intent drop"
@@ -344,6 +355,7 @@ fn load_intent_stack_session(
     }
     let canonical_session_path = validate_durable_intent_stack_session_path(session_log_path)?;
     let root_config = RootConfig::load(config_path)
+        .and_then(|config| config.with_effective_composition())
         .with_context(|| "failed to load Intent Stack application configuration")?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);

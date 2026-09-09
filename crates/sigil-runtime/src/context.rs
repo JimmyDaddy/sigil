@@ -78,6 +78,7 @@ pub struct RequestContextResolver {
     workspace_root: PathBuf,
     code_intelligence: Option<CodeIntelligenceService>,
     writable_memory: Option<crate::WritableMemoryStore>,
+    repository_context: bool,
 }
 
 impl std::fmt::Debug for RequestContextResolver {
@@ -89,6 +90,7 @@ impl std::fmt::Debug for RequestContextResolver {
                 "code_intelligence",
                 &self.code_intelligence.as_ref().map(|_| "shared"),
             )
+            .field("repository_context", &self.repository_context)
             .field("writable_memory", &self.writable_memory.is_some())
             .finish()
     }
@@ -104,12 +106,21 @@ impl RequestContextResolver {
             workspace_root,
             code_intelligence,
             writable_memory: None,
+            repository_context: true,
         }
     }
 
     #[must_use]
     pub(crate) fn with_writable_memory(mut self, store: crate::WritableMemoryStore) -> Self {
         self.writable_memory = Some(store);
+        self
+    }
+
+    /// Selects repository retrieval independently of language-server and memory context.
+    /// Disabled repository context never falls back to a filesystem scan.
+    #[must_use]
+    pub fn with_repository_context(mut self, enabled: bool) -> Self {
+        self.repository_context = enabled;
         self
     }
 
@@ -132,7 +143,11 @@ impl RequestContextResolver {
     /// cannot complete. A missing, stale, timed-out, or unrelated LSP cache is normal fallback.
     pub async fn resolve(&self, query: &str) -> Result<RuntimeContextCandidates> {
         let query = query.trim();
-        if query.is_empty() {
+        if query.is_empty()
+            || (!self.repository_context
+                && self.code_intelligence.is_none()
+                && self.writable_memory.is_none())
+        {
             return Ok(RuntimeContextCandidates::default());
         }
         let snapshot = if let Some(service) = self.code_intelligence.as_ref() {
@@ -148,10 +163,20 @@ impl RequestContextResolver {
         };
         let workspace_root = self.workspace_root.clone();
         let writable_memory = self.writable_memory.clone();
+        let repository_context = self.repository_context;
+        let language_server_context = self.code_intelligence.is_some();
         let query = query.to_owned();
         tokio::task::spawn_blocking(move || {
-            let mut candidates =
-                context_candidates_from_safe_sources(&workspace_root, &query, Some(&snapshot))?;
+            let mut candidates = if repository_context {
+                context_candidates_from_safe_sources(&workspace_root, &query, Some(&snapshot))?
+            } else if language_server_context {
+                collect_context_from_source_provider(
+                    &WarmLspContextProvider::new(Some(snapshot)),
+                    &ContextSourceRequest::new(&workspace_root, &query),
+                )?
+            } else {
+                RuntimeContextCandidates::default()
+            };
             if let Some(store) = writable_memory {
                 candidates.extend(store.retrieve_context(&query)?);
             }

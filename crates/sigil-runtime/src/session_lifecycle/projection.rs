@@ -327,6 +327,22 @@ impl SessionCatalogProjectionService {
         &self.database_path
     }
 
+    /// Resolves a catalog reference using this owner's declared source roots without replaying
+    /// its JSONL. Direct sources retain the configured root spelling used by existing navigation
+    /// state; managed sources retain their resolved physical key. This is a navigation path only;
+    /// reopen and mutation still revalidate the source and produce canonical bindings.
+    ///
+    /// Returns an error for unsafe references or source directories.
+    pub fn session_source_path(&self, session_ref: &SessionRef) -> anyhow::Result<PathBuf> {
+        let source_path = self.lifecycle.session_source_path(session_ref)?;
+        if let Ok(direct_root) = fs::canonicalize(&self.lifecycle.session_dir)
+            && source_path == session_ref.resolve(&direct_root)
+        {
+            return Ok(session_ref.resolve(&self.lifecycle.session_dir));
+        }
+        Ok(source_path)
+    }
+
     /// Revalidates one ready catalog identity and returns its exact canonical durable path.
     pub fn resolve_session_for_reopen(
         &self,

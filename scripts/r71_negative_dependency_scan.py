@@ -34,6 +34,7 @@ PHYSICAL_IMPORT_ALLOWLIST = {
         "crates/sigil-runtime/src/managed_resource_adapters.rs",
         "crates/sigil-runtime/src/managed_storage_writer.rs",
         "crates/sigil-runtime/src/r71_authority_composition.rs",
+        "crates/sigil-runtime/src/r71_authority_composition/bootstrap_predecessor.rs",
         "crates/sigil-runtime/src/r71_global_cutover.rs",
         "crates/sigil-runtime/src/session_scratch.rs",
         "crates/sigil-runtime/src/doctor.rs",

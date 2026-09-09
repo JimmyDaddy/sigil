@@ -1,47 +1,171 @@
 //! Durable-session adapter for the transport-neutral application projection.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 
 use futures::future::BoxFuture;
 use sigil_application::{
     APPLICATION_CONTRACT_SCHEMA_VERSION, AgentSurfaceProjection, ApplicationError,
-    ApplicationEvent, ApplicationEventEnvelope, ApplicationFrontier, ApplicationInstanceId,
-    ApplicationProjection, ApplicationQueueItemKind, ApplicationQueueItemProjection,
-    ApplicationQueueSurfaceProjection, ApplicationQueueTarget, ApplicationScope,
-    ApplicationTerminalTaskProjection, AttentionSurfaceProjection, CapabilitySurfaceProjection,
-    ConfigurationSurfaceProjection, ConversationSurfaceProjection, OpenProjectionRequest,
-    PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem, ProjectionPage,
-    ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
+    ApplicationFrontier, ApplicationInstanceId, ApplicationProjection, ApplicationQueueItemKind,
+    ApplicationQueueItemProjection, ApplicationQueueSurfaceProjection, ApplicationQueueTarget,
+    ApplicationScope, ApplicationTerminalTaskProjection, AttentionSurfaceProjection,
+    CapabilitySurfaceProjection, ConfigurationSurfaceProjection, ConversationSurfaceProjection,
+    OpenProjectionRequest, PageDirection, PlanTaskSurfaceProjection, ProjectionFeedItem,
+    ProjectionPage, ProjectionPageRequest, ProjectionSnapshot, ProjectionSnapshotEnvelope,
     ResourceRecoverySurfaceContractV1, RunSurfaceProjection, SafeText, SessionItemId,
     SessionScopeId, SessionSurfaceProjection, StablePageCursor, TerminalSurfaceProjection,
     UserInputSurfaceProjection,
 };
 use sigil_kernel::{
     ControlEntry, ConversationQueueDurableProjection, DurableEventType, JsonlSessionStore,
-    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1,
-    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder, PublicRunEventKind, SessionLogEntry,
+    PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+    PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1, PublicEventOutboxRecorder,
+    PublicRunEventKind, SessionLogEntry, SessionRecordReadHandle, SessionStreamRecord,
     TerminalReadinessStatus, TerminalTaskProjection,
 };
 
-use crate::application_run::{
-    application_run_context_view, application_session_frontier_view,
-    application_session_transcript_page,
-};
+const MAX_PROJECTION_RANGE_BYTES: usize = 4 * 1024 * 1024;
 
-const MAX_PROJECTION_FEED_ITEMS: usize = 256;
+mod message_content;
+mod read_model;
+pub use read_model::ProjectionReadMetrics;
+use read_model::{ProjectionRecordCache, corrupt, unavailable};
 
-type ProjectionBuild = (
-    ProjectionSnapshotEnvelope,
-    Vec<sigil_kernel::SessionStreamRecord>,
-    Vec<(u64, PublicEventOutboxEntryV1)>,
-);
+/// Canonical display inputs; all durable reads remain bound to the session owner.
+pub struct ConversationDisplayQuery<'a> {
+    pub expected_session_scope_id: &'a str,
+    pub cursor: Option<&'a str>,
+    pub limit: usize,
+    pub current_workspace_snapshot_id: Option<&'a str>,
+    pub artifact_store: Option<&'a sigil_kernel::ToolArtifactStore>,
+}
+
+/// One attachment owns one incremental state and a single catch-up boundary. Clones share it.
+#[derive(Debug, Clone)]
+pub struct RuntimeSessionProjectionOwner {
+    reader: SessionRecordReadHandle,
+    delivery_recorder: Option<PublicEventOutboxRecorder>,
+    cache: Arc<Mutex<ProjectionRecordCache>>,
+    observations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RuntimeSessionProjectionOwner {
+    #[must_use]
+    pub fn from_store(store: &JsonlSessionStore) -> Self {
+        let mut owner = Self::from_read_handle(store.read_handle());
+        owner.delivery_recorder = Some(PublicEventOutboxRecorder::new(store.clone()));
+        owner
+    }
+    /// Creates a read-only attachment. This handle cannot issue ACKs or recover a writer.
+    #[must_use]
+    pub fn from_read_handle(reader: SessionRecordReadHandle) -> Self {
+        Self {
+            reader,
+            delivery_recorder: None,
+            cache: Arc::new(Mutex::new(ProjectionRecordCache::default())),
+            observations: Arc::default(),
+        }
+    }
+    #[must_use]
+    pub fn pending_observations(&self) -> usize {
+        self.observations.load(std::sync::atomic::Ordering::Acquire)
+    }
+    #[must_use]
+    pub fn read_handle(&self) -> SessionRecordReadHandle {
+        self.reader.clone()
+    }
+    pub fn metrics(&self) -> Result<ProjectionReadMetrics, ApplicationError> {
+        Ok(self.cache.lock().map_err(unavailable)?.metrics)
+    }
+    /// Reads one renderer-safe page through this session owner's shared incremental index.
+    pub fn transcript_page(
+        &self,
+        expected_session_scope_id: &str,
+        before: Option<u64>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<crate::application_run::ApplicationTranscriptPage, ApplicationError> {
+        if limit == 0
+            || limit > crate::application_run::MAX_APPLICATION_TRANSCRIPT_PAGE_SIZE
+            || before == Some(0)
+        {
+            return Err(ApplicationError::InvalidRequest(
+                "invalid transcript page bounds".into(),
+            ));
+        }
+        let mut state = self.state(budget)?;
+        if state.session_id.as_deref() != Some(expected_session_scope_id) {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let sequence = state.sequence;
+        state.transcript_page(self, sequence, before, limit, budget)
+    }
+    /// Reads the formal Desktop display, including Plan/Task/input summaries, from the same index.
+    pub fn conversation_display_page(
+        &self,
+        request: ConversationDisplayQuery<'_>,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<
+        crate::conversation_display::ConversationDisplayPageV1,
+        crate::conversation_display::ConversationDisplayProjectionError,
+    > {
+        let mut state = self.state(budget).map_err(
+            crate::conversation_display::ConversationDisplayProjectionError::from_application,
+        )?;
+        if state.session_id.as_deref() != Some(request.expected_session_scope_id) {
+            return Err(anyhow::anyhow!("conversation display session scope mismatch").into());
+        }
+        state.display_page(self, request, budget)
+    }
+    fn state(
+        &self,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<std::sync::MutexGuard<'_, ProjectionRecordCache>, ApplicationError> {
+        loop {
+            budget.check().map_err(unavailable)?;
+            match self.cache.try_lock() {
+                Ok(mut state) => {
+                    if let Some(error) = &state.permanent_error {
+                        return Err(error.clone());
+                    }
+                    if let Err(error) = state.synchronize(self, budget) {
+                        if matches!(
+                            error,
+                            ApplicationError::ResetRequired
+                                | ApplicationError::ScopeMismatch
+                                | ApplicationError::CorruptProjection(_)
+                        ) {
+                            let metrics = state.metrics;
+                            *state = ProjectionRecordCache::default();
+                            state.metrics = metrics;
+                            state.permanent_error = Some(error.clone());
+                        }
+                        return Err(error);
+                    }
+                    return Ok(state);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(2))
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(ApplicationError::Unavailable);
+                }
+            }
+        }
+    }
+}
 
 /// Runtime-owned binding used to construct an application projection without exposing its durable
 /// paths to the application contract or renderer.
 #[derive(Debug, Clone)]
 pub struct RuntimeSessionProjectionBinding {
     config_path: PathBuf,
-    launch_cwd: PathBuf,
+    _launch_cwd: PathBuf,
+    #[cfg_attr(not(test), allow(dead_code))]
     session_path: PathBuf,
     expected_session_scope_id: String,
     scope: ApplicationScope,
@@ -49,6 +173,18 @@ pub struct RuntimeSessionProjectionBinding {
     stream_generation: u64,
     observer_generation: u64,
     source_generation: u64,
+    owner: Option<RuntimeSessionProjectionOwner>,
+    configuration: Arc<Mutex<Option<QueryConfiguration>>>,
+}
+
+#[derive(Debug)]
+struct QueryConfiguration {
+    source: read_model::SourceIdentity,
+    modified: Option<SystemTime>,
+    length: u64,
+    route_revision: u64,
+    model_name: String,
+    recovery_required: bool,
 }
 
 impl RuntimeSessionProjectionBinding {
@@ -84,7 +220,7 @@ impl RuntimeSessionProjectionBinding {
         }
         Ok(Self {
             config_path,
-            launch_cwd,
+            _launch_cwd: launch_cwd,
             session_path,
             expected_session_scope_id,
             scope,
@@ -92,119 +228,152 @@ impl RuntimeSessionProjectionBinding {
             stream_generation,
             observer_generation,
             source_generation,
+            owner: None,
+            configuration: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Attaches capabilities explicitly transferred by this session's host owner.
+    ///
+    /// Every snapshot still validates its durable session identity. A missing or failed owned
+    /// read never falls back to a path-based observer, and detached bindings cannot append ACKs.
+    #[must_use]
+    pub fn with_owner(mut self, owner: RuntimeSessionProjectionOwner) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn scope(&self) -> &ApplicationScope {
         &self.scope
     }
 
-    fn current_frontier(&self) -> Result<ApplicationFrontier, ApplicationError> {
-        let view =
-            application_session_frontier_view(&self.session_path, &self.expected_session_scope_id)
-                .map_err(|_| ApplicationError::Unavailable)?;
-        Ok(ApplicationFrontier {
+    pub fn read_handle(&self) -> Result<SessionRecordReadHandle, ApplicationError> {
+        self.owner
+            .as_ref()
+            .map(RuntimeSessionProjectionOwner::read_handle)
+            .ok_or(ApplicationError::Unavailable)
+    }
+    #[must_use]
+    pub fn pending_observations(&self) -> usize {
+        self.owner
+            .as_ref()
+            .map_or(0, RuntimeSessionProjectionOwner::pending_observations)
+    }
+    fn observation_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.owner
+            .as_ref()
+            .map(|owner| Arc::clone(&owner.observations))
+            .unwrap_or_default()
+    }
+    fn frontier(&self, sequence: u64) -> ApplicationFrontier {
+        ApplicationFrontier {
             schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
             scope: self.scope.clone(),
             writer_generation: self.writer_generation,
             stream_generation: self.stream_generation,
-            through_sequence: view.through_stream_sequence,
-            durable_cursor: format!("session-stream:{}", view.through_stream_sequence),
-        })
+            through_sequence: sequence,
+            durable_cursor: format!("session-stream:{sequence}"),
+        }
     }
-
-    fn build_projection(&self) -> Result<ProjectionBuild, ApplicationError> {
-        let records = JsonlSessionStore::read_event_records(&self.session_path)
-            .map_err(|_| ApplicationError::Unavailable)?;
-        let actual_session_scope_id = records
-            .first()
-            .map(|record| record.session_id())
-            .ok_or(ApplicationError::Unavailable)?;
-        if actual_session_scope_id != self.expected_session_scope_id
-            || records
-                .iter()
-                .any(|record| record.session_id() != self.expected_session_scope_id)
+    fn validate_frontier(
+        &self,
+        frontier: &ApplicationFrontier,
+        sequence: u64,
+    ) -> Result<(), ApplicationError> {
+        if frontier.scope != self.scope
+            || frontier.writer_generation != self.writer_generation
+            || frontier.stream_generation != self.stream_generation
+            || frontier.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION
         {
             return Err(ApplicationError::ScopeMismatch);
         }
-        let last_sequence = records
-            .last()
-            .map(sigil_kernel::SessionStreamRecord::stream_sequence)
+        if frontier.through_sequence == 0
+            || frontier.through_sequence > sequence
+            || frontier.durable_cursor != format!("session-stream:{}", frontier.through_sequence)
+        {
+            return Err(ApplicationError::ResetRequired);
+        }
+        Ok(())
+    }
+    fn configuration(
+        &self,
+        state: &ProjectionRecordCache,
+    ) -> Result<(String, bool), ApplicationError> {
+        let metadata = std::fs::metadata(&self.config_path).map_err(unavailable)?;
+        let source = read_model::SourceIdentity::from_metadata(&metadata);
+        let mut cached = self.configuration.lock().map_err(unavailable)?;
+        if let Some(config) = cached.as_ref()
+            && config.source == source
+            && config.modified == metadata.modified().ok()
+            && config.length == metadata.len()
+            && config.route_revision == state.route_revision
+        {
+            return Ok((config.model_name.clone(), config.recovery_required));
+        }
+        let root = sigil_kernel::RootConfig::load(&self.config_path)
+            .map_err(unavailable)?
+            .with_effective_composition()
+            .map_err(unavailable)?;
+        let route = crate::application_run::application_session_route(&state.route_entries)
             .ok_or(ApplicationError::Unavailable)?;
-        let frontier = ApplicationFrontier {
-            schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
-            scope: self.scope.clone(),
-            writer_generation: self.writer_generation,
-            stream_generation: self.stream_generation,
-            through_sequence: last_sequence,
-            durable_cursor: format!("session-stream:{last_sequence}"),
+        let config =
+            crate::provider_connections::ResolvedRouteConfigSnapshot::from_root_config(&root);
+        let planned = crate::provider_connections::plan_session_route_resume(
+            &config,
+            &crate::provider_connections::SessionRouteResumeInput {
+                route: route.clone(),
+                egress_trust_binding:
+                    crate::application_run::application_session_route_trust_binding(
+                        &state.route_entries,
+                    ),
+            },
+        );
+        let (model_name, route_recovery) = match planned {
+            crate::provider_connections::SessionRouteResumePlan::Exact { route, .. } => {
+                (route.model_ref.model_id, false)
+            }
+            crate::provider_connections::SessionRouteResumePlan::RebindCurrentModel {
+                target_route,
+                ..
+            } => (target_route.model_ref.model_id, false),
+            crate::provider_connections::SessionRouteResumePlan::NeedsConfirmation {
+                target_route,
+                ..
+            } => (target_route.model_ref.model_id, true),
+            _ => (route.model_ref.model_id, true),
         };
-        let context = application_run_context_view(
-            &self.config_path,
-            &self.launch_cwd,
-            &self.session_path,
-            &self.expected_session_scope_id,
-        )
-        .map_err(|_| ApplicationError::Unavailable)?;
-        let transcript = application_session_transcript_page(
-            &self.session_path,
-            &self.expected_session_scope_id,
-            None,
-            1,
-        )
-        .map_err(|_| ApplicationError::Unavailable)?;
-        let public_events =
-            PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
-                ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
-            })?;
-        let public_stream_events = records
-            .iter()
-            .filter(|record| {
-                record.stored_event().event_kind()
-                    == Some(sigil_kernel::DurableEventType::PublicEventOutbox)
-            })
-            .map(|record| {
-                let entry = serde_json::from_value::<PublicEventOutboxEntryV1>(
-                    record.stored_event().payload.clone(),
-                )
-                .map_err(|_| {
-                    ApplicationError::CorruptProjection(
-                        "invalid public event outbox payload".to_owned(),
-                    )
-                })?;
-                if public_events.entry(&entry.public_event_id).is_none() {
-                    return Err(ApplicationError::CorruptProjection(
-                        "public event outbox projection lost its entry".to_owned(),
-                    ));
-                }
-                Ok((record.stream_sequence(), entry))
-            })
-            .collect::<Result<Vec<_>, ApplicationError>>()?;
-        let events = public_stream_events
-            .iter()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let revision_waiting_public_event_ids =
-            revision_waiting_public_event_ids(&records, &public_events)?;
-        let route_recovery = context.route_recovery.as_ref();
-        let event_state =
-            ProjectionEventState::from_events(&events, &revision_waiting_public_event_ids);
-        let status = route_recovery
-            .map(|_| "recovery-required")
-            .unwrap_or(event_state.run_status);
-        let latest_message = transcript
-            .messages
-            .last()
-            .and_then(|message| message.content.as_deref())
-            .unwrap_or("No messages yet");
-        let queue = ConversationQueueDurableProjection::from_records(&records).map_err(|_| {
-            ApplicationError::CorruptProjection("invalid conversation queue projection".to_owned())
-        })?;
-        let terminal = terminal_surface_projection(&records)?;
+        *cached = Some(QueryConfiguration {
+            source,
+            modified: metadata.modified().ok(),
+            length: metadata.len(),
+            route_revision: state.route_revision,
+            model_name: model_name.clone(),
+            recovery_required: route_recovery,
+        });
+        Ok((model_name, route_recovery))
+    }
+    fn envelope(
+        &self,
+        state: &ProjectionRecordCache,
+    ) -> Result<ProjectionSnapshotEnvelope, ApplicationError> {
+        if state.session_id.as_deref() != Some(&self.expected_session_scope_id) {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let frontier = self.frontier(state.sequence);
+        let (model_name, route_recovery) = self.configuration(state)?;
+        let event_state = state.event_state.clone();
+        let status = if route_recovery {
+            "recovery-required"
+        } else {
+            event_state.run_status
+        };
+        let latest_message = state.latest_message.as_deref().unwrap_or("No messages yet");
+        let queue = &state.queue;
+        let terminal = terminal_surface_from_projection(&state.terminal)?;
         let queue_revision = queue.current_revision();
         let queue_next_dispatchable = queue.queue.next_dispatchable.clone();
         let queue_paused = queue.queue.paused;
-        let queue_items = queue.queue.items;
+        let queue_items = queue.queue.items.clone();
         let queue = ApplicationQueueSurfaceProjection {
             generation: sigil_application::queue_generation(
                 queue_revision.stream_sequence,
@@ -245,7 +414,7 @@ impl RuntimeSessionProjectionBinding {
                 status: safe_text(status)?,
             },
             conversation: ConversationSurfaceProjection {
-                message_count: transcript.total_messages,
+                message_count: state.transcript.len() as u64,
                 latest_message: Some(safe_text(latest_message)?),
             },
             run: RunSurfaceProjection {
@@ -271,13 +440,13 @@ impl RuntimeSessionProjectionBinding {
                 prompt: event_state.user_input_prompt,
             },
             capabilities: CapabilitySurfaceProjection {
-                can_submit: route_recovery.is_none() && !event_state.run_active,
+                can_submit: !route_recovery && !event_state.run_active,
                 can_cancel: event_state.run_active,
                 can_configure: true,
             },
             configuration: ConfigurationSurfaceProjection {
                 persisted_revision: 0,
-                selected_route: Some(safe_text(&context.model_name)?),
+                selected_route: Some(safe_text(&model_name)?),
                 dirty: false,
             },
             attention: AttentionSurfaceProjection {
@@ -295,158 +464,60 @@ impl RuntimeSessionProjectionBinding {
             cut: frontier,
             projection,
         };
-        Ok((envelope, records, public_stream_events))
+        Ok(envelope)
     }
-
+    #[cfg(test)]
     fn build_snapshot(
         &self,
-        resume_from: Option<ApplicationFrontier>,
+        resume: Option<ApplicationFrontier>,
     ) -> Result<ProjectionSnapshot, ApplicationError> {
-        let (current, records, public_events) = self.build_projection()?;
-        let Some(resume_from) = resume_from else {
-            return Ok(ProjectionSnapshot {
-                envelope: current,
-                feed: Vec::new(),
-            });
-        };
-        if resume_from.scope != self.scope
-            || resume_from.writer_generation != self.writer_generation
-            || resume_from.stream_generation != self.stream_generation
-        {
-            return Err(ApplicationError::ResetRequired);
+        self.snapshot_with_budget(resume, &sigil_kernel::SessionReadBudget::default())
+    }
+    fn snapshot_with_budget(
+        &self,
+        resume: Option<ApplicationFrontier>,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<ProjectionSnapshot, ApplicationError> {
+        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let state = owner.state(budget)?;
+        if let Some(frontier) = &resume {
+            self.validate_frontier(frontier, state.sequence)?;
         }
-        if resume_from.through_sequence > current.cut.through_sequence {
-            return Err(ApplicationError::ResetRequired);
-        }
-        if resume_from.through_sequence > 0
-            && !records
-                .iter()
-                .any(|record| record.stream_sequence() == resume_from.through_sequence)
-        {
-            return Err(ApplicationError::ResetRequired);
-        }
-
-        let all_public = public_events
-            .iter()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let public_outbox =
-            PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
-                ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
-            })?;
-        let revision_waiting_public_event_ids =
-            revision_waiting_public_event_ids(&records, &public_outbox)?;
-        let prefix_public = public_events
-            .iter()
-            .filter(|(sequence, _)| *sequence <= resume_from.through_sequence)
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let mut base_projection = current.projection.clone();
-        let base_state =
-            ProjectionEventState::from_events(&prefix_public, &revision_waiting_public_event_ids);
-        apply_projection_event_state(&mut base_projection, &base_state)?;
-        let prefix_records = records
-            .iter()
-            .filter(|record| record.stream_sequence() <= resume_from.through_sequence)
-            .cloned()
-            .collect::<Vec<_>>();
-        base_projection.terminal = terminal_surface_projection(&prefix_records)?;
-        base_projection.frontier = resume_from.clone();
-        let mut base = ProjectionSnapshotEnvelope {
-            schema_version: current.schema_version,
-            scope: current.scope.clone(),
-            writer_generation: current.writer_generation,
-            stream_generation: current.stream_generation,
-            observer_generation: current.observer_generation,
-            cut: resume_from,
-            projection: base_projection,
-        };
-        base.validate()?;
-
-        let mut feed = Vec::new();
-        let mut public_index = prefix_public.len();
-        let resume_sequence = base.cut.through_sequence;
-        for record in records
-            .iter()
-            .filter(|record| record.stream_sequence() > resume_sequence)
-        {
-            if feed.len() == MAX_PROJECTION_FEED_ITEMS {
-                return Ok(ProjectionSnapshot {
-                    envelope: base,
-                    feed: vec![ProjectionFeedItem::ResetRequired {
-                        reason: "projection-feed-overflow",
-                    }],
-                });
-            }
-            let expected_sequence = base.cut.through_sequence.saturating_add(1);
-            if record.stream_sequence() != expected_sequence {
-                return Ok(ProjectionSnapshot {
-                    envelope: base,
-                    feed: vec![ProjectionFeedItem::Gap {
-                        expected: expected_sequence,
-                        observed: record.stream_sequence(),
-                    }],
-                });
-            }
-            if public_index < all_public.len()
-                && public_events[public_index].0 == record.stream_sequence()
-            {
-                public_index += 1;
-            }
-            let state = ProjectionEventState::from_events(
-                &all_public[..public_index],
-                &revision_waiting_public_event_ids,
-            );
-            let mut next_projection = base.projection.clone();
-            apply_projection_event_state(&mut next_projection, &state)?;
-            let through_records = records
-                .iter()
-                .filter(|candidate| candidate.stream_sequence() <= record.stream_sequence())
-                .cloned()
-                .collect::<Vec<_>>();
-            next_projection.terminal = terminal_surface_projection(&through_records)?;
-            let next_frontier = ApplicationFrontier {
-                through_sequence: record.stream_sequence(),
-                durable_cursor: format!("session-stream:{}", record.stream_sequence()),
-                ..base.cut.clone()
-            };
-            next_projection.frontier = next_frontier.clone();
-            let payload = ApplicationEvent::ProjectionReplaced(Box::new(next_projection.clone()));
-            let event = ApplicationEventEnvelope {
-                schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
-                scope: self.scope.clone(),
-                writer_generation: self.writer_generation,
-                stream_generation: self.stream_generation,
-                observer_generation: self.observer_generation,
-                event_id: format!(
-                    "application-stream:{}:{}",
-                    record.stream_sequence(),
-                    record.event_id()
-                ),
-                base_frontier: base.cut.clone(),
-                next_frontier: next_frontier.clone(),
-                payload_digest: sigil_application::event_payload_digest(&payload)?,
-                payload,
-            };
-            feed.push(ProjectionFeedItem::Event(Box::new(event)));
-            base.cut = next_frontier;
-            base.projection = next_projection;
-        }
+        let envelope = self.envelope(&state)?;
         Ok(ProjectionSnapshot {
-            envelope: base,
-            feed,
+            envelope,
+            feed: if resume.is_some() {
+                vec![ProjectionFeedItem::CurrentState]
+            } else {
+                Vec::new()
+            },
         })
     }
-
+    #[cfg(test)]
     fn page_sync(
         &self,
         request: ProjectionPageRequest,
     ) -> Result<ProjectionPage, ApplicationError> {
+        self.page_with_budget(request, &sigil_kernel::SessionReadBudget::default())
+    }
+    fn page_with_budget(
+        &self,
+        request: ProjectionPageRequest,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<ProjectionPage, ApplicationError> {
         if request.scope != self.scope || request.source_generation != self.source_generation {
             return Err(ApplicationError::ScopeMismatch);
         }
-        if request.at_frontier != self.current_frontier()? {
-            return Err(ApplicationError::ResetRequired);
+        if request.limit.get() > sigil_application::MAX_PAGE_ITEMS {
+            return Err(ApplicationError::InvalidRequest(
+                "page limit exceeds bound".into(),
+            ));
+        }
+        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let mut state = owner.state(budget)?;
+        self.validate_frontier(&request.at_frontier, state.sequence)?;
+        if state.session_id.as_deref() != Some(&self.expected_session_scope_id) {
+            return Err(ApplicationError::ScopeMismatch);
         }
         if request.direction != PageDirection::Older {
             return Err(ApplicationError::ResetRequired);
@@ -457,40 +528,40 @@ impl RuntimeSessionProjectionBinding {
             .as_ref()
             .map(parse_before_cursor)
             .transpose()?;
-        let page = application_session_transcript_page(
-            &self.session_path,
-            &self.expected_session_scope_id,
+        let page = state.transcript_page(
+            owner,
+            request.at_frontier.through_sequence,
             before,
             request.limit.get(),
-        )
-        .map_err(|_| ApplicationError::Unavailable)?;
+            budget,
+        )?;
         let items = page
             .messages
             .into_iter()
             .map(|message| {
-                let role = match message.role {
-                    crate::application_run::ApplicationTranscriptRole::User => "user",
-                    crate::application_run::ApplicationTranscriptRole::Assistant => "assistant",
-                    crate::application_run::ApplicationTranscriptRole::Tool => "tool",
-                };
-                let item_id = SessionItemId::new(message.message_id)?;
-                let text = message
-                    .content
-                    .map(|content| safe_text(&content))
-                    .transpose()?;
                 Ok(sigil_application::RendererSafeItem {
-                    item_id,
+                    item_id: SessionItemId::new(message.message_id)?,
                     ordinal: message.ordinal,
-                    role: role.to_owned(),
-                    text,
+                    role: match message.role {
+                        crate::application_run::ApplicationTranscriptRole::User => "user",
+                        crate::application_run::ApplicationTranscriptRole::Assistant => "assistant",
+                        crate::application_run::ApplicationTranscriptRole::Tool => "tool",
+                    }
+                    .into(),
+                    text: message
+                        .content
+                        .as_deref()
+                        .filter(|content| !content.is_empty())
+                        .map(safe_text)
+                        .transpose()?,
                     estimated_height: 1,
                 })
             })
             .collect::<Result<Vec<_>, ApplicationError>>()?;
-        let before = page.next_before.map(|ordinal| {
-            StablePageCursor::new(format!("before:{ordinal}"))
-                .expect("generated before cursor is bounded and non-empty")
-        });
+        let before = page
+            .next_before
+            .map(|ordinal| StablePageCursor::new(format!("before:{ordinal}")))
+            .transpose()?;
         Ok(ProjectionPage {
             request_id: request.request_id,
             scope: request.scope,
@@ -503,129 +574,101 @@ impl RuntimeSessionProjectionBinding {
             items,
         })
     }
-
-    fn acknowledge_tui_public_outbox_through_sync(
+    fn acknowledge_with_budget(
         &self,
+        event_ids: &[String],
         frontier: &ApplicationFrontier,
+        budget: &sigil_kernel::SessionReadBudget,
     ) -> Result<usize, ApplicationError> {
-        if frontier.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION
-            || frontier.scope != self.scope
-            || frontier.writer_generation != self.writer_generation
-            || frontier.stream_generation != self.stream_generation
-        {
-            return Err(ApplicationError::ScopeMismatch);
-        }
-        if frontier.durable_cursor != format!("session-stream:{}", frontier.through_sequence) {
-            return Err(ApplicationError::ResetRequired);
-        }
-
-        let store = JsonlSessionStore::new(&self.session_path)
-            .map_err(|_| ApplicationError::Unavailable)?;
-        let records = store
-            .read_event_records_writer()
-            .map_err(|_| ApplicationError::Unavailable)?;
-        let first = records.first().ok_or(ApplicationError::Unavailable)?;
-        let last = records.last().ok_or(ApplicationError::Unavailable)?;
-        if first.session_id() != self.expected_session_scope_id
-            || records
-                .iter()
-                .any(|record| record.session_id() != self.expected_session_scope_id)
-        {
-            return Err(ApplicationError::ScopeMismatch);
-        }
-        if frontier.through_sequence < first.stream_sequence()
-            || frontier.through_sequence > last.stream_sequence()
-        {
-            return Err(ApplicationError::ResetRequired);
-        }
-
-        let outbox = PublicEventOutboxProjectionV1::from_records(&records).map_err(|_| {
-            ApplicationError::CorruptProjection("invalid public event outbox".to_owned())
-        })?;
-        let pending_ids = outbox
-            .pending_for_adapter("tui")
-            .into_iter()
-            .map(|entry| entry.public_event_id.as_str())
-            .collect::<BTreeSet<_>>();
-        let eligible_ids = records
-            .iter()
-            .filter(|record| record.stream_sequence() <= frontier.through_sequence)
-            .filter(|record| {
-                record.stored_event().event_kind() == Some(DurableEventType::PublicEventOutbox)
-            })
-            .map(|record| {
-                let entry = serde_json::from_value::<PublicEventOutboxEntryV1>(
-                    record.stored_event().payload.clone(),
-                )
-                .map_err(|_| {
-                    ApplicationError::CorruptProjection(
-                        "invalid public event outbox payload".to_owned(),
-                    )
-                })?;
-                let Some(projected) = outbox.entry(&entry.public_event_id) else {
-                    return Err(ApplicationError::CorruptProjection(
-                        "public event outbox projection lost its entry".to_owned(),
-                    ));
-                };
-                let projected_payload = serde_json::to_vec(projected).map_err(|_| {
-                    ApplicationError::CorruptProjection(
-                        "public event outbox projection could not validate its payload".to_owned(),
-                    )
-                })?;
-                let durable_payload = serde_json::to_vec(&entry).map_err(|_| {
-                    ApplicationError::CorruptProjection(
-                        "public event outbox payload could not be validated".to_owned(),
-                    )
-                })?;
-                if projected_payload != durable_payload {
-                    return Err(ApplicationError::CorruptProjection(
-                        "public event outbox projection entry differs from durable payload"
-                            .to_owned(),
-                    ));
-                }
-                Ok(entry.public_event_id)
-            })
-            .collect::<Result<BTreeSet<_>, ApplicationError>>()?;
-        let recorder = PublicEventOutboxRecorder::new(store);
-        let delivered_at_unix_ms = crate::current_unix_time_ms();
-        let mut acknowledged = 0usize;
-        for entry in outbox.events_in_order().into_iter().filter(|entry| {
-            pending_ids.contains(entry.public_event_id.as_str())
-                && eligible_ids.contains(entry.public_event_id.as_str())
-        }) {
-            if entry.event.session_id != self.expected_session_scope_id {
+        let owner = self.owner.as_ref().ok_or(ApplicationError::Unavailable)?;
+        let recorder = owner
+            .delivery_recorder
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let ids = {
+            let state = owner.state(budget)?;
+            self.validate_frontier(frontier, state.sequence)?;
+            if state.session_id.as_deref() != Some(&self.expected_session_scope_id) {
                 return Err(ApplicationError::ScopeMismatch);
             }
-            recorder
-                .append_delivery(&PublicEventDeliveryReceiptV1 {
+            let ids = event_ids.to_owned();
+            for id in &ids {
+                let index = *state
+                    .public_positions
+                    .get(id)
+                    .ok_or(ApplicationError::ResetRequired)?;
+                if state.public[index].1.sequence > frontier.through_sequence {
+                    return Err(ApplicationError::ResetRequired);
+                }
+            }
+            ids.into_iter()
+                .filter(|id| !state.delivery.was_delivered(id, "tui"))
+                .collect::<Vec<_>>()
+        };
+        let mut acknowledged = 0;
+        for batch in ids.chunks(PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS) {
+            budget.check().map_err(unavailable)?;
+            let receipts = batch
+                .iter()
+                .map(|id| PublicEventDeliveryReceiptV1 {
                     schema_version: PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-                    public_event_id: entry.public_event_id.clone(),
-                    adapter: "tui".to_owned(),
-                    delivered_at_unix_ms,
+                    public_event_id: id.clone(),
+                    adapter: "tui".into(),
+                    delivered_at_unix_ms: crate::current_unix_time_ms(),
                 })
-                .map_err(|_| ApplicationError::Unavailable)?;
-            acknowledged += 1;
+                .collect::<Vec<_>>();
+            acknowledged += recorder
+                .append_delivery_batch_with_budget(&receipts, budget)
+                .map_err(unavailable)?;
         }
         Ok(acknowledged)
     }
-
-    /// Acknowledges only the TUI-visible public outbox entries represented by one exact,
-    /// already-applied application projection cut. This is intentionally not a generic adapter
-    /// writer: it fixes the adapter identity and keeps durable writer policy in runtime.
-    pub async fn acknowledge_tui_public_outbox_through(
+    pub async fn acknowledge_tui_public_events(
         &self,
+        event_ids: &[String],
         frontier: &ApplicationFrontier,
     ) -> Result<usize, ApplicationError> {
         let binding = self.clone();
+        let ids = event_ids.to_owned();
         let frontier = frontier.clone();
-        tokio::task::spawn_blocking(move || {
-            binding.acknowledge_tui_public_outbox_through_sync(&frontier)
+        observation(binding.observation_counter(), move |budget| {
+            binding.acknowledge_with_budget(&ids, &frontier, &budget)
         })
         .await
-        .map_err(|_| ApplicationError::Unavailable)?
     }
 }
 
+struct ObservationGuard(sigil_kernel::SessionReadBudget);
+impl Drop for ObservationGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+struct PendingObservation(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for PendingObservation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+async fn observation<T: Send + 'static>(
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    work: impl FnOnce(sigil_kernel::SessionReadBudget) -> Result<T, ApplicationError> + Send + 'static,
+) -> Result<T, ApplicationError> {
+    let guard = ObservationGuard(sigil_kernel::SessionReadBudget::default());
+    let budget = guard.0.clone();
+    counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let pending = PendingObservation(counter);
+    let result = tokio::task::spawn_blocking(move || {
+        let _pending = pending;
+        work(budget)
+    })
+    .await
+    .map_err(unavailable)?;
+    drop(guard);
+    result
+}
+
+#[cfg(test)]
 fn terminal_surface_projection(
     records: &[sigil_kernel::SessionStreamRecord],
 ) -> Result<TerminalSurfaceProjection, ApplicationError> {
@@ -644,6 +687,12 @@ fn terminal_surface_projection(
     }
 
     let projection = TerminalTaskProjection::from_entries(&entries);
+    terminal_surface_from_projection(&projection)
+}
+
+fn terminal_surface_from_projection(
+    projection: &TerminalTaskProjection,
+) -> Result<TerminalSurfaceProjection, ApplicationError> {
     if projection.tasks.len() > sigil_application::MAX_TERMINAL_TASKS {
         return Err(ApplicationError::CorruptProjection(
             "terminal task projection exceeds application bound".to_owned(),
@@ -689,41 +738,6 @@ fn terminal_readiness_label(readiness: &TerminalReadinessStatus) -> &'static str
     }
 }
 
-/// Returns only the public events whose `RunAwaitingUserInput` payload is proven by the paired
-/// revision Waiting attempt. A public event kind is intentionally insufficient: root awaiting
-/// input remains a terminal conversation outcome.
-fn revision_waiting_public_event_ids(
-    records: &[sigil_kernel::SessionStreamRecord],
-    outbox: &PublicEventOutboxProjectionV1,
-) -> Result<BTreeSet<String>, ApplicationError> {
-    let mut waiting_domain_ids = BTreeSet::new();
-    for record in records {
-        let entry = record.session_log_entry().map_err(|_| {
-            ApplicationError::CorruptProjection("invalid plan-review waiting record".to_owned())
-        })?;
-        let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) = entry else {
-            continue;
-        };
-        if attempt.revision_request_id.is_some()
-            && attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
-        {
-            waiting_domain_ids.insert(record.event_id().to_owned());
-        }
-    }
-    Ok(outbox
-        .events_in_order()
-        .into_iter()
-        .filter(|entry| {
-            waiting_domain_ids.contains(&entry.domain_event_id)
-                && matches!(
-                    entry.event.event,
-                    PublicRunEventKind::RunAwaitingUserInput { .. }
-                )
-        })
-        .map(|entry| entry.public_event_id.clone())
-        .collect())
-}
-
 #[derive(Clone)]
 struct ProjectionEventState {
     run_status: &'static str,
@@ -743,40 +757,9 @@ struct ProjectionEventState {
     last_notice: Option<SafeText>,
 }
 
-fn apply_projection_event_state(
-    projection: &mut ApplicationProjection,
-    state: &ProjectionEventState,
-) -> Result<(), ApplicationError> {
-    let status = if projection.session.status.as_str() == "recovery-required" {
-        "recovery-required"
-    } else {
-        state.run_status
-    };
-    projection.session.status = safe_text(status)?;
-    projection.run.status = safe_text(status)?;
-    projection.run.active_binding = state.run_binding.clone();
-    projection.plan_task.status = safe_text(state.plan_status)?;
-    projection.plan_task.action_binding = state.plan_binding.clone();
-    projection.agents.active_count = state.active_agents;
-    projection.agents.summary = state.agent_summary.clone();
-    projection.approval.pending = state.approval_pending;
-    projection.approval.binding = state.approval_binding.clone();
-    projection.approval.summary = state.approval_summary.clone();
-    projection.user_input.pending = state.user_input_pending;
-    projection.user_input.binding = state.user_input_binding.clone();
-    projection.user_input.prompt = state.user_input_prompt.clone();
-    projection.capabilities.can_submit = status != "recovery-required" && !state.run_active;
-    projection.capabilities.can_cancel = state.run_active;
-    projection.attention.last_notice = state.last_notice.clone();
-    Ok(())
-}
-
 impl ProjectionEventState {
-    fn from_events(
-        events: &[&sigil_kernel::PublicEventOutboxEntryV1],
-        revision_waiting_public_event_ids: &BTreeSet<String>,
-    ) -> Self {
-        let mut state = Self {
+    fn new() -> Self {
+        Self {
             run_status: "idle",
             run_active: false,
             run_binding: None,
@@ -792,117 +775,125 @@ impl ProjectionEventState {
             user_input_prompt: None,
             revision_waiting_run_id: None,
             last_notice: None,
-        };
+        }
+    }
+    #[cfg(test)]
+    fn from_events(events: &[&PublicEventOutboxEntryV1], waiting: &BTreeSet<String>) -> Self {
+        let mut state = Self::new();
         for entry in events {
-            match &entry.event.event {
-                PublicRunEventKind::RunStarted { .. }
-                | PublicRunEventKind::TaskRunStarted { .. }
-                | PublicRunEventKind::TaskPhaseChanged { .. }
-                | PublicRunEventKind::TaskExecutionAdmitted { .. } => {
-                    state.run_status = "running";
-                    state.run_active = true;
-                    state.run_binding = Some(entry.run_id.clone());
-                    if state.revision_waiting_run_id.as_deref() == Some(&entry.run_id) {
-                        state.user_input_pending = false;
-                        state.user_input_binding = None;
-                        state.user_input_prompt = None;
-                        state.plan_status = "started";
-                        state.revision_waiting_run_id = None;
-                    }
-                }
-                PublicRunEventKind::RunFinished { .. }
-                | PublicRunEventKind::TaskRunFinished { .. }
-                | PublicRunEventKind::RunCancelled
-                | PublicRunEventKind::RunPaused { .. }
-                | PublicRunEventKind::RunInterrupted { .. }
-                | PublicRunEventKind::RunFailed { .. }
-                | PublicRunEventKind::RunBlocked { .. } => {
-                    state.run_status = match &entry.event.event {
-                        PublicRunEventKind::RunFinished { .. }
-                        | PublicRunEventKind::TaskRunFinished { .. } => "finished",
-                        PublicRunEventKind::RunCancelled => "cancelled",
-                        PublicRunEventKind::RunPaused { .. } => "paused",
-                        PublicRunEventKind::RunInterrupted { .. } => "interrupted",
-                        PublicRunEventKind::RunFailed { .. } => "failed",
-                        PublicRunEventKind::RunBlocked { .. } => "blocked",
-                        _ => unreachable!("terminal event classification is exhaustive"),
-                    };
-                    state.run_active = false;
-                    state.run_binding = None;
-                }
-                PublicRunEventKind::ApprovalRequested {
-                    approval_identity,
-                    safe_summary,
-                    ..
-                } => {
-                    state.approval_pending = true;
-                    state.approval_binding = Some(format!(
-                        "{}:{}:{}",
-                        approval_identity.run_id,
-                        approval_identity.call_id,
-                        approval_identity.approval_request_id
-                    ));
-                    state.approval_summary = safe_text(&safe_summary.title).ok();
-                }
-                PublicRunEventKind::ApprovalResolved { .. } => {
-                    state.approval_pending = false;
-                    state.approval_binding = None;
-                    state.approval_summary = None;
-                }
-                PublicRunEventKind::RunAwaitingUserInput {
-                    request_id,
-                    generation,
-                    request_hash,
-                } => {
-                    // A root AwaitingUserInput is terminal, while a revision Waiting pair is a
-                    // resumable attempt suspension. The exact PlanReviewAttempt/outbox pairing
-                    // selects the latter; the public event kind alone never decides it.
-                    state.run_status = "awaiting-user-input";
-                    state.run_active = false;
-                    state.run_binding = None;
-                    state.user_input_pending = true;
-                    state.user_input_binding =
-                        Some(format!("{request_id}:{generation}:{request_hash}"));
-                    if revision_waiting_public_event_ids.contains(&entry.public_event_id) {
-                        state.plan_status = "waiting-for-input";
-                        state.revision_waiting_run_id = Some(entry.run_id.clone());
-                    }
-                }
-                PublicRunEventKind::UserInputChanged {
-                    request_id,
-                    generation,
-                    request_hash,
-                    status,
-                    request,
-                } => {
-                    state.user_input_pending =
-                        !matches!(status, sigil_kernel::UserInputStatusV1::Resolved);
-                    state.user_input_binding = state
-                        .user_input_pending
-                        .then(|| format!("{request_id}:{generation}:{request_hash}"));
-                    state.user_input_prompt = state
-                        .user_input_pending
-                        .then(|| safe_text(&request.prompt).ok())
-                        .flatten();
-                }
-                PublicRunEventKind::Notice { message: text } => {
-                    state.last_notice = safe_text(text).ok();
-                }
-                PublicRunEventKind::TaskRoutingChanged { status, .. }
-                | PublicRunEventKind::IntegrationLaneChanged { status, .. } => {
-                    state.active_agents = 1;
-                    state.agent_summary = safe_text(status).ok().into_iter().collect();
-                }
-                PublicRunEventKind::PlanReviewChanged {
-                    plan_id, status, ..
-                } => {
-                    state.plan_status = plan_status_label(status);
-                    state.plan_binding = Some(plan_id.clone());
-                }
-                _ => {}
-            }
+            state.apply_event(entry, waiting.contains(&entry.public_event_id));
         }
         state
+    }
+    fn apply_event(&mut self, entry: &PublicEventOutboxEntryV1, revision_waiting: bool) {
+        let state = self;
+        match &entry.event.event {
+            PublicRunEventKind::RunStarted { .. }
+            | PublicRunEventKind::TaskRunStarted { .. }
+            | PublicRunEventKind::TaskPhaseChanged { .. }
+            | PublicRunEventKind::TaskExecutionAdmitted { .. } => {
+                state.run_status = "running";
+                state.run_active = true;
+                state.run_binding = Some(entry.run_id.clone());
+                if state.revision_waiting_run_id.as_deref() == Some(&entry.run_id) {
+                    state.user_input_pending = false;
+                    state.user_input_binding = None;
+                    state.user_input_prompt = None;
+                    state.plan_status = "started";
+                    state.revision_waiting_run_id = None;
+                }
+            }
+            PublicRunEventKind::RunFinished { .. }
+            | PublicRunEventKind::TaskRunFinished { .. }
+            | PublicRunEventKind::RunCancelled
+            | PublicRunEventKind::RunPaused { .. }
+            | PublicRunEventKind::RunInterrupted { .. }
+            | PublicRunEventKind::RunFailed { .. }
+            | PublicRunEventKind::RunBlocked { .. } => {
+                state.run_status = match &entry.event.event {
+                    PublicRunEventKind::RunFinished { .. }
+                    | PublicRunEventKind::TaskRunFinished { .. } => "finished",
+                    PublicRunEventKind::RunCancelled => "cancelled",
+                    PublicRunEventKind::RunPaused { .. } => "paused",
+                    PublicRunEventKind::RunInterrupted { .. } => "interrupted",
+                    PublicRunEventKind::RunFailed { .. } => "failed",
+                    PublicRunEventKind::RunBlocked { .. } => "blocked",
+                    _ => unreachable!("terminal event classification is exhaustive"),
+                };
+                state.run_active = false;
+                state.run_binding = None;
+            }
+            PublicRunEventKind::ApprovalRequested {
+                approval_identity,
+                safe_summary,
+                ..
+            } => {
+                state.approval_pending = true;
+                state.approval_binding = Some(format!(
+                    "{}:{}:{}",
+                    approval_identity.run_id,
+                    approval_identity.call_id,
+                    approval_identity.approval_request_id
+                ));
+                state.approval_summary = safe_text(&safe_summary.title).ok();
+            }
+            PublicRunEventKind::ApprovalResolved { .. } => {
+                state.approval_pending = false;
+                state.approval_binding = None;
+                state.approval_summary = None;
+            }
+            PublicRunEventKind::RunAwaitingUserInput {
+                request_id,
+                generation,
+                request_hash,
+            } => {
+                // A root AwaitingUserInput is terminal, while a revision Waiting pair is a
+                // resumable attempt suspension. The exact PlanReviewAttempt/outbox pairing
+                // selects the latter; the public event kind alone never decides it.
+                state.run_status = "awaiting-user-input";
+                state.run_active = false;
+                state.run_binding = None;
+                state.user_input_pending = true;
+                state.user_input_binding =
+                    Some(format!("{request_id}:{generation}:{request_hash}"));
+                if revision_waiting {
+                    state.plan_status = "waiting-for-input";
+                    state.revision_waiting_run_id = Some(entry.run_id.clone());
+                }
+            }
+            PublicRunEventKind::UserInputChanged {
+                request_id,
+                generation,
+                request_hash,
+                status,
+                request,
+            } => {
+                state.user_input_pending =
+                    !matches!(status, sigil_kernel::UserInputStatusV1::Resolved);
+                state.user_input_binding = state
+                    .user_input_pending
+                    .then(|| format!("{request_id}:{generation}:{request_hash}"));
+                state.user_input_prompt = state
+                    .user_input_pending
+                    .then(|| safe_text(&request.prompt).ok())
+                    .flatten();
+            }
+            PublicRunEventKind::Notice { message: text } => {
+                state.last_notice = safe_text(text).ok();
+            }
+            PublicRunEventKind::TaskRoutingChanged { status, .. }
+            | PublicRunEventKind::IntegrationLaneChanged { status, .. } => {
+                state.active_agents = 1;
+                state.agent_summary = safe_text(status).ok().into_iter().collect();
+            }
+            PublicRunEventKind::PlanReviewChanged {
+                plan_id, status, ..
+            } => {
+                state.plan_status = plan_status_label(status);
+                state.plan_binding = Some(plan_id.clone());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -923,6 +914,87 @@ fn plan_status_label(status: &sigil_kernel::PublicPlanReviewStatus) -> &'static 
 }
 
 impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBinding {
+    fn delivery_batch(
+        &self,
+        request: sigil_application::DurableDeliveryRequest,
+    ) -> BoxFuture<'static, Result<sigil_application::DurableDeliveryBatch, ApplicationError>> {
+        let binding = self.clone();
+        Box::pin(async move {
+            observation(binding.observation_counter(), move |budget| {
+                if request.observer_generation != binding.observer_generation {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                let owner = binding
+                    .owner
+                    .as_ref()
+                    .ok_or(ApplicationError::Unavailable)?;
+                let mut state = owner.state(&budget)?;
+                if state.session_id.as_deref() != Some(&binding.expected_session_scope_id) {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                binding.validate_frontier(&request.frontier, state.sequence)?;
+                if request.after_sequence > request.frontier.through_sequence {
+                    return Err(ApplicationError::ResetRequired);
+                }
+                let start = state
+                    .public
+                    .partition_point(|(_, position)| position.sequence <= request.after_sequence);
+                let end = state.public.partition_point(|(_, position)| {
+                    position.sequence <= request.frontier.through_sequence
+                });
+                let mut events = Vec::new();
+                let mut encoded = 0;
+                let mut raw = 0;
+                let mut next = start;
+                for index in start..end.min(start + 256) {
+                    budget.check().map_err(unavailable)?;
+                    let (id, position) = state.public[index].clone();
+                    if state.delivery.was_delivered(&id, "tui") {
+                        next = index + 1;
+                        continue;
+                    }
+                    if raw + position.end - position.offset > MAX_PROJECTION_RANGE_BYTES as u64 {
+                        break;
+                    }
+                    let record = state.read_position(owner, &position, &budget, false)?;
+                    raw += position.end - position.offset;
+                    let entry: PublicEventOutboxEntryV1 =
+                        serde_json::from_value(record.stored_event().payload.clone())
+                            .map_err(corrupt)?;
+                    if entry.public_event_id != id {
+                        return Err(ApplicationError::ResetRequired);
+                    }
+                    let bytes = serde_json::to_vec(&entry.event).map_err(corrupt)?.len();
+                    if encoded + bytes > 1024 * 1024 {
+                        break;
+                    }
+                    encoded += bytes;
+                    events.push(sigil_application::DurableDeliveryEvent {
+                        stream_sequence: position.sequence,
+                        public_event_id: id,
+                        payload_digest: entry.payload_digest,
+                        event: entry.event,
+                    });
+                    next = index + 1;
+                }
+                let has_more = next < end;
+                let through_sequence = if has_more {
+                    next.checked_sub(1)
+                        .map(|index| state.public[index].1.sequence)
+                        .unwrap_or(request.after_sequence)
+                } else {
+                    request.frontier.through_sequence
+                };
+                Ok(sigil_application::DurableDeliveryBatch {
+                    request,
+                    through_sequence,
+                    events,
+                    has_more,
+                })
+            })
+            .await
+        })
+    }
     fn open_projection(
         &self,
         request: OpenProjectionRequest,
@@ -934,15 +1006,12 @@ impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBindi
             {
                 return Err(ApplicationError::ScopeMismatch);
             }
-            tokio::task::spawn_blocking(move || {
-                let snapshot = binding.build_snapshot(request.resume_from)?;
-                snapshot.envelope.validate().map_err(|_| {
-                    ApplicationError::CorruptProjection("invalid runtime projection".to_owned())
-                })?;
+            observation(binding.observation_counter(), move |budget| {
+                let snapshot = binding.snapshot_with_budget(request.resume_from, &budget)?;
+                snapshot.envelope.validate()?;
                 Ok(snapshot)
             })
             .await
-            .map_err(|_| ApplicationError::Unavailable)?
         })
     }
 
@@ -952,9 +1021,10 @@ impl crate::RuntimeApplicationProjectionSource for RuntimeSessionProjectionBindi
     ) -> BoxFuture<'static, Result<ProjectionPage, ApplicationError>> {
         let binding = self.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || binding.page_sync(request))
-                .await
-                .map_err(|_| ApplicationError::Unavailable)?
+            observation(binding.observation_counter(), move |budget| {
+                binding.page_with_budget(request, &budget)
+            })
+            .await
         })
     }
 }

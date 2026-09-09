@@ -43,8 +43,13 @@ use crate::{
 };
 
 mod integration_control;
+mod live_preview;
+mod recorder;
 mod task_control;
 mod user_input;
+
+pub use live_preview::{RuntimeLivePreviewReader, RuntimeLivePreviewSource};
+pub use recorder::ApplicationRunEventRecorder;
 
 pub use integration_control::{
     APPLICATION_TASK_INTEGRATION_REVIEW_SCHEMA_VERSION, ApplicationIntegrationLaneCandidateKind,
@@ -715,20 +720,23 @@ pub struct ApplicationTerminalTaskControl {
 impl ApplicationTerminalTaskControl {
     fn new(
         workspace_root: PathBuf,
-        owner: sigil_tools_builtin::TerminalTaskControlHandle,
+        owner: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
         session_lease: &ApplicationSessionLease,
         session_scope_id: &str,
-    ) -> Result<Self> {
+    ) -> Result<Option<Self>> {
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
         let route_execution_owner = session_lease
             .route_mutation_authority(session_scope_id)?
             .acquire_execution_owner()
             .map_err(anyhow::Error::new)?;
-        Ok(Self {
+        Ok(Some(Self {
             workspace_root,
             owner,
             _session_attachment: Arc::clone(&session_lease.attachment),
             _route_execution_owner: Arc::new(route_execution_owner),
-        })
+        }))
     }
 
     /// Cancels one exact terminal task through its original process owner.
@@ -969,6 +977,18 @@ pub trait ApplicationRunEventHandler {
     /// application run's domain terminal.
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()>;
 
+    /// Attaches a read-only preview source. Interactive adapters poll this bounded source at
+    /// frame cadence; provider deltas never become queued public events.
+    fn bind_live_preview_source(&mut self, _source: RuntimeLivePreviewSource) -> Result<()> {
+        Ok(())
+    }
+
+    /// Accepts an independently typed preview snapshot. Machine/durable-only adapters may
+    /// ignore it, but must never convert its revision into a public event sequence.
+    fn handle_live_update(&mut self, _update: sigil_application::LiveRunUpdate) -> Result<()> {
+        Ok(())
+    }
+
     /// Bounded durable adapter identity used by the public outbox receipt.  Implementations that
     /// share an application bridge can keep the generic value; dedicated HTTP/Desktop/TUI
     /// adapters may override it without changing domain terminal semantics.
@@ -996,13 +1016,19 @@ pub trait ApplicationRunEventHandler {
 pub struct PreparedApplicationRun {
     execution: ApplicationRunExecution,
     control: ApplicationRunControl,
-    terminal_control: ApplicationTerminalTaskControl,
+    terminal_control: Option<ApplicationTerminalTaskControl>,
 }
 
 impl PreparedApplicationRun {
+    /// Returns projection and delivery capabilities from this prepared run's actual session owner.
+    #[must_use]
+    pub fn session_projection_owner(&self) -> crate::RuntimeSessionProjectionOwner {
+        self.execution.events.projection_owner.clone()
+    }
+
     /// Returns the typed persistent-terminal owner retained beyond the foreground model turn.
     #[must_use]
-    pub fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+    pub fn terminal_control(&self) -> Option<ApplicationTerminalTaskControl> {
         self.terminal_control.clone()
     }
 
@@ -1146,35 +1172,40 @@ impl PreparedApplicationRun {
             ));
         }
 
-        self.execution
-            .conversation_coordinator
-            .enforce_orchestration_route_kill_switch(
-                &mut self.execution.session,
-                current_unix_time_ms(),
-            )
-            .map_err(|source| {
-                ApplicationQueuedRunPrepareError::promotion_commit(
-                    "orchestration_route_guard",
-                    source,
-                )
-            })?;
-        let queued_input = self
-            .execution
-            .conversation_coordinator
-            .bind_conversation_input(
-                &self.execution.session,
-                queued.input,
-                self.execution.parent_session_ref.clone(),
-                self.execution.run_id.clone(),
-                Some(crate::ConversationSourceTurn {
-                    message_id: durable_message_id,
-                    objective: queued.safe_prompt,
-                }),
-                current_unix_time_ms(),
-            )
-            .map_err(|source| {
-                ApplicationQueuedRunPrepareError::promotion_commit("task_handoff_binding", source)
-            })?;
+        let queued_input =
+            if let Some(coordinator) = self.execution.conversation_coordinator.as_ref() {
+                coordinator
+                    .enforce_orchestration_route_kill_switch(
+                        &mut self.execution.session,
+                        current_unix_time_ms(),
+                    )
+                    .map_err(|source| {
+                        ApplicationQueuedRunPrepareError::promotion_commit(
+                            "orchestration_route_guard",
+                            source,
+                        )
+                    })?;
+                coordinator
+                    .bind_conversation_input(
+                        &self.execution.session,
+                        queued.input,
+                        self.execution.parent_session_ref.clone(),
+                        self.execution.run_id.clone(),
+                        Some(crate::ConversationSourceTurn {
+                            message_id: durable_message_id,
+                            objective: queued.safe_prompt,
+                        }),
+                        current_unix_time_ms(),
+                    )
+                    .map_err(|source| {
+                        ApplicationQueuedRunPrepareError::promotion_commit(
+                            "task_handoff_binding",
+                            source,
+                        )
+                    })?
+            } else {
+                queued.input
+            };
         **input = queued_input;
         Ok(self)
     }
@@ -1956,7 +1987,7 @@ pub struct ApplicationRunExecution {
     conversation_lifecycle: ConversationRunLifecycleRecorder,
     conversation_start: ConversationRunStartedEntryV1,
     events: ApplicationRunEventSequence,
-    conversation_coordinator: crate::ConversationCoordinator,
+    conversation_coordinator: Option<crate::ConversationCoordinator>,
     parent_session_ref: SessionRef,
     pending_session_title: Option<ApplicationSessionTitleRequest>,
     pending_user_input_continuation: Option<user_input::ApplicationUserInputContinuationContext>,
@@ -3704,7 +3735,7 @@ async fn assemble_application_tool_surface(
 ) -> Result<(crate::RuntimeToolSurface, Vec<String>)> {
     let managed_extension_execution = services
         .authority_composition()
-        .map(|composition| std::sync::Arc::clone(&composition.extension_execution));
+        .and_then(|composition| composition.extension_execution.clone());
     let surface = crate::mcp_registry::build_tool_surface_with_terminal_lifecycle_and_managed_extension_execution(
         root_config,
         provider_capabilities,
@@ -3767,7 +3798,7 @@ async fn assemble_application_tool_surface(
         runtime_event_handler,
         Arc::clone(&services.disclosure_presenter),
         managed_extension_execution,
-    );
+    )?;
     let eager_remote_servers = root_config
         .mcp_servers
         .iter()
@@ -3823,7 +3854,6 @@ pub async fn prepare_application_run(
     request: ApplicationRunRequest,
     services: &ApplicationRunServices,
 ) -> std::result::Result<PreparedApplicationRun, ApplicationRunPrepareError> {
-    #[cfg(not(test))]
     services
         .require_current_schema_authority()
         .map_err(application_authority_prepare_error)?;
@@ -3842,7 +3872,6 @@ pub(crate) async fn prepare_application_run_with_exact_first_request(
     (PreparedApplicationRun, ApplicationExactFirstRequestAssembly),
     ApplicationRunPrepareError,
 > {
-    #[cfg(not(test))]
     services
         .require_current_schema_authority()
         .map_err(application_authority_prepare_error)?;
@@ -3896,22 +3925,8 @@ async fn prepare_application_run_internal(
             })?;
     let session_leases = Arc::clone(&services.session_leases);
     let task_executor_attached = services.task_role_provider_builder.is_some();
-    // RFC-0071 R71.6: the new-epoch binary is the only consumer of the composed authority;
-    // legacy-epoch runs keep the V2 path (tool_authority None, adjudication defers). The
-    // boot-time gate stays RED until every mandatory adapter is composed, so a new-epoch run
-    // either adjudicates through the real authority or never starts - never partial, never a
-    // per-consumer switch.
-    let tool_authority = match services.cutover() {
-        Some(cutover)
-            if cutover.manifest().selected_epoch
-                == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema =>
-        {
-            services
-                .authority_composition()
-                .map(|composition| std::sync::Arc::new(composition.tool_authority.clone()))
-        }
-        _ => None,
-    };
+    let tool_authority = current_schema_tool_authority(services);
+    let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
     let prepared = tokio::task::spawn_blocking(move || {
@@ -3920,6 +3935,7 @@ async fn prepare_application_run_internal(
             session_leases,
             task_executor_attached,
             tool_authority,
+            expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
         )
@@ -3957,6 +3973,13 @@ async fn prepare_application_run_internal(
         managed_session_log,
         managed_artifact_store,
     } = prepared;
+    let selected_composition =
+        sigil_kernel::SessionCompositionSnapshotV1::new(root_config.selected_capabilities());
+    crate::session_composition::validate_session_composition_snapshot(
+        &session,
+        &selected_composition,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
     let provider = crate::build_provider_for_model_ref_async(&root_config, &model_ref)
         .await
         .map_err(ApplicationRunPrepareError::provider_unavailable)?;
@@ -3982,17 +4005,21 @@ async fn prepare_application_run_internal(
         target_max_tokens,
     )
     .map_err(|source| ApplicationRunPrepareError::Configuration { source })?;
-    let orchestration_route_guard = crate::OrchestrationRouteGuard::new(
-        session.provider_name(),
-        session.model_name(),
-        crate::ORCHESTRATION_RUNTIME_BUILD_ID,
-    );
-    if queued_first_request.is_none() {
-        orchestration_route_guard
-            .enforce(&mut session, current_unix_time_ms())
-            .map_err(ApplicationRunPrepareError::execution)?;
+    let orchestration_route_guard = root_config.task.enabled.then(|| {
+        crate::OrchestrationRouteGuard::new(
+            session.provider_name(),
+            session.model_name(),
+            crate::ORCHESTRATION_RUNTIME_BUILD_ID,
+        )
+    });
+    if let Some(guard) = orchestration_route_guard.as_ref() {
+        if queued_first_request.is_none() {
+            guard
+                .enforce(&mut session, current_unix_time_ms())
+                .map_err(ApplicationRunPrepareError::execution)?;
+        }
+        guard.apply_effective_task_config(&session, &mut root_config.task);
     }
-    orchestration_route_guard.apply_effective_task_config(&session, &mut root_config.task);
     let session_id = session.session_scope_id().to_owned();
     // Construct the only public-event sequence before terminal tools retain the lifecycle sink.
     // The sink may publish while the foreground execution is active or after it finalizes.
@@ -4088,25 +4115,30 @@ async fn prepare_application_run_internal(
                 }),
             },
         );
-    let conversation_coordinator = crate::ConversationCoordinator::new(
-        root_config.task.enabled,
-        root_config.task.routing_policy,
-    )
-    .with_writable_memory_routing(writable_memory_available)
-    .with_orchestration_route_guard(orchestration_route_guard)
-    .with_route_capability_evidence(crate::RouteCapabilityEvidence {
-        provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
-        // DirectTask additionally requires an attached task executor; without one the route
-        // stays at the ReviewFirst baseline so plan review remains usable.
-        route_qualified: (crate::route_qualification_evidence(&root_config)
-            || services.model_eval_route_qualified)
-            && task_execution.is_some(),
+    let conversation_coordinator = orchestration_route_guard.map(|guard| {
+        crate::ConversationCoordinator::new(
+            root_config.task.enabled,
+            root_config.task.routing_policy,
+        )
+        .with_writable_memory_routing(writable_memory_available)
+        .with_orchestration_route_guard(guard)
+        .with_route_capability_evidence(crate::RouteCapabilityEvidence {
+            provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
+            // DirectTask additionally requires an attached task executor; without one the route
+            // stays at the ReviewFirst baseline so plan review remains usable.
+            route_qualified: (crate::route_qualification_evidence(&root_config)
+                || services.model_eval_route_qualified)
+                && task_execution.is_some(),
+        })
     });
-    if queued_first_request.is_none() && agent_invocation.is_none() {
-        conversation_coordinator
+    if queued_first_request.is_none()
+        && agent_invocation.is_none()
+        && let Some(coordinator) = conversation_coordinator.as_ref()
+    {
+        coordinator
             .enforce_orchestration_route_kill_switch(&mut session, current_unix_time_ms())
             .map_err(ApplicationRunPrepareError::execution)?;
-        input = conversation_coordinator
+        input = coordinator
             .bind_conversation_input(
                 &session,
                 input,
@@ -4121,13 +4153,19 @@ async fn prepare_application_run_internal(
         if let Some((exact_prompt, durable_user_message_id)) = queued_first_request.as_ref() {
             let mut exact_user_message = ModelMessage::user(exact_prompt.expose_secret());
             exact_user_message.id = durable_user_message_id.clone();
-            let route_capability = conversation_coordinator.resolve_route_capability(&session);
-            let automatic_routing = route_capability.routes_automatically();
-            let tool_specs = if automatic_routing {
-                conversation_coordinator.route_tool_specs_for_session(&session, route_capability)
-            } else {
-                registry.specs()
-            };
+            let routing = conversation_coordinator.as_ref().and_then(|coordinator| {
+                let capability = coordinator.resolve_route_capability(&session);
+                capability
+                    .routes_automatically()
+                    .then_some((coordinator, capability))
+            });
+            let automatic_routing = routing.is_some();
+            let tool_specs = routing.map_or_else(
+                || registry.specs(),
+                |(coordinator, capability)| {
+                    coordinator.route_tool_specs_for_session(&session, capability)
+                },
+            );
             let mut transient_messages = vec![exact_user_message];
             if automatic_routing {
                 transient_messages.insert(
@@ -4168,13 +4206,24 @@ async fn prepare_application_run_internal(
         } else {
             None
         };
-    let plan_review_workspace_snapshot_id =
-        crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
-            .ok()
-            .flatten();
     let explicit_plan_review = agent_invocation
         .as_ref()
         .is_some_and(|(_, profile_id)| profile_id.as_str() == "plan");
+    let plan_review_selected = explicit_plan_review
+        || (agent_invocation.is_none()
+            && conversation_coordinator
+                .as_ref()
+                .is_some_and(|coordinator| {
+                    coordinator
+                        .resolve_route_capability(&session)
+                        .routes_automatically()
+                }));
+    let plan_review_workspace_snapshot_id = if plan_review_selected {
+        crate::plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
+            .map_err(ApplicationRunPrepareError::execution)?
+    } else {
+        None
+    };
     let explicit_plan_review_request = explicit_plan_review
         .then(|| {
             crate::PlanReviewCoordinator::prepare_explicit_plan_review(
@@ -4234,29 +4283,38 @@ async fn prepare_application_run_internal(
             input: Box::new(input),
         }
     };
+    crate::session_composition::bind_session_composition_snapshot(
+        &mut session,
+        selected_composition,
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
     let prepared = PreparedApplicationRun {
         execution: ApplicationRunExecution {
-            plan_review_runtime: Some(ApplicationPlanReviewRuntime {
-                options: options.clone(),
-                root_config: root_config.clone(),
-                workspace_snapshot_id: plan_review_workspace_snapshot_id,
-                agent: Box::new(
-                    crate::configured_agent(
-                        &root_config,
-                        crate::build_provider_for_model_ref_async(&root_config, &model_ref)
-                            .await
-                            .map_err(ApplicationRunPrepareError::provider_unavailable)?,
-                        crate::build_plan_review_tool_registry(&registry, &root_config)
-                            .into_registry(),
-                    )
-                    .map_err(ApplicationRunPrepareError::execution)?,
-                ),
-                tool_registry: crate::build_plan_review_tool_registry(&registry, &root_config)
-                    .into_registry(),
-                child_resource_provisioner: services
-                    .authority_composition()
-                    .map(|composition| composition.plan_review_child_resource_provisioner()),
-            }),
+            plan_review_runtime: if plan_review_selected {
+                let tool_registry =
+                    crate::build_plan_review_tool_registry(&registry, &root_config).into_registry();
+                Some(ApplicationPlanReviewRuntime {
+                    options: options.clone(),
+                    root_config: root_config.clone(),
+                    workspace_snapshot_id: plan_review_workspace_snapshot_id,
+                    agent: Box::new(
+                        crate::configured_agent(
+                            &root_config,
+                            crate::build_provider_for_model_ref_async(&root_config, &model_ref)
+                                .await
+                                .map_err(ApplicationRunPrepareError::provider_unavailable)?,
+                            tool_registry.clone(),
+                        )
+                        .map_err(ApplicationRunPrepareError::execution)?,
+                    ),
+                    tool_registry,
+                    child_resource_provisioner: services
+                        .authority_composition()
+                        .map(|composition| composition.plan_review_child_resource_provisioner()),
+                })
+            } else {
+                None
+            },
             kind,
             task_execution,
             session,
@@ -4393,6 +4451,35 @@ pub fn bind_application_session_with_model_ref_and_attachment_and_managed_writer
     ),
     ApplicationRunPrepareError,
 > {
+    bind_application_session_with_model_ref_and_projection_owner(
+        config_path,
+        launch_cwd,
+        session_path,
+        connection_id,
+        model_name,
+        managed_session_log_writer,
+    )
+    .map(|(binding, attachment, _owner)| (binding, attachment))
+}
+
+/// Binds a session and transfers projection capabilities from the same admitted store.
+pub fn bind_application_session_with_model_ref_and_projection_owner(
+    config_path: &Path,
+    launch_cwd: &Path,
+    session_path: Option<&Path>,
+    connection_id: Option<&ConnectionId>,
+    model_name: Option<&str>,
+    managed_session_log_writer: Option<
+        Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+) -> std::result::Result<
+    (
+        ApplicationSessionBinding,
+        Arc<crate::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+        crate::RuntimeSessionProjectionOwner,
+    ),
+    ApplicationRunPrepareError,
+> {
     let root_config = load_application_root_config(config_path)?;
     let (_, selected_route) =
         application_selected_model_route(&root_config, connection_id, model_name)?;
@@ -4451,15 +4538,25 @@ pub fn bind_application_session_with_model_ref_and_attachment_and_managed_writer
     );
     let store =
         JsonlSessionStore::new(&canonical_path).map_err(ApplicationRunPrepareError::execution)?;
-    let outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+    let inspected = crate::provider_connections::inspect_session_for_route_resume(
+        &root_config,
+        &selected_route,
+        store.clone(),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    crate::validate_session_composition(&inspected.session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let mut outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
             &root_config,
             &selected_route,
-            store,
+            store.clone(),
             None,
             None,
             Some(attachment.as_ref()),
         )
         .map_err(application_route_load_prepare_error)?;
+    crate::bind_session_composition(&mut outcome.session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
     if let Some(managed_session_log) = managed_session_log {
         managed_session_log
             .finalize()
@@ -4472,6 +4569,7 @@ pub fn bind_application_session_with_model_ref_and_attachment_and_managed_writer
             route_transition: outcome.transition,
         },
         attachment,
+        crate::RuntimeSessionProjectionOwner::from_store(&store),
     ))
 }
 
@@ -4717,6 +4815,26 @@ pub fn bind_existing_application_session_with_attachment(
     session_path: &Path,
     attachment: &crate::interactive_session_attachment::InteractiveSessionAttachmentLease,
 ) -> std::result::Result<ApplicationSessionBinding, ApplicationRunPrepareError> {
+    bind_existing_application_session_with_attachment_and_projection_owner(
+        config_path,
+        session_path,
+        attachment,
+    )
+    .map(|(binding, _owner)| binding)
+}
+
+/// Reopens an attached session and transfers projection capabilities from its actual owner.
+pub fn bind_existing_application_session_with_attachment_and_projection_owner(
+    config_path: &Path,
+    session_path: &Path,
+    attachment: &crate::interactive_session_attachment::InteractiveSessionAttachmentLease,
+) -> std::result::Result<
+    (
+        ApplicationSessionBinding,
+        crate::RuntimeSessionProjectionOwner,
+    ),
+    ApplicationRunPrepareError,
+> {
     let read_binding = bind_existing_application_session(config_path, session_path)?;
     let root_config = load_application_root_config(config_path)?;
     let persisted_connection_id = read_binding
@@ -4740,20 +4858,33 @@ pub fn bind_existing_application_session_with_attachment(
     )?;
     let store = JsonlSessionStore::new(&read_binding.session_log_path)
         .map_err(ApplicationRunPrepareError::execution)?;
-    let outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+    let inspected = crate::provider_connections::inspect_session_for_route_resume(
         &root_config,
         &fallback_route,
-        store,
+        store.clone(),
+    )
+    .map_err(ApplicationRunPrepareError::execution)?;
+    crate::validate_session_composition(&inspected.session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    let mut outcome = crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment_transition(
+        &root_config,
+        &fallback_route,
+        store.clone(),
         None,
         None,
         Some(attachment),
     )
     .map_err(application_route_load_prepare_error)?;
-    Ok(ApplicationSessionBinding {
-        session_scope_id: outcome.session.session_scope_id().to_owned(),
-        session_log_path: read_binding.session_log_path,
-        route_transition: outcome.transition,
-    })
+    crate::bind_session_composition(&mut outcome.session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
+    Ok((
+        ApplicationSessionBinding {
+            session_scope_id: outcome.session.session_scope_id().to_owned(),
+            session_log_path: read_binding.session_log_path,
+            route_transition: outcome.transition,
+        },
+        crate::RuntimeSessionProjectionOwner::from_store(&store),
+    ))
 }
 
 fn application_route_load_prepare_error(
@@ -4805,7 +4936,9 @@ fn load_application_root_config(
         }
         Ok(_) => {}
     }
-    RootConfig::load(config_path).map_err(ApplicationRunPrepareError::connection_config_invalid)
+    RootConfig::load(config_path)
+        .and_then(|config| config.with_effective_composition())
+        .map_err(ApplicationRunPrepareError::connection_config_invalid)
 }
 
 fn application_selected_model_route(
@@ -4893,11 +5026,27 @@ pub fn application_run_context_view(
     session_path: &Path,
     expected_session_scope_id: &str,
 ) -> Result<ApplicationRunContextView> {
+    let records = application_bound_session_records(session_path, expected_session_scope_id)?;
+    application_run_context_view_from_records(
+        config_path,
+        launch_cwd,
+        &records,
+        expected_session_scope_id,
+    )
+}
+
+pub(crate) fn application_run_context_view_from_records(
+    config_path: &Path,
+    launch_cwd: &Path,
+    records: &[sigil_kernel::SessionStreamRecord],
+    expected_session_scope_id: &str,
+) -> Result<ApplicationRunContextView> {
     if expected_session_scope_id.is_empty() {
         bail!("expected run-context session scope must not be empty");
     }
-    let root_config = RootConfig::load(config_path)?;
-    let entries = application_bound_session_entries(session_path, expected_session_scope_id)?;
+    let root_config = RootConfig::load(config_path)?.with_effective_composition()?;
+    let entries =
+        application_bound_session_entries_from_records(records, expected_session_scope_id)?;
     let route = application_session_route(&entries).ok_or_else(|| {
         anyhow!(
             "session_route_missing: restore the referenced connection or fork with current route"
@@ -5092,7 +5241,7 @@ pub fn application_run_context_view(
     })
 }
 
-fn application_session_route_trust_binding(
+pub(crate) fn application_session_route_trust_binding(
     entries: &[SessionLogEntry],
 ) -> Option<sigil_kernel::RouteEgressTrustBinding> {
     let mut current_fingerprint = None::<String>;
@@ -5133,7 +5282,7 @@ fn application_session_route_trust_binding(
     binding
 }
 
-fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedModelRoute> {
+pub(crate) fn application_session_route(entries: &[SessionLogEntry]) -> Option<ResolvedModelRoute> {
     let mut route = None;
     let mut identity_seen = false;
     for entry in entries {
@@ -5196,7 +5345,15 @@ fn application_bound_session_entries(
     expected_session_scope_id: &str,
 ) -> Result<Vec<SessionLogEntry>> {
     let records = application_bound_session_records(session_path, expected_session_scope_id)?;
-    sigil_kernel::ConversationQueueDurableProjection::from_records(&records)?;
+    application_bound_session_entries_from_records(&records, expected_session_scope_id)
+}
+
+fn application_bound_session_entries_from_records(
+    records: &[sigil_kernel::SessionStreamRecord],
+    expected_session_scope_id: &str,
+) -> Result<Vec<SessionLogEntry>> {
+    validate_application_session_records(records, expected_session_scope_id)?;
+    sigil_kernel::ConversationQueueDurableProjection::from_records(records)?;
     records
         .iter()
         .map(sigil_kernel::conversation_transcript_entry_from_record)
@@ -5210,6 +5367,14 @@ fn application_bound_session_records(
     expected_session_scope_id: &str,
 ) -> Result<Vec<sigil_kernel::SessionStreamRecord>> {
     let records = JsonlSessionStore::read_event_records(session_path)?;
+    validate_application_session_records(&records, expected_session_scope_id)?;
+    Ok(records)
+}
+
+fn validate_application_session_records(
+    records: &[sigil_kernel::SessionStreamRecord],
+    expected_session_scope_id: &str,
+) -> Result<()> {
     let actual_session_scope_id = records
         .first()
         .map(|record| record.session_id().to_owned())
@@ -5221,7 +5386,7 @@ fn application_bound_session_records(
     {
         bail!("durable application session scope does not match the bound session");
     }
-    Ok(records)
+    Ok(())
 }
 
 /// Reads the current append-only durable frontier for one bound application session.
@@ -5302,6 +5467,20 @@ pub fn application_session_transcript_page(
     before: Option<u64>,
     limit: usize,
 ) -> Result<ApplicationTranscriptPage> {
+    validate_application_transcript_page_request(expected_session_scope_id, before, limit)?;
+    project_application_session_transcript(
+        JsonlSessionStore::read_event_record_stream(session_path)?,
+        expected_session_scope_id,
+        before,
+        limit,
+    )
+}
+
+fn validate_application_transcript_page_request(
+    expected_session_scope_id: &str,
+    before: Option<u64>,
+    limit: usize,
+) -> Result<()> {
     if expected_session_scope_id.is_empty() {
         bail!("expected transcript session scope must not be empty");
     }
@@ -5312,7 +5491,17 @@ pub fn application_session_transcript_page(
         bail!("transcript before ordinal must be positive");
     }
 
-    let mut reader = JsonlSessionStore::read_event_record_stream(session_path)?;
+    Ok(())
+}
+
+fn project_application_session_transcript<
+    R: std::borrow::Borrow<sigil_kernel::SessionStreamRecord>,
+>(
+    records: impl IntoIterator<Item = Result<R>>,
+    expected_session_scope_id: &str,
+    before: Option<u64>,
+    limit: usize,
+) -> Result<ApplicationTranscriptPage> {
     let mut tool_names = BTreeMap::new();
     let mut tool_name_order = VecDeque::new();
     const MAX_TOOL_NAMES: usize = 512;
@@ -5320,13 +5509,14 @@ pub fn application_session_transcript_page(
     let mut message_bytes = 0_usize;
     let mut total_messages = 0_u64;
     let mut saw_record = false;
-    for record in &mut reader {
+    for record in records {
         let record = record?;
+        let record = record.borrow();
         saw_record = true;
         if record.session_id() != expected_session_scope_id {
             bail!("durable application session scope does not match the bound session");
         }
-        let Some(entry) = sigil_kernel::conversation_transcript_entry_from_record(&record)? else {
+        let Some(entry) = sigil_kernel::conversation_transcript_entry_from_record(record)? else {
             continue;
         };
         total_messages = total_messages
@@ -5390,7 +5580,7 @@ fn application_transcript_reasoning_trace(control: &ControlEntry) -> Option<&str
         .filter(|trace| !trace.trim().is_empty())
 }
 
-fn project_application_transcript_entry(
+pub(crate) fn project_application_transcript_entry(
     entry: SessionLogEntry,
     ordinal: u64,
     tool_names: &mut BTreeMap<String, String>,
@@ -5495,7 +5685,7 @@ fn truncate_application_transcript_text(value: &str, max_bytes: usize) -> String
     value[..end].to_owned()
 }
 
-fn safe_application_transcript_message_id(value: &str) -> String {
+pub(crate) fn safe_application_transcript_message_id(value: &str) -> String {
     format!("message-sha256:{:x}", Sha256::digest(value.as_bytes()))
 }
 
@@ -5545,7 +5735,11 @@ pub async fn rerun_application_verification_with_attachment(
     let session_leases = Arc::clone(&services.session_leases);
     let request = request.clone();
     let preparation = tokio::task::spawn_blocking(move || {
-        let root_config = RootConfig::load(&config_path)?;
+        let root_config = RootConfig::load(&config_path)?.with_effective_composition()?;
+        anyhow::ensure!(
+            root_config.task.enabled,
+            "task orchestration is not selected for this session composition"
+        );
         let workspace_root =
             resolve_workspace_root(&config_path, &launch_cwd, &root_config.workspace.root);
         let store = JsonlSessionStore::new(&session_path)?;
@@ -5562,6 +5756,7 @@ pub async fn rerun_application_verification_with_attachment(
         if session.session_scope_id() != expected_session_scope_id {
             bail!("durable session identity changed before verification rerun");
         }
+        crate::validate_session_composition(&session, &root_config)?;
         Ok::<_, anyhow::Error>((session, session_lease, workspace_root, request))
     })
     .await
@@ -5771,6 +5966,31 @@ fn current_schema_managed_session_log_writer(
         .map(|composition| Arc::clone(&composition.storage_writer))
 }
 
+/// Ordinary runs and continuations consume the same boot-owned broker and physical file port.
+/// Legacy test fixtures remain absent; the public production entry point enforces boot readiness.
+fn current_schema_tool_authority(
+    services: &ApplicationRunServices,
+) -> Option<Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>> {
+    let cutover = services.cutover()?;
+    if cutover.manifest().selected_epoch
+        != sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema
+    {
+        return None;
+    }
+    services
+        .authority_composition()
+        .map(|composition| Arc::new(composition.tool_authority.clone()))
+}
+
+fn current_schema_boot_composition(
+    services: &ApplicationRunServices,
+) -> Option<sigil_kernel::RuntimeCompositionConfig> {
+    let cutover = services.cutover()?;
+    (cutover.manifest().selected_epoch
+        == sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema)
+        .then(|| cutover.manifest().composition.selection_only())
+}
+
 fn current_schema_managed_artifact_store_writer(
     services: &ApplicationRunServices,
 ) -> Option<Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>> {
@@ -5852,11 +6072,17 @@ fn prepare_application_run_blocking(
     task_executor_attached: bool,
     tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
+    let fixture_config = load_application_root_config(&request.config_path)?;
+    let expected_composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        fixture_config.selected_capabilities(),
+    );
     prepare_application_run_blocking_with_writer(
         request,
         session_leases,
         task_executor_attached,
         tool_authority,
+        Some(expected_composition),
         None,
         None,
     )
@@ -5867,6 +6093,7 @@ fn prepare_application_run_blocking_with_writer(
     session_leases: Arc<ApplicationSessionLeaseManager>,
     task_executor_attached: bool,
     tool_authority: Option<std::sync::Arc<sigil_kernel::tool_authority::KernelToolAuthorityV1>>,
+    expected_composition: Option<sigil_kernel::RuntimeCompositionConfig>,
     managed_session_log_writer: Option<
         Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
     >,
@@ -5884,6 +6111,13 @@ fn prepare_application_run_blocking_with_writer(
         });
     }
     let mut root_config = load_application_root_config(&request.config_path)?;
+    let expected_composition = expected_composition.as_ref().ok_or_else(|| {
+        application_authority_prepare_error(
+            sigil_kernel::cutover_manifest::CutoverErrorV1::AuthorityUnavailable,
+        )
+    })?;
+    crate::session_composition::validate_boot_composition(&root_config, expected_composition)
+        .map_err(ApplicationRunPrepareError::configuration)?;
     let workspace_root = resolve_workspace_root(
         &request.config_path,
         &request.launch_cwd,
@@ -5943,6 +6177,8 @@ fn prepare_application_run_blocking_with_writer(
         plan,
         recovery_binding,
     } = inspected;
+    crate::validate_session_composition(&session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
     let managed_artifact_store = if let (Some(writer), Some(key)) = (
         managed_artifact_store_writer,
         managed_session_key.as_deref(),
@@ -6131,7 +6367,10 @@ fn prepare_application_run_blocking_with_writer(
         &workspace_root,
         session.entries(),
     )?;
-    let generate_session_title = request.constraints.is_none()
+    let generate_session_title = root_config
+        .composition
+        .allows(sigil_kernel::OptionalCapability::SessionTitles)
+        && request.constraints.is_none()
         && agent_invocation.is_none()
         && !session
             .entries()
@@ -6228,6 +6467,8 @@ fn prepare_application_run_blocking_with_writer(
         input = input.with_max_output_tokens(max_output_tokens);
     }
     let redactor = secret_redactor_for_root_config(&root_config);
+    crate::bind_session_composition(&mut session, &root_config)
+        .map_err(ApplicationRunPrepareError::execution)?;
     Ok(BlockingApplicationRunPreparation {
         root_config,
         workspace_root,
@@ -6303,6 +6544,15 @@ fn admit_application_skill_binding(
     let Some(binding) = request.skill_binding.as_ref() else {
         return Ok(None);
     };
+    if !root_config.skills.enabled
+        || !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Skills)
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "skills are not selected for this session composition".to_owned(),
+        });
+    }
     let user_config_dir = sigil_kernel::default_user_config_dir().ok();
     let report = crate::discover_skill_index_with_user_dir(
         workspace_root,
@@ -6360,6 +6610,15 @@ fn admit_application_agent_binding(
     let Some(binding) = request.agent_binding.as_ref() else {
         return Ok(None);
     };
+    if !root_config.task.enabled
+        || !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+    {
+        return Err(ApplicationRunPrepareError::InvalidInvocation {
+            message: "agent profiles are not selected for this session composition".to_owned(),
+        });
+    }
     let profile_id = AgentProfileId::new(binding.profile_id.clone()).map_err(|_| {
         ApplicationRunPrepareError::InvalidInvocation {
             message: "agent profile binding contains an invalid profile id".to_owned(),
@@ -6578,8 +6837,11 @@ pub(crate) struct ApplicationRunEventSequence {
     session_id: String,
     run_id: String,
     outbox_store: JsonlSessionStore,
+    projection_owner: crate::RuntimeSessionProjectionOwner,
     outbox: PublicEventOutboxRecorder,
+    live_preview: RuntimeLivePreviewSource,
     state: Arc<Mutex<ApplicationRunEventState>>,
+    delivery_deferred: bool,
 }
 
 #[derive(Debug, Default)]
@@ -6643,6 +6905,8 @@ impl ApplicationRunEventSequence {
                 ) || conversation_terminals.contains(entry.domain_event_id.as_str()))
         });
         Ok(Self {
+            live_preview: RuntimeLivePreviewSource::new(&session_id, &run_id, terminal),
+            projection_owner: crate::RuntimeSessionProjectionOwner::from_store(&outbox_store),
             session_id,
             run_id,
             outbox_store,
@@ -6652,6 +6916,7 @@ impl ApplicationRunEventSequence {
                 terminal,
                 ..ApplicationRunEventState::default()
             })),
+            delivery_deferred: false,
         })
     }
 
@@ -6662,6 +6927,10 @@ impl ApplicationRunEventSequence {
     where
         H: ApplicationRunEventHandler,
     {
+        if self.delivery_deferred {
+            self.mark_live_delivery_prepared()?;
+            return Ok(0);
+        }
         let records = self.outbox_store.read_event_records_writer()?;
         let projection = PublicEventOutboxProjectionV1::from_records(&records)?;
         let adapter = handler.public_event_adapter_id();
@@ -6726,8 +6995,9 @@ impl ApplicationRunEventSequence {
     /// Appends an owned terminal-task lifecycle update to the same public outbox stream.
     ///
     /// A persistent terminal task can outlive the foreground conversation terminal, so this is
-    /// intentionally the only nonterminal event allowed to advance that stream afterwards.
-    /// All ordinary application events remain rejected once the foreground terminal is durable.
+    /// allowed to advance that stream afterwards. The deferred adapter recorder separately
+    /// permits durable user-input lifecycle updates for a terminal Awaiting root. Ordinary
+    /// application events remain rejected once the foreground terminal is durable.
     pub(crate) fn emit_terminal_lifecycle<H>(
         &self,
         handler: &mut H,
@@ -6752,6 +7022,16 @@ impl ApplicationRunEventSequence {
     where
         H: ApplicationRunEventHandler,
     {
+        if sigil_kernel::is_transient_public_run_event(&event) {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow!("application run event sequence is unavailable"))?;
+            if state.terminal {
+                bail!("application run event stream is already terminal");
+            }
+            return self.live_preview.apply_delta(&event, state.sequence);
+        }
         self.ensure_pending_replayed_before_live(handler)?;
         let mut state = self
             .state
@@ -7009,6 +7289,11 @@ impl ApplicationRunEventSequence {
     where
         H: ApplicationRunEventHandler,
     {
+        self.live_preview
+            .apply_committed(&event.event, state.terminal);
+        if self.delivery_deferred {
+            return false;
+        }
         if state.delivery_degraded {
             return false;
         }
@@ -7517,6 +7802,7 @@ where
     H: ApplicationRunEventHandler,
 {
     fn new(events: ApplicationRunEventSequence, handler: &'a mut H) -> Result<Self> {
+        handler.bind_live_preview_source(events.live_preview.clone())?;
         events.replay_pending_before_live(handler)?;
         let mut task_events = PublicTaskEventProjector::default();
         for record in events.outbox_store.read_event_records_writer()? {
@@ -7674,6 +7960,10 @@ impl<H> EventHandler for PublicApplicationEventBridge<'_, H>
 where
     H: ApplicationRunEventHandler,
 {
+    fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
+        self.events.live_preview.begin_attempt(physical_attempt_id)
+    }
+
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         let RunEvent::Control(control) = event else {
             return self.emit(event.into());
@@ -7900,8 +8190,16 @@ impl<H> ApplicationRunEventHandler for PublicApplicationEventBridge<'_, H>
 where
     H: ApplicationRunEventHandler,
 {
+    fn bind_live_preview_source(&mut self, source: RuntimeLivePreviewSource) -> Result<()> {
+        self.handler.bind_live_preview_source(source)
+    }
+
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
         self.handler.handle_public_event(event)
+    }
+
+    fn handle_live_update(&mut self, update: sigil_application::LiveRunUpdate) -> Result<()> {
+        self.handler.handle_live_update(update)
     }
 
     fn public_event_adapter_id(&self) -> &'static str {

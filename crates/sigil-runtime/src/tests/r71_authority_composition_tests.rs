@@ -6,6 +6,9 @@ use crate::r71_global_cutover::{
 use sigil_application::ApplicationResourceRecoveryFacadeV1;
 use sigil_kernel::cutover_manifest::MandatoryAdapterKindV1;
 
+#[path = "r71_bootstrap_upgrade_tests.rs"]
+mod bootstrap_upgrade;
+
 fn write_r71_boot_config(config: &Path) {
     let fixture_root = config.parent().expect("config parent");
     let state = fixture_root.join(".r71-test-state");
@@ -221,6 +224,181 @@ fn r71_current_boot_publishes_one_green_current_manifest_and_replays_it() {
     let (second, _composition) =
         compose_current_boot_authority(&config_snapshot, &state, &cache, &exec).expect("replay");
     assert_eq!(first.manifest(), second.manifest());
+}
+
+#[test]
+fn core_boot_keeps_real_authority_and_omits_unselected_owners() {
+    let _environment_guard = crate::test_env::lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("sigil.toml");
+    write_r71_boot_config(&config);
+    let mut source = std::fs::read_to_string(&config).expect("config source");
+    source.push_str("\n[composition]\nprofile = \"core\"\n");
+    std::fs::write(&config, source).expect("core config");
+
+    let boot = boot_current_schema(&config, dir.path()).expect("core boot");
+    assert!(
+        boot.config().persisted_toml().is_ok(),
+        "boot preserves editable configuration"
+    );
+    assert!(
+        boot.runtime_config().persisted_toml().is_err(),
+        "execution view cannot overwrite saved preferences"
+    );
+    assert!(boot.runtime_config().selected_capabilities().is_empty());
+    assert!(!boot.runtime_config().memory.enabled);
+    assert!(!boot.runtime_config().task.enabled);
+    assert!(boot.cutover().is_current_schema_ready());
+    assert_eq!(
+        boot.cutover().manifest().composition,
+        RuntimeCompositionConfig::core()
+    );
+    assert_eq!(boot.cutover().manifest().mandatory_readiness.len(), 13);
+    let composed = boot.composition();
+    assert!(composed.extension_execution.is_none());
+    assert!(composed.services.extension_execution.is_none());
+    assert!(composed.plugin_hook_runner().is_none());
+    assert!(composed.plugin_hook_execution.is_none());
+    assert_eq!(
+        composed.services.product_state_updater_seam,
+        crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
+    );
+    assert_eq!(
+        composed.services.borrowed_release_output_seam,
+        crate::r71_global_cutover::RuntimeProductStateSeamV1::Unavailable
+    );
+    assert!(
+        !composed
+            .declared_channels
+            .contains(&StorageWriterChannelV1::DurableMemory)
+    );
+    assert!(
+        composed
+            .storage_writer
+            .acquire(StorageWriterChannelV1::DurableMemory)
+            .is_err()
+    );
+    let session_lease = composed
+        .storage_writer
+        .acquire(StorageWriterChannelV1::SessionLog)
+        .expect("core session writer");
+    composed
+        .storage_writer
+        .write_record(&session_lease, b"core-session-record")
+        .expect("core durable write");
+    composed
+        .storage_writer
+        .finalize(session_lease)
+        .expect("core durable finalize");
+
+    let mut selected = RuntimeCompositionConfig::core();
+    selected.enhancements.insert(OptionalCapability::Memory);
+    let probes = crate::r71_global_cutover::probe_selected_adapters(
+        &composed.services,
+        &ApplicationResourceRecoveryFacadeV1::new(),
+        boot.cutover().manifest().manifest_hash,
+        boot.cutover().manifest().application_generation,
+        &selected,
+    );
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.adapter == MandatoryAdapterKindV1::StorageMemory && !probe.passed),
+        "an enabled but uncomposed memory owner must fail"
+    );
+}
+
+#[test]
+fn boot_freezes_module_enable_flags_before_optional_authority_composition() {
+    let _environment_guard = crate::test_env::lock();
+    for (profile, expected_probes) in [("core", 13), ("standard", 17)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("sigil.toml");
+        write_r71_boot_config(&config);
+        let mut source = std::fs::read_to_string(&config).expect("config source");
+        source.push_str(&format!(
+            "\n[composition]\nprofile = \"{profile}\"\nenhancements = [\"memory\", \"skills\"]\n\
+             [memory]\nenabled = false\nwritable = false\n\
+             [skills]\nenabled = false\n"
+        ));
+        std::fs::write(&config, &source).expect("disabled module config");
+
+        let boot = boot_current_schema(&config, dir.path()).expect("boot with disabled modules");
+        assert!(boot.cutover().is_current_schema_ready());
+        let manifest = boot.cutover().manifest();
+        assert_eq!(manifest.mandatory_readiness.len(), expected_probes);
+        assert_eq!(
+            manifest.composition.profile,
+            sigil_kernel::RuntimeCompositionProfile::Core,
+            "published readiness uses a closed effective selection"
+        );
+        assert_eq!(
+            manifest.composition.selected_capabilities(),
+            boot.config().selected_capabilities()
+        );
+        assert!(!manifest.composition.allows(OptionalCapability::Memory));
+        assert!(!manifest.composition.allows(OptionalCapability::Skills));
+        assert!(
+            manifest
+                .mandatory_readiness
+                .iter()
+                .all(|probe| probe.adapter != MandatoryAdapterKindV1::StorageMemory)
+        );
+        let composition = boot.composition();
+        assert!(composition.plugin_hook_execution.is_none());
+        assert!(composition.plugin_hook_runner().is_none());
+        assert_eq!(
+            composition.extension_execution.is_some(),
+            profile == "standard"
+        );
+        assert!(
+            !composition
+                .declared_channels
+                .contains(&StorageWriterChannelV1::DurableMemory)
+        );
+        assert!(
+            composition
+                .storage_writer
+                .acquire(StorageWriterChannelV1::DurableMemory)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("original source"),
+            source,
+            "effective owner selection must not rewrite the durable configuration"
+        );
+    }
+}
+
+#[test]
+fn core_writable_memory_selects_its_owner_when_workspace_memory_is_disabled() {
+    let _environment_guard = crate::test_env::lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = dir.path().join("sigil.toml");
+    write_r71_boot_config(&config);
+    let mut source = std::fs::read_to_string(&config).expect("config source");
+    source.push_str(
+        "\n[composition]\nprofile = \"core\"\nenhancements = [\"memory\"]\n\
+         [memory]\nenabled = false\nwritable = true\n",
+    );
+    std::fs::write(&config, source).expect("writable memory config");
+
+    let boot = boot_current_schema(&config, dir.path()).expect("writable memory boot");
+    let manifest = boot.cutover().manifest();
+    assert!(boot.cutover().is_current_schema_ready());
+    assert_eq!(manifest.mandatory_readiness.len(), 14);
+    assert!(manifest.composition.allows(OptionalCapability::Memory));
+    assert!(
+        manifest
+            .mandatory_readiness
+            .iter()
+            .any(|probe| probe.adapter == MandatoryAdapterKindV1::StorageMemory && probe.passed)
+    );
+    assert!(
+        boot.composition()
+            .declared_channels
+            .contains(&StorageWriterChannelV1::DurableMemory)
+    );
 }
 
 #[test]
@@ -795,13 +973,15 @@ fn r71_concurrent_boots_publish_monotonic_generation_under_one_lock() {
     });
     barrier.wait();
     let result_a = handle_a.join().expect("boot a thread");
-    if let Err(error) = result_a {
-        panic!("boot a failed: {error}");
-    }
     let result_b = handle_b.join().expect("boot b thread");
-    if let Err(error) = result_b {
-        panic!("boot b failed: {error}");
-    }
+    let boot_a = result_a.unwrap_or_else(|error| panic!("boot a failed: {error}"));
+    let boot_b = result_b.unwrap_or_else(|error| panic!("boot b failed: {error}"));
+    let mut generations = [
+        boot_a.cutover().manifest().application_generation,
+        boot_b.cutover().manifest().application_generation,
+    ];
+    generations.sort_unstable();
+    assert_eq!(generations, [1, 2]);
 
     let bootstrap =
         sigil_resource_authority::bootstrap::AuthorityBootstrapStoreV1::for_config_path(&config)

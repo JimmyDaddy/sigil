@@ -457,14 +457,13 @@ pub(super) fn check_cache_runtime_invariants(report: &mut DoctorReport, session_
     }
 }
 
-pub(super) fn check_plan_review_compatibility(report: &mut DoctorReport, session_dir: &Path) {
+pub(super) fn check_plan_review_format(report: &mut DoctorReport, session_dir: &Path) {
     let Ok(mut paths) = session_log_paths(session_dir) else {
         return;
     };
     paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
     let mut current = 0usize;
-    let mut legacy_recovered = 0usize;
-    let mut unsupported_legacy = 0usize;
+    let mut unsupported = 0usize;
     for path in paths {
         if session_stream_too_large_for_doctor(&path) {
             continue;
@@ -480,35 +479,33 @@ pub(super) fn check_plan_review_compatibility(report: &mut DoctorReport, session
                     .flatten()
             })
             .collect::<Vec<_>>();
-        match crate::conversation_display::plan_review_compatibility_from_entries(&entries) {
-            crate::conversation_display::PlanReviewCompatibilityStatusV1::NoPlanReview => {}
-            crate::conversation_display::PlanReviewCompatibilityStatusV1::Current => current += 1,
-            crate::conversation_display::PlanReviewCompatibilityStatusV1::LegacyRecovered => {
-                legacy_recovered += 1;
-            }
-            crate::conversation_display::PlanReviewCompatibilityStatusV1::UnsupportedLegacy => {
-                unsupported_legacy += 1;
-            }
+        if !entries.iter().any(|entry| {
+            matches!(
+                entry,
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::PlanReviewAttempt(_)
+                )
+            )
+        }) {
+            continue;
+        }
+        match crate::conversation_display::public_plan_review_from_entries(&entries, None) {
+            Ok(_) => current += 1,
+            Err(_) => unsupported += 1,
         }
     }
-    let message = format!(
-        "current={current}, legacy_read_only_recovered={legacy_recovered}, unsupported_legacy={unsupported_legacy}"
-    );
-    if unsupported_legacy > 0 {
+    let message = format!("current={current}, unsupported={unsupported}");
+    if unsupported > 0 {
         report.push_with_remediation(
             DoctorStatus::Warn,
-            "session:plan_review_compatibility",
+            "session:plan_review_format",
             message,
             Some(
-                "preserve the affected session for audit and start a new plan review; Sigil will not guess ambiguous legacy revision lineage",
+                "start a new session and plan review; old Plan revision formats are unsupported and are not migrated",
             ),
         );
     } else {
-        report.push(
-            DoctorStatus::Ok,
-            "session:plan_review_compatibility",
-            message,
-        );
+        report.push(DoctorStatus::Ok, "session:plan_review_format", message);
     }
 }
 

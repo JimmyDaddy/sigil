@@ -14,6 +14,7 @@ use sigil_kernel::{
 pub fn default_setup_root_config() -> RootConfig {
     RootConfig {
         config_version: sigil_kernel::CONFIG_VERSION_V2,
+        composition: sigil_kernel::RuntimeCompositionConfig::core(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },

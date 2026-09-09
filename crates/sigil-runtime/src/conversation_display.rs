@@ -1,7 +1,13 @@
 //! Canonical, provider-neutral display projection for durable conversation history.
 
+mod index;
+pub use index::{
+    ConversationDisplayHashMetrics, ConversationDisplayIndex, ConversationDisplayPagePlan,
+    ConversationDisplayRecordPosition,
+};
+
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::Path,
 };
 
@@ -37,12 +43,19 @@ pub const MAX_CONVERSATION_TASK_CONTROL_ITEMS: usize = 128;
 pub const MAX_CONVERSATION_TASK_CONTROL_DETAIL_ITEMS: usize = 32;
 /// Hard byte limit for one durable Task control step title.
 pub const MAX_CONVERSATION_TASK_CONTROL_TITLE_BYTES: usize = 4 * 1024;
+const CONVERSATION_DISPLAY_CURSOR_SCHEMA_VERSION: u16 = 2;
 const MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
 const MAX_CONVERSATION_DISPLAY_IDENTITY_BYTES: usize = 512;
 
 /// Stable failure classes for canonical conversation display projection.
 #[derive(Debug, ThisError)]
 pub enum ConversationDisplayProjectionError {
+    /// The committed history is invalid; retrying the same owner cannot repair it.
+    #[error("conversation display history is corrupt: {source}")]
+    Corrupt {
+        #[source]
+        source: anyhow::Error,
+    },
     /// The supplied cursor is malformed or belongs to another request scope.
     #[error("conversation display cursor is invalid: {source}")]
     InvalidCursor {
@@ -64,6 +77,20 @@ pub enum ConversationDisplayProjectionError {
 }
 
 impl ConversationDisplayProjectionError {
+    pub(crate) fn from_application(error: sigil_application::ApplicationError) -> Self {
+        match error {
+            sigil_application::ApplicationError::CorruptProjection(reason) => Self::Corrupt {
+                source: anyhow!(reason),
+            },
+            sigil_application::ApplicationError::ResetRequired
+            | sigil_application::ApplicationError::ScopeMismatch => {
+                Self::stale_cursor(anyhow!("conversation display owner source changed"))
+            }
+            error => Self::Unavailable {
+                source: anyhow!(error),
+            },
+        }
+    }
     fn invalid_cursor(source: anyhow::Error) -> Self {
         Self::InvalidCursor { source }
     }
@@ -380,7 +407,7 @@ pub struct ConversationDisplayPageV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct ConversationDisplayCursorV1 {
+struct ConversationDisplayCursor {
     schema_version: u16,
     session_scope_sha256: String,
     through_session_stream_sequence: u64,
@@ -413,6 +440,7 @@ struct ConversationTaskControlProjection {
     current_task_id: Option<String>,
     focus_explicitly_selected: bool,
     task_run_scopes: BTreeMap<String, String>,
+    latest_user_input: Option<sigil_kernel::PublicUserInputRequestV1>,
 }
 
 impl ConversationTaskControlProjection {
@@ -536,6 +564,10 @@ impl ConversationTaskControlProjection {
 
     fn apply_event(&mut self, event: PublicRunEventKind) {
         match event {
+            PublicRunEventKind::UserInputChanged { request, .. } => {
+                self.latest_user_input = Some(*request);
+            }
+
             PublicRunEventKind::TaskPhaseChanged {
                 task_id: Some(task_id),
                 phase,
@@ -964,7 +996,7 @@ pub fn conversation_display_page_from_records(
         .iter()
         .take_while(|record| record.stream_sequence() <= frontier.sequence)
     {
-        plan_review.apply_record(record);
+        plan_review.apply_record(record)?;
         if let Some(SessionLogEntry::Control(control)) = record.session_log_entry()?
             && let Some(entry) = UserInputLifecycleEntryV1::from_control(&control)
         {
@@ -975,6 +1007,9 @@ pub fn conversation_display_page_from_records(
         {
             agent_user_input.apply(route)?;
         }
+        if let Some(entry) = record.session_log_entry()? {
+            task_control.apply_entry(&entry)?;
+        }
         let mut projected = project_record(
             record,
             expected_scope,
@@ -983,7 +1018,6 @@ pub fn conversation_display_page_from_records(
             &mut approval_items,
             &mut run_skills,
             &mut terminal_frontier,
-            &mut task_control,
         )?;
         projected.sort_by_key(|item| item.display_order);
         for item in projected {
@@ -1035,8 +1069,8 @@ pub fn conversation_display_page_from_records(
         let oldest = items
             .first()
             .ok_or_else(|| anyhow!("bounded display page could not retain one item"))?;
-        Some(encode_cursor(&ConversationDisplayCursorV1 {
-            schema_version: CONVERSATION_DISPLAY_SCHEMA_VERSION,
+        Some(encode_cursor(&ConversationDisplayCursor {
+            schema_version: CONVERSATION_DISPLAY_CURSOR_SCHEMA_VERSION,
             session_scope_sha256: scope_sha256(expected_scope),
             through_session_stream_sequence: frontier.sequence,
             frontier_binding_sha256: frontier_binding_sha256(
@@ -1055,7 +1089,7 @@ pub fn conversation_display_page_from_records(
         user_input
             .pending()
             .map(sigil_kernel::UserInputRequestStateV1::public_view)
-            .chain(plan_review.pending_user_input())
+            .chain(plan_review.pending_user_inputs())
             .chain(
                 agent_user_input
                     .unresolved()
@@ -1122,7 +1156,7 @@ fn validate_stream(records: &[SessionStreamRecord], expected_scope: &str) -> Res
 fn fixed_frontier(
     records: &[SessionStreamRecord],
     expected_scope: &str,
-    cursor: Option<&ConversationDisplayCursorV1>,
+    cursor: Option<&ConversationDisplayCursor>,
 ) -> Result<FixedFrontier> {
     let Some(cursor) = cursor else {
         return Ok(records.last().map_or_else(
@@ -1150,11 +1184,8 @@ fn fixed_frontier(
     })
 }
 
-fn validate_cursor_request(
-    cursor: &ConversationDisplayCursorV1,
-    expected_scope: &str,
-) -> Result<()> {
-    if cursor.schema_version != CONVERSATION_DISPLAY_SCHEMA_VERSION {
+fn validate_cursor_request(cursor: &ConversationDisplayCursor, expected_scope: &str) -> Result<()> {
+    if cursor.schema_version != CONVERSATION_DISPLAY_CURSOR_SCHEMA_VERSION {
         bail!("unsupported conversation display cursor schema");
     }
     if cursor.session_scope_sha256 != scope_sha256(expected_scope) {
@@ -1176,7 +1207,6 @@ fn project_record(
     approval_items: &mut HashMap<String, String>,
     run_skills: &mut HashMap<String, ConversationDisplaySkillReferenceV1>,
     terminal_frontier: &mut Option<ConversationTerminalFrontierV1>,
-    task_control: &mut ConversationTaskControlProjection,
 ) -> Result<Vec<ConversationDisplayItemV1>> {
     if let Some(lifecycle) = conversation_run_lifecycle_record_from_stream(record)? {
         return project_lifecycle(
@@ -1191,7 +1221,6 @@ fn project_record(
     }
 
     if let Some(entry) = record.session_log_entry()? {
-        task_control.apply_entry(&entry)?;
         return project_session_entry(
             record,
             expected_scope,
@@ -1894,7 +1923,7 @@ fn new_item(
     }
 }
 
-fn stable_display_id(scope: &str, source_event_id: &str, subindex: u32) -> String {
+pub(crate) fn stable_display_id(scope: &str, source_event_id: &str, subindex: u32) -> String {
     let mut digest = Sha256::new();
     digest.update(b"sigil-conversation-display-v1\0");
     digest.update(u64::try_from(scope.len()).unwrap_or(u64::MAX).to_be_bytes());
@@ -1917,37 +1946,65 @@ fn frontier_binding_sha256(
     scope: &str,
     records: &[SessionStreamRecord],
     sequence: u64,
-    before_order: ConversationDisplayOrderV1,
+    before: ConversationDisplayOrderV1,
+) -> String {
+    let prefix = records
+        .iter()
+        .take_while(|record| record.stream_sequence() <= sequence)
+        .fold([0_u8; 32], |prefix, record| {
+            advance_display_prefix_digest(
+                &prefix,
+                record.stream_sequence(),
+                record.event_id(),
+                record.record_checksum(),
+            )
+        });
+    display_cursor_binding_sha256(scope, sequence, before, &prefix)
+}
+
+fn advance_display_prefix_digest(
+    previous: &[u8; 32],
+    sequence: u64,
+    event_id: &str,
+    checksum: &str,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"sigil-conversation-display-prefix-v2\0");
+    digest.update(previous);
+    digest.update(sequence.to_be_bytes());
+    digest.update(
+        u64::try_from(event_id.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(event_id.as_bytes());
+    digest.update(
+        u64::try_from(checksum.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    digest.update(checksum.as_bytes());
+    digest.finalize().into()
+}
+
+fn display_cursor_binding_sha256(
+    scope: &str,
+    sequence: u64,
+    before: ConversationDisplayOrderV1,
+    prefix: &[u8; 32],
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"sigil-conversation-display-frontier-v1\0");
+    digest.update(b"sigil-conversation-display-frontier-v2\0");
     digest.update(u64::try_from(scope.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(scope.as_bytes());
     digest.update(sequence.to_be_bytes());
-    digest.update(before_order.session_stream_sequence.to_be_bytes());
-    digest.update(before_order.subindex.to_be_bytes());
-    for record in records
-        .iter()
-        .take_while(|record| record.stream_sequence() <= sequence)
-    {
-        digest.update(record.stream_sequence().to_be_bytes());
-        digest.update(
-            u64::try_from(record.event_id().len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        digest.update(record.event_id().as_bytes());
-        digest.update(
-            u64::try_from(record.record_checksum().len())
-                .unwrap_or(u64::MAX)
-                .to_be_bytes(),
-        );
-        digest.update(record.record_checksum().as_bytes());
-    }
+    digest.update(before.session_stream_sequence.to_be_bytes());
+    digest.update(before.subindex.to_be_bytes());
+    digest.update(prefix);
     format!("{:x}", digest.finalize())
 }
 
-fn encode_cursor(cursor: &ConversationDisplayCursorV1) -> Result<String> {
+fn encode_cursor(cursor: &ConversationDisplayCursor) -> Result<String> {
     let encoded = URL_SAFE_NO_PAD.encode(
         serde_json::to_vec(cursor).context("failed to encode conversation display cursor")?,
     );
@@ -1957,7 +2014,7 @@ fn encode_cursor(cursor: &ConversationDisplayCursorV1) -> Result<String> {
     Ok(encoded)
 }
 
-fn decode_cursor(encoded: &str) -> Result<ConversationDisplayCursorV1> {
+fn decode_cursor(encoded: &str) -> Result<ConversationDisplayCursor> {
     if encoded.is_empty() || encoded.len() > MAX_CONVERSATION_DISPLAY_CURSOR_BYTES {
         bail!("conversation display cursor has invalid size");
     }
@@ -2055,7 +2112,7 @@ fn map_checkpoint_conflict_reason(
 }
 
 /// Incremental display projection for the bounded pending plan review surface.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct PlanReviewDisplayProjection {
     attempts: Vec<sigil_kernel::PlanReviewAttemptEntry>,
     drafts: std::collections::BTreeMap<sigil_kernel::PlanId, sigil_kernel::PlanDraftCreatedEntry>,
@@ -2084,33 +2141,15 @@ struct PlanReviewDisplayProjection {
     >,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlanReviewCompatibilityStatusV1 {
-    NoPlanReview,
-    Current,
-    LegacyRecovered,
-    UnsupportedLegacy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LegacyPlanRevisionRecovery {
-    base_attempt_index: usize,
-    terminal_attempt_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LegacyPlanRevisionCompatibility {
-    None,
-    Recovered(LegacyPlanRevisionRecovery),
-    Unsupported,
-}
-
 impl PlanReviewDisplayProjection {
-    fn apply_entry(&mut self, entry: sigil_kernel::SessionLogEntry) {
+    fn apply_entry(&mut self, entry: sigil_kernel::SessionLogEntry) -> Result<()> {
         match entry {
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanReviewAttempt(attempt),
-            ) => self.attempts.push(attempt),
+            ) => {
+                self.validate_attempt_format(&attempt)?;
+                self.attempts.push(attempt);
+            }
             sigil_kernel::SessionLogEntry::Control(
                 sigil_kernel::ControlEntry::PlanDraftCreated(draft),
             ) => {
@@ -2202,41 +2241,59 @@ impl PlanReviewDisplayProjection {
             }
             _ => {}
         }
+        Ok(())
     }
 
-    fn pending_user_input(&self) -> Option<sigil_kernel::PublicUserInputRequestV1> {
+    fn validate_attempt_format(
+        &self,
+        attempt: &sigil_kernel::PlanReviewAttemptEntry,
+    ) -> Result<()> {
+        let revision_bound = attempt.revision_request_id.is_some();
+        if revision_bound != attempt.base_plan_id.is_some()
+            || revision_bound != attempt.base_plan_hash.is_some()
+            || (!revision_bound
+                && self.attempts.iter().any(|previous| {
+                    previous.plan_review_id == attempt.plan_review_id
+                        && previous.plan_id != attempt.plan_id
+                        && previous.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
+                }))
+        {
+            bail!(
+                "unsupported Plan revision format: the current format requires an explicit request and exact base plan binding"
+            );
+        }
+        Ok(())
+    }
+
+    fn pending_user_inputs(&self) -> Vec<sigil_kernel::PublicUserInputRequestV1> {
+        let mut latest_attempts = BTreeSet::new();
         self.attempts
             .iter()
             .rev()
-            .find(|attempt| {
+            .filter(|attempt| {
+                latest_attempts.insert((attempt.plan_review_id.clone(), attempt.attempt_id.clone()))
+            })
+            .filter(|attempt| {
                 attempt.status == sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
             })
-            .and_then(|attempt| attempt.pending_user_input.as_deref())
+            .filter_map(|attempt| attempt.pending_user_input.as_deref())
             .cloned()
+            .collect()
     }
 
-    fn apply_record(&mut self, record: &sigil_kernel::SessionStreamRecord) {
-        let Ok(Some(entry)) = record.session_log_entry() else {
-            return;
+    fn apply_record(&mut self, record: &sigil_kernel::SessionStreamRecord) -> Result<()> {
+        let Some(entry) = record.session_log_entry()? else {
+            return Ok(());
         };
-        self.apply_entry(entry);
+        self.apply_entry(entry)
     }
 
     fn into_public(
         self,
         current_workspace_snapshot_id: Option<&str>,
     ) -> Option<sigil_kernel::PublicPlanReview> {
-        let latest_index = self.attempts.len().checked_sub(1)?;
-        let latest = &self.attempts[latest_index];
-        let legacy_revision = self.legacy_revision_compatibility(latest_index);
-        let legacy_recovery = match &legacy_revision {
-            LegacyPlanRevisionCompatibility::Recovered(recovery) => Some(recovery),
-            LegacyPlanRevisionCompatibility::None
-            | LegacyPlanRevisionCompatibility::Unsupported => None,
-        };
-        let active_attempt = if let Some(recovery) = legacy_recovery {
-            &self.attempts[recovery.base_attempt_index]
-        } else if latest.revision_request_id.is_some()
+        let latest = self.attempts.last()?;
+        let active_attempt = if latest.revision_request_id.is_some()
             && latest.status != sigil_kernel::PlanReviewAttemptStatus::DraftReady
         {
             latest.base_plan_id.as_ref().and_then(|base_plan_id| {
@@ -2333,9 +2390,7 @@ impl PlanReviewDisplayProjection {
             && !revision_running
             && !guidance_pending
         {
-            match legacy_recovery.map_or(latest_decision, |_| {
-                Some(sigil_kernel::PlanDecision::RevisionFailed)
-            }) {
+            match latest_decision {
                 // Guidance is accepted before an HTTP/TUI adapter claims the revision worker.
                 // When that claim is rejected before an executor records `Started`, the
                 // unchanged DraftReady attempt remains the durable authority and the user may
@@ -2364,9 +2419,6 @@ impl PlanReviewDisplayProjection {
                 | sigil_kernel::PlanReviewAttemptStatus::Blocked
                 | sigil_kernel::PlanReviewAttemptStatus::Failed
                 | sigil_kernel::PlanReviewAttemptStatus::Interrupted
-        ) && !matches!(
-            legacy_revision,
-            LegacyPlanRevisionCompatibility::Unsupported
         ) {
             let mut actions = vec![sigil_kernel::PublicPlanAction::RetryReview];
             if candidate.as_ref().is_some_and(|candidate| {
@@ -2407,37 +2459,7 @@ impl PlanReviewDisplayProjection {
             source: active_attempt.source.into(),
             stale,
             candidate,
-            revision: if let Some(recovery) = legacy_recovery {
-                let terminal = &self.attempts[recovery.terminal_attempt_index];
-                Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
-                    request_id: format!("legacy-plan-revision-{}", terminal.attempt_id.as_str()),
-                    attempt_id: Some(terminal.attempt_id.as_str().to_owned()),
-                    attempt_ordinal: Some(1),
-                    status: match terminal.status {
-                        sigil_kernel::PlanReviewAttemptStatus::Cancelled => {
-                            sigil_kernel::PublicPlanRevisionStatusV1::Cancelled
-                        }
-                        sigil_kernel::PlanReviewAttemptStatus::CompletedWithoutDraft
-                        | sigil_kernel::PlanReviewAttemptStatus::Blocked
-                        | sigil_kernel::PlanReviewAttemptStatus::Paused
-                        | sigil_kernel::PlanReviewAttemptStatus::Failed
-                        | sigil_kernel::PlanReviewAttemptStatus::Interrupted => {
-                            sigil_kernel::PublicPlanRevisionStatusV1::Failed
-                        }
-                        sigil_kernel::PlanReviewAttemptStatus::Started
-                        | sigil_kernel::PlanReviewAttemptStatus::WaitingForInput
-                        | sigil_kernel::PlanReviewAttemptStatus::Finalizing
-                        | sigil_kernel::PlanReviewAttemptStatus::DraftReady
-                        | sigil_kernel::PlanReviewAttemptStatus::CompileFailed => {
-                            unreachable!("legacy recovery only accepts terminal attempts")
-                        }
-                    },
-                    terminal_reason: terminal
-                        .terminal_reason
-                        .map(|reason| reason.as_str().to_owned())
-                        .or_else(|| Some("legacy_revision_failed".to_owned())),
-                })
-            } else if let Some(request_id) = latest.revision_request_id.as_ref() {
+            revision: if let Some(request_id) = latest.revision_request_id.as_ref() {
                 Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
                     request_id: request_id.as_str().to_owned(),
                     attempt_id: Some(latest.attempt_id.as_str().to_owned()),
@@ -2519,140 +2541,23 @@ impl PlanReviewDisplayProjection {
             },
         })
     }
-
-    fn legacy_revision_compatibility(
-        &self,
-        latest_index: usize,
-    ) -> LegacyPlanRevisionCompatibility {
-        let Some(terminal) = self.attempts.get(latest_index) else {
-            return LegacyPlanRevisionCompatibility::None;
-        };
-        let has_matching_legacy_base = self.attempts[..latest_index].iter().any(|attempt| {
-            attempt.plan_review_id == terminal.plan_review_id
-                && attempt.plan_id != terminal.plan_id
-                && attempt.source == terminal.source
-                && attempt.source_turn == terminal.source_turn
-                && attempt.route_decision_id == terminal.route_decision_id
-                && attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
-                && self.drafts.get(&attempt.plan_id).is_some_and(|draft| {
-                    self.decisions
-                        .get(&attempt.plan_id)
-                        .and_then(|entries| entries.last())
-                        .is_some_and(|decision| {
-                            decision.decision == sigil_kernel::PlanDecision::RevisionRequested
-                                && decision.plan_hash == draft.plan_hash
-                        })
-                })
-        });
-        let has_legacy_signal = terminal.revision_request_id.is_none()
-            && terminal.base_plan_id.is_none()
-            && terminal.base_plan_hash.is_none()
-            && terminal.status.is_terminal()
-            && !self.drafts.contains_key(&terminal.plan_id)
-            && has_matching_legacy_base;
-        if !has_legacy_signal {
-            return LegacyPlanRevisionCompatibility::None;
-        }
-
-        let Some(candidate_start_index) = self.attempts.iter().position(|attempt| {
-            attempt.attempt_id == terminal.attempt_id
-                && attempt.plan_id == terminal.plan_id
-                && attempt.status == sigil_kernel::PlanReviewAttemptStatus::Started
-        }) else {
-            return LegacyPlanRevisionCompatibility::Unsupported;
-        };
-        if candidate_start_index >= latest_index
-            || self.attempts[candidate_start_index..=latest_index]
-                .iter()
-                .any(|attempt| {
-                    attempt.attempt_id != terminal.attempt_id
-                        || attempt.plan_id != terminal.plan_id
-                        || attempt.plan_review_id != terminal.plan_review_id
-                        || attempt.source != terminal.source
-                        || attempt.source_turn != terminal.source_turn
-                        || attempt.route_decision_id != terminal.route_decision_id
-                        || attempt.revision_request_id.is_some()
-                        || attempt.base_plan_id.is_some()
-                        || attempt.base_plan_hash.is_some()
-                })
-        {
-            return LegacyPlanRevisionCompatibility::Unsupported;
-        }
-
-        let mut candidates = self.attempts[..candidate_start_index]
-            .iter()
-            .enumerate()
-            .filter_map(|(index, attempt)| {
-                if attempt.plan_review_id != terminal.plan_review_id
-                    || attempt.source != terminal.source
-                    || attempt.source_turn != terminal.source_turn
-                    || attempt.route_decision_id != terminal.route_decision_id
-                    || attempt.status != sigil_kernel::PlanReviewAttemptStatus::DraftReady
-                {
-                    return None;
-                }
-                let draft = self.drafts.get(&attempt.plan_id)?;
-                let decision = self
-                    .decisions
-                    .get(&attempt.plan_id)
-                    .and_then(|entries| entries.last())?;
-                (decision.decision == sigil_kernel::PlanDecision::RevisionRequested
-                    && decision.plan_hash == draft.plan_hash
-                    && decision.decided_at_ms
-                        <= self.attempts[candidate_start_index].recorded_at_ms)
-                    .then_some((decision.decided_at_ms, index))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|candidate| candidate.0);
-        let Some((latest_decision_at, base_attempt_index)) = candidates.pop() else {
-            return LegacyPlanRevisionCompatibility::Unsupported;
-        };
-        if candidates
-            .last()
-            .is_some_and(|candidate| candidate.0 == latest_decision_at)
-        {
-            return LegacyPlanRevisionCompatibility::Unsupported;
-        }
-        LegacyPlanRevisionCompatibility::Recovered(LegacyPlanRevisionRecovery {
-            base_attempt_index,
-            terminal_attempt_index: latest_index,
-        })
-    }
-}
-
-pub(crate) fn plan_review_compatibility_from_entries(
-    entries: &[sigil_kernel::SessionLogEntry],
-) -> PlanReviewCompatibilityStatusV1 {
-    let mut projection = PlanReviewDisplayProjection::default();
-    for entry in entries {
-        projection.apply_entry(entry.clone());
-    }
-    let Some(latest_index) = projection.attempts.len().checked_sub(1) else {
-        return PlanReviewCompatibilityStatusV1::NoPlanReview;
-    };
-    match projection.legacy_revision_compatibility(latest_index) {
-        LegacyPlanRevisionCompatibility::None => PlanReviewCompatibilityStatusV1::Current,
-        LegacyPlanRevisionCompatibility::Recovered(_) => {
-            PlanReviewCompatibilityStatusV1::LegacyRecovered
-        }
-        LegacyPlanRevisionCompatibility::Unsupported => {
-            PlanReviewCompatibilityStatusV1::UnsupportedLegacy
-        }
-    }
 }
 
 /// Projects the reducer-owned plan summary for an in-process surface that already owns a
 /// validated session snapshot.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error when a Plan revision omits the current request and exact base binding.
 pub fn public_plan_review_from_entries(
     entries: &[sigil_kernel::SessionLogEntry],
     current_workspace_snapshot_id: Option<&str>,
-) -> Option<sigil_kernel::PublicPlanReview> {
+) -> Result<Option<sigil_kernel::PublicPlanReview>> {
     let mut projection = PlanReviewDisplayProjection::default();
     for entry in entries {
-        projection.apply_entry(entry.clone());
+        projection.apply_entry(entry.clone())?;
     }
-    projection.into_public(current_workspace_snapshot_id)
+    Ok(projection.into_public(current_workspace_snapshot_id))
 }
 
 /// Projects every unresolved attention request in stable oldest-first order.
@@ -2664,13 +2569,13 @@ pub fn public_user_inputs_from_entries(
         sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(entries)?;
     let mut plan_review = PlanReviewDisplayProjection::default();
     for entry in entries {
-        plan_review.apply_entry(entry.clone());
+        plan_review.apply_entry(entry.clone())?;
     }
     Ok(stable_pending_user_inputs(
         user_input
             .pending()
             .map(sigil_kernel::UserInputRequestStateV1::public_view)
-            .chain(plan_review.pending_user_input())
+            .chain(plan_review.pending_user_inputs())
             .chain(
                 agent_user_input
                     .pending()

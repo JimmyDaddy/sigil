@@ -4598,10 +4598,12 @@ pub(crate) fn build_child_session(
             store,
         )?;
         crate::attach_session_url_capability_store(&mut session)?;
+        crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
         return Ok(session);
     }
     let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
     crate::attach_session_url_capability_store(&mut session)?;
+    crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
     Ok(session)
 }
 

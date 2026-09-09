@@ -8454,6 +8454,7 @@ fn supervisor(config: &RootConfig) -> Result<AgentSupervisor> {
 fn root_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },

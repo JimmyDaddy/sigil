@@ -1653,7 +1653,9 @@ where
     W: Write,
 {
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-        if self.output == RunOutput::Jsonl {
+        if self.output == RunOutput::Jsonl
+            && !sigil_kernel::is_transient_public_run_event(&event.event)
+        {
             write_machine_record(self.writer, &MachineRecord::event(event))?;
         }
         Ok(())

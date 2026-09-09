@@ -829,10 +829,12 @@ impl LocalSessionLifecycleService {
             .map_err(|error| anyhow!(error))?;
         let records = JsonlSessionStore::read_event_records(&binding.session_log_path)
             .with_context(|| format!("failed to read {}", binding.session_log_path.display()))?;
+        let root_config = root_config.with_effective_composition()?;
+        validate_conversation_fork_source_composition(&records, &root_config)?;
         let projection = project_records(&records)?;
         let _ = projection.resolved_model_route.as_ref();
         let (provider_name, resolved_model_route) =
-            crate::provider_connections::resolve_model_route(root_config, target_model_ref)
+            crate::provider_connections::resolve_model_route(&root_config, target_model_ref)
                 .map_err(anyhow::Error::new)?;
         let model_name = resolved_model_route.model_ref.model_id.clone();
         let parent = binding
@@ -855,6 +857,7 @@ impl LocalSessionLifecycleService {
                 &destination_path,
                 expected_session_id,
                 source_turn_digest,
+                &root_config,
             );
         }
         let store = JsonlSessionStore::new(&binding.session_log_path)?;
@@ -2046,12 +2049,36 @@ fn conversation_fork_path(
     parent.join(format!("session-fork-{identity}.jsonl"))
 }
 
+/// Checks the immutable source contract before a product surface creates or reopens a fork.
+/// A fork inherits the source selection; changing selection requires a fresh conversation.
+///
+/// # Errors
+///
+/// Rejects an unbound, invalid, or differently composed source without creating a destination.
+pub fn validate_conversation_fork_source_composition(
+    records: &[SessionStreamRecord],
+    root_config: &RootConfig,
+) -> Result<()> {
+    let effective = root_config.with_effective_composition()?;
+    let composition =
+        sigil_kernel::conversation_fork::conversation_fork_source_composition(records)?.context(
+            "conversation fork source has no capability composition binding; start a new session",
+        )?;
+    anyhow::ensure!(
+        composition.capabilities == effective.selected_capabilities(),
+        "conversation fork source capability composition differs from configuration; start a new session"
+    );
+    Ok(())
+}
+
 fn recover_conversation_fork_output(
     destination_path: &Path,
     expected_source_session_id: &str,
     expected_source_turn_digest: &str,
+    root_config: &RootConfig,
 ) -> Result<ConversationForkOutput> {
     let records = JsonlSessionStore::read_event_records(destination_path)?;
+    validate_conversation_fork_source_composition(&records, root_config)?;
     let (fork_event, forked) = records
         .iter()
         .find_map(|record| {

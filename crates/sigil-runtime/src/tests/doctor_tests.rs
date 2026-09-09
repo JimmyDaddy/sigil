@@ -14,7 +14,7 @@ use super::*;
 use crate::doctor::mcp::command_status_with_search_path;
 
 #[test]
-fn doctor_reports_current_plan_review_compatibility_without_mutating_sessions() -> Result<()> {
+fn doctor_reports_current_plan_review_format_without_mutating_sessions() -> Result<()> {
     let temp = tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session-current-plan.jsonl"))?;
     let mut session = sigil_kernel::Session::new("provider", "model").with_store(store);
@@ -50,22 +50,19 @@ fn doctor_reports_current_plan_review_compatibility_without_mutating_sessions() 
     let before = fs::read(temp.path().join("session-current-plan.jsonl"))?;
 
     let mut report = DoctorReport::default();
-    check_plan_review_compatibility(&mut report, temp.path());
+    check_plan_review_format(&mut report, temp.path());
 
     let check = report
         .checks
         .iter()
-        .find(|check| check.name == "session:plan_review_compatibility")
-        .expect("plan review compatibility check should be present");
+        .find(|check| check.name == "session:plan_review_format")
+        .expect("plan review format check should be present");
     assert_eq!(check.status, DoctorStatus::Ok);
-    assert_eq!(
-        check.message,
-        "current=1, legacy_read_only_recovered=0, unsupported_legacy=0"
-    );
+    assert_eq!(check.message, "current=1, unsupported=0");
     assert_eq!(
         fs::read(temp.path().join("session-current-plan.jsonl"))?,
         before,
-        "Doctor compatibility inspection must stay read-only"
+        "Doctor format inspection must stay read-only"
     );
     Ok(())
 }
