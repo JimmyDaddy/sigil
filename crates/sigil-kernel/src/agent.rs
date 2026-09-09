@@ -182,6 +182,10 @@ impl<H> EventHandler for RoutingMicroturnEventFilter<'_, H>
 where
     H: EventHandler,
 {
+    fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
+        self.inner.begin_live_attempt(physical_attempt_id)
+    }
+
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         let suppress = self.suppress_internal_activity
             && match &event {
@@ -469,6 +473,9 @@ pub struct AgentRunInput {
     pub persisted_user_message: Option<String>,
     pub persisted_user_message_id: Option<String>,
     pub persisted_image_attachments: Vec<crate::ImageAttachment>,
+    /// Fixed provider-visible prefix that is placed before retained child history for this run.
+    /// It is process-local and must be derived from an already proven durable boundary.
+    pub initial_context: Vec<ModelMessage>,
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
@@ -527,6 +534,7 @@ impl fmt::Debug for AgentRunInput {
                 &self.persisted_image_attachments.len(),
             )
             .field("transient_context_count", &self.transient_context.len())
+            .field("initial_context_count", &self.initial_context.len())
             .field("runtime_context", &self.runtime_context)
             .field(
                 "tool_artifact_read_budget",
@@ -650,6 +658,7 @@ impl AgentRunInput {
             persisted_user_message: Some(prompt.into()),
             persisted_user_message_id: Some(message_id),
             persisted_image_attachments: Vec::new(),
+            initial_context: Vec::new(),
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -689,6 +698,7 @@ impl AgentRunInput {
             persisted_user_message: Some(prompt.into()),
             persisted_user_message_id: Some(message_id),
             persisted_image_attachments: Vec::new(),
+            initial_context: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -727,6 +737,7 @@ impl AgentRunInput {
             persisted_user_message: None,
             persisted_user_message_id: None,
             persisted_image_attachments: Vec::new(),
+            initial_context: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
             task_plan_update: None,
@@ -1026,6 +1037,14 @@ impl AgentRunInput {
 
     pub fn with_runtime_context(mut self, context: RuntimeContextCandidates) -> Self {
         self.runtime_context = context;
+        self
+    }
+
+    /// Places fixed provider-visible context before retained child history. This is intentionally
+    /// process-local; callers must bind it to an existing durable source boundary.
+    #[must_use]
+    pub fn with_initial_context(mut self, context: Vec<ModelMessage>) -> Self {
+        self.initial_context = context;
         self
     }
 
@@ -2238,6 +2257,7 @@ where
             persisted_user_message,
             persisted_user_message_id,
             persisted_image_attachments,
+            initial_context,
             mut transient_context,
             mut runtime_context,
             task_plan_update,
@@ -2917,7 +2937,7 @@ where
                     }
                     None => {
                         let mut request = session
-                            .build_request_with_transient_messages_context_overlays_and_max_tokens(
+                            .build_request_with_initial_context_and_transient_messages_context_overlays_and_max_tokens(
                                 &options.workspace_root,
                                 &options.memory_config,
                                 tool_specs,
@@ -2925,6 +2945,7 @@ where
                                 options.reasoning_effort.clone(),
                                 previous_response_handle.clone(),
                                 options.traffic_partition_key.clone(),
+                                &initial_context,
                                 &transient_context,
                                 runtime_context.clone(),
                                 &current_run_overlays,

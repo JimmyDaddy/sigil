@@ -11,9 +11,9 @@ use crate::session::ToolArtifactDescriptorV1;
 use crate::session::ToolArtifactStore;
 use crate::{
     ControlEntry, ControlledCheckpointProjection, DurableEventType, EventClass,
-    ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session, SessionLogEntry,
-    SessionRef, SessionStreamRecord, StoredEvent, ToolArtifactBindingV1, ToolResultRecordedV3,
-    stable_event_hash, stable_event_uuid,
+    ExternalProvenanceEntry, JsonlSessionStore, ResolvedModelRoute, Session,
+    SessionCompositionSnapshotV1, SessionLogEntry, SessionRef, SessionStreamRecord, StoredEvent,
+    ToolArtifactBindingV1, ToolResultRecordedV3, stable_event_hash, stable_event_uuid,
 };
 
 /// Stable, append-only binding for one finalized user turn that can be forked safely.
@@ -271,6 +271,7 @@ fn create_conversation_fork(
     checkpoint: Option<(String, String)>,
 ) -> Result<ConversationForkOutput> {
     validate_source_and_destination(source_store.path(), &source_session_ref, &destination_path)?;
+    let composition = conversation_fork_source_composition(records)?;
     let mut prefix = safe_prefix_for_complete_turn(records, &point)?;
     if let Some(route) = resolved_model_route.as_ref() {
         anyhow::ensure!(
@@ -296,6 +297,9 @@ fn create_conversation_fork(
         model_name: model_name.clone(),
         resolved_model_route,
     })?;
+    if let Some(composition) = composition {
+        destination.append_control(ControlEntry::SessionCompositionBound(composition))?;
+    }
     let destination_session_id = destination.session_scope_id().to_owned();
     let destination_session_ref = SessionRef::new_relative(
         destination_path
@@ -357,6 +361,45 @@ fn create_conversation_fork(
         copied_message_count: prefix.messages.len(),
         copied_external_provenance_count: payload.copied_external_provenance_count,
     })
+}
+
+/// Returns the source execution contract without inferring one for low-level unbound sources.
+/// Product adapters require a bound source before invoking the generic transcript operation.
+///
+/// # Errors
+///
+/// Rejects invalid critical records, unsupported contracts, duplicate bindings, and bindings
+/// recorded after model output or effect history.
+pub fn conversation_fork_source_composition(
+    records: &[SessionStreamRecord],
+) -> Result<Option<SessionCompositionSnapshotV1>> {
+    let mut composition = None;
+    let mut has_execution_history = false;
+    for record in records {
+        match record.session_log_entry()? {
+            Some(SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot))) => {
+                snapshot.validate()?;
+                if composition.is_some() {
+                    bail!("conversation fork source has duplicate composition bindings");
+                }
+                if has_execution_history {
+                    bail!("conversation fork source composition follows execution history");
+                }
+                composition = Some(snapshot);
+            }
+            Some(
+                SessionLogEntry::Assistant(_)
+                | SessionLogEntry::ToolResultV3(_)
+                | SessionLogEntry::Control(
+                    ControlEntry::ToolExecution(_)
+                    | ControlEntry::TaskRun(_)
+                    | ControlEntry::TerminalTask(_),
+                ),
+            ) => has_execution_history = true,
+            _ => {}
+        }
+    }
+    Ok(composition)
 }
 
 #[cfg(not(any(test, feature = "test-support")))]

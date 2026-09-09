@@ -8,7 +8,7 @@ use tempfile::tempdir;
 use super::*;
 use crate::{
     AgentRole, EventClass, IntentOperationPreviewV1, IntentPlanProposalV1, IntentProposalUnitV1,
-    TaskId, TaskIsolationMode, TaskStepId, TaskStepMode, TaskStepSpec,
+    JsonlSessionStore, TaskId, TaskIsolationMode, TaskStepId, TaskStepMode, TaskStepSpec,
 };
 
 const PROPOSAL: &str = include_str!("../../../../dev/fixtures/intent-stack-v1/proposal.json");

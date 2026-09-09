@@ -108,7 +108,7 @@ impl MutationEventRecorder {
         let mut committed = Vec::new();
         let mut reconciled = Vec::new();
 
-        for record in JsonlSessionStore::read_event_records(self.store.path())? {
+        for record in self.store.read_event_records_writer()? {
             let event = record.into_stored_event();
             match DurableEventType::from_event_type(&event.event_type) {
                 Some(DurableEventType::MutationPrepared) => {
@@ -652,7 +652,7 @@ impl MutationEventRecorder {
         tool_call_id: &str,
     ) -> Result<Option<WorkspaceMutationDetected>> {
         let mut latest = None;
-        for record in JsonlSessionStore::read_event_records(self.store.path())? {
+        for record in self.store.read_event_records_writer()? {
             let event = record.into_stored_event();
             if DurableEventType::from_event_type(&event.event_type)
                 != Some(DurableEventType::WorkspaceMutationDetected)
@@ -674,7 +674,9 @@ pub(super) fn latest_workspace_revision(
     workspace_id: &str,
 ) -> Result<WorkspaceRevision> {
     let mut latest = 0;
-    for record in JsonlSessionStore::read_event_records(store.path())? {
+    // This recorder already owns the shared writer. Serialize with its append/ACK
+    // boundary instead of contending with the same process through a path reader.
+    for record in store.read_event_records_writer()? {
         let event = record.into_stored_event();
         if event.event_type == DurableEventType::MutationCommitted.as_str() {
             if let Ok(payload) = serde_json::from_value::<MutationCommitted>(event.payload.clone())

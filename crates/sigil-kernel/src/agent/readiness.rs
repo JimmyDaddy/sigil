@@ -6,10 +6,7 @@ use crate::{
     CheckpointRestored, ExecutionMutationProfile, MutationCommitted, MutationReconciled,
     MutationResolution, WorkspaceMutationDetected,
     event::DurableEventType,
-    session::{
-        ControlEntry, JsonlSessionStore, Session, SessionLogEntry, SessionStreamRecord,
-        ToolExecutionStatus,
-    },
+    session::{ControlEntry, Session, SessionLogEntry, SessionStreamRecord, ToolExecutionStatus},
     verification::{
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ReadinessEvaluatedEntry,
         ReadinessInput, RunStatus, VerificationPolicy, VerificationScope,
@@ -123,10 +120,10 @@ fn agent_run_workspace_mutation_evidence(
     scope: &VerificationScope,
     outcome: &AgentRunOutcome,
 ) -> Result<Vec<WorkspaceMutationEvidence>> {
-    let Some(path) = session.store_path() else {
+    let Some(store) = session.durable_store() else {
         return Ok(Vec::new());
     };
-    let records = JsonlSessionStore::read_event_records(path)?;
+    let records = store.read_event_records_coordinated()?;
     let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
     for record in &records {
         let event = record.stored_event();

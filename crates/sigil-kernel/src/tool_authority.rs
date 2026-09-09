@@ -86,7 +86,7 @@ impl KernelToolAuthorityV1 {
         decision: &crate::permission_plan_v3::ToolPermissionDecisionV3,
         operation: ManagedFileOperationV1,
         input: ManagedFileExecutionInputV1,
-        mutation_recorder: Option<crate::MutationEventRecorder>,
+        context: crate::managed_file_access::ManagedFileExecutionContextV1,
     ) -> Result<ManagedFileExecutionOutcomeV1, KernelToolAuthorityErrorV1> {
         let file_ref = plan.managed_file_access_plan.as_ref().ok_or_else(|| {
             KernelToolAuthorityErrorV1::BindingKind(
@@ -130,7 +130,7 @@ impl KernelToolAuthorityV1 {
                         admission_binding_hash: file_ref.plan_hash,
                     },
                     input,
-                    mutation_recorder,
+                    context,
                 },
                 token,
             )

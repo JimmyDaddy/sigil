@@ -225,6 +225,70 @@ fn recorder_rejects_foreign_or_wrong_schema_public_event() -> Result<()> {
 }
 
 #[test]
+fn recorder_rejects_noncurrent_outbox_and_receipt_versions() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = PublicEventOutboxRecorder::new(store.clone());
+    let original = entry_for(&session_id(&store)?, "run-1", 1, "event-1");
+    for version in [0, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION + 1] {
+        let mut unsupported = original.clone();
+        unsupported.schema_version = version;
+        let before = std::fs::read(store.path())?;
+        assert!(recorder.append_outbox(&unsupported).is_err());
+        assert_eq!(std::fs::read(store.path())?, before);
+    }
+    assert!(recorder.append_outbox(&original)?);
+    for version in [0, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION + 1] {
+        let receipt = PublicEventDeliveryReceiptV1 {
+            schema_version: version,
+            public_event_id: original.public_event_id.clone(),
+            adapter: "http".into(),
+            delivered_at_unix_ms: 1,
+        };
+        let before = std::fs::read(store.path())?;
+        assert!(recorder.append_delivery(&receipt).is_err());
+        assert_eq!(std::fs::read(store.path())?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn durable_outbox_rejects_transient_events_without_rewriting_source() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let recorder = PublicEventOutboxRecorder::new(store.clone());
+    let mut transient = entry_for(&session_id(&store)?, "run-1", 1, "transient-1");
+    transient.event.event = crate::PublicRunEventKind::TextDelta {
+        text: "unsupported durable preview".to_owned(),
+    };
+    transient.payload_digest = crate::stable_event_hash(serde_json::to_vec(&transient.event)?);
+    let before = std::fs::read(&path)?;
+    assert!(recorder.append_outbox(&transient).is_err());
+    assert_eq!(std::fs::read(&path)?, before);
+    let raw = StoredEvent::new(
+        DurableEventType::PublicEventOutbox,
+        EventClass::Critical,
+        transient.public_event_id.clone(),
+        transient.event.session_id.clone(),
+        1,
+        serde_json::to_value(transient)?,
+    )?;
+    assert!(
+        PublicEventOutboxProjectionV1::from_records(&[SessionStreamRecord::Stored(raw.clone()),])
+            .is_err()
+    );
+    drop(recorder);
+    drop(store);
+    let original = raw.to_json_line()?;
+    std::fs::write(&path, original.as_bytes())?;
+    let reopened = JsonlSessionStore::new(&path)?;
+    assert!(reopened.read_event_records_writer().is_err());
+    assert_eq!(std::fs::read(&path)?, original.as_bytes());
+    Ok(())
+}
+
+#[test]
 fn public_event_gap_is_rejected_by_bundle_writer_and_persisted_recovery() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

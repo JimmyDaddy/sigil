@@ -435,8 +435,8 @@ where
 
 fn verification_stream_records(session: &Session) -> Result<Vec<SessionStreamRecord>> {
     session
-        .store_path()
-        .map(JsonlSessionStore::read_event_records)
+        .durable_store()
+        .map(|store| store.read_event_records_coordinated())
         .transpose()
         .map(Option::unwrap_or_default)
 }
@@ -639,8 +639,8 @@ pub(super) async fn task_step_readiness_nonblocking(
         session.model_name().to_owned(),
         session.entries().to_vec(),
     );
-    if let Some(store_path) = session.store_path() {
-        session_snapshot = session_snapshot.with_store(JsonlSessionStore::new(store_path)?);
+    if let Some(store) = session.durable_store() {
+        session_snapshot = session_snapshot.with_store(store);
     }
     let request = request.clone();
     let step = step.clone();

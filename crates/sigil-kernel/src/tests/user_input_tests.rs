@@ -854,3 +854,62 @@ fn invalid_public_control_projection_is_error_not_a_fabricated_run_failure() -> 
     );
     Ok(())
 }
+
+#[test]
+fn public_input_projector_retires_bodies_without_losing_generation_or_root_budget() -> Result<()> {
+    let mut full = UserInputProjectionV1::default();
+    let mut compact = PublicUserInputProjector::default();
+    for generation in 1..=MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN as u32 {
+        let requested = text_request("retired", generation)?;
+        let decision = UserInputDecisionAcceptedV1::new(
+            &requested,
+            UserInputCommandId::new(format!("decision_{generation}"))?,
+            UserInputDecisionV1::Declined,
+            20,
+        )?;
+        let resolved = UserInputResolvedV1 {
+            schema_version: USER_INPUT_SCHEMA_VERSION,
+            identity: requested.request.identity.clone(),
+            request_hash: requested.request_hash.clone(),
+            resolution: UserInputResolutionV1::Declined,
+            resolved_at_unix_ms: 30,
+        };
+        for entry in [
+            UserInputLifecycleEntryV1::Requested(Box::new(requested.clone())),
+            UserInputLifecycleEntryV1::DecisionAccepted(Box::new(decision)),
+            UserInputLifecycleEntryV1::Resolved(resolved.clone()),
+        ] {
+            full.apply(entry.clone())?;
+            assert_eq!(
+                compact.apply(entry)?,
+                full.request(&requested.request.identity)
+                    .expect("request")
+                    .public_view()
+            );
+        }
+        assert!(compact.active.requests.is_empty());
+        assert_eq!(compact.retired.len(), generation as usize);
+        assert!(
+            compact
+                .apply(UserInputLifecycleEntryV1::Resolved(resolved.clone()))
+                .is_err()
+        );
+        assert!(
+            full.apply(UserInputLifecycleEntryV1::Resolved(resolved))
+                .is_err()
+        );
+        let gap = UserInputLifecycleEntryV1::Requested(Box::new(text_request(
+            "retired",
+            generation + 2,
+        )?));
+        assert!(compact.clone().apply(gap.clone()).is_err());
+        assert!(full.clone().apply(gap).is_err());
+    }
+    let exhausted = UserInputLifecycleEntryV1::Requested(Box::new(text_request(
+        "retired",
+        MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN as u32 + 1,
+    )?));
+    assert!(compact.apply(exhausted.clone()).is_err());
+    assert!(full.apply(exhausted).is_err());
+    Ok(())
+}

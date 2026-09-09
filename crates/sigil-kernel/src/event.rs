@@ -182,6 +182,7 @@ durable_event_types! {
     RuntimeContextSnapshotRecordedV2 => ("runtime_context_snapshot_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV3 => ("tool_result_recorded_v3", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    SessionCompositionBound => ("session_composition_bound", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
     RunFinalized => ("run_finalized", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
@@ -1461,6 +1462,21 @@ impl PublicRunEvent {
     }
 }
 
+/// Returns whether a public event is a bounded live preview rather than a durable fact.
+///
+/// Preview events never consume the durable outbox sequence or delivery receipt stream.  The
+/// complete message/result remains represented by its durable publication.
+#[must_use]
+pub fn is_transient_public_run_event(event: &PublicRunEventKind) -> bool {
+    matches!(
+        event,
+        PublicRunEventKind::TextDelta { .. }
+            | PublicRunEventKind::ReasoningDelta { .. }
+            | PublicRunEventKind::ToolCallArgsDelta { .. }
+            | PublicRunEventKind::ToolProgress { .. }
+    )
+}
+
 /// Public event payloads exposed to external run consumers.
 ///
 /// Lifecycle events are owned by adapters because the kernel's internal [`RunEvent`] stream only
@@ -1840,6 +1856,7 @@ impl From<RunEvent> for PublicRunEventKind {
 
 pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
+        ControlEntry::SessionCompositionBound(_) => "session_composition_bound",
         ControlEntry::SessionIdentity { .. } => "session_identity",
         ControlEntry::SessionModelSelected { .. } => "session_model_selected",
         ControlEntry::SessionRouteRebound { .. } => "session_route_rebound",
@@ -1994,6 +2011,12 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
 
 /// Sink for run events emitted by the agent loop.
 pub trait EventHandler {
+    /// Binds subsequent live previews to an already admitted physical provider attempt.
+    /// This notification carries no publication, replay, or execution authority.
+    fn begin_live_attempt(&mut self, _physical_attempt_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Handles one run event.
     ///
     /// # Errors
@@ -2036,6 +2059,19 @@ pub trait EventHandler {
     ) -> Result<Vec<StoredEvent>> {
         session.validate_session_publication_bundle(&entries, &publications)?;
         let events = session.append_session_entries(entries.clone())?;
+        self.handle_committed_session_publications(entries, publications)?;
+        Ok(events)
+    }
+
+    /// Delivers a source-bound bundle after its owning commit boundary has made it durable.
+    /// This method only forwards live events; it neither writes session entries nor acknowledges
+    /// an application observer. Durable outbox producers use it to preserve native adapter
+    /// delivery after their atomic source/outbox transaction succeeds.
+    fn handle_committed_session_publications(
+        &mut self,
+        entries: Vec<crate::SessionLogEntry>,
+        publications: Vec<crate::session::SessionPublicEventProjectionV1>,
+    ) -> Result<()> {
         let publication_indices = publications
             .iter()
             .map(|publication| publication.source_entry_index())
@@ -2051,7 +2087,7 @@ pub trait EventHandler {
         for publication in publications {
             self.handle(publication.into_run_event())?;
         }
-        Ok(events)
+        Ok(())
     }
 
     /// Prepares the public handling policy for one durable provider-attempt output control.

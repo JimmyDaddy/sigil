@@ -319,7 +319,7 @@ impl JsonlSessionStore {
         exact_fit_limit_tokens: u64,
         branch_id: Option<&str>,
     ) -> Result<Option<V2CompactionPreview>> {
-        let records = Self::read_event_records(self.path())?;
+        let records = self.read_event_records_coordinated()?;
         if records.is_empty() {
             return Ok(None);
         }

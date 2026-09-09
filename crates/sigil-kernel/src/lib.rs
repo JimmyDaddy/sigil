@@ -10,6 +10,10 @@ pub mod checkpoint;
 pub mod compaction_economics_v2;
 pub mod compaction_token_proof;
 pub mod config;
+pub mod session_composition;
+pub use session_composition::{
+    CORE_RUN_CONTRACT_VERSION, SESSION_COMPOSITION_SCHEMA_VERSION, SessionCompositionSnapshotV1,
+};
 pub mod context_engine;
 pub mod conversation_fork;
 pub mod conversation_queue;
@@ -132,9 +136,9 @@ pub use cancellation::{
     RunCancellationFinalizedEntry, RunCancellationHandle, RunCancellationOwner,
     RunCancellationRecorder, RunCancellationRequested, RunCancellationRequestedEntry,
     RunCancellationTarget, RunCancellationTerminalOutcome, RunEffectClass, RunEffectGuard,
-    RunEffectKind, RunQuiescenceOutcome, RunTaskGuard, append_run_cancellation_finalized,
-    append_run_cancellation_requested, durable_task_cancellation_requested,
-    reconcile_unfinished_run_cancellations,
+    RunEffectKind, RunQuiescenceOutcome, RunStopCapability, RunTaskGuard,
+    append_run_cancellation_finalized, append_run_cancellation_requested,
+    durable_task_cancellation_requested, reconcile_unfinished_run_cancellations,
 };
 pub use changeset::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
@@ -178,16 +182,18 @@ pub use config::{
     MIN_TERMINAL_NOTIFICATION_RUN_DURATION_MS, McpRemoteClientCapability, McpServerConfig,
     McpServerPinnedIdentity, McpServerStartup, McpServerTransportConfig, McpServerTrustPolicy,
     McpStreamableHttpConfig, McpTrustClass, MemoryConfig, ModelRequestConfig, ModelRequestTimeouts,
-    MultiAgentMode, MutationArtifactRetentionConfig, ProviderTurnRecoveryConfig, RoleModelConfig,
-    RootConfig, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV,
-    SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV, SessionConfig, SessionRetentionConfig, SkillConfig,
-    StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskRoutingPolicy,
-    TerminalKeyboardEnhancement, TerminalNotificationConfig, TerminalNotificationMethod,
-    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WebBundledSearchConfig,
-    WebConfig, WebPolicyCap, WebProxyMode, WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute,
-    WorkspaceConfig, atomic_publish_private_file, default_user_config_dir,
-    default_user_config_path, preferred_config_path, private_path_permissions_are_restricted,
-    resolve_workspace_root, secure_private_path_permissions,
+    MultiAgentMode, MutationArtifactRetentionConfig, OptionalCapability,
+    ProviderTurnRecoveryConfig, RoleModelConfig, RootConfig, RuntimeCompositionConfig,
+    RuntimeCompositionProfile, SIGIL_MODEL_REQUEST_TIMEOUT_SECS_ENV,
+    SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV, SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV,
+    SessionConfig, SessionRetentionConfig, SkillConfig, StorageConfig, StorageRoot, SyntaxThemeId,
+    TaskConfig, TaskRoutingPolicy, TerminalKeyboardEnhancement, TerminalNotificationConfig,
+    TerminalNotificationMethod, ThemeColorOverrides, ThemeId, ToolAllowlistConfig,
+    UsageCostCurrency, WebBundledSearchConfig, WebConfig, WebPolicyCap, WebProxyMode,
+    WebRedirectPolicy, WebSearchMcpConfig, WebSearchRoute, WorkspaceConfig,
+    atomic_publish_private_file, default_user_config_dir, default_user_config_path,
+    preferred_config_path, private_path_permissions_are_restricted, resolve_workspace_root,
+    secure_private_path_permissions,
 };
 pub use context_engine::{
     CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
@@ -242,11 +248,11 @@ pub use conversation_route::{
     conversation_route_contract_fingerprint, conversation_route_decision_id_for_source,
     conversation_route_routing_contract_material,
     direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_retry,
-    plan_review_attempt_id_for_review, plan_review_attempt_id_for_revision,
-    plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
-    plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
-    plan_review_id_for_source, plan_review_no_draft_retry_contract_material,
-    plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash, plan_review_reason_codes,
+    plan_review_attempt_id_for_review, plan_review_attempt_id_for_revision_ordinal,
+    plan_review_child_session_ref, plan_review_finalizer_session_ref,
+    plan_review_id_for_explicit_command, plan_review_id_for_source,
+    plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash, plan_review_reason_codes,
     plan_review_system_prompt_contract_material, reconcile_plan_review_attempts,
     request_plan_review_tool_spec, submit_plan_draft_tool_spec,
     submit_plan_review_result_tool_spec,
@@ -307,9 +313,9 @@ pub use event::{
     PublicSessionRouteTransitionKind, PublicSessionRouteTransitionView, RECORD_CHECKSUM_PREFIX,
     ReducerDisposition, RunEvent, STORED_EVENT_SCHEMA_VERSION, SessionId, StoredEvent,
     StoredEventDecode, TypedDomainEvent, TypedStoredEventDecode, decode_stored_event,
-    decode_typed_stored_event, is_transient_run_event, projection_apply_decision,
-    projection_apply_decision_for_record, reducer_disposition, stable_event_hash,
-    stable_event_uuid,
+    decode_typed_stored_event, is_transient_public_run_event, is_transient_run_event,
+    projection_apply_decision, projection_apply_decision_for_record, reducer_disposition,
+    stable_event_hash, stable_event_uuid,
 };
 pub use execution_backend::{
     EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION, ExecutionBackend, ExecutionBackendCapabilities,
@@ -611,6 +617,7 @@ pub use resume::{
 };
 pub use run_capability::{SessionPersistenceCapability, WorkspaceCapability};
 pub use secret::{REDACTED_SECRET, SecretRedactor};
+pub use session::PublicEventOutboxValidatorV1;
 pub use session::{
     ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, ActiveConstraintV1, ActiveProjectionFrontier,
     ActiveSessionProjectionSnapshot, AdaptiveTailPolicyV3, AdaptiveTailSelectionV3,
@@ -663,7 +670,8 @@ pub use session::{
     NativeProviderCompactionRequest, ObjectiveAuthorityRefV1,
     PROVIDER_CONTINUATION_PROJECTION_SCHEMA_VERSION, PROVIDER_CONTINUATION_SCHEMA_VERSION,
     PROVIDER_CONTINUATION_SESSION_KEY_SLOT_ID, PROVIDER_PHYSICAL_ATTEMPT_PROJECTION_SCHEMA_VERSION,
-    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+    PROVIDER_PHYSICAL_ATTEMPT_SCHEMA_VERSION, PUBLIC_EVENT_DELIVERY_BATCH_MAX_BYTES,
+    PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS, PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
     PortableSemanticCompactionOutcome, PortableSemanticCompactionPreflight,
     PortableSemanticCompactionRequest, PortableTargetRequestMaterial, ProcessStreamCaptureConfigV1,
     ProjectedToolOutput, ProtectedCompactionEventRef, ProviderArtifactComposition,
@@ -708,20 +716,22 @@ pub use session::{
     ProviderTurnRecoveryScheduledEntry, ProviderTurnRecoveryStartedEntry,
     ProviderTurnRecoveryTerminalDispositionV1, ProviderTurnRecoveryTerminalError,
     ProviderTurnRequestMaterialAvailabilityV1, ProviderTurnTransportFallbackSelectedEntryV1,
-    PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1,
-    PublicEventOutboxRecorder, PublicProviderTurnPartialOutputDiscardedViewV1,
-    PublicProviderTurnRecoveryActionV1, PublicProviderTurnRecoveryPhaseV1,
-    PublicProviderTurnRecoveryViewV1, RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
+    PublicEventDeliveryReceiptV1, PublicEventOutboxAdmissionIndexV1, PublicEventOutboxEntryV1,
+    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder,
+    PublicProviderTurnPartialOutputDiscardedViewV1, PublicProviderTurnRecoveryActionV1,
+    PublicProviderTurnRecoveryPhaseV1, PublicProviderTurnRecoveryViewV1,
+    RECOVERABLE_TOOL_OUTPUT_SHRINK_CANDIDATE_SCHEMA_VERSION,
     RECOVERY_BLOCKER_PROJECTION_SCHEMA_VERSION, RUNTIME_CONTEXT_SNAPSHOT_V2_SCHEMA_VERSION,
     ReconciliationProbeKindV1, RecoverableToolOutputShrinkCandidateV1, RecoveryBlockerProjectionV1,
     RecoveryBlockerResolutionStateV1, RecoveryBudgetProjectionV1, RecoveryDispositionV1,
     ResolvedCompactionSidecar, RetainedTurnGroupV3, RuntimeContextSnapshotStateV2,
     RuntimeContextSnapshotV2, SESSION_ANCHOR_V1_SCHEMA_VERSION,
     SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SemanticCompactionGeneration, Session,
-    SessionAnchorRefV1, SessionAnchorV1, SessionContextProjection, SessionIoLockMetricsSnapshot,
-    SessionLogEntry, SessionProjectionEntry, SessionProjectionOrigin,
-    SessionPublicEventProjectionV1, SessionStreamRecord, SourceSpanRefV1,
-    TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
+    SessionAnchorRefV1, SessionAnchorV1, SessionContextPrefixError, SessionContextProjection,
+    SessionIoLockMetricsSnapshot, SessionLogEntry, SessionObservationCancelled,
+    SessionProjectionEntry, SessionProjectionOrigin, SessionPublicEventProjectionV1,
+    SessionReadBudget, SessionRecordReadHandle, SessionRecordSourceSnapshot, SessionStreamRecord,
+    SourceSpanRefV1, TASK_MEMORY_RECORDED_V1_SCHEMA_VERSION, TOOL_APPROVAL_AUDIT_SCHEMA_VERSION,
     TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, TOOL_ARTIFACT_READ_BYTES_PER_TURN,
     TOOL_ARTIFACT_READ_SCHEMA_VERSION, TOOL_ARTIFACT_READS_PER_TURN,
     TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION, TOOL_MODEL_VIEW_BATCH_BUDGET_BYTES,

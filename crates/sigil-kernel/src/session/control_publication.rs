@@ -65,34 +65,76 @@ pub(super) fn validate_explicit_session_publication(
     entry: &SessionLogEntry,
     event: &PublicRunEventKind,
 ) -> Result<()> {
-    match (entry, event) {
-        (
-            SessionLogEntry::Assistant(source),
-            PublicRunEventKind::AssistantMessage { message: public },
-        ) if public.id == source.id
-            && public.content == source.content
-            && serde_json::to_value(&public.tool_calls)?
-                == serde_json::to_value(&source.tool_calls)?
-            && public.assistant_kind == source.assistant_kind =>
-        {
-            Ok(())
-        }
-        (SessionLogEntry::ToolResultV3(recorded), PublicRunEventKind::ToolResult { result }) => {
-            let display = recorded.display_view();
-            if result.call_id != recorded.call_id
-                || result.tool_name != recorded.tool_name
-                || result.content != display.preview
-            {
+    ExplicitSessionPublicationFingerprint::from_entry(entry)?
+        .context("public session projection does not match its durable source type")?
+        .validate(event)
+}
+
+/// Equality proof for the explicitly public source fields, without retaining source bodies.
+#[derive(Debug)]
+pub(super) enum ExplicitSessionPublicationFingerprint {
+    Assistant(String),
+    ToolResult(String),
+    Usage(String),
+}
+
+impl ExplicitSessionPublicationFingerprint {
+    pub(super) fn from_entry(entry: &SessionLogEntry) -> Result<Option<Self>> {
+        Ok(match entry {
+            SessionLogEntry::Assistant(source) => {
+                Some(Self::Assistant(publication_fingerprint(&(
+                    &source.id,
+                    &source.content,
+                    &source.tool_calls,
+                    &source.assistant_kind,
+                ))?))
+            }
+            SessionLogEntry::ToolResultV3(recorded) => {
+                Some(Self::ToolResult(publication_fingerprint(&(
+                    &recorded.call_id,
+                    &recorded.tool_name,
+                    &recorded.display_view().preview,
+                ))?))
+            }
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(source)) => {
+                Some(Self::Usage(publication_fingerprint(source)?))
+            }
+            _ => None,
+        })
+    }
+
+    pub(super) fn validate(&self, event: &PublicRunEventKind) -> Result<()> {
+        let (expected, actual) = match (self, event) {
+            (Self::Assistant(expected), PublicRunEventKind::AssistantMessage { message }) => (
+                expected,
+                publication_fingerprint(&(
+                    &message.id,
+                    &message.content,
+                    &message.tool_calls,
+                    &message.assistant_kind,
+                ))?,
+            ),
+            (Self::ToolResult(expected), PublicRunEventKind::ToolResult { result }) => (
+                expected,
+                publication_fingerprint(&(&result.call_id, &result.tool_name, &result.content))?,
+            ),
+            (Self::Usage(expected), PublicRunEventKind::Usage { usage }) => {
+                (expected, publication_fingerprint(usage)?)
+            }
+            _ => bail!("public session projection does not match its durable source type"),
+        };
+        if expected != &actual {
+            if matches!(self, Self::ToolResult(_)) {
                 bail!("public tool result does not match its bounded durable display view");
             }
-            Ok(())
+            bail!("public session projection does not match its durable source type");
         }
-        (
-            SessionLogEntry::Control(ControlEntry::UsageSnapshot(source)),
-            PublicRunEventKind::Usage { usage: public },
-        ) if serde_json::to_value(public)? == serde_json::to_value(source)? => Ok(()),
-        _ => bail!("public session projection does not match its durable source type"),
+        Ok(())
     }
+}
+
+fn publication_fingerprint(material: &impl serde::Serialize) -> Result<String> {
+    crate::event::canonical_json_content_hash(&serde_json::to_value(material)?)
 }
 
 /// Rebuildable projection of this Session's append-only entries, never an authority or log.
@@ -122,6 +164,13 @@ pub(super) fn project_explicit_control(
     control: &ControlEntry,
 ) -> Result<Vec<PublicRunEventKind>> {
     let events = projector.project_control(control)?;
+    finish_explicit_control_projection(control, events)
+}
+
+pub(super) fn finish_explicit_control_projection(
+    control: &ControlEntry,
+    events: Vec<PublicRunEventKind>,
+) -> Result<Vec<PublicRunEventKind>> {
     if !events.is_empty() {
         return Ok(events);
     }

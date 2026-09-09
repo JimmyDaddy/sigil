@@ -140,14 +140,24 @@ impl ManagedFileExecutionInputV1 {
     }
 }
 
+/// Session-owned output capture and run lifecycle carried into the authority executor.
+/// The sink accepts policy-safe bytes only and is consumed by exactly one physical attempt.
+#[derive(Debug, Default)]
+pub struct ManagedFileExecutionContextV1 {
+    /// Durable tool-call identity used by mutation audit records.
+    pub tool_call_id: String,
+    pub mutation_recorder: Option<crate::MutationEventRecorder>,
+    pub output_sink: Option<crate::session::ToolArtifactCaptureSink>,
+    pub cancellation: Option<crate::RunCancellationHandle>,
+    pub deadline: Option<std::time::Instant>,
+}
+
 /// Authority-private executor request after kernel seal/issue.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ManagedFileExecutionRequestV1 {
     pub access: ManagedFileAccessRequestV1,
     pub input: ManagedFileExecutionInputV1,
-    /// Session-owned mutation recorder. Read-only callers leave this absent; write effects are
-    /// refused unless the authority can append the existing mutation facts before returning.
-    pub mutation_recorder: Option<crate::MutationEventRecorder>,
+    pub context: ManagedFileExecutionContextV1,
 }
 
 impl PartialEq for ManagedFileExecutionRequestV1 {
@@ -157,6 +167,37 @@ impl PartialEq for ManagedFileExecutionRequestV1 {
 }
 
 impl Eq for ManagedFileExecutionRequestV1 {}
+
+/// Result of capturing the complete policy-safe stream independently of its model preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ManagedFileOutputCaptureV1 {
+    #[default]
+    NotAttached,
+    Published {
+        descriptor: Box<crate::session::ToolArtifactDescriptorV1>,
+    },
+    Unavailable {
+        observed_bytes: u64,
+    },
+}
+
+/// Operation-specific facts needed to present bounded output without re-reading a file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManagedFileOutputDetailsV1 {
+    #[default]
+    None,
+    Read {
+        selected_bytes: u64,
+        next_offset: Option<usize>,
+        oversized_lines: u64,
+    },
+    Search {
+        binary_files_skipped: u64,
+        oversized_lines_skipped: u64,
+    },
+}
 
 /// Bounded result returned by the authority executor; callers do not perform a second filesystem
 /// read. `payload` is already policy-safe text/JSON and is bounded by the authority.
@@ -172,6 +213,8 @@ pub struct ManagedFileExecutionOutcomeV1 {
     pub returned_lines: u64,
     pub total_lines: u64,
     pub truncated: bool,
+    pub output_capture: ManagedFileOutputCaptureV1,
+    pub output_details: ManagedFileOutputDetailsV1,
     /// Workspace-relative paths whose contents or directory entries changed as part of this
     /// operation. Read-only operations leave this empty; mutation callers must project it into
     /// `ToolResultMeta.changed_files` rather than inferring it from free-form payload text.
@@ -523,7 +566,21 @@ pub enum ManagedFileAccessErrorV1 {
     TokenReplay,
     #[error("managed file plan is stale or belongs to another authority generation")]
     PlanStale,
-    #[error("managed file delete requires durable reconciliation: {operation_id}")]
+    #[error("managed file does not exist")]
+    NotFound,
+    #[error("managed file is not a regular file")]
+    NotRegularFile,
+    #[error("managed file cannot be accessed with the current filesystem permissions")]
+    PermissionDenied,
+    #[error("managed file input is invalid: {0}")]
+    InvalidInput(String),
+    #[error("managed file operation was cancelled")]
+    Interrupted,
+    #[error("managed file operation exceeded its execution deadline")]
+    Timeout,
+    #[error("managed file operation exceeded its resource budget: {0}")]
+    ResourceLimit(String),
+    #[error("managed file mutation requires durable reconciliation: {operation_id}")]
     ReconciliationRequired {
         operation_id: String,
         binding_hash: CanonicalHash,

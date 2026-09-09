@@ -71,6 +71,9 @@ use super::{
     TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, build_task_step_checkpoint, emit_tool_result,
 };
 
+#[path = "agent_coordinated_readiness_tests.rs"]
+mod coordinated_readiness;
+
 /// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
 fn test_plan_review_handoff_binding(
     source_turn: &ConversationTurnRef,
@@ -2595,9 +2598,15 @@ impl EventHandler for RecordingEventHandler {
 struct CommitControlsRecordingEventHandler {
     events: Vec<RunEvent>,
     committed_batches: Vec<Vec<ControlEntry>>,
+    live_attempts: Vec<String>,
 }
 
 impl EventHandler for CommitControlsRecordingEventHandler {
+    fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
+        self.live_attempts.push(physical_attempt_id.to_owned());
+        Ok(())
+    }
+
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         self.events.push(event);
         Ok(())
@@ -2615,6 +2624,21 @@ impl EventHandler for CommitControlsRecordingEventHandler {
         }
         Ok(events)
     }
+}
+
+#[test]
+fn routing_microturn_filter_preserves_attempt_identity_and_content_filtering() -> Result<()> {
+    let mut inner = CommitControlsRecordingEventHandler::default();
+    for (suppressed, attempt) in [(true, "routing-attempt"), (false, "visible-attempt")] {
+        let mut filter = RoutingMicroturnEventFilter::new(&mut inner, suppressed);
+        filter.begin_live_attempt(attempt)?;
+        filter.handle(RunEvent::TextDelta(attempt.to_owned()))?;
+    }
+    assert_eq!(inner.live_attempts, ["routing-attempt", "visible-attempt"]);
+    assert!(
+        matches!(inner.events.as_slice(), [RunEvent::TextDelta(text)] if text == "visible-attempt")
+    );
+    Ok(())
 }
 
 #[test]

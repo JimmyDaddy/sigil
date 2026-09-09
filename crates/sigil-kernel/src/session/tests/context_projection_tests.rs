@@ -287,6 +287,17 @@ fn promoted_user_is_live_immediately_but_durable_context_waits_for_delivery() ->
             .count(),
         0
     );
+    let boundary = ControlEntry::Note {
+        kind: "promoted-prefix".to_owned(),
+        data: serde_json::json!(1),
+    };
+    session.append_control(boundary.clone())?;
+    let prefix =
+        session.context_projection_before_control(&boundary, Some(&durable_user_message.id))?;
+    assert!(
+        prefix.model_messages().is_empty(),
+        "the raw promoted source is excluded once as the separate objective"
+    );
     Ok(())
 }
 
@@ -468,4 +479,142 @@ fn task_memory_snapshot_relation_is_metadata_only() {
         projection.model_messages()[0].content.as_deref(),
         Some("first")
     );
+}
+
+#[test]
+fn context_prefix_selects_raw_source_before_compaction_and_excludes_later_parent() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("prefix.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let prior = ModelMessage::user("original constraint");
+    session.append_user_message(prior.clone())?;
+    let source = ModelMessage::user("source objective");
+    session.append_user_message(source.clone())?;
+    let start = store.append_compaction_started(started("attempt-1"))?;
+    store.append_task_memory_recorded_v1(
+        "attempt-1",
+        TaskMemoryRecordedV1::new(
+            CompactionCursor {
+                session_id: start.session_id.clone(),
+                through_stream_sequence: start.stream_sequence,
+                through_event_id: start.event_id.clone(),
+            },
+            task_memory(),
+        )?,
+    )?;
+    store.append_compaction_applied_v2(applied(&start))?;
+    let boundary = ControlEntry::Note {
+        kind: "fixed-context-boundary".to_owned(),
+        data: serde_json::json!({"ordinal": 1}),
+    };
+    session.append_control(boundary.clone())?;
+    session.append_user_message(ModelMessage::user("later parent must not leak"))?;
+    let current = session
+        .try_context_projection_from_durable()?
+        .expect("durable projection");
+    assert!(current.active_compaction_id.is_some());
+    let before = std::fs::read(store.path())?;
+    let prefix = session.context_projection_before_control(&boundary, Some(&source.id))?;
+    assert_eq!(prefix.model_messages().len(), 1);
+    assert_eq!(prefix.model_messages()[0].id, prior.id);
+    assert!(prefix.active_compaction_id.is_none());
+    let explicit = session.context_projection_before_control(&boundary, None)?;
+    assert!(explicit.active_compaction_id.is_some());
+    assert!(
+        !explicit
+            .model_messages()
+            .iter()
+            .any(|message| { message.content.as_deref() == Some("later parent must not leak") })
+    );
+    assert_eq!(
+        std::fs::read(store.path())?,
+        before,
+        "prefix reads must never mutate the log"
+    );
+    drop(session);
+    let reloaded = Session::load_from_store("provider", "model", store)?;
+    assert_eq!(
+        reloaded
+            .context_projection_before_control(&boundary, Some(&source.id))?
+            .model_messages()[0]
+            .id,
+        prior.id
+    );
+    Ok(())
+}
+
+#[test]
+fn context_prefix_rejects_missing_source_conflicting_source_and_missing_boundary() -> Result<()> {
+    let boundary = ControlEntry::Note {
+        kind: "prefix".to_owned(),
+        data: serde_json::json!(1),
+    };
+    let mut session = Session::new("provider", "model");
+    let source = ModelMessage::user("source");
+    let mut forged = source.clone();
+    forged.content = Some("conflicting source".to_owned());
+    session.append_user_message(source.clone())?;
+    session.append_user_message(forged)?;
+    let missing = session
+        .context_projection_before_control(&boundary, None)
+        .expect_err("missing boundary");
+    assert_eq!(
+        missing.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::MissingBoundary)
+    );
+    session.append_control(boundary.clone())?;
+    let conflict = session
+        .context_projection_before_control(&boundary, Some(&source.id))
+        .expect_err("source conflict");
+    assert_eq!(
+        conflict.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::ConflictingSource)
+    );
+    let missing = session
+        .context_projection_before_control(&boundary, Some("absent"))
+        .expect_err("missing source");
+    assert_eq!(
+        missing.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::MissingSource)
+    );
+    let mut late = ModelMessage::user("late source");
+    late.id = "late".to_owned();
+    session.append_user_message(late)?;
+    assert!(
+        session
+            .context_projection_before_control(&boundary, Some("late"))
+            .is_err()
+    );
+    session.append_control(boundary.clone())?;
+    assert_eq!(
+        session
+            .context_projection_before_control(&boundary, None)?
+            .model_messages()
+            .len(),
+        2,
+        "an identical later boundary must not move the first prefix"
+    );
+    let mut non_user = Session::new("provider", "model");
+    let message = ModelMessage::assistant(Some("not a user source".to_owned()), Vec::new());
+    non_user.append_assistant_message(message.clone())?;
+    non_user.append_control(boundary.clone())?;
+    let error = non_user
+        .context_projection_before_control(&boundary, Some(&message.id))
+        .expect_err("assistant cannot be a user source");
+    assert_eq!(
+        error.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::MissingSource)
+    );
+    let mut wrong_role = Session::new("provider", "model");
+    wrong_role.append_user_message(message.clone())?;
+    wrong_role.append_control(boundary.clone())?;
+    let error = wrong_role
+        .context_projection_before_control(&boundary, Some(&message.id))
+        .expect_err("user entry must carry a user message");
+    assert_eq!(
+        error.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::ConflictingSource)
+    );
+    Ok(())
 }

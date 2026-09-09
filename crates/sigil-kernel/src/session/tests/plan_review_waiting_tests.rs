@@ -6,7 +6,9 @@ use crate::{
     UserInputSourceV1, UserInputStatusV1,
 };
 
-fn waiting_fixture(path: &Path) -> Result<(Session, PlanReviewAttemptEntry, PublicRunEvent)> {
+pub(in crate::session) fn waiting_fixture(
+    path: &Path,
+) -> Result<(Session, PlanReviewAttemptEntry, PublicRunEvent)> {
     let mut session = Session::load_from_store("test", "model", JsonlSessionStore::new(path)?)?;
     let review = PlanReviewId::new("review")?;
     let attempt_id = PlanReviewAttemptId::new("revision")?;

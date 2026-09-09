@@ -9,8 +9,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::external::sha256_hex;
 use crate::resource::CanonicalHash;
+use crate::{OptionalCapability, RuntimeCompositionConfig};
 
-pub const CUTOVER_MANIFEST_SCHEMA_VERSION: u32 = 1;
+mod predecessor;
+
+pub use predecessor::{
+    CutoverPredecessorErrorV1, ValidatedCutoverPredecessorV1,
+    validate_bootstrap_cutover_predecessor_v1,
+};
+
+pub const CUTOVER_MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// Closed startup epoch selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +66,9 @@ pub struct CutoverManifestV1 {
     pub selected_epoch: StartupEpochV1,
     pub application_generation: u64,
     pub authority_generation_digest: CanonicalHash,
+    /// The effective owner selection determines the closed readiness requirement set. Boot
+    /// freezes module enable flags into this selection before composing owners or probing them.
+    pub composition: RuntimeCompositionConfig,
     pub mandatory_readiness: Vec<AdapterReadinessProbeV1>,
     pub manifest_hash: CanonicalHash,
 }
@@ -73,6 +84,10 @@ pub enum CutoverErrorV1 {
     AdapterNotReady(MandatoryAdapterKindV1),
     #[error("new current-schema epoch selected but a readiness probe is missing")]
     MissingReadinessProbe,
+    #[error("readiness probe is not required by the selected composition: {0:?}")]
+    UnexpectedReadinessProbe(MandatoryAdapterKindV1),
+    #[error("readiness probe appears more than once: {0:?}")]
+    DuplicateReadinessProbe(MandatoryAdapterKindV1),
     #[error("current-schema-only session cannot be opened by a legacy binary")]
     LegacyBinaryRejected,
     #[error("cutover manifest content hash does not match manifest_hash")]
@@ -168,6 +183,15 @@ impl Default for CutoverSurfaceStatusV1 {
 impl CutoverSurfaceStatusV1 {
     #[must_use]
     pub fn from_manifest(manifest: &CutoverManifestV1) -> Self {
+        // Readiness is meaningful only after the composition and probe set pass the same
+        // integrity boundary as startup. A stale composition hash or duplicate/extra row must
+        // never let a surface silently project a different set of mandatory adapters as ready.
+        match validate_cutover_manifest(manifest) {
+            Ok(())
+            | Err(CutoverErrorV1::AdapterNotReady(_))
+            | Err(CutoverErrorV1::MissingReadinessProbe) => {}
+            Err(_) => return Self::unavailable(),
+        }
         let epoch = match manifest.selected_epoch {
             StartupEpochV1::Legacy => CutoverSurfaceEpochV1::Legacy,
             StartupEpochV1::NewCurrentSchema => CutoverSurfaceEpochV1::NewCurrentSchema,
@@ -178,7 +202,7 @@ impl CutoverSurfaceStatusV1 {
                 adapter: None,
             }]
         } else if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
-            mandatory_adapter_kinds_v1()
+            required_adapter_kinds_v1(&manifest.composition)
                 .iter()
                 .filter_map(|adapter| {
                     let probe = manifest
@@ -274,6 +298,33 @@ pub const fn mandatory_adapter_kinds_v1() -> &'static [MandatoryAdapterKindV1] {
     ]
 }
 
+/// Fixed adapter dependency closure for a selected composition. Callers select capabilities;
+/// they cannot provide an arbitrary list that omits an authority or recovery prerequisite.
+#[must_use]
+pub fn required_adapter_kinds_v1(
+    composition: &RuntimeCompositionConfig,
+) -> Vec<MandatoryAdapterKindV1> {
+    mandatory_adapter_kinds_v1()
+        .iter()
+        .copied()
+        .filter(|adapter| match adapter {
+            MandatoryAdapterKindV1::ExecutionTerminal => {
+                composition.allows(OptionalCapability::Terminal)
+            }
+            MandatoryAdapterKindV1::ExecutionExtension => {
+                composition.allows(OptionalCapability::Mcp)
+                    || composition.allows(OptionalCapability::Skills)
+            }
+            MandatoryAdapterKindV1::StorageMemory => composition.allows(OptionalCapability::Memory),
+            MandatoryAdapterKindV1::ProductStateUpdater
+            | MandatoryAdapterKindV1::BorrowedReleaseOutput => {
+                composition.allows(OptionalCapability::Updater)
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// A session open attempt: session schema vs. binary epoch. After the new epoch is published
 /// the current binary only creates/reads current-schema sessions; old-schema sessions are
 /// explicitly unavailable (not opened with legacy interpretation).
@@ -344,6 +395,7 @@ struct ManifestHashableV1<'a> {
     selected_epoch: StartupEpochV1,
     application_generation: u64,
     authority_generation_digest: CanonicalHash,
+    composition: &'a RuntimeCompositionConfig,
     mandatory_readiness: &'a [AdapterReadinessProbeV1],
 }
 
@@ -355,6 +407,7 @@ pub fn compute_manifest_hash(manifest: &CutoverManifestV1) -> CanonicalHash {
         selected_epoch: manifest.selected_epoch,
         application_generation: manifest.application_generation,
         authority_generation_digest: manifest.authority_generation_digest,
+        composition: &manifest.composition,
         mandatory_readiness: &manifest.mandatory_readiness,
     };
     let encoded = serde_json::to_vec(&hashable).expect("infallible: manifest fields serialize");
@@ -376,15 +429,25 @@ pub fn validate_cutover_manifest(manifest: &CutoverManifestV1) -> Result<(), Cut
         return Err(CutoverErrorV1::ManifestHashMismatch);
     }
     if manifest.selected_epoch == StartupEpochV1::NewCurrentSchema {
-        // Every mandatory adapter must be present and passing; missing = fail closed.
-        for adapter in mandatory_adapter_kinds_v1() {
+        let required = required_adapter_kinds_v1(&manifest.composition);
+        let mut seen = std::collections::BTreeSet::new();
+        for probe in &manifest.mandatory_readiness {
+            if !required.contains(&probe.adapter) {
+                return Err(CutoverErrorV1::UnexpectedReadinessProbe(probe.adapter));
+            }
+            if !seen.insert(probe.adapter) {
+                return Err(CutoverErrorV1::DuplicateReadinessProbe(probe.adapter));
+            }
+        }
+        // Every selected adapter must be present and passing; missing = fail closed.
+        for adapter in required {
             let probe = manifest
                 .mandatory_readiness
                 .iter()
-                .find(|probe| &probe.adapter == adapter)
+                .find(|probe| probe.adapter == adapter)
                 .ok_or(CutoverErrorV1::MissingReadinessProbe)?;
             if !probe.passed {
-                return Err(CutoverErrorV1::AdapterNotReady(*adapter));
+                return Err(CutoverErrorV1::AdapterNotReady(adapter));
             }
         }
     }

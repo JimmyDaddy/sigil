@@ -55,7 +55,7 @@ impl JsonlSessionStore {
         &self,
         now_unix_ms: u64,
     ) -> Result<Vec<ProviderContinuationActivationState>> {
-        let records = Self::read_event_records(self.path())?;
+        let records = self.read_event_records_coordinated()?;
         ProviderContinuationActivationEvaluator::from_records_at(&records, now_unix_ms)
     }
 }

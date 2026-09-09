@@ -15,6 +15,7 @@ fn ready_manifest() -> CutoverManifestV1 {
         selected_epoch: StartupEpochV1::NewCurrentSchema,
         application_generation: 1,
         authority_generation_digest: CanonicalHash::from_bytes([0x22; 32]),
+        composition: RuntimeCompositionConfig::standard(),
         mandatory_readiness: Vec::new(),
         manifest_hash: CanonicalHash::from_bytes([0u8; 32]),
     };
@@ -49,6 +50,121 @@ fn ready_manifest() -> CutoverManifestV1 {
 fn r71_cutover_new_epoch_all_adapters_ready_passes() {
     let manifest = ready_manifest();
     validate_cutover_manifest(&manifest).expect("valid new-epoch manifest");
+}
+
+fn ready_core_manifest() -> CutoverManifestV1 {
+    let mut manifest = ready_manifest();
+    manifest.composition = RuntimeCompositionConfig::core();
+    manifest.mandatory_readiness = required_adapter_kinds_v1(&manifest.composition)
+        .into_iter()
+        .map(|adapter| probe(adapter, true))
+        .collect();
+    manifest.manifest_hash = compute_manifest_hash(&manifest);
+    manifest
+}
+
+#[test]
+fn core_manifest_requires_authority_and_recovery_without_unselected_adapters() {
+    let manifest = ready_core_manifest();
+    validate_cutover_manifest(&manifest).expect("core readiness");
+    assert_eq!(manifest.mandatory_readiness.len(), 13);
+    assert!(CutoverSurfaceStatusV1::from_manifest(&manifest).is_ready());
+    for required in [
+        MandatoryAdapterKindV1::ExecutionOneShot,
+        MandatoryAdapterKindV1::FileAccessInProcess,
+        MandatoryAdapterKindV1::StorageSessionLog,
+        MandatoryAdapterKindV1::StorageArtifact,
+        MandatoryAdapterKindV1::BorrowedConfiguration,
+        MandatoryAdapterKindV1::RecoverySurface,
+        MandatoryAdapterKindV1::BlockingGate,
+    ] {
+        let mut incomplete = manifest.clone();
+        incomplete
+            .mandatory_readiness
+            .retain(|probe| probe.adapter != required);
+        incomplete.manifest_hash = compute_manifest_hash(&incomplete);
+        assert_eq!(
+            validate_cutover_manifest(&incomplete),
+            Err(CutoverErrorV1::MissingReadinessProbe),
+            "core must retain {required:?}",
+        );
+    }
+}
+
+#[test]
+fn selected_capability_cannot_omit_its_adapter_probe() {
+    for (capability, adapter) in [
+        (
+            OptionalCapability::Terminal,
+            MandatoryAdapterKindV1::ExecutionTerminal,
+        ),
+        (
+            OptionalCapability::Mcp,
+            MandatoryAdapterKindV1::ExecutionExtension,
+        ),
+        (
+            OptionalCapability::Skills,
+            MandatoryAdapterKindV1::ExecutionExtension,
+        ),
+        (
+            OptionalCapability::Memory,
+            MandatoryAdapterKindV1::StorageMemory,
+        ),
+        (
+            OptionalCapability::Updater,
+            MandatoryAdapterKindV1::ProductStateUpdater,
+        ),
+    ] {
+        let mut manifest = ready_core_manifest();
+        manifest.composition.enhancements.insert(capability);
+        manifest.manifest_hash = compute_manifest_hash(&manifest);
+        assert_eq!(
+            validate_cutover_manifest(&manifest),
+            Err(CutoverErrorV1::MissingReadinessProbe),
+        );
+        let status = CutoverSurfaceStatusV1::from_manifest(&manifest);
+        assert!(
+            status
+                .blockers
+                .iter()
+                .any(|blocker| blocker.adapter == Some(adapter))
+        );
+    }
+}
+
+#[test]
+fn composition_is_hash_bound_and_extra_or_duplicate_probes_are_rejected() {
+    let mut manifest = ready_core_manifest();
+    manifest
+        .composition
+        .enhancements
+        .insert(OptionalCapability::Web);
+    assert_eq!(
+        validate_cutover_manifest(&manifest),
+        Err(CutoverErrorV1::ManifestHashMismatch),
+    );
+    manifest = ready_core_manifest();
+    manifest
+        .mandatory_readiness
+        .push(probe(MandatoryAdapterKindV1::StorageMemory, true));
+    manifest.manifest_hash = compute_manifest_hash(&manifest);
+    assert_eq!(
+        validate_cutover_manifest(&manifest),
+        Err(CutoverErrorV1::UnexpectedReadinessProbe(
+            MandatoryAdapterKindV1::StorageMemory
+        )),
+    );
+    manifest = ready_core_manifest();
+    manifest
+        .mandatory_readiness
+        .push(probe(MandatoryAdapterKindV1::StorageSessionLog, false));
+    manifest.manifest_hash = compute_manifest_hash(&manifest);
+    assert_eq!(
+        validate_cutover_manifest(&manifest),
+        Err(CutoverErrorV1::DuplicateReadinessProbe(
+            MandatoryAdapterKindV1::StorageSessionLog
+        )),
+    );
 }
 
 #[test]
@@ -116,6 +232,7 @@ fn r71_surface_status_projects_all_current_schema_blockers() {
             probe.passed = false;
         }
     }
+    manifest.manifest_hash = compute_manifest_hash(&manifest);
     let status = CutoverSurfaceStatusV1::from_manifest(&manifest);
     assert_eq!(status.epoch, CutoverSurfaceEpochV1::NewCurrentSchema);
     assert_eq!(status.authority, CutoverAuthorityStateV1::Blocked);
@@ -123,6 +240,65 @@ fn r71_surface_status_projects_all_current_schema_blockers() {
     assert!(status.blockers.iter().all(|blocker| {
         blocker.code == CutoverBlockerCodeV1::AdapterNotReady && blocker.adapter.is_some()
     }));
+}
+
+#[test]
+fn cutover_surface_rejects_tampered_composition_and_probe_sets() {
+    let mut changed_selection = ready_core_manifest();
+    changed_selection
+        .composition
+        .enhancements
+        .insert(OptionalCapability::Web);
+
+    let mut changed_probe = ready_core_manifest();
+    changed_probe.mandatory_readiness[0].passed = false;
+
+    let mut unknown_schema = ready_core_manifest();
+    unknown_schema.schema_version = CUTOVER_MANIFEST_SCHEMA_VERSION - 1;
+    unknown_schema.manifest_hash = compute_manifest_hash(&unknown_schema);
+
+    let mut duplicate = ready_core_manifest();
+    duplicate
+        .mandatory_readiness
+        .push(probe(MandatoryAdapterKindV1::StorageSessionLog, false));
+    duplicate.manifest_hash = compute_manifest_hash(&duplicate);
+
+    let mut unexpected = ready_core_manifest();
+    unexpected
+        .mandatory_readiness
+        .push(probe(MandatoryAdapterKindV1::StorageMemory, true));
+    unexpected.manifest_hash = compute_manifest_hash(&unexpected);
+
+    for manifest in [
+        changed_selection,
+        changed_probe,
+        unknown_schema,
+        duplicate,
+        unexpected,
+    ] {
+        let status = CutoverSurfaceStatusV1::from_manifest(&manifest);
+        assert_eq!(status, CutoverSurfaceStatusV1::unavailable());
+        assert!(!status.is_ready());
+    }
+}
+
+#[test]
+fn cutover_surface_preserves_missing_core_readiness_as_a_blocker() {
+    let mut manifest = ready_core_manifest();
+    manifest
+        .mandatory_readiness
+        .retain(|probe| probe.adapter != MandatoryAdapterKindV1::BlockingGate);
+    manifest.manifest_hash = compute_manifest_hash(&manifest);
+    let status = CutoverSurfaceStatusV1::from_manifest(&manifest);
+    assert_eq!(status.epoch, CutoverSurfaceEpochV1::NewCurrentSchema);
+    assert_eq!(status.authority, CutoverAuthorityStateV1::Blocked);
+    assert_eq!(
+        status.blockers,
+        vec![CutoverBlockerV1 {
+            code: CutoverBlockerCodeV1::MissingReadinessProbe,
+            adapter: Some(MandatoryAdapterKindV1::BlockingGate),
+        }]
+    );
 }
 
 #[test]

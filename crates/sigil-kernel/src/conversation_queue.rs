@@ -795,7 +795,8 @@ impl ConversationQueueDurableProjection {
         }
     }
 
-    pub(crate) fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
+    /// Applies the next verified record without replaying the already validated prefix.
+    pub fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         let decision = projection_apply_decision(self.cursor.as_ref(), event)?;
         if decision == ProjectionApplyDecision::IgnoreAlreadyApplied {

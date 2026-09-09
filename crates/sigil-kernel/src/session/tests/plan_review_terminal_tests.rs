@@ -4,7 +4,7 @@ use crate::{
     PlanSourceRef, UserInputRequestId,
 };
 
-fn fixture(
+pub(in crate::session) fn fixture(
     path: &Path,
 ) -> Result<(
     Session,

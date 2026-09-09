@@ -9,6 +9,46 @@ use super::*;
 use crate::EventId;
 use thiserror::Error;
 
+/// Maximum encoded JSONL record, including its newline. Checked before allocating or decoding.
+pub const MAX_SESSION_RAW_RECORD_BYTES: usize = 2 * 1024 * 1024;
+
+/// A cooperative observer stopped before admitting more I/O; this is not corrupt history.
+#[derive(Debug, Clone, Copy, Error)]
+#[error("session observation cancelled or deadline exceeded")]
+pub struct SessionObservationCancelled;
+
+/// Cooperative observer budget. This is cancellation state, never write or recovery authority.
+#[derive(Debug, Clone, Default)]
+pub struct SessionReadBudget {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    deadline: Option<std::time::Instant>,
+}
+
+impl SessionReadBudget {
+    #[must_use]
+    pub fn new(deadline: Option<std::time::Instant>) -> Self {
+        Self {
+            cancelled: Arc::default(),
+            deadline,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn check(&self) -> Result<()> {
+        if self.cancelled.load(Ordering::Acquire)
+            || self
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Err(SessionObservationCancelled.into());
+        }
+        Ok(())
+    }
+}
+
 /// Operation class whose bounded session-file lock acquisition was exhausted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionIoBusyKind {
@@ -116,7 +156,194 @@ pub struct JsonlSessionStore {
     writer: std::sync::Arc<SharedSessionCoordinator>,
 }
 
+/// Read-only access to one existing store's coordinated durable record snapshots.
+///
+/// Only a store owner can derive this handle. It retains that owner's coordinator without
+/// exposing a path, append operation, recovery operation, or another way to acquire a writer.
+#[derive(Debug, Clone)]
+pub struct SessionRecordReadHandle {
+    coordinator: std::sync::Arc<SharedSessionCoordinator>,
+}
+
+impl SessionRecordReadHandle {
+    /// Opens an existing, host-authorized stream for observation without acquiring write or
+    /// recovery authority. No filesystem state is created or repaired.
+    pub fn open_existing_observer(path: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            coordinator: super::writer::shared_session_observer(path)?,
+        })
+    }
+    /// Captures a physical cut between committed writer batches. This is read evidence only.
+    pub fn source_snapshot(
+        &self,
+        budget: &SessionReadBudget,
+    ) -> Result<SessionRecordSourceSnapshot> {
+        self.coordinator.read_source_snapshot(budget)
+    }
+    /// Reads one strictly validated durable snapshot after waiting for the existing writer.
+    ///
+    /// All file locks and coordinator guards are released before returning the records. The
+    /// caller can derive several views from that same snapshot without retaining a file lock.
+    /// This does not create a stream, repair its tail, or publish a cached projection. Writer
+    /// callbacks must use their supplied records instead of re-entering this handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the strict reader's coordination, external-lock, I/O, or validation error.
+    pub fn read_event_records(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.coordinator.read_records_coordinated()
+    }
+
+    /// Reads the complete strictly validated stream once and retains the byte offsets needed by
+    /// later bounded tail reads. The coordinator and shared file lock are released before the
+    /// range is returned; offsets are metadata only and never grant write or recovery authority.
+    pub fn read_event_records_with_offsets(&self) -> Result<SessionRecordRange> {
+        self.coordinator.read_records_coordinated_with_offsets()
+    }
+
+    /// Reads a bounded JSONL range from the already-owned session stream.
+    ///
+    /// `start_offset` must point at the beginning of a durable line. The range is validated with
+    /// the supplied sequence/session predecessor facts and never repairs or truncates the file.
+    pub fn read_event_record_range(
+        &self,
+        start_offset: u64,
+        expected_sequence: u64,
+        expected_session_id: Option<&str>,
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<SessionRecordRange> {
+        if max_records == 0 || max_bytes == 0 {
+            bail!("session record range bounds must be non-zero");
+        }
+        self.read_event_record_range_with_budget(
+            start_offset,
+            expected_sequence,
+            expected_session_id,
+            max_records,
+            max_bytes,
+            &SessionReadBudget::default(),
+        )
+    }
+
+    /// Reads a chunk while checking cancellation during coordinator waits and raw reads.
+    pub fn read_event_record_range_with_budget(
+        &self,
+        start_offset: u64,
+        expected_sequence: u64,
+        expected_session_id: Option<&str>,
+        max_records: usize,
+        max_bytes: usize,
+        budget: &SessionReadBudget,
+    ) -> Result<SessionRecordRange> {
+        if max_records == 0 || max_bytes == 0 {
+            bail!("session record range bounds must be non-zero");
+        }
+        self.coordinator.read_record_range(
+            start_offset,
+            expected_sequence,
+            expected_session_id,
+            max_records,
+            max_bytes,
+            budget,
+        )
+    }
+}
+
+/// A strictly validated, bounded read from a session JSONL stream.
+#[derive(Debug, Clone)]
+pub struct SessionRecordSourceSnapshot {
+    pub(super) metadata: std::fs::Metadata,
+}
+
+impl SessionRecordSourceSnapshot {
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.metadata.len()
+    }
+    #[must_use]
+    pub fn modified_at(&self) -> Option<std::time::SystemTime> {
+        self.metadata.modified().ok()
+    }
+    #[must_use]
+    pub fn same_source(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            self.metadata.dev() == other.metadata.dev()
+                && self.metadata.ino() == other.metadata.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            self.metadata.created().ok() == other.metadata.created().ok()
+        }
+    }
+}
+
+/// A strictly validated, bounded read from a session JSONL stream.
+#[derive(Debug, Clone)]
+pub struct SessionRecordRange {
+    records: Vec<SessionStreamRecord>,
+    record_offsets: Vec<u64>,
+    record_end_offsets: Vec<u64>,
+    start_offset: u64,
+    end_offset: u64,
+    has_more: bool,
+    source: SessionRecordSourceSnapshot,
+}
+
+impl SessionRecordRange {
+    #[must_use]
+    pub fn source_snapshot(&self) -> &SessionRecordSourceSnapshot {
+        &self.source
+    }
+    #[must_use]
+    pub fn records(&self) -> &[SessionStreamRecord] {
+        &self.records
+    }
+
+    #[must_use]
+    pub fn into_records(self) -> Vec<SessionStreamRecord> {
+        self.records
+    }
+
+    /// Returns the byte offset for each record in [`Self::records`]. The vectors always have the
+    /// same length; offsets are relative to the beginning of the session stream.
+    #[must_use]
+    pub fn record_offsets(&self) -> &[u64] {
+        &self.record_offsets
+    }
+
+    #[must_use]
+    pub fn record_end_offsets(&self) -> &[u64] {
+        &self.record_end_offsets
+    }
+
+    #[must_use]
+    pub fn start_offset(&self) -> u64 {
+        self.start_offset
+    }
+
+    #[must_use]
+    pub fn end_offset(&self) -> u64 {
+        self.end_offset
+    }
+
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+}
+
 impl JsonlSessionStore {
+    /// Derives read-only observation from this store's already-established coordinator.
+    #[must_use]
+    pub fn read_handle(&self) -> SessionRecordReadHandle {
+        SessionRecordReadHandle {
+            coordinator: std::sync::Arc::clone(&self.writer),
+        }
+    }
+
     /// Creates a store rooted at `path`, creating parent directories when needed.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let (path, writer) = shared_session_writer(path)?;
@@ -699,9 +926,49 @@ impl JsonlSessionStore {
         Ok(records)
     }
 
+    /// Reads durable records after waiting for this store's in-process writer, without recovery.
+    ///
+    /// This retains the static reader's checksum, tail, and external-lock validation. It never
+    /// creates a stream, repairs a tail, or publishes a projection. A caller already inside a
+    /// writer callback must use the callback's records instead of re-entering this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when coordination fails or the strict reader cannot lock, read, or
+    /// validate the durable stream.
+    pub fn read_event_records_coordinated(&self) -> Result<Vec<SessionStreamRecord>> {
+        self.writer.read_records_coordinated()
+    }
+
     /// Reads all durable records in writer mode, performing tail recovery when needed.
     pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
         self.writer.read_reconciled_records()
+    }
+
+    /// Appends a bounded batch of public-event delivery receipts through the existing session
+    /// writer and outbox authority.
+    pub fn append_public_event_delivery_batch(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+    ) -> Result<usize> {
+        self.writer.append_public_event_delivery_batch(
+            receipts,
+            &SessionReadBudget::default(),
+            true,
+        )
+    }
+
+    /// Commits one receipt bundle after cancellable coordinator acquisition. An admitted bundle
+    /// completes atomically even if cancellation is requested during its physical commit. The
+    /// writer must already be initialized by its session owner; this observer path never replays
+    /// history or performs recovery on behalf of that owner.
+    pub fn append_public_event_delivery_batch_with_budget(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+        budget: &SessionReadBudget,
+    ) -> Result<usize> {
+        self.writer
+            .append_public_event_delivery_batch(receipts, budget, false)
     }
 
     pub(super) fn load_entries_writer_reconciled(
@@ -1135,6 +1402,129 @@ impl JsonlSessionStore {
     }
 }
 
+pub(super) fn read_event_record_range_locked(
+    file: &mut File,
+    path: &Path,
+    start_offset: u64,
+    expected_sequence: u64,
+    expected_session_id: Option<&str>,
+    max_records: usize,
+    max_bytes: usize,
+    budget: &SessionReadBudget,
+) -> Result<SessionRecordRange> {
+    let source = SessionRecordSourceSnapshot {
+        metadata: file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?,
+    };
+    let file_len = source.byte_len();
+    if start_offset > file_len {
+        bail!("session record range starts beyond the durable stream");
+    }
+    if start_offset > 0 {
+        file.seek(SeekFrom::Start(start_offset.saturating_sub(1)))
+            .with_context(|| format!("failed to seek {}", path.display()))?;
+        let mut previous = [0_u8; 1];
+        file.read_exact(&mut previous)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if previous[0] != b'\n' {
+            bail!("session record range does not begin at a line boundary");
+        }
+    }
+    file.seek(SeekFrom::Start(start_offset))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut reader = BufReader::new(file.try_clone()?);
+    reader
+        .seek(SeekFrom::Start(start_offset))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut records = Vec::with_capacity(max_records.min(256));
+    let mut record_offsets = Vec::with_capacity(max_records.min(256));
+    let mut record_end_offsets = Vec::with_capacity(max_records.min(256));
+    let mut consumed = 0usize;
+    let mut expected_session = expected_session_id.map(str::to_owned);
+    let mut next_sequence = expected_sequence;
+    while records.len() < max_records && consumed < max_bytes {
+        budget.check()?;
+        let mut bytes = Vec::new();
+        loop {
+            budget.check()?;
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                break;
+            }
+            let length = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            if bytes.len().saturating_add(length) > MAX_SESSION_RAW_RECORD_BYTES {
+                bail!("session raw record exceeds its byte bound");
+            }
+            if consumed.saturating_add(bytes.len()).saturating_add(length) > max_bytes {
+                if records.is_empty() {
+                    bail!("session record range exceeds its byte bound");
+                }
+                return Ok(SessionRecordRange {
+                    records,
+                    record_offsets,
+                    record_end_offsets,
+                    start_offset,
+                    source,
+                    end_offset: start_offset + consumed as u64,
+                    has_more: true,
+                });
+            }
+            let complete = available[length - 1] == b'\n';
+            bytes.extend_from_slice(&available[..length]);
+            reader.consume(length);
+            if complete {
+                break;
+            }
+        }
+        let read = bytes.len();
+        if read == 0 {
+            break;
+        }
+        let line = std::str::from_utf8(&bytes).context("session record is not UTF-8")?;
+        let record_offset = start_offset.saturating_add(consumed as u64);
+        consumed = consumed.saturating_add(read);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let sequence = next_sequence
+            .checked_add(1)
+            .context("session record range sequence exhausted")?;
+        let event = stored_event_from_stream_line(
+            line.trim_end_matches(['\r', '\n']),
+            path,
+            sequence as usize,
+        )?;
+        if event.stream_sequence != sequence {
+            bail!("session record range has a sequence gap");
+        }
+        if let Some(expected) = expected_session.as_deref() {
+            if expected != event.session_id {
+                bail!("session record range belongs to another session");
+            }
+        } else {
+            expected_session = Some(event.session_id.clone());
+        }
+        record_offsets.push(record_offset);
+        record_end_offsets.push(start_offset + consumed as u64);
+        records.push(SessionStreamRecord::Stored(event));
+        next_sequence = sequence;
+    }
+    let end_offset = start_offset.saturating_add(consumed as u64);
+    Ok(SessionRecordRange {
+        records,
+        record_offsets,
+        record_end_offsets,
+        start_offset,
+        end_offset,
+        has_more: end_offset < file_len,
+        source,
+    })
+}
+
 pub(super) fn read_stream_records_from_str(
     path: &Path,
     content: &str,
@@ -1281,6 +1671,7 @@ pub(super) fn session_entry_event_class(event_type: DurableEventType) -> EventCl
 
 pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
     match entry {
+        ControlEntry::SessionCompositionBound(_) => DurableEventType::SessionCompositionBound,
         ControlEntry::ToolApproval(approval)
             if approval.action == ToolApprovalAuditAction::Resolved =>
         {
@@ -1443,12 +1834,22 @@ pub(super) fn session_entry_from_stored_event(
             "unsupported session schema: found legacy tool_result_recorded_v2 (expected tool-result-v3); old sessions are not migratable"
         );
     }
+    if event.event_kind() == Some(DurableEventType::SessionCompositionBound) {
+        return session_composition_entry_from_payload(&event.payload).map(Some);
+    }
     let Some(value) = event.payload.get("session_log_entry") else {
         return Ok(None);
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
     validate_session_entry_durable_contract(&entry)?;
+    if matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionCompositionBound(_))
+    ) && event.event_kind() != Some(DurableEventType::SessionCompositionBound)
+    {
+        bail!("session composition used the wrong durable event type");
+    }
     if let SessionLogEntry::ToolResultV3(result) = &entry {
         if event.event_kind() != Some(DurableEventType::ToolResultRecordedV3) {
             bail!("tool result payload used the wrong durable event type");
@@ -1483,12 +1884,22 @@ pub(crate) fn session_entry_from_domain_event(
     let payload = event
         .payload()
         .expect("v2 durable domain event must carry a payload");
+    if event.event_type() == DurableEventType::SessionCompositionBound {
+        return session_composition_entry_from_payload(&payload.payload).map(Some);
+    }
     let Some(value) = payload.payload.get("session_log_entry") else {
         return Ok(None);
     };
     let entry: SessionLogEntry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from domain event payload")?;
     validate_session_entry_durable_contract(&entry)?;
+    if matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionCompositionBound(_))
+    ) && event.event_type() != DurableEventType::SessionCompositionBound
+    {
+        bail!("session composition used the wrong durable event type");
+    }
     if let SessionLogEntry::ToolResultV3(result) = &entry {
         if event.event_type() != DurableEventType::ToolResultRecordedV3 {
             bail!("tool result payload used the wrong durable event type");
@@ -1504,9 +1915,31 @@ pub(crate) fn session_entry_from_domain_event(
     Ok(Some(entry))
 }
 
+fn session_composition_entry_from_payload(payload: &serde_json::Value) -> Result<SessionLogEntry> {
+    let value = payload
+        .get("session_log_entry")
+        .context("session composition event is missing its session_log_entry payload")?;
+    let entry: SessionLogEntry = serde_json::from_value(value.clone())
+        .context("failed to decode session composition event payload")?;
+    let SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot)) = &entry else {
+        bail!("session composition event carried a different session entry");
+    };
+    snapshot.validate()?;
+    Ok(entry)
+}
+
 pub(super) fn lock_shared_with_retry(file: &File, path: &Path) -> Result<()> {
+    lock_shared_with_budget(file, path, &SessionReadBudget::default())
+}
+
+pub(super) fn lock_shared_with_budget(
+    file: &File,
+    path: &Path,
+    budget: &SessionReadBudget,
+) -> Result<()> {
     let mut last_error = None;
     for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
+        budget.check()?;
         SESSION_SHARED_LOCK_ATTEMPT_TOTAL.fetch_add(1, Ordering::Relaxed);
         match file.try_lock_shared() {
             Ok(()) => return Ok(()),
@@ -1575,3 +2008,7 @@ fn lock_is_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock
         || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
+
+#[cfg(test)]
+#[path = "tests/session_record_read_handle_tests.rs"]
+mod read_handle_tests;

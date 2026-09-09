@@ -11,10 +11,10 @@ use crate::{
     IntentApplicationState, IntentDigest, IntentDigestDomain, IntentId, IntentOperationId,
     IntentOperationKind, IntentOperationPreviewV1, IntentPlanV1, IntentProposalCriterionV1,
     IntentSourceV1, IntentStackId, IntentStackProjectionV1, IntentStackVersion,
-    IntentVerificationImpact, IntentVerificationImpactV1, IntentVersionRef, JsonlSessionStore,
-    MAX_INTENT_CRITERIA, MAX_INTENT_DEPENDENCIES, MAX_INTENT_STATEMENT_BYTES,
-    MAX_INTENT_TITLE_BYTES, Session, TaskPlanEntry, agent_invocation_workspace_snapshot_id,
-    canonical_intent_digest, stable_workspace_id,
+    IntentVerificationImpact, IntentVerificationImpactV1, IntentVersionRef, MAX_INTENT_CRITERIA,
+    MAX_INTENT_DEPENDENCIES, MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES, Session,
+    TaskPlanEntry, agent_invocation_workspace_snapshot_id, canonical_intent_digest,
+    stable_workspace_id,
 };
 
 /// Untrusted, digest-bound proposal for one immutable intent definition successor.
@@ -711,7 +711,7 @@ fn durable_records(session: &Session) -> Result<Vec<crate::SessionStreamRecord>>
     let store = session
         .durable_store()
         .context("Intent impact requires a durable session")?;
-    JsonlSessionStore::read_event_records(store.path())
+    store.read_event_records_coordinated()
 }
 
 fn zero_digest() -> Result<IntentDigest> {

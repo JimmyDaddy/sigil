@@ -146,6 +146,7 @@ fn storage_plan(owner: ManagedStorageSemanticOwnerV1) -> ManagedStoragePlanRefV1
 
 fn file_plan() -> ManagedFileAccessPlanDraftRefV1 {
     ManagedFileAccessPlanDraftRefV1 {
+        target_exists: true,
         plan_id: OpaqueManagedFileAccessPlanId::new("plan-f".to_owned()),
         subject_ref: OpaquePermissionSubjectRef::new("subject-1".to_owned()),
         subject_binding_hash: one_hash(),

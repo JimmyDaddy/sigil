@@ -448,6 +448,30 @@ impl RunCancellationHandle {
     }
 }
 
+/// Root-issued stop capability that only closes the forward-effect gate.
+///
+/// Reserving is memory-only. The unique owner still performs audit, activation and settlement;
+/// this capability cannot activate cancellation or claim that cleanup has completed.
+#[derive(Debug, Clone)]
+pub struct RunStopCapability {
+    handle: RunCancellationHandle,
+}
+
+impl RunStopCapability {
+    /// Closes admission before the UI waits for the owner's durable cancellation work.
+    pub fn reserve(&self) -> bool {
+        self.handle.reserve_cancel()
+    }
+
+    /// Observes whether the owner finished activation and all registered work is quiet.
+    #[must_use]
+    pub fn cleanup_complete(&self) -> bool {
+        self.handle.state.phase.load(Ordering::SeqCst) != RUN_PHASE_CANCEL_RESERVED
+            && self.handle.is_quiescent()
+            && self.handle.cleanup_complete()
+    }
+}
+
 /// Unique root authority that requests cancellation and confirms terminal quiescence.
 ///
 /// This type is intentionally not `Clone`; child work receives only [`RunCancellationHandle`].
@@ -497,6 +521,20 @@ impl RunCancellationOwner {
                 handle.activate_reserved_cancel();
             }
         })
+    }
+
+    /// Issues a restricted stop capability for this exact run owner.
+    #[must_use]
+    pub fn stop_capability(&self) -> RunStopCapability {
+        RunStopCapability {
+            handle: self.handle.clone(),
+        }
+    }
+
+    /// Whether an earlier root-issued stop capability has already reserved cancellation.
+    #[must_use]
+    pub fn is_cancel_reserved(&self) -> bool {
+        self.handle.state.phase.load(Ordering::SeqCst) == RUN_PHASE_CANCEL_RESERVED
     }
 
     pub fn reserve_cancel(&self) -> bool {
@@ -663,16 +701,10 @@ pub fn durable_task_cancellation_requested(session: &Session, task_id: &str) -> 
 }
 
 fn cancellation_records(session: &Session) -> Result<Vec<DurableRunCancellationRecord>> {
-    let path = session
-        .store_path()
+    let store = session
+        .durable_store()
         .context("run cancellation requires a durable session store")?;
-    cancellation_records_from_path(path)
-}
-
-fn cancellation_records_from_path(
-    path: &std::path::Path,
-) -> Result<Vec<DurableRunCancellationRecord>> {
-    cancellation_records_from_stream(&JsonlSessionStore::read_event_records(path)?)
+    cancellation_records_from_stream(&store.read_event_records_coordinated()?)
 }
 
 fn cancellation_records_from_stream(

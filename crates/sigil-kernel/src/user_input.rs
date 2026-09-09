@@ -1080,48 +1080,22 @@ impl UserInputProjectionV1 {
 
     fn apply_requested(&mut self, entry: UserInputRequestedV1) -> Result<()> {
         entry.validate()?;
+        validate_requested_history(
+            &entry,
+            self.requests.values().map(|state| {
+                (
+                    &state.requested.request.identity,
+                    state.is_terminal(),
+                    state.requested.request.source.counts_against_root_limit(),
+                )
+            }),
+        )?;
+        self.insert_requested(entry);
+        Ok(())
+    }
+
+    fn insert_requested(&mut self, entry: UserInputRequestedV1) {
         let identity = entry.request.identity.clone();
-        if self.requests.contains_key(&identity) {
-            bail!("user input request generation is already recorded");
-        }
-        let previous = self
-            .requests
-            .iter()
-            .filter(|(candidate, _)| same_request(candidate, &identity))
-            .max_by_key(|(candidate, _)| candidate.generation);
-        match previous {
-            None if identity.generation != 1 => {
-                bail!("first user input request generation must be one")
-            }
-            Some((previous_identity, previous_state)) => {
-                if !previous_state.is_terminal() {
-                    bail!("previous user input request generation is not terminal");
-                }
-                if identity.generation != previous_identity.generation.saturating_add(1) {
-                    bail!("user input request generation is not contiguous");
-                }
-            }
-            _ => {}
-        }
-        if self.pending().any(|state| {
-            state.requested.request.identity.source_thread_id == identity.source_thread_id
-        }) {
-            bail!("source agent already has a pending user input request");
-        }
-        if entry.request.source.counts_against_root_limit() {
-            let prior_count = self
-                .requests
-                .values()
-                .filter(|state| {
-                    state.requested.request.identity.root_logical_run_id
-                        == identity.root_logical_run_id
-                        && state.requested.request.source.counts_against_root_limit()
-                })
-                .count();
-            if prior_count >= MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN {
-                bail!("root logical run exhausted its user input request budget");
-            }
-        }
         self.requests.insert(
             identity,
             UserInputRequestStateV1 {
@@ -1133,7 +1107,6 @@ impl UserInputProjectionV1 {
                 resolution: None,
             },
         );
-        Ok(())
     }
 
     fn apply_decision(&mut self, entry: UserInputDecisionAcceptedV1) -> Result<()> {
@@ -1264,6 +1237,98 @@ impl UserInputProjectionV1 {
         state.resolution = Some(entry);
         Ok(())
     }
+}
+
+/// Public projection keeps full input material only while its request can still advance.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PublicUserInputProjector {
+    active: UserInputProjectionV1,
+    retired: BTreeMap<UserInputIdentityV1, bool>,
+}
+
+impl PublicUserInputProjector {
+    pub(crate) fn apply(
+        &mut self,
+        entry: UserInputLifecycleEntryV1,
+    ) -> Result<PublicUserInputRequestV1> {
+        let identity = entry.identity().clone();
+        entry.validate_shape()?;
+        if let UserInputLifecycleEntryV1::Requested(requested) = entry {
+            requested.validate()?;
+            let active = self.active.requests.values().map(|state| {
+                (
+                    &state.requested.request.identity,
+                    state.is_terminal(),
+                    state.requested.request.source.counts_against_root_limit(),
+                )
+            });
+            let retired = self
+                .retired
+                .iter()
+                .map(|(identity, counted)| (identity, true, *counted));
+            validate_requested_history(&requested, active.chain(retired))?;
+            self.active.insert_requested(*requested);
+        } else {
+            if self.retired.contains_key(&identity) {
+                bail!("user input request is already resolved");
+            }
+            self.active.apply(entry)?;
+        }
+        let state = self
+            .active
+            .request(&identity)
+            .context("durable user input lifecycle lost its projected request")?;
+        let public = state.public_view();
+        if state.is_terminal() {
+            let counted = state.requested.request.source.counts_against_root_limit();
+            self.active.requests.remove(&identity);
+            self.retired.insert(identity, counted);
+        }
+        Ok(public)
+    }
+}
+
+fn validate_requested_history<'a>(
+    entry: &UserInputRequestedV1,
+    history: impl Iterator<Item = (&'a UserInputIdentityV1, bool, bool)>,
+) -> Result<()> {
+    let identity = &entry.request.identity;
+    let mut previous = None;
+    let mut pending_source = false;
+    let mut root_count = 0_usize;
+    for (candidate, terminal, counted) in history {
+        if candidate == identity {
+            bail!("user input request generation is already recorded");
+        }
+        if same_request(candidate, identity)
+            && previous.is_none_or(|(generation, _)| generation < candidate.generation)
+        {
+            previous = Some((candidate.generation, terminal));
+        }
+        pending_source |= !terminal && candidate.source_thread_id == identity.source_thread_id;
+        if counted && candidate.root_logical_run_id == identity.root_logical_run_id {
+            root_count = root_count.saturating_add(1);
+        }
+    }
+    match previous {
+        None if identity.generation != 1 => {
+            bail!("first user input request generation must be one")
+        }
+        Some((_, false)) => bail!("previous user input request generation is not terminal"),
+        Some((generation, true)) if identity.generation != generation.saturating_add(1) => {
+            bail!("user input request generation is not contiguous");
+        }
+        _ => {}
+    }
+    if pending_source {
+        bail!("source agent already has a pending user input request");
+    }
+    if entry.request.source.counts_against_root_limit()
+        && root_count >= MAX_USER_INPUT_REQUESTS_PER_ROOT_RUN
+    {
+        bail!("root logical run exhausted its user input request budget");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

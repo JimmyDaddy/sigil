@@ -238,6 +238,9 @@ where
                 return Err(error);
             }
         };
+        if let Some(attempt_id) = physical_attempt.physical_attempt_id() {
+            handler.begin_live_attempt(attempt_id)?;
+        }
         let mut generation_observed = false;
         let mut partial_output = ProviderTurnPartialOutput::default();
         let result = collect_provider_turn_after_send_barrier(

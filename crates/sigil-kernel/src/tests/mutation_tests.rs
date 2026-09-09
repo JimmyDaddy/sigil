@@ -2255,6 +2255,139 @@ fn reconciliation_marks_unexpected_disk_state_as_conflict() -> Result<()> {
 }
 
 #[test]
+fn workspace_mutation_scan_waits_for_same_process_writer_and_reads_its_revision() -> Result<()> {
+    use std::{
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let scope = VerificationScope::all_tracked("scope-concurrent-scan");
+    let before = recorder.capture_workspace_scan(&workspace, &scope)?;
+    assert_eq!(before.workspace_revision, 0);
+    assert!(before.workspace_snapshot_id.is_some());
+    let reconciled = MutationReconciled {
+        operation_id: "operation-concurrent-scan".to_owned(),
+        batch_id: None,
+        observed_state: MutationObservedState::AppliedAsIntended,
+        resolution: MutationResolution::MarkCommitted,
+        workspace_revision: Some(1),
+        workspace_snapshot_id: before.workspace_snapshot_id.clone(),
+    };
+    let payload = serde_json::to_value(&reconciled)?;
+
+    let scan = thread::scope(|threads| -> Result<WorkspaceMutationScan> {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer_store = store.clone();
+        let writer = threads.spawn(move || {
+            writer_store.append_event_if(
+                DurableEventType::MutationReconciled,
+                EventClass::Critical,
+                payload,
+                |_| {
+                    // The conditional append holds the real coordinator while this fixture
+                    // extends its data-file critical section until the scan queues behind it.
+                    let owner = fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(writer_store.path())?;
+                    fs2::FileExt::try_lock_exclusive(&owner)?;
+                    entered_tx.send(())?;
+                    release_rx.recv_timeout(Duration::from_secs(5))?;
+                    drop(owner);
+                    Ok(true)
+                },
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5))?;
+        let writer_attempts = store.active_projection_metrics().writer_lock_attempt_total;
+        let (scanned_tx, scanned_rx) = mpsc::channel();
+        let scan_recorder = &recorder;
+        let scan_workspace = &workspace;
+        let scan_scope = &scope;
+        let scanner = threads.spawn(move || {
+            let result = scan_recorder.capture_workspace_scan(scan_workspace, scan_scope);
+            scanned_tx.send(result).expect("scan result should signal");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match scanned_rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {}
+                result => anyhow::bail!(
+                    "mutation scan completed before waiting for the session writer: {result:?}"
+                ),
+            }
+            if store.active_projection_metrics().writer_lock_attempt_total > writer_attempts {
+                break;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "mutation scan did not attempt the shared session coordinator"
+            );
+            thread::yield_now();
+        }
+        release_tx.send(())?;
+        assert!(writer.join().expect("writer should not panic")?);
+        let scan = scanned_rx.recv_timeout(Duration::from_secs(5))??;
+        scanner.join().expect("scanner should not panic");
+        Ok(scan)
+    })?;
+
+    assert_eq!(scan.workspace_revision, 1);
+    assert_eq!(scan.workspace_knowledge, WorkspaceKnowledge::Clean(1));
+    assert_eq!(scan.workspace_id, before.workspace_id);
+    assert_eq!(scan.workspace_snapshot_id, before.workspace_snapshot_id);
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(records.len(), 1);
+    let persisted: MutationReconciled =
+        serde_json::from_value(records[0].stored_event().payload.clone())?;
+    assert_eq!(persisted, reconciled);
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_preserves_typed_uncoordinated_data_lock_contention() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    store.read_event_records_writer()?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let scope = VerificationScope::all_tracked("scope-external-lock");
+    let before = recorder.capture_workspace_scan(&workspace, &scope)?;
+    let durable_before = fs::read(store.path())?;
+    let owner = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(store.path())?;
+    fs2::FileExt::try_lock_exclusive(&owner)?;
+
+    let error = recorder
+        .capture_workspace_scan(&workspace, &scope)
+        .expect_err("an external data-file lease must prevent a successful workspace scan");
+    let busy = error
+        .downcast_ref::<crate::session::SessionIoBusyError>()
+        .expect("data-file contention must retain its typed error");
+    assert_eq!(busy.kind, crate::session::SessionIoBusyKind::Writer);
+    assert_eq!(busy.path, store.path());
+    drop(owner);
+
+    let after = recorder.capture_workspace_scan(&workspace, &scope)?;
+    assert_eq!(after, before);
+    assert_eq!(fs::read(store.path())?, durable_before);
+    Ok(())
+}
+
+#[test]
 fn workspace_mutation_scan_records_changed_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

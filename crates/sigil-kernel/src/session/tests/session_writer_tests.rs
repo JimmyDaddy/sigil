@@ -19,6 +19,9 @@ use crate::{
     Session, SnapshotCoverage,
 };
 
+#[path = "coordinated_session_reader_tests.rs"]
+mod coordinated_reader;
+
 fn audit_record(
     _event_type: DurableEventType,
     record_id: &str,

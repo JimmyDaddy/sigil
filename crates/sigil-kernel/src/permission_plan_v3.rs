@@ -68,6 +68,9 @@ pub struct ManagedFileAccessPlanDraftRefV1 {
     pub authority_generation: AuthorityGeneration,
     pub resolver_proof_digest: CanonicalHash,
     pub plan_hash: CanonicalHash,
+    /// Authority-observed existence used to distinguish create from overwrite without
+    /// allowing an adapter to inspect the physical workspace independently.
+    pub target_exists: bool,
 }
 
 /// Core plan fields carried by V3 unchanged from the V2 semantic payload (no nesting).

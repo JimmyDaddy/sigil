@@ -85,7 +85,7 @@ impl JsonlSessionStore {
     pub fn provider_observed_resolution_admissions(
         &self,
     ) -> Result<Vec<ProviderObservedResolutionAdmission>> {
-        let records = Self::read_event_records(self.path())?;
+        let records = self.read_event_records_coordinated()?;
         ProviderObservedResolutionAdmissionEvaluator::from_records(&records)
     }
 }

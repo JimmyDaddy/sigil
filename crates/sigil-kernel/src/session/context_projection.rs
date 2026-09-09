@@ -8,6 +8,69 @@ use crate::EventId;
 /// Schema version for the provider-neutral chat context projection.
 pub const SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
+/// A fixed request prefix could not be proven from its original session sources.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SessionContextPrefixError {
+    #[error("session context prefix is missing its committed boundary")]
+    MissingBoundary,
+    #[error("session context prefix has conflicting boundary bindings")]
+    ConflictingBoundary,
+    #[error("session context prefix is missing its source user message")]
+    MissingSource,
+    #[error("session context prefix has conflicting source user messages")]
+    ConflictingSource,
+}
+
+pub(super) fn context_prefix_end(
+    entries: &[SessionLogEntry],
+    boundary: &ControlEntry,
+    source_user_message_id: Option<&str>,
+) -> Result<usize> {
+    let boundary_value = serde_json::to_value(boundary)?;
+    let mut boundary_index = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if let SessionLogEntry::Control(control) = entry
+            && serde_json::to_value(control)? == boundary_value
+        {
+            boundary_index = Some(index);
+            break;
+        }
+    }
+    let boundary_index = boundary_index.ok_or(SessionContextPrefixError::MissingBoundary)?;
+    let Some(source_id) = source_user_message_id else {
+        return Ok(boundary_index);
+    };
+    let mut source = None;
+    for (index, entry) in entries[..boundary_index].iter().enumerate() {
+        let message = match entry {
+            SessionLogEntry::User(message) => message,
+            SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion)) => {
+                &promotion.durable_user_message
+            }
+            _ => continue,
+        };
+        if message.id != source_id {
+            continue;
+        }
+        if message.role != crate::MessageRole::User {
+            return Err(SessionContextPrefixError::ConflictingSource.into());
+        }
+        let value = serde_json::to_value(message)?;
+        if let Some((_, prior)) = &source {
+            // A promotion and its identical historical user copy denote one source. Conflicting
+            // bytes under the same message id cannot choose an objective or context boundary.
+            if prior != &value {
+                return Err(SessionContextPrefixError::ConflictingSource.into());
+            }
+        } else {
+            source = Some((index, value));
+        }
+    }
+    source
+        .map(|(index, _)| index)
+        .ok_or_else(|| SessionContextPrefixError::MissingSource.into())
+}
+
 /// One provider-visible message retained by a session context projection.
 #[derive(Debug, Clone)]
 pub struct SessionProjectionEntry {

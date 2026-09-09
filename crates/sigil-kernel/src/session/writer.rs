@@ -106,6 +106,24 @@ impl SharedSessionCoordinator {
             .map_err(|_| anyhow::anyhow!("session writer lock poisoned"))
     }
 
+    fn lock_writer_with_budget(
+        &self,
+        budget: &super::store::SessionReadBudget,
+    ) -> Result<std::sync::MutexGuard<'_, LinearSessionWriter>> {
+        self.writer_lock_attempt_total
+            .fetch_add(1, Ordering::Relaxed);
+        loop {
+            budget.check()?;
+            match self.writer.try_lock() {
+                Ok(writer) => return Ok(writer),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => bail!("session writer lock poisoned"),
+            }
+        }
+    }
+
     /// Irreversibly constrains this shared coordinator to an already-durable session stream.
     ///
     /// A coordinator is shared per canonical stream path. Once a recovery caller proves that it
@@ -334,6 +352,68 @@ impl SharedSessionCoordinator {
         Ok(appended)
     }
 
+    pub(super) fn append_public_event_delivery_batch(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+        budget: &super::store::SessionReadBudget,
+        allow_bootstrap: bool,
+    ) -> Result<usize> {
+        if receipts.is_empty() {
+            return Ok(0);
+        }
+        let (appended, notice) = {
+            let mut writer = self.lock_writer_with_budget(budget)?;
+            if allow_bootstrap {
+                writer.ensure_public_event_outbox_index()?;
+            } else {
+                // Observer ACKs consume the already admitted session writer. They cannot start
+                // recovery or an unbounded historical scan while holding the coordinator.
+                if writer.public_event_outbox_index.is_none() || writer.lease_file.is_none() {
+                    bail!("public delivery requires an initialized session writer");
+                }
+                let mut file = writer.open_locked_data_file()?;
+                if writer.tail_needs_reload(&mut file) {
+                    bail!("public delivery requires session writer recovery");
+                }
+            }
+            budget.check()?;
+            let index = writer
+                .public_event_outbox_index()
+                .context("public event outbox index is unavailable")?;
+            let mut pending = Vec::with_capacity(receipts.len());
+            for receipt in receipts {
+                match index.admit_delivery(receipt)? {
+                    PublicEventOutboxAppendDecisionV1::AlreadyRecorded => {}
+                    PublicEventOutboxAppendDecisionV1::Append => {
+                        let receipt_identity =
+                            format!("{}|{}", receipt.public_event_id, receipt.adapter);
+                        pending.push(PendingStoredEvent {
+                            event_type: DurableEventType::PublicEventDeliveryReceipt,
+                            event_class: EventClass::Critical,
+                            payload: serde_json::to_value(receipt)
+                                .context("failed to encode public delivery receipt")?,
+                            event_id: Some(stable_event_uuid(
+                                "sigil-public-event-delivery-v1",
+                                &receipt_identity,
+                            )),
+                            correlation_id: Some(receipt.public_event_id.clone()),
+                            causation_id: None,
+                        });
+                    }
+                }
+            }
+            if pending.is_empty() {
+                return Ok(0);
+            }
+            let (events, _) = writer.append_crash_safe_bundle(pending)?;
+            let count = events.len();
+            let notice = self.commit_delta_locked(&mut writer, &events);
+            (count, notice)
+        };
+        self.notify(notice);
+        Ok(appended)
+    }
+
     pub(super) fn public_event_outbox_durable_sequence(&self, run_id: &str) -> Result<u64> {
         let mut writer = self.lock_writer()?;
         writer.ensure_public_event_outbox_index()?;
@@ -511,6 +591,75 @@ impl SharedSessionCoordinator {
         let mut writer = self.lock_writer()?;
         let projection = self.current_projection_locked(&mut writer)?;
         adopt(ActiveSessionProjectionSnapshot { projection })
+    }
+
+    /// Serializes an owned strict read with this coordinator's writes without entering recovery
+    /// or changing the cached projection. The static reader still owns the OS shared-lock policy.
+    pub(super) fn read_records_coordinated(&self) -> Result<Vec<SessionStreamRecord>> {
+        let writer = self.lock_writer()?;
+        JsonlSessionStore::read_event_records(&writer.path)
+    }
+
+    pub(super) fn read_records_coordinated_with_offsets(
+        &self,
+    ) -> Result<super::store::SessionRecordRange> {
+        let writer = self.lock_writer()?;
+        let mut file = File::open(&writer.path)
+            .with_context(|| format!("failed to open {}", writer.path.display()))?;
+        super::store::lock_shared_with_retry(&file, &writer.path)?;
+        let file_len = file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", writer.path.display()))?
+            .len();
+        let max_records = usize::try_from(file_len.saturating_add(1)).unwrap_or(usize::MAX);
+        let max_bytes = usize::try_from(file_len).unwrap_or(usize::MAX);
+        super::store::read_event_record_range_locked(
+            &mut file,
+            &writer.path,
+            0,
+            0,
+            None,
+            max_records.max(1),
+            max_bytes.max(1),
+            &super::store::SessionReadBudget::default(),
+        )
+    }
+
+    pub(super) fn read_source_snapshot(
+        &self,
+        budget: &super::store::SessionReadBudget,
+    ) -> Result<super::store::SessionRecordSourceSnapshot> {
+        let writer = self.lock_writer_with_budget(budget)?;
+        let file = open_observed_session_file(&writer.path)?;
+        super::store::lock_shared_with_budget(&file, &writer.path, budget)?;
+        Ok(super::store::SessionRecordSourceSnapshot {
+            metadata: file.metadata()?,
+        })
+    }
+
+    pub(super) fn read_record_range(
+        &self,
+        start_offset: u64,
+        expected_sequence: u64,
+        expected_session_id: Option<&str>,
+        max_records: usize,
+        max_bytes: usize,
+        budget: &super::store::SessionReadBudget,
+    ) -> Result<super::store::SessionRecordRange> {
+        let writer = self.lock_writer_with_budget(budget)?;
+        let mut file = open_observed_session_file(&writer.path)
+            .with_context(|| format!("failed to open {}", writer.path.display()))?;
+        super::store::lock_shared_with_budget(&file, &writer.path, budget)?;
+        super::store::read_event_record_range_locked(
+            &mut file,
+            &writer.path,
+            start_offset,
+            expected_sequence,
+            expected_session_id,
+            max_records,
+            max_bytes,
+            budget,
+        )
     }
 
     /// Writer recovery may complete an intent without passing through append's delta publisher.
@@ -2192,7 +2341,11 @@ impl LinearSessionWriter {
             event.causation_id = pending.causation_id;
             event.record_checksum = event.compute_record_checksum()?;
             any_recovery_critical |= event.sync_class()? != EventSyncClass::NormalEvent;
-            lines.push(event.to_json_line()?.into_bytes());
+            let line = event.to_json_line()?.into_bytes();
+            if line.len() > super::store::MAX_SESSION_RAW_RECORD_BYTES {
+                bail!("session raw record exceeds its byte bound");
+            }
+            lines.push(line);
             events.push(event);
             next_sequence = next_sequence
                 .checked_add(1)
@@ -2865,6 +3018,54 @@ pub(super) fn shared_session_writer(
     let coordinator = Arc::new(SharedSessionCoordinator::new(path.clone()));
     registry.insert(path.clone(), Arc::downgrade(&coordinator));
     Ok((path, coordinator))
+}
+
+/// Shares only the in-process coordinator for an existing stream. It never creates a reserve,
+/// sidecar, directory or writer lease, and never changes an active writer's recovery mode.
+pub(super) fn shared_session_observer(
+    path: impl Into<PathBuf>,
+) -> Result<Arc<SharedSessionCoordinator>> {
+    let path = canonical_existing_session_path(path.into())?;
+    drop(open_observed_session_file(&path)?);
+    let registry = SESSION_WRITER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session reader registry lock poisoned"))?;
+    registry.retain(|_, coordinator| coordinator.strong_count() > 0);
+    if let Some(coordinator) = registry.get(&path).and_then(Weak::upgrade) {
+        return Ok(coordinator);
+    }
+    let coordinator = Arc::new(SharedSessionCoordinator::new_existing(path.clone()));
+    registry.insert(path, Arc::downgrade(&coordinator));
+    Ok(coordinator)
+}
+
+fn open_observed_session_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("session observation requires an existing regular stream");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            bail!("session observation rejects a reparse point");
+        }
+    }
+    Ok(file)
 }
 
 /// Returns the ordinary shared coordinator only after irreversibly putting it in no-create

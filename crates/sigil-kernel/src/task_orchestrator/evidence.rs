@@ -7,10 +7,10 @@ pub(super) fn durable_workspace_mutation_evidence(
     tool_call_ids: &[String],
     latest_successful_verification_sequence: u64,
 ) -> Result<Vec<WorkspaceMutationEvidence>> {
-    let Some(path) = session.store_path() else {
+    let Some(store) = session.durable_store() else {
         return Ok(Vec::new());
     };
-    let records = JsonlSessionStore::read_event_records(path)?;
+    let records = store.read_event_records_coordinated()?;
     let baseline_sequence = latest_successful_verification_sequence.max(
         task_started_stream_sequence(&records, task_id)
             .unwrap_or(0)

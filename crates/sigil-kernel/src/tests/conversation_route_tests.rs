@@ -156,6 +156,9 @@ fn explicit_plan_objective_cannot_drift_during_settlement_or_a_new_attempt() -> 
     let next = PlanReviewAttemptEntry {
         attempt_id: PlanReviewAttemptId::new("next-explicit-attempt")?,
         plan_id: crate::PlanId::new("next-explicit-plan")?,
+        revision_request_id: Some(crate::UserInputRequestId::new("explicit-revision-request")?),
+        base_plan_id: Some(started.plan_id.clone()),
+        base_plan_hash: Some("sha256:base-plan".to_owned()),
         recorded_at_ms: 44,
         ..started
     };
@@ -390,14 +393,119 @@ fn plan_review_projection_validates_attempt_transitions() -> Result<()> {
     );
 
     // Revision: a new attempt may start after DraftReady.
-    let revision_attempt = crate::plan_review_attempt_id_for_revision(&review_id, &attempt_id);
-    let revision_started = attempt_entry(
+    let revision_request = crate::UserInputRequestId::new("revision-request")?;
+    let revision_attempt =
+        crate::plan_review_attempt_id_for_revision_ordinal(&review_id, &revision_request, 1);
+    let mut revision_started = attempt_entry(
         &review_id,
         &revision_attempt,
         PlanReviewAttemptStatus::Started,
         &turn,
     );
+    assert!(projection.validate_append(&revision_started).is_err());
+    let mut old_revision = entries.clone();
+    old_revision.push(SessionLogEntry::Control(
+        crate::ControlEntry::PlanReviewAttempt(revision_started.clone()),
+    ));
+    assert!(PlanReviewProjection::from_entries(&old_revision).has_conflicts());
+    revision_started.revision_request_id = Some(revision_request);
+    revision_started.base_plan_id = Some(plan_review_plan_id_for_attempt(&review_id, &attempt_id));
+    revision_started.base_plan_hash = Some("sha256:base-plan".to_owned());
     projection.validate_append(&revision_started)?;
+    Ok(())
+}
+
+#[test]
+fn plan_review_current_format_requires_explicit_ordinal_and_complete_revision_binding() -> Result<()>
+{
+    let session = Session::new("mock", "mock");
+    let turn = source_turn(&session, "current-format");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let initial = attempt_entry(
+        &review_id,
+        &attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    let mut missing_ordinal = serde_json::to_value(&initial)?;
+    missing_ordinal
+        .as_object_mut()
+        .expect("attempt object")
+        .remove("attempt_ordinal");
+    assert!(serde_json::from_value::<PlanReviewAttemptEntry>(missing_ordinal).is_err());
+    for fields in 1_u8..7 {
+        let mut partial = initial.clone();
+        partial.revision_request_id = (fields & 1 != 0)
+            .then(|| crate::UserInputRequestId::new("revision-request").expect("valid id"));
+        partial.base_plan_id = (fields & 2 != 0).then(|| initial.plan_id.clone());
+        partial.base_plan_hash = (fields & 4 != 0).then(|| "sha256:base-plan".to_owned());
+        assert!(
+            PlanReviewProjection::default()
+                .validate_append(&partial)
+                .is_err()
+        );
+        assert!(
+            PlanReviewProjection::from_entries(&[SessionLogEntry::Control(
+                crate::ControlEntry::PlanReviewAttempt(partial)
+            )])
+            .has_conflicts()
+        );
+    }
+    let mut failed = initial.clone();
+    failed.status = PlanReviewAttemptStatus::Failed;
+    let entries = vec![
+        SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(initial.clone())),
+        SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(failed)),
+    ];
+    let retry = PlanReviewAttemptEntry {
+        attempt_id: crate::plan_review_attempt_id_for_retry(
+            &review_id,
+            &attempt_id,
+            "retry-command",
+        ),
+        attempt_ordinal: 2,
+        ..initial
+    };
+    PlanReviewProjection::from_entries(&entries).validate_append(&retry)?;
+    Ok(())
+}
+
+#[test]
+fn plan_review_same_attempt_does_not_enrich_missing_finalizer_or_workspace_binding() -> Result<()> {
+    let session = Session::new("mock", "mock");
+    let turn = source_turn(&session, "immutable-format");
+    let review_id = plan_review_id_for_source(&turn);
+    let attempt_id = plan_review_attempt_id_for_review(&review_id);
+    let started = attempt_entry(
+        &review_id,
+        &attempt_id,
+        PlanReviewAttemptStatus::Started,
+        &turn,
+    );
+    let entry = SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(started.clone()));
+    let projection = PlanReviewProjection::from_entries(std::slice::from_ref(&entry));
+    for finalizer in [true, false] {
+        let mut changed = started.clone();
+        changed.status = PlanReviewAttemptStatus::Finalizing;
+        if finalizer {
+            changed.finalizer_session_ref = Some(crate::plan_review_finalizer_session_ref(
+                &review_id,
+                &attempt_id,
+                1,
+            ));
+        } else {
+            changed.workspace_snapshot_id = Some("sha256:workspace".to_owned());
+        }
+        assert!(projection.validate_append(&changed).is_err());
+        assert!(
+            PlanReviewProjection::from_entries(&[
+                entry.clone(),
+                SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(changed))
+            ])
+            .has_conflicts()
+        );
+    }
     Ok(())
 }
 

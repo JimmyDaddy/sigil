@@ -727,6 +727,7 @@ fn root_config_save_roundtrips() {
     let path = temp.path().join("nested").join("sigil.toml");
     let config = RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
@@ -1089,6 +1090,7 @@ fn root_config_save_handles_paths_without_parent() {
 
     let config = RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
@@ -1428,6 +1430,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
     colors.insert("text_primary".to_owned(), "#ecf0f6".to_owned());
     let config = RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig::default(),
         storage: Default::default(),
         session: Default::default(),
@@ -2891,6 +2894,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let config = RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },

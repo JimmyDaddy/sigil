@@ -43,6 +43,7 @@ fn core() -> ToolPermissionPlanCoreV3 {
 
 fn file_ref() -> ManagedFileAccessPlanDraftRefV1 {
     ManagedFileAccessPlanDraftRefV1 {
+        target_exists: true,
         plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
         subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
         subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),

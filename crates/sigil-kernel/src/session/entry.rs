@@ -201,6 +201,7 @@ pub struct RuntimeContextSnapshotV2 {
 #[allow(clippy::large_enum_variant)] // Boxing variants would churn append-only control projection matches.
 #[serde(rename_all = "snake_case")]
 pub enum ControlEntry {
+    SessionCompositionBound(crate::SessionCompositionSnapshotV1),
     SessionIdentity {
         provider_name: String,
         model_name: String,
@@ -399,6 +400,7 @@ impl ControlEntry {
     /// policy configuration cannot recreate an oversized session record.
     pub(crate) fn validate_durable_contract(&self) -> anyhow::Result<()> {
         match self {
+            Self::SessionCompositionBound(entry) => entry.validate(),
             Self::ToolPermissionPlannedV2(entry) => entry.validate(),
             Self::ToolPermissionDecisionV2(entry) => entry.validate(),
             Self::ToolApproval(entry) => entry.validate(),

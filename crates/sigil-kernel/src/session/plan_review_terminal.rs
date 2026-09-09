@@ -324,7 +324,7 @@ pub(super) fn validate_predecessor(
     Ok(())
 }
 
-fn validate_terminal_material(
+pub(super) fn validate_terminal_material(
     attempt: &PlanReviewAttemptEntry,
     draft: Option<&PlanDraftCreatedEntry>,
     decision: &PlanDecisionRecordedEntry,
@@ -390,6 +390,25 @@ fn validate_terminal_material(
     Ok(())
 }
 
+/// Checks the optional model classification emitted inside the writer's success bundle.
+pub(super) fn validate_terminal_resolution(
+    attempt: &PlanReviewAttemptEntry,
+    draft: &PlanDraftCreatedEntry,
+    resolution: &crate::PlanReviewResolutionRecordedV1,
+) -> Result<()> {
+    resolution.validate()?;
+    if resolution.plan_review_id != attempt.plan_review_id
+        || resolution.attempt_id != attempt.attempt_id
+        || resolution.candidate_hash != draft.plan_hash
+        || resolution.outcome != crate::PlanReviewResultOutcome::Draft
+        || resolution.actor != crate::PlanReviewResolutionActorV1::Model
+        || resolution.recorded_at_ms != attempt.recorded_at_ms
+    {
+        bail!("revision terminal resolution changes its exact candidate or attempt binding");
+    }
+    Ok(())
+}
+
 /// Checks both directions of every revision terminal pair and its contiguous domain bundle.
 pub(super) fn validate_revision_pairs(
     records: &[SessionStreamRecord],
@@ -444,14 +463,28 @@ pub(super) fn validate_revision_pairs(
             bail!("revision bundle has inconsistent original commit timestamps");
         }
         let (first, draft) = if attempt.status == PlanReviewAttemptStatus::DraftReady {
-            let first = decision_index
+            let mut first = decision_index
                 .checked_sub(1)
                 .context("revision success lost its draft")?;
+            let resolution = match records[first].session_log_entry()? {
+                Some(SessionLogEntry::Control(ControlEntry::PlanReviewResolutionRecordedV1(
+                    resolution,
+                ))) => {
+                    first = first
+                        .checked_sub(1)
+                        .context("revision resolution lost its adjacent draft")?;
+                    Some(resolution)
+                }
+                _ => None,
+            };
             let Some(SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft))) =
                 records[first].session_log_entry()?
             else {
                 bail!("revision success lost its adjacent draft");
             };
+            if let Some(resolution) = resolution {
+                validate_terminal_resolution(&attempt, &draft, &resolution)?;
+            }
             (first, Some(draft))
         } else {
             (decision_index, None)
@@ -481,4 +514,4 @@ pub(super) fn validate_revision_pairs(
 
 #[cfg(test)]
 #[path = "tests/plan_review_terminal_tests.rs"]
-mod tests;
+pub(super) mod tests;

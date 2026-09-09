@@ -147,6 +147,7 @@ mod provider_continuation_resolution_coordinator;
 mod provider_native_compaction;
 mod provider_turn_recovery;
 mod public_event_outbox;
+mod public_event_validator;
 mod recovery;
 mod recovery_blocker;
 mod stats;
@@ -200,8 +201,9 @@ pub use compaction_v2::{
     CompactionStartedEntry,
 };
 pub use context_projection::{
-    ContextTrustProjection, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SessionContextProjection,
-    SessionProjectionEntry, SessionProjectionOrigin, TaskMemorySnapshotRelation,
+    ContextTrustProjection, SESSION_CONTEXT_PROJECTION_SCHEMA_VERSION, SessionContextPrefixError,
+    SessionContextProjection, SessionProjectionEntry, SessionProjectionOrigin,
+    TaskMemorySnapshotRelation,
 };
 pub use continuity_v2::{
     ActiveConstraintV1, AnchoredStatementV1, CONVERSATION_CONTINUITY_V2_SCHEMA_VERSION,
@@ -333,13 +335,16 @@ pub(crate) use provider_turn_recovery::{
     validate_transport_fallback_selected as validate_provider_turn_transport_fallback_selected,
 };
 pub use public_event_outbox::{
-    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventDeliveryReceiptV1, PublicEventOutboxEntryV1,
-    PublicEventOutboxProjectionV1, PublicEventOutboxRecorder,
+    PUBLIC_EVENT_DELIVERY_BATCH_MAX_BYTES, PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS,
+    PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION, PublicEventDeliveryReceiptV1,
+    PublicEventOutboxAdmissionIndexV1, PublicEventOutboxEntryV1, PublicEventOutboxProjectionV1,
+    PublicEventOutboxRecorder,
 };
 pub(crate) use public_event_outbox::{
     validate_delivery_receipt as validate_public_event_delivery_receipt,
     validate_outbox_entry as validate_public_event_outbox_entry,
 };
+pub use public_event_validator::PublicEventOutboxValidatorV1;
 pub use recovery_blocker::{
     RECOVERY_BLOCKER_PROJECTION_SCHEMA_VERSION, RecoveryBlockerProjectionV1,
     RecoveryBlockerResolutionStateV1,
@@ -347,7 +352,9 @@ pub use recovery_blocker::{
 pub use stats::session_stats_from_entries;
 pub(crate) use store::session_entry_from_domain_event;
 pub use store::{
-    JsonlSessionStore, SessionIoBusyError, SessionIoBusyKind, SessionIoLockMetricsSnapshot,
+    JsonlSessionStore, MAX_SESSION_RAW_RECORD_BYTES, SessionIoBusyError, SessionIoBusyKind,
+    SessionIoLockMetricsSnapshot, SessionObservationCancelled, SessionReadBudget,
+    SessionRecordRange, SessionRecordReadHandle, SessionRecordSourceSnapshot,
     SessionStreamRecordReader, session_io_lock_metrics,
 };
 pub use tool_artifact::{

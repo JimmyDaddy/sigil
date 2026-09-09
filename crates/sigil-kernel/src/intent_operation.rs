@@ -166,7 +166,7 @@ impl Session {
         let store = self
             .durable_store()
             .context("Intent operation projection requires a durable session")?;
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let admission = IntentStackProjectionV1::from_records(&records)?;
         let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
         let mut layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
@@ -966,7 +966,7 @@ pub fn execute_intent_drop(
         request.operation_id.as_str().to_owned(),
         Some(batch_id.clone()),
     )?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
     let mut layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
@@ -1202,7 +1202,7 @@ pub fn cancel_intent_operation(
     let store = session
         .durable_store()
         .context("Intent operation cancellation requires a durable session")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
     let layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;
@@ -1258,7 +1258,7 @@ pub fn reconcile_intent_operations(
         "intent-operation-recovery",
         None,
     )?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let accepted = admission
         .latest_accepted_plan()
@@ -1385,7 +1385,7 @@ fn resolve_drop(
     let recorder = session
         .mutation_event_recorder()
         .context("Intent drop preview requires mutation artifacts")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
     let mut layers = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;

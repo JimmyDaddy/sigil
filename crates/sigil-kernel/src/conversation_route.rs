@@ -311,14 +311,13 @@ pub struct PlanReviewAttemptEntry {
     pub route_decision_id: Option<ConversationRouteDecisionId>,
     /// Retry-stable child session that owns the read-only plan review transcript.
     pub child_session_ref: SessionRef,
-    /// Fresh submit-only child session. Older records omit it and remain readable.
+    /// Fresh submit-only child session; user-adopted draft successors have no finalizer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalizer_session_ref: Option<SessionRef>,
     /// Retry-stable user revision intent. It is absent for the initial review attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_request_id: Option<crate::UserInputRequestId>,
     /// Physical execution ordinal within one revision request. Initial reviews use one.
-    #[serde(default = "default_plan_review_attempt_ordinal")]
     pub attempt_ordinal: u32,
     /// Immutable base plan retained while a revision candidate is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,10 +335,6 @@ pub struct PlanReviewAttemptEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<PlanReviewTerminalReason>,
     pub recorded_at_ms: u64,
-}
-
-fn default_plan_review_attempt_ordinal() -> u32 {
-    1
 }
 
 /// Host-bound identity for one possible automatic PlanReview decision.
@@ -465,22 +460,6 @@ pub fn plan_review_attempt_id_for_retry(
             plan_review_id.as_str(),
             predecessor_attempt_id.as_str(),
             command_id
-        ),
-    ))
-}
-
-/// Derives the next attempt identity for a revision under the same plan review lifecycle.
-#[must_use]
-pub fn plan_review_attempt_id_for_revision(
-    plan_review_id: &PlanReviewId,
-    previous_attempt_id: &PlanReviewAttemptId,
-) -> PlanReviewAttemptId {
-    PlanReviewAttemptId(stable_event_uuid(
-        PLAN_REVIEW_ATTEMPT_ID_DOMAIN,
-        &format!(
-            "{}|revision|{}",
-            plan_review_id.as_str(),
-            previous_attempt_id.as_str()
         ),
     ))
 }
@@ -1088,8 +1067,12 @@ pub(crate) fn validate_attempt_payload(entry: &PlanReviewAttemptEntry) -> Result
     if entry.attempt_ordinal == 0 {
         bail!("plan review attempt ordinal must start at one");
     }
-    if entry.base_plan_id.is_some() != entry.base_plan_hash.is_some() {
-        bail!("plan review revision base id and hash must be recorded together");
+    if entry.revision_request_id.is_some() != entry.base_plan_id.is_some()
+        || entry.revision_request_id.is_some() != entry.base_plan_hash.is_some()
+    {
+        bail!(
+            "unsupported Plan revision format: request id and exact base id/hash must be recorded together"
+        );
     }
     match (entry.status, entry.pending_user_input.as_deref()) {
         (PlanReviewAttemptStatus::WaitingForInput, Some(pending)) => match &pending.source {
@@ -1124,20 +1107,21 @@ fn same_attempt_binding(previous: &PlanReviewAttemptEntry, next: &PlanReviewAtte
         && same_review_source_binding(previous, next)
         && previous.route_decision_id == next.route_decision_id
         && previous.child_session_ref == next.child_session_ref
-        // Older durable attempts did not carry these two fields. Permit a one-way enrichment, but
-        // never allow an established binding to disappear or change.
-        && previous
-            .finalizer_session_ref
-            .as_ref()
-            .is_none_or(|value| next.finalizer_session_ref.as_ref() == Some(value))
+        && previous.finalizer_session_ref == next.finalizer_session_ref
         && previous.revision_request_id == next.revision_request_id
         && previous.attempt_ordinal == next.attempt_ordinal
         && previous.base_plan_id == next.base_plan_id
         && previous.base_plan_hash == next.base_plan_hash
-        && previous
-            .workspace_snapshot_id
-            .as_ref()
-            .is_none_or(|value| next.workspace_snapshot_id.as_ref() == Some(value))
+        && previous.workspace_snapshot_id == next.workspace_snapshot_id
+}
+
+fn starts_unbound_revision(
+    previous: &PlanReviewAttemptEntry,
+    next: &PlanReviewAttemptEntry,
+) -> bool {
+    previous.status == PlanReviewAttemptStatus::DraftReady
+        && previous.attempt_id != next.attempt_id
+        && next.revision_request_id.is_none()
 }
 
 impl PlanReviewProjectionEntry {
@@ -1266,6 +1250,7 @@ impl PlanReviewProjection {
         }
         if let Some(previous) = review.attempts.last()
             && (!same_review_source_binding(previous, entry)
+                || starts_unbound_revision(previous, entry)
                 || (previous.attempt_id == entry.attempt_id
                     && (!legal_same_attempt_transition(previous.status, entry.status)
                         || !same_attempt_binding(previous, entry))))
@@ -1278,6 +1263,21 @@ impl PlanReviewProjection {
             self.conflicts.push(conflict);
         }
         review.attempts.push(entry.clone());
+    }
+
+    /// Advances corruption validation with only the latest fingerprinted attempt per review.
+    pub(crate) fn apply_public_validation_metadata(
+        &mut self,
+        entry: &PlanReviewAttemptEntry,
+    ) -> Result<()> {
+        let compact = public_validation_attempt_metadata(entry)?;
+        self.apply(&compact);
+        if let Some(review) = self.reviews.get_mut(&entry.plan_review_id) {
+            let latest = review.attempts.pop();
+            review.attempts.clear();
+            review.attempts.extend(latest);
+        }
+        Ok(())
     }
 
     /// Returns the projection entry for one plan review lifecycle.
@@ -1395,6 +1395,11 @@ impl PlanReviewProjection {
     pub fn validate_append(&self, entry: &PlanReviewAttemptEntry) -> Result<()> {
         validate_attempt_payload(entry)?;
         if let Some(previous) = self.latest_attempt(&entry.plan_review_id) {
+            if starts_unbound_revision(previous, entry) {
+                bail!(
+                    "unsupported Plan revision format: a revised attempt requires its request and base binding"
+                );
+            }
             if !same_review_source_binding(previous, entry) {
                 bail!("plan review attempt changes its original durable source objective");
             }
@@ -1460,6 +1465,26 @@ impl PlanReviewProjection {
         }
         Ok(())
     }
+}
+
+/// Retains identity/status and semantic fingerprints, never historical objectives or forms.
+pub(crate) fn public_validation_attempt_metadata(
+    entry: &PlanReviewAttemptEntry,
+) -> Result<PlanReviewAttemptEntry> {
+    validate_attempt_payload(entry)?;
+    let mut compact = entry.clone();
+    compact.explicit_objective = entry
+        .explicit_objective
+        .as_ref()
+        .map(|objective| crate::stable_event_hash(objective.as_bytes()));
+    if let Some(pending) = compact.pending_user_input.as_mut() {
+        pending.prompt = crate::stable_event_hash(serde_json::to_vec(&**pending)?);
+        pending.questions.clear();
+        pending.allowed_actions.clear();
+        pending.answer_receipt = None;
+        pending.resolution = None;
+    }
+    Ok(compact)
 }
 
 /// Reconciles plan review attempts after a durable session load.

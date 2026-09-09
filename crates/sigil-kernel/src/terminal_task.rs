@@ -626,7 +626,8 @@ impl TerminalTaskProjection {
         projection
     }
 
-    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+    /// Advances the existing reducer from one committed control entry.
+    pub fn apply_control_entry(&mut self, control: &ControlEntry) {
         if let ControlEntry::TerminalTask(task_entry) = control {
             self.apply_entry(task_entry);
             self.refresh_active_task_ids();

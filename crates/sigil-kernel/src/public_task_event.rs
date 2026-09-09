@@ -285,7 +285,7 @@ pub struct PublicTaskEventProjector {
     step_attempts:
         BTreeMap<(String, u32, String), (TaskParticipantAttemptId, TaskParticipantAttemptStatus)>,
     plan_reviews: BTreeMap<crate::PlanReviewId, crate::PlanId>,
-    user_inputs: crate::UserInputProjectionV1,
+    user_inputs: crate::user_input::PublicUserInputProjector,
 }
 
 impl PublicTaskEventProjector {
@@ -301,14 +301,7 @@ impl PublicTaskEventProjector {
         if let Some(entry) = crate::UserInputLifecycleEntryV1::from_control(control) {
             let identity = entry.identity().clone();
             let request_hash = entry.request_hash().to_owned();
-            self.user_inputs.apply(entry)?;
-            let Some(request) = self
-                .user_inputs
-                .request(&identity)
-                .map(crate::UserInputRequestStateV1::public_view)
-            else {
-                anyhow::bail!("durable user input lifecycle lost its projected request");
-            };
+            let request = self.user_inputs.apply(entry)?;
             return Ok(vec![PublicRunEventKind::UserInputChanged {
                 request_id: identity.request_id.as_str().to_owned(),
                 generation: identity.generation,

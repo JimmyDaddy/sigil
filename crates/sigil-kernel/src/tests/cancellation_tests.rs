@@ -305,3 +305,40 @@ fn concurrent_cancellation_recorders_append_each_phase_once() -> anyhow::Result<
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn root_issued_stop_reserves_before_audit_without_granting_activation_or_cleanup() {
+    let owner = RunCancellationOwner::new();
+    let stop = owner.stop_capability();
+    let child = owner.handle();
+    let effect = child
+        .begin_effect(RunEffectClass::Forward, RunEffectKind::Process)
+        .expect("admitted effect");
+    assert!(stop.reserve());
+    assert!(owner.is_cancel_reserved());
+    assert!(
+        child
+            .begin_effect(RunEffectClass::Forward, RunEffectKind::ProviderRequest)
+            .is_err()
+    );
+    assert!(!child.try_finalize_naturally());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), child.cancelled())
+            .await
+            .is_err(),
+        "only the audited root owner activates cancellation"
+    );
+    assert!(!stop.cleanup_complete());
+    assert!(owner.activate_reserved_cancel());
+    drop(effect);
+    assert_eq!(
+        owner.wait_for_quiescence(Duration::from_secs(1)).await,
+        RunQuiescenceOutcome::Quiescent
+    );
+    assert!(stop.cleanup_complete());
+    child.mark_cleanup_incomplete();
+    assert!(
+        !stop.cleanup_complete(),
+        "physical cleanup uncertainty survives quiescence"
+    );
+}

@@ -12,12 +12,12 @@ use crate::{
     IntegrationPromotionRecorded, IntegrationPromotionStatus, IntegrationPromotionTarget,
     IntentApplicationState, IntentCriterionEvidenceLevel, IntentCriterionEvidenceV1, IntentEventV1,
     IntentExecutionBindingKind, IntentExecutionBindingV1, IntentExecutionId,
-    IntentExecutionOriginV1, IntentStackProjectionV1, IntentVersionRef, JsonlSessionStore,
-    MutationBatchFinished, MutationBatchStarted, MutationBatchStatus, MutationCommitted,
-    MutationPrepared, MutationSubject, ReceiptStatus, Session, SessionLogEntry,
-    SessionStreamRecord, TaskParentVerificationRecorded, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry,
-    TaskPlanStatus, TaskStepId, TaskStepMode, TypedDomainEvent, TypedStoredEventDecode,
+    IntentExecutionOriginV1, IntentStackProjectionV1, IntentVersionRef, MutationBatchFinished,
+    MutationBatchStarted, MutationBatchStatus, MutationCommitted, MutationPrepared,
+    MutationSubject, ReceiptStatus, Session, SessionLogEntry, SessionStreamRecord,
+    TaskParentVerificationRecorded, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus,
+    TaskStepId, TaskStepMode, TypedDomainEvent, TypedStoredEventDecode,
     VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
     WorkspaceMutationDetected, decode_typed_stored_event,
 };
@@ -1162,7 +1162,7 @@ fn append_execution_binding(
     let store = session
         .durable_store()
         .context("Intent execution binding requires a durable session")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let accepted = admission
         .latest_accepted_plan()
@@ -1235,7 +1235,7 @@ pub fn append_intent_changeset_binding(
     let store = session
         .durable_store()
         .context("Intent ChangeSet binding requires a durable session")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let projection = IntentLineageProjectionV1::from_records(&records, &admission)?;
     let execution = projection
@@ -1296,7 +1296,7 @@ pub fn append_chat_direct_mutation_changeset_binding(
     let store = session
         .durable_store()
         .context("Chat mutation projection requires a durable session")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let projection = IntentLineageProjectionV1::from_records(&records, &admission)?;
     let execution = projection
@@ -1401,7 +1401,7 @@ pub fn append_intent_verification_evidence(
     let store = session
         .durable_store()
         .context("Intent verification link requires a durable session")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let projection = IntentLineageProjectionV1::from_records(&records, &admission)?;
     let facts = DurableLineageFacts::from_records(&records)?;
@@ -1610,7 +1610,7 @@ fn durable_records(session: &Session) -> Result<Vec<SessionStreamRecord>> {
     let store = session
         .durable_store()
         .context("Intent lineage requires a durable session")?;
-    JsonlSessionStore::read_event_records(store.path())
+    store.read_event_records_coordinated()
 }
 
 impl Session {

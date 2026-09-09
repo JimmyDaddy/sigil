@@ -9,6 +9,7 @@ use crate::tool_authority::{adjudicate_guarded_tool_operation, v3_file_access_bi
 #[test]
 fn r71_tool_authority_v3_binding_maps_exact_fields() {
     let file_ref = ManagedFileAccessPlanDraftRefV1 {
+        target_exists: true,
         plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
         subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
         subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),
@@ -72,6 +73,7 @@ fn r71_tool_authority_guarded_helper_returns_none_without_authority() {
         CanonicalHash::from_bytes([0x03; 32]),
         CanonicalHash::from_bytes([0x04; 32]),
         &ManagedFileAccessPlanDraftRefV1 {
+            target_exists: true,
             plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
             subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
             subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),
@@ -108,6 +110,7 @@ fn r71_tool_authority_tool_context_guard() {
         CanonicalHash::from_bytes([0x03; 32]),
         CanonicalHash::from_bytes([0x04; 32]),
         &ManagedFileAccessPlanDraftRefV1 {
+            target_exists: true,
             plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
             subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
             subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),
@@ -138,6 +141,7 @@ fn r71_tool_authority_v3_context_adjudicates_or_defers() {
         canonical_hash: CanonicalHash::from_bytes([0x31; 32]),
     };
     let file_ref = ManagedFileAccessPlanDraftRefV1 {
+        target_exists: true,
         plan_id: OpaqueManagedFileAccessPlanId::new("fa-1".to_owned()),
         subject_ref: OpaquePermissionSubjectRef::new("ws-1".to_owned()),
         subject_binding_hash: CanonicalHash::from_bytes([0x11; 32]),

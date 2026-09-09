@@ -8,6 +8,8 @@ use crate::projection_apply_decision;
 
 /// Durable schema for public-event outbox records.
 pub const PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION: u16 = 1;
+pub const PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS: usize = 256;
+pub const PUBLIC_EVENT_DELIVERY_BATCH_MAX_BYTES: usize = 256 * 1024;
 
 /// Public event retained before it is dispatched to one product adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,7 +206,7 @@ impl PublicEventOutboxProjectionV1 {
 /// single writer only needs identities, digests, watermarks, and receipts to admit the next
 /// append, so it keeps this separate index instead of retaining another copy of every event body.
 #[derive(Debug, Default)]
-pub(super) struct PublicEventOutboxAdmissionIndexV1 {
+pub struct PublicEventOutboxAdmissionIndexV1 {
     cursor: Option<ProjectionCursor>,
     entries: BTreeMap<String, PublicEventOutboxIdentityV1>,
     run_watermarks: BTreeMap<String, u64>,
@@ -228,7 +230,7 @@ pub(super) enum PublicEventOutboxAppendDecisionV1 {
 }
 
 impl PublicEventOutboxAdmissionIndexV1 {
-    pub(super) fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
+    pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
         // Keep canonical root/revision pair validation on the replay path. This index is only an
         // admission cache; it must never weaken the durable projection's corruption checks.
         PublicEventOutboxProjectionV1::from_records(records)?;
@@ -343,7 +345,8 @@ impl PublicEventOutboxAdmissionIndexV1 {
         Ok(())
     }
 
-    fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
+    /// Applies a verified next record to the payload-free index. This grants no write authority.
+    pub fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
         if projection_apply_decision(self.cursor.as_ref(), event)?
             == ProjectionApplyDecision::IgnoreAlreadyApplied
@@ -369,6 +372,17 @@ impl PublicEventOutboxAdmissionIndexV1 {
         }
         self.cursor = Some(record.projection_cursor(PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION));
         Ok(())
+    }
+
+    #[must_use]
+    pub fn contains_event(&self, event_id: &str) -> bool {
+        self.entries.contains_key(event_id)
+    }
+
+    #[must_use]
+    pub fn was_delivered(&self, event_id: &str, adapter: &str) -> bool {
+        self.deliveries
+            .contains(&(event_id.to_owned(), adapter.to_owned()))
     }
 
     fn apply_outbox(&mut self, entry: PublicEventOutboxEntryV1) -> Result<()> {
@@ -480,6 +494,59 @@ impl PublicEventOutboxRecorder {
         self.store.append_public_event_delivery(receipt)
     }
 
+    /// Appends a bounded batch of idempotent delivery receipts in one crash-safe bundle.
+    ///
+    /// Already recorded identities are skipped. The batch limits are checked before entering the
+    /// writer, so a caller cannot turn a presentation update into an unbounded durable write.
+    pub fn append_delivery_batch(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+    ) -> Result<usize> {
+        self.append_validated_delivery_batch(receipts, None)
+    }
+
+    /// Applies the same batch validation with cancellable coordinator acquisition.
+    pub fn append_delivery_batch_with_budget(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+        budget: &SessionReadBudget,
+    ) -> Result<usize> {
+        self.append_validated_delivery_batch(receipts, Some(budget))
+    }
+
+    fn append_validated_delivery_batch(
+        &self,
+        receipts: &[PublicEventDeliveryReceiptV1],
+        budget: Option<&SessionReadBudget>,
+    ) -> Result<usize> {
+        if receipts.is_empty() {
+            return Ok(0);
+        }
+        if receipts.len() > PUBLIC_EVENT_DELIVERY_BATCH_MAX_RECORDS {
+            bail!("public delivery batch exceeds its record bound");
+        }
+        let encoded_bytes = receipts
+            .iter()
+            .map(|receipt| {
+                validate_delivery_receipt(receipt)?;
+                serde_json::to_vec(receipt).context("failed to encode public delivery receipt")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|bytes| bytes.len())
+            .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+            .ok_or_else(|| anyhow::anyhow!("public delivery batch byte count overflow"))?;
+        if encoded_bytes > PUBLIC_EVENT_DELIVERY_BATCH_MAX_BYTES {
+            bail!("public delivery batch exceeds its byte bound");
+        }
+        match budget {
+            Some(budget) => self
+                .store
+                .append_public_event_delivery_batch_with_budget(receipts, budget),
+            None => self.store.append_public_event_delivery_batch(receipts),
+        }
+    }
+
     /// Returns the exact durable public-event frontier for `run_id`.
     pub fn durable_sequence(&self, run_id: &str) -> Result<u64> {
         if run_id.trim().is_empty() {
@@ -516,6 +583,9 @@ pub(crate) fn validate_outbox_entry(entry: &PublicEventOutboxEntryV1) -> Result<
         || entry.domain_event_id.len() > 256
     {
         bail!("public event outbox entry is malformed");
+    }
+    if crate::is_transient_public_run_event(&entry.event.event) {
+        bail!("transient public events are not supported in the durable outbox");
     }
     let encoded =
         serde_json::to_vec(&entry.event).context("failed to encode public outbox payload")?;

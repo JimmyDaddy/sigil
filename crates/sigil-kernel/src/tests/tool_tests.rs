@@ -1570,6 +1570,29 @@ fn execution_coverage_labels_do_not_overstate_shell_sandbox() {
 }
 
 #[test]
+fn tool_execution_error_preserves_session_io_context_without_changing_retry_policy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let error = anyhow::Error::new(crate::session::SessionIoBusyError {
+        kind: crate::session::SessionIoBusyKind::Reader,
+        path: path.clone(),
+    })
+    .context("outer mutation scan failure");
+
+    let result = super::tool_result_from_execution_error("call-busy", "bash", &error);
+    let super::ToolResultStatus::Error(projected) = &result.status else {
+        panic!("session lock contention must remain a tool error");
+    };
+    assert_eq!(projected.kind, ToolErrorKind::Internal);
+    assert!(!projected.retryable);
+    assert!(projected.message.contains("outer mutation scan failure"));
+    assert!(projected.message.contains("session Reader I/O is busy"));
+    assert!(projected.message.contains(&path.display().to_string()));
+    assert_eq!(result.content, projected.message);
+    Ok(())
+}
+
+#[test]
 fn tool_result_serializes_error_message_meta_and_summary() {
     let ok = ToolResult::ok(
         "call-ok",

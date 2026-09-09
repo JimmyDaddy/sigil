@@ -10,12 +10,11 @@ use crate::{
     IntentApplicationState, IntentAuthorityState, IntentDefinitionState, IntentDefinitionV1,
     IntentDigest, IntentEventV1, IntentId, IntentOperationKind, IntentPlanKind,
     IntentPlanProposalV1, IntentPlanV1, IntentProposalCriterionV1, IntentSourceV1, IntentStackId,
-    IntentStackVersion, IntentTaskPlanBindingV1, IntentVersionRef, JsonlSessionStore,
-    MAX_INTENT_CRITERIA, MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES,
-    ProjectionApplyDecision, ProjectionCursor, PublicIntentSourceV1, PublicIntentStackStateV1,
-    PublicIntentStackV1, PublicIntentV1, Session, SessionLogEntry, SessionStreamRecord,
-    TaskPlanEntry, TaskPlanStatus, TaskStepId, TaskStepMode, TypedDomainEvent,
-    TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
+    IntentStackVersion, IntentTaskPlanBindingV1, IntentVersionRef, MAX_INTENT_CRITERIA,
+    MAX_INTENT_STATEMENT_BYTES, MAX_INTENT_TITLE_BYTES, ProjectionApplyDecision, ProjectionCursor,
+    PublicIntentSourceV1, PublicIntentStackStateV1, PublicIntentStackV1, PublicIntentV1, Session,
+    SessionLogEntry, SessionStreamRecord, TaskPlanEntry, TaskPlanStatus, TaskStepId, TaskStepMode,
+    TypedDomainEvent, TypedStoredEventDecode, decode_typed_stored_event, projection_apply_decision,
     validate_task_plan_graph_steps,
 };
 
@@ -1192,7 +1191,7 @@ pub fn append_successor_intent_plan_admission(
             })
         })
         .transpose()?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let projection = IntentStackProjectionV1::from_records(&records)?;
     if projection.has_incomplete_task_acceptance() {
         bail!("an incomplete IntentPlan admission requires recovery");
@@ -1507,7 +1506,7 @@ impl Session {
         let Some(store) = self.durable_store() else {
             return Ok(IntentStackProjectionV1::default());
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         IntentStackProjectionV1::from_records(&records)
     }
 
@@ -1516,7 +1515,7 @@ impl Session {
         let Some(store) = self.durable_store() else {
             return IntentStackProjectionV1::default().public_state();
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let admission = IntentStackProjectionV1::from_records(&records)?;
         if admission.latest_accepted_plan().is_none() {
             return admission.public_state();

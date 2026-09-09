@@ -2784,7 +2784,7 @@ impl JsonlSessionStore {
     ///
     /// Returns an error when the V2 stream or the provider-continuation provenance is invalid.
     pub fn provider_continuation_projection(&self) -> Result<ProviderContinuationProjection> {
-        let records = Self::read_event_records(self.path())?;
+        let records = self.read_event_records_coordinated()?;
         ProviderContinuationProjection::from_records(&records)
     }
 }

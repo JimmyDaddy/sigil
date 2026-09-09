@@ -1122,7 +1122,7 @@ pub fn materialize_intent_layer(
     let recorder = session
         .mutation_event_recorder()
         .context("Intent layer materialization requires mutation artifacts")?;
-    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let records = store.read_event_records_coordinated()?;
     let admission = IntentStackProjectionV1::from_records(&records)?;
     let accepted = admission
         .latest_accepted_plan()
@@ -1792,7 +1792,7 @@ impl Session {
         let store = self
             .durable_store()
             .context("Intent layer projection requires a durable session")?;
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let admission = IntentStackProjectionV1::from_records(&records)?;
         let lineage = crate::IntentLineageProjectionV1::from_records(&records, &admission)?;
         let mut projection = IntentLayerProjectionV1::from_records(&records, &admission, &lineage)?;

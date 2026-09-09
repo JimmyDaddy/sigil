@@ -41,45 +41,33 @@ pub const SIGIL_MODEL_STREAM_IDLE_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_I
 pub const SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS_ENV: &str = "SIGIL_MODEL_STREAM_TOTAL_TIMEOUT_SECS";
 const CONFIG_UPDATE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
+mod composition;
+mod composition_document;
+
+pub use composition::{OptionalCapability, RuntimeCompositionConfig, RuntimeCompositionProfile};
+
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone)]
 pub struct RootConfig {
     pub config_version: u32,
-    #[serde(default)]
+    pub composition: RuntimeCompositionConfig,
     pub workspace: WorkspaceConfig,
-    #[serde(default)]
     pub storage: StorageConfig,
-    #[serde(default)]
     pub session: SessionConfig,
     pub agent: AgentConfig,
-    #[serde(default)]
     pub model_request: ModelRequestConfig,
-    #[serde(default)]
     pub permission: PermissionConfig,
-    #[serde(default)]
     pub memory: MemoryConfig,
-    #[serde(default)]
     pub skills: SkillConfig,
-    #[serde(default)]
     pub compaction: CompactionConfig,
-    #[serde(default)]
     pub code_intelligence: CodeIntelligenceConfig,
-    #[serde(default)]
     pub terminal: TerminalConfig,
-    #[serde(default)]
     pub execution: ExecutionConfig,
-    #[serde(default, skip_serializing_if = "VerificationConfig::is_empty")]
     pub verification: VerificationConfig,
-    #[serde(default)]
     pub appearance: AppearanceConfig,
-    #[serde(default)]
     pub task: TaskConfig,
-    #[serde(default)]
     pub web: WebConfig,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connections: BTreeMap<String, Value>,
-    #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -88,6 +76,7 @@ impl fmt::Debug for RootConfig {
         formatter
             .debug_struct("RootConfig")
             .field("config_version", &self.config_version)
+            .field("composition", &self.composition)
             .field("workspace", &self.workspace)
             .field("storage", &self.storage)
             .field("session", &self.session)
@@ -1439,6 +1428,10 @@ impl RootConfig {
     /// bytes that are actually on disk. Keeping the renderer here avoids a second serializer
     /// silently producing a different source representation.
     pub fn persisted_toml(&self) -> Result<String> {
+        anyhow::ensure!(
+            !self.composition.deferred.runtime_effective,
+            "runtime-effective configuration cannot be persisted; publish the original root configuration"
+        );
         let mut root = toml::Value::try_from(self.clone())
             .context("failed to serialize root config to toml")?;
         let root_table = root
@@ -1503,7 +1496,17 @@ impl RootConfig {
         );
         self.model_request.validate_max_output_tokens()?;
         self.model_request.provider_turn_recovery_policy()?;
-        for (name, role) in self.task.role_configs() {
+        self.validate_selected_module_config()
+    }
+
+    /// Validates only semantics owned by selected optional modules. Runtime composition may
+    /// also serve an already-typed local operation whose provider route is validated by its
+    /// own entry point; root parsing remains responsible for the complete document schema.
+    fn validate_selected_module_config(&self) -> Result<()> {
+        for (name, role) in self.task.role_configs().filter(|_| {
+            self.composition
+                .allows(OptionalCapability::TaskOrchestration)
+        }) {
             anyhow::ensure!(
                 role.connection.is_some() == role.model.is_some(),
                 "config_version = {CONFIG_VERSION_V2} requires [{name}].connection and [{name}].model to be configured together"

@@ -169,7 +169,7 @@ impl Session {
     }
 }
 
-fn validate_waiting_material(
+pub(super) fn validate_waiting_material(
     attempt: &PlanReviewAttemptEntry,
     event: &PublicRunEvent,
 ) -> Result<()> {
@@ -258,4 +258,4 @@ pub(super) fn validate_waiting_pairs(
 
 #[cfg(test)]
 #[path = "tests/plan_review_waiting_tests.rs"]
-mod tests;
+pub(super) mod tests;

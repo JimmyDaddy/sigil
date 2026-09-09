@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
@@ -886,11 +886,58 @@ impl ToolContext {
         )
     }
 
-    /// Executes one bounded V3 file operation through the authority-owned physical executor.
+    /// Freezes one file call's output and deadline before its blocking work is queued.
+    pub fn managed_file_execution_context(
+        &self,
+        operation: crate::managed_file_access::ManagedFileOperationV1,
+    ) -> Result<
+        crate::managed_file_access::ManagedFileExecutionContextV1,
+        crate::tool_authority::KernelToolAuthorityErrorV1,
+    > {
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(self.timeout_secs.max(1)));
+        let plan = self.sealed_v3_plan().ok_or({
+            crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+            )
+        })?;
+        let decision = self.sealed_v3_decision().ok_or({
+            crate::tool_authority::KernelToolAuthorityErrorV1::Access(
+                crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
+            )
+        })?;
+        let output_sink = match operation {
+            crate::managed_file_access::ManagedFileOperationV1::Read
+            | crate::managed_file_access::ManagedFileOperationV1::Grep => self
+                .create_policy_safe_tool_output_sink(
+                    decision.call_id.as_str(),
+                    &plan.core.tool_name,
+                    if operation == crate::managed_file_access::ManagedFileOperationV1::Grep {
+                        "application/json; charset=utf-8"
+                    } else {
+                        "text/plain; charset=utf-8"
+                    },
+                    ToolArtifactEncoding::Utf8,
+                    ToolArtifactSensitivity::Ordinary,
+                ),
+            _ => None,
+        };
+        Ok(crate::managed_file_access::ManagedFileExecutionContextV1 {
+            tool_call_id: decision.call_id.as_str().to_owned(),
+            mutation_recorder: self.mutation_recorder.clone(),
+            output_sink,
+            cancellation: self.cancellation_handle(),
+            deadline,
+        })
+    }
+
+    /// Executes one V3 file operation using the context frozen before dispatch. Queueing never
+    /// grants the physical executor a fresh deadline after the caller has already timed out.
     pub fn execute_v3_file_operation(
         &self,
         operation: crate::managed_file_access::ManagedFileOperationV1,
         input: crate::managed_file_access::ManagedFileExecutionInputV1,
+        context: crate::managed_file_access::ManagedFileExecutionContextV1,
     ) -> Result<
         crate::managed_file_access::ManagedFileExecutionOutcomeV1,
         crate::tool_authority::KernelToolAuthorityErrorV1,
@@ -912,7 +959,7 @@ impl ToolContext {
                     crate::managed_file_access::ManagedFileAccessErrorV1::ResourcePreconditionUnavailable,
                 )
             })?
-            .execute_v3_file_operation(plan, decision, operation, input, self.mutation_recorder.clone())
+            .execute_v3_file_operation(plan, decision, operation, input, context)
     }
 
     /// Reads bounded preview data through the authority without touching the host filesystem in
@@ -1808,13 +1855,19 @@ impl ToolExecutionGuardError {
     pub fn managed_file(error: crate::managed_file_access::ManagedFileAccessErrorV1) -> Self {
         use crate::managed_file_access::ManagedFileAccessErrorV1 as E;
         let kind = match &error {
-            E::AdmissionMismatch | E::OperationNotPermitted | E::TokenReplay => {
-                ToolErrorKind::PermissionDenied
-            }
+            E::AdmissionMismatch
+            | E::OperationNotPermitted
+            | E::TokenReplay
+            | E::PermissionDenied => ToolErrorKind::PermissionDenied,
             E::SubjectIdentityDrift | E::PlanStale => ToolErrorKind::StalePreparedMutation,
             E::AliasCollision => ToolErrorKind::PathOutsideWorkspace,
             E::ResourcePreconditionUnavailable => ToolErrorKind::ResourceExhausted,
             E::ReconciliationRequired { .. } => ToolErrorKind::EffectReconciliationRequired,
+            E::NotFound => ToolErrorKind::NotFound,
+            E::NotRegularFile | E::InvalidInput(_) => ToolErrorKind::InvalidInput,
+            E::Interrupted => ToolErrorKind::Interrupted,
+            E::Timeout => ToolErrorKind::Timeout,
+            E::ResourceLimit(_) => ToolErrorKind::ResourceLimit,
             E::PhysicalExecutionFailed(_) => ToolErrorKind::Io,
         };
         Self::ManagedFile {
@@ -1849,7 +1902,7 @@ pub(crate) fn tool_result_from_execution_error(
         Some(ToolExecutionGuardError::ManagedFile { kind, .. }) => *kind,
         None => ToolErrorKind::Internal,
     };
-    ToolResult::error(call_id, tool_name, kind, error.to_string()).with_error_details(
+    ToolResult::error(call_id, tool_name, kind, format!("{error:#}")).with_error_details(
         kind.is_recovery_blocker(),
         serde_json::json!({
             "recovery_blocker": kind.is_recovery_blocker(),
@@ -3185,9 +3238,9 @@ impl ResolvedToolInvocation {
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         let mutation_scan = begin_unknown_mutation_scan(&ctx, self.contract.mutation_tracking)
-            .map_err(|error| {
-                anyhow!(
-                    "failed to start workspace mutation detection for {}: {error:#}",
+            .with_context(|| {
+                format!(
+                    "failed to start workspace mutation detection for {}",
                     self.contract.spec.name
                 )
             })?;
@@ -3645,9 +3698,9 @@ impl ToolRegistry {
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         let mutation_scan =
-            begin_unknown_mutation_scan(&ctx, mutation_tracking).map_err(|error| {
-                anyhow!(
-                    "failed to start workspace mutation detection for {}: {error:#}",
+            begin_unknown_mutation_scan(&ctx, mutation_tracking).with_context(|| {
+                format!(
+                    "failed to start workspace mutation detection for {}",
                     spec.name
                 )
             })?;
@@ -3759,9 +3812,9 @@ impl ToolRegistry {
         }
 
         let mutation_scan =
-            begin_unknown_mutation_scan(&ctx, mutation_tracking).map_err(|error| {
-                anyhow!(
-                    "failed to start workspace mutation detection for {}: {error:#}",
+            begin_unknown_mutation_scan(&ctx, mutation_tracking).with_context(|| {
+                format!(
+                    "failed to start workspace mutation detection for {}",
                     spec.name
                 )
             })?;

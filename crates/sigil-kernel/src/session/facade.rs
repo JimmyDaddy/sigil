@@ -2149,6 +2149,57 @@ impl Session {
         SessionContextProjection::from_durable_records(&self.entries, &records, None).map(Some)
     }
 
+    /// Projects the original records before the first exact committed control boundary. When supplied,
+    /// a real user or promoted-user source inside that prefix narrows the cut to before that
+    /// message. Source selection precedes compaction and all other context projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionContextPrefixError`] for a missing boundary or missing/conflicting sources,
+    /// or an error from the existing durable context/sidecar validation. This query never repairs
+    /// or appends records. In-memory sessions use the same selection over their append-only entries.
+    pub fn context_projection_before_control(
+        &self,
+        boundary: &ControlEntry,
+        source_user_message_id: Option<&str>,
+    ) -> Result<SessionContextProjection> {
+        let records = match (&self.reconstruction_records, &self.store) {
+            (Some(records), _) => records.clone(),
+            (None, Some(store)) => store.read_event_records_writer()?.into(),
+            (None, None) => {
+                let end = super::context_projection::context_prefix_end(
+                    &self.entries,
+                    boundary,
+                    source_user_message_id,
+                )?;
+                return Ok(SessionContextProjection::from_entries(&self.entries[..end]));
+            }
+        };
+        let entries = session_entries_from_records(&records)?;
+        let end = super::context_projection::context_prefix_end(
+            &entries,
+            boundary,
+            source_user_message_id,
+        )?;
+        let mut entry_index = 0;
+        let mut record_end = records.len();
+        for (index, record) in records.iter().enumerate() {
+            if session_entry_from_stored_event(record.stored_event())?.is_some() {
+                if entry_index == end {
+                    record_end = index;
+                    break;
+                }
+                entry_index += 1;
+            }
+        }
+        let (entries, audit_needed) =
+            validated_recovered_entries(self.session_scope_id(), entries[..end].to_vec());
+        if audit_needed {
+            bail!("session context prefix requires unsafe external recovery");
+        }
+        SessionContextProjection::from_durable_records(&entries, &records[..record_end], None)
+    }
+
     /// Reads the current validated durable stream through this session's shared coordinator.
     ///
     /// Expensive projections such as manual compaction may use this at an explicit safe point.
@@ -2350,7 +2401,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         RecoveryBlockerProjectionV1::from_records(&records).map(Some)
     }
 
@@ -2364,7 +2415,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         EffectReconciliationProjectionV1::from_records(&records).map(Some)
     }
 
@@ -2401,7 +2452,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = crate::resume::ResumeJobStateProjection::default();
         for record in records {
             let Some(event) = record.domain_event_record()? else {
@@ -2450,7 +2501,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         crate::projection::session_list_projection_from_records(&records).map(Some)
     }
 
@@ -2465,7 +2516,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = AgentThreadStateProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2496,7 +2547,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         crate::projection::dispatch_trace_projection_from_records(&records).map(Some)
     }
 
@@ -2512,7 +2563,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = AgentProfileTrustProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2533,7 +2584,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = AgentProfilePolicyProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2552,7 +2603,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = SkillStateProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2573,7 +2624,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = PluginStateProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2596,7 +2647,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = ChangeSetProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2620,7 +2671,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = WriteIsolationProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2645,7 +2696,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut projection = VerificationStateProjection::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {
@@ -2699,7 +2750,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         Ok(Some(ConversationQueueDurableProjection::from_records(
             &records,
         )?))
@@ -2785,6 +2836,7 @@ impl Session {
                 reasoning_effort,
                 previous_response_handle,
                 traffic_partition_key,
+                &[],
                 transient_messages,
                 &[],
             )?
@@ -2904,6 +2956,39 @@ impl Session {
         runtime_context: RuntimeContextCandidates,
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<CompletionRequest> {
+        self.build_request_with_initial_context_and_transient_messages_context_overlays_and_max_tokens(
+            workspace_root,
+            memory_config,
+            tools,
+            max_output_tokens,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            &[],
+            transient_messages,
+            runtime_context,
+            overlays,
+        )
+    }
+
+    /// Builds a request with a fixed provider-visible prefix that precedes retained child
+    /// history. The prefix is process-local input material; callers remain responsible for
+    /// proving its source and durable boundary before provider I/O.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_request_with_initial_context_and_transient_messages_context_overlays_and_max_tokens(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        max_output_tokens: Option<u32>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        initial_messages: &[ModelMessage],
+        transient_messages: &[ModelMessage],
+        runtime_context: RuntimeContextCandidates,
+        overlays: &[crate::TransientMessageOverlay],
+    ) -> Result<CompletionRequest> {
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let session_projection = self.request_context_projection()?;
         let projected_messages = session_projection.model_messages();
@@ -2926,6 +3011,7 @@ impl Session {
             reasoning_effort,
             previous_response_handle,
             traffic_partition_key,
+            initial_messages,
             transient_messages,
             overlays,
         )?;
@@ -3003,6 +3089,7 @@ impl Session {
                 reasoning_effort,
                 previous_response_handle,
                 traffic_partition_key,
+                &[],
                 transient_messages,
                 overlays,
             )?
@@ -3071,6 +3158,7 @@ impl Session {
                 reasoning_effort,
                 previous_response_handle,
                 traffic_partition_key,
+                &[],
                 transient_messages,
                 overlays,
             )?
@@ -3091,6 +3179,7 @@ impl Session {
         reasoning_effort: Option<crate::provider::ReasoningEffort>,
         previous_response_handle: Option<crate::provider::ResponseHandle>,
         traffic_partition_key: Option<String>,
+        initial_messages: &[ModelMessage],
         transient_messages: &[ModelMessage],
         overlays: &[crate::TransientMessageOverlay],
     ) -> Result<AssembledRequest> {
@@ -3103,6 +3192,12 @@ impl Session {
             let (safe_transient, exact_overlay) =
                 crate::project_message_for_persistence(transient.clone())?;
             safe_request_messages.push(safe_transient);
+            exact_overlays.push(exact_overlay);
+        }
+        for initial in initial_messages {
+            let (safe_initial, exact_overlay) =
+                crate::project_message_for_persistence(initial.clone())?;
+            safe_request_messages.push(safe_initial);
             exact_overlays.push(exact_overlay);
         }
         safe_request_messages.extend(projected_messages);
@@ -3418,7 +3513,7 @@ impl Session {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let records = store.read_event_records_coordinated()?;
         let mut stats = SessionStats::default();
         let mut cursor: Option<ProjectionCursor> = None;
         for record in records {

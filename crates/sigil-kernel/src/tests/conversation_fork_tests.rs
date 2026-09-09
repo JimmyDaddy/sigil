@@ -94,6 +94,160 @@ fn portable_target_material(
         .with_portable_economics(&frozen_before_request, before_input)
 }
 
+fn finalized_composition_source(
+    path: &Path,
+    composition: Option<SessionCompositionSnapshotV1>,
+) -> Result<(Session, JsonlSessionStore)> {
+    let store = JsonlSessionStore::new(path)?;
+    let mut session = Session::new("fixture", "model").with_store(store.clone());
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "fixture".to_owned(),
+        model_name: "model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    if let Some(composition) = composition {
+        session.append_control(ControlEntry::SessionCompositionBound(composition))?;
+    }
+    session.append_user_message(ModelMessage::user("inspect the parser"))?;
+    let assistant = ModelMessage::assistant(Some("done".to_owned()), Vec::new());
+    session.append_assistant_message(assistant.clone())?;
+    session.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": "completed",
+            "terminal_reason": "final_answer",
+            "final_message_id": assistant.id,
+            "tool_calls": 0,
+            "error": null
+        }),
+    )?;
+    Ok((session, store))
+}
+
+#[test]
+fn conversation_fork_preserves_a_bound_composition_before_copied_execution_history() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source_path = temp.path().join("source.jsonl");
+    let composition = SessionCompositionSnapshotV1::new(BTreeSet::new());
+    let (_source, store) = finalized_composition_source(&source_path, Some(composition.clone()))?;
+    let records = JsonlSessionStore::read_event_records(&source_path)?;
+    let point = ConversationForkProjection::from_records(&records)?
+        .latest()
+        .context("completed turn")?
+        .clone();
+    let parent_before = fs::read(&source_path)?;
+    let destination_path = temp.path().join("fork.jsonl");
+
+    let output = fork_conversation_at_turn(
+        &store,
+        &records,
+        &ConversationTurnForkRequest {
+            source_turn_digest: point.source_turn_digest,
+            source_session_ref: SessionRef::new_relative("source.jsonl")?,
+            destination_path: destination_path.clone(),
+            provider_name: "fixture".to_owned(),
+            model_name: "model".to_owned(),
+            resolved_model_route: None,
+        },
+    )?;
+
+    let destination_records = JsonlSessionStore::read_event_records(&destination_path)?;
+    assert_eq!(
+        conversation_fork_source_composition(&destination_records)?,
+        Some(composition.clone())
+    );
+    let entries = JsonlSessionStore::read_entries(&destination_path)?;
+    let binding_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry, SessionLogEntry::Control(ControlEntry::SessionCompositionBound(actual)) if actual == &composition)
+        })
+        .context("fork must preserve the source binding")?;
+    let first_copied_message = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::User(_) | SessionLogEntry::Assistant(_)
+            )
+        })
+        .context("copied conversation history")?;
+    assert!(binding_index < first_copied_message);
+    assert_eq!(output.copied_message_count, 2);
+    assert_eq!(fs::read(&source_path)?, parent_before);
+    Ok(())
+}
+
+#[test]
+fn conversation_fork_rejects_invalid_source_composition_before_creating_destination() -> Result<()>
+{
+    for case in [
+        "duplicate",
+        "late",
+        "unsupported_schema",
+        "unsupported_core_contract",
+    ] {
+        let temp = tempfile::tempdir()?;
+        let source_path = temp.path().join("source.jsonl");
+        let composition = SessionCompositionSnapshotV1::new(BTreeSet::new());
+        let (mut source, store) = finalized_composition_source(
+            &source_path,
+            (case != "late").then_some(composition.clone()),
+        )?;
+        if matches!(case, "duplicate" | "late") {
+            source.append_control(ControlEntry::SessionCompositionBound(composition.clone()))?;
+        }
+        let mut records = JsonlSessionStore::read_event_records(&source_path)?;
+        let point = ConversationForkProjection::from_records(&records)?
+            .latest()
+            .context("completed turn")?
+            .clone();
+        if matches!(case, "unsupported_schema" | "unsupported_core_contract") {
+            let mut unsupported = composition;
+            if case == "unsupported_schema" {
+                unsupported.schema_version += 1;
+            } else {
+                unsupported.core_contract_version += 1;
+            }
+            let event = records
+                .iter_mut()
+                .find_map(|record| {
+                    let SessionStreamRecord::Stored(event) = record;
+                    (event.event_kind() == Some(DurableEventType::SessionCompositionBound))
+                        .then_some(event)
+                })
+                .context("source composition event")?;
+            event.payload = json!({
+                "session_log_entry": SessionLogEntry::Control(ControlEntry::SessionCompositionBound(unsupported))
+            });
+            event.record_checksum = event.compute_record_checksum()?;
+            event.verify_record_checksum()?;
+        }
+        let destination_path = temp.path().join("fork.jsonl");
+        let error = fork_conversation_at_turn(
+            &store,
+            &records,
+            &ConversationTurnForkRequest {
+                source_turn_digest: point.source_turn_digest,
+                source_session_ref: SessionRef::new_relative("source.jsonl")?,
+                destination_path: destination_path.clone(),
+                provider_name: "fixture".to_owned(),
+                model_name: "model".to_owned(),
+                resolved_model_route: None,
+            },
+        )
+        .expect_err("invalid source composition must not be copied");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("composition") || message.contains("execution contract"),
+            "{case}: {message}"
+        );
+        assert!(!destination_path.exists(), "{case}");
+    }
+    Ok(())
+}
+
 #[test]
 fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -523,6 +677,8 @@ fn conversation_turn_fork_supports_finalized_turn_without_file_mutations() -> Re
     assert_eq!(fs::read(&source_path)?, before_parent);
     assert_eq!(output.copied_message_count, 2);
     let destination_records = JsonlSessionStore::read_event_records(destination_path)?;
+    assert!(conversation_fork_source_composition(&records)?.is_none());
+    assert!(conversation_fork_source_composition(&destination_records)?.is_none());
     let fork_payload = destination_records
         .iter()
         .find_map(|record| match record {
