@@ -2,6 +2,71 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn typed_live_envelope_projects_snapshot_metadata_without_a_public_sequence() {
+    let value = json!({
+        "schema_version": DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
+        "event_class": "transient",
+        "live_update": {
+            "schema_version": 1, "session_id": "session-1", "run_id": "run-1",
+            "attempt_id": "physical-attempt", "slot_id": "assistant-text", "live_revision": 100000,
+            "base_durable_sequence": 3, "kind": "text", "preview": "replacement snapshot", "truncated": false
+        }
+    });
+    let decoded: DesktopProtocolEvent =
+        serde_json::from_value(value.clone()).expect("typed live branch");
+    assert!(decoded.run_event.is_none());
+    let timeline = decoded
+        .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+        .expect("live timeline");
+    assert!(!timeline.replayable);
+    assert_eq!(
+        timeline.sequence, 3,
+        "only the base durable sequence is carried in the timeline"
+    );
+    assert_eq!(
+        timeline
+            .live_preview
+            .as_ref()
+            .map(|preview| preview.revision.as_str()),
+        Some("100000")
+    );
+    assert_eq!(timeline.text.as_deref(), Some("replacement snapshot"));
+    let mut contradictory = value.clone();
+    contradictory["run_event"] = json!({ "schema_version": 2, "session_id": "session-1", "run_id": "run-1", "sequence": 3,
+        "event": { "type": "notice", "message": "invalid mixed branches" }});
+    assert!(
+        serde_json::from_value::<DesktopProtocolEvent>(contradictory)
+            .expect("wire shape")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .is_err()
+    );
+    let mut wrong_owner = value.clone();
+    wrong_owner["live_update"]["run_id"] = json!("another-run");
+    assert!(
+        serde_json::from_value::<DesktopProtocolEvent>(wrong_owner)
+            .expect("wire shape")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .is_err()
+    );
+    let mut fake_identity = value.clone();
+    fake_identity["provisional_id"] = json!(format!("live-v1:{}", "a".repeat(64)));
+    assert!(
+        serde_json::from_value::<DesktopProtocolEvent>(fake_identity)
+            .expect("wire shape")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .is_err()
+    );
+    let mut fake_cursor = value;
+    fake_cursor["replay_id"] = json!("sigil-http-run-v1:session-1:run-1:100000");
+    assert!(
+        serde_json::from_value::<DesktopProtocolEvent>(fake_cursor)
+            .expect("wire shape")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .is_err()
+    );
+}
+
 fn envelope(event_class: DesktopProtocolEventClass, event: Value) -> DesktopProtocolEvent {
     DesktopProtocolEvent {
         schema_version: DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
@@ -10,13 +75,82 @@ fn envelope(event_class: DesktopProtocolEventClass, event: Value) -> DesktopProt
             .then(|| "sigil-http-run-v1:session-1:run-1:1".to_owned()),
         approval_request: None,
         provisional_id: None,
-        run_event: DesktopPublicRunEvent {
+        live_update: None,
+        run_event: Some(DesktopPublicRunEvent {
             schema_version: DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,
             session_id: "session-1".to_owned(),
             run_id: "run-1".to_owned(),
             sequence: 1,
             event: serde_json::from_value(event).expect("public event should deserialize"),
-        },
+        }),
+    }
+}
+
+#[test]
+fn timeline_projection_rejects_retired_public_live_payloads() {
+    for event in [
+        json!({"type": "text_delta", "text": "old text"}),
+        json!({"type": "reasoning_delta", "text": "old reasoning"}),
+        json!({"type": "tool_call_args_delta", "id": "call-1", "delta": "{}"}),
+        json!({"type": "tool_progress", "progress": {"call_id": "call-1", "tool_name": "terminal_start", "status": "running"}}),
+    ] {
+        for event_class in [
+            DesktopProtocolEventClass::Durable,
+            DesktopProtocolEventClass::Transient,
+        ] {
+            assert_eq!(
+                envelope(event_class, event.clone()).into_timeline(
+                    "workspace",
+                    "session-1",
+                    "run-1",
+                    "renderer-session"
+                ),
+                Err(DesktopProtocolEventError::UnsupportedLivePayload)
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_live_envelope_keeps_all_current_preview_kinds() {
+    for (kind, expected_kind) in [
+        ("text", DesktopTimelineEventKind::AssistantDelta),
+        ("reasoning", DesktopTimelineEventKind::ReasoningDelta),
+        (
+            "tool_call_arguments",
+            DesktopTimelineEventKind::ToolCallArgsDelta,
+        ),
+        ("tool_progress", DesktopTimelineEventKind::ToolProgress),
+    ] {
+        let mut payload = json!({
+            "schema_version": DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION,
+            "event_class": "transient",
+            "live_update": {
+                "schema_version": 1, "session_id": "session-1", "run_id": "run-1",
+                "attempt_id": "current-provider-attempt", "slot_id": "call-1",
+                "live_revision": 10, "base_durable_sequence": 9,
+                "kind": kind, "preview": "current preview", "truncated": false,
+            }
+        });
+        if kind == "tool_progress" {
+            payload["live_update"]["tool_progress"] = json!({
+                "execution_id": "execution-1", "call_id": "call-1", "tool_name": "terminal_start",
+                "status": "running", "total_bytes": 20, "updated_at_ms": 1,
+            });
+        }
+        let projected = serde_json::from_value::<DesktopProtocolEvent>(payload)
+            .expect("current wire shape")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .expect("current typed preview");
+        assert_eq!(projected.kind, expected_kind);
+        assert!(!projected.replayable);
+        assert!(projected.replay_id.is_none());
+        assert_eq!(projected.run_sequence, "9");
+        let live = projected
+            .live_preview
+            .expect("attempt-bound preview metadata");
+        assert_eq!(live.attempt_id, "current-provider-attempt");
+        assert_eq!(live.revision, "10");
     }
 }
 
@@ -360,7 +494,7 @@ fn protocol_projection_rejects_wrong_stream_and_invalid_replay_shape() {
     transient.event_class = DesktopProtocolEventClass::Transient;
     assert_eq!(
         transient.into_timeline("workspace-1", "session-1", "run-1", "http-session-1"),
-        Err(DesktopProtocolEventError::InvalidReplayCursor)
+        Err(DesktopProtocolEventError::WrongStream)
     );
 }
 
@@ -370,7 +504,11 @@ fn timeline_projection_preserves_exact_sequence_and_opaque_provisional_identity(
         DesktopProtocolEventClass::Durable,
         json!({"type": "run_started", "prompt": "hello"}),
     );
-    event.run_event.sequence = 9_007_199_254_740_993;
+    event
+        .run_event
+        .as_mut()
+        .expect("public event payload")
+        .sequence = 9_007_199_254_740_993;
     event.provisional_id = Some(format!("live-v1:{}", "a".repeat(64)));
 
     let timeline = event
@@ -567,10 +705,7 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         json!({"type": "run_failed", "error": "failed"}),
         json!({"type": "route_recovery_required", "code": "session_route_confirmation_required", "actions": ["repair_connection", "start_new_session"], "recovery_binding": "binding-1", "retryable": true}),
         json!({"type": "run_cancelled"}),
-        json!({"type": "text_delta", "text": "text"}),
-        json!({"type": "reasoning_delta", "text": "reasoning"}),
         json!({"type": "tool_call_started", "call": {"id": "call-1", "name": "bash", "args_json": "{}"}}),
-        json!({"type": "tool_call_args_delta", "id": "call-1", "delta": "{}"}),
         json!({"type": "tool_call_completed", "call": {"id": "call-1", "name": "bash", "args_json": "{}"}}),
         json!({
             "type": "approval_requested",
@@ -593,7 +728,6 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
         }),
         json!({"type": "approval_resolved", "call_id": "call-1", "approval_request_id": "approval-1", "approved": false, "reason": null}),
         json!({"type": "tool_result", "result": {"call_id": "call-1", "tool_name": "bash", "content": "failed", "status": {"error": {"kind": "internal", "message": "failed", "retryable": false}}, "metadata": {}}}),
-        json!({"type": "tool_progress", "progress": {"execution_id": "execution-1", "call_id": "call-1", "tool_name": "bash", "sequence": 1, "status": "running", "details": {}}}),
         json!({"type": "terminal_lifecycle", "event": {"task_id": "terminal-1", "generation": 1, "status": {"state": "running"}, "readiness": {"state": "waiting", "kind": "output_contains"}, "total_output_bytes": 0, "emitted_at_ms": 1}}),
         json!({"type": "usage", "usage": {"prompt_tokens": 1}}),
         json!({"type": "continuation_state", "state": {"provider_name": "provider"}}),

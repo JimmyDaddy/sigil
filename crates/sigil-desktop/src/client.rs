@@ -71,6 +71,7 @@ const MAX_DESKTOP_INTENT_CONFLICTS: usize = 512;
 const MAX_DESKTOP_INTENT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SSE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PLAN_DECISION_BUSY_RETRIES: usize = 8;
 const RUN_EVENT_NAME: &str = "run_event";
 const MAX_CONVERSATION_QUEUE_ITEMS: usize = 100;
 const MAX_CONVERSATION_QUEUE_PROMPT_PREVIEW_CHARS: usize = 240;
@@ -483,7 +484,32 @@ impl DesktopHttpClient {
                 pairs.append_pair("limit", &limit.to_string());
             }
         }
-        self.get_json(url, StatusCode::OK).await
+        self.get_observation_json(url).await
+    }
+
+    /// Reads one bounded page of complete safely redacted durable message content.
+    pub async fn message_content(
+        &self,
+        session_id: &str,
+        query: &crate::DesktopMessageContentQuery,
+    ) -> Result<crate::DesktopMessageContentPage, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        query
+            .validate()
+            .map_err(|_| DesktopClientError::InvalidRoute)?;
+        let mut url = self.route(["sessions", session_id, "message-content"])?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("display_id", &query.display_id);
+            pairs.append_pair("offset", &query.offset.to_string());
+            pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(version) = &query.content_version {
+                pairs.append_pair("content_version", version);
+            }
+        }
+        let page: crate::DesktopMessageContentPage = self.get_observation_json(url).await?;
+        validate_message_content_page(&page, query)?;
+        Ok(page)
     }
 
     /// Reads one canonical, identity-ordered conversation display page.
@@ -509,7 +535,7 @@ impl DesktopHttpClient {
                 pairs.append_pair("limit", &limit.to_string());
             }
         }
-        let page: DesktopConversationDisplayPage = self.get_json(url, StatusCode::OK).await?;
+        let page: DesktopConversationDisplayPage = self.get_observation_json(url).await?;
         validate_conversation_display_page(&page, session_id)?;
         Ok(page)
     }
@@ -927,16 +953,33 @@ impl DesktopHttpClient {
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
         let route = self.route(["sessions", session_id, "plan-decision"])?;
-        let first = self
-            .post_json(route.clone(), &command, StatusCode::OK)
-            .await;
-        // The response may be lost after the append-only decision boundary. Replay the exact
-        // command envelope before surfacing ambiguity to the renderer.
-        let mut receipt: crate::DesktopPlanDecisionCommandReceipt = match first {
-            Err(DesktopClientError::RequestFailed) => {
-                self.post_json(route, &command, StatusCode::OK).await?
+        let mut busy_retries = 0;
+        let mut replayed_lost_response = false;
+        let mut receipt: crate::DesktopPlanDecisionCommandReceipt = loop {
+            let result = self
+                .post_json(route.clone(), &command, StatusCode::OK)
+                .await;
+            match result {
+                // The server durably binds this pre-execution refusal to the exact command.
+                // A terminal UI projection can arrive before foreground ownership is released.
+                Err(DesktopClientError::Rejected {
+                    status: 409,
+                    ref code,
+                    ..
+                }) if code.as_deref() == Some("plan_decision_busy")
+                    && busy_retries < PLAN_DECISION_BUSY_RETRIES =>
+                {
+                    let delay_ms = (100_u64 << busy_retries).min(1_000);
+                    busy_retries += 1;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                // A response may be lost after the durable boundary. Reuse the same envelope
+                // once so a committed decision is replayed rather than executed a second time.
+                Err(DesktopClientError::RequestFailed) if !replayed_lost_response => {
+                    replayed_lost_response = true;
+                }
+                result => break result?,
             }
-            result => result?,
         };
         if receipt.command_id != command_id
             || receipt.client_id != client_id
@@ -1316,6 +1359,24 @@ impl DesktopHttpClient {
         T: DeserializeOwned,
     {
         self.send_json(self.client.get(url), status).await
+    }
+
+    async fn get_observation_json<T>(&self, url: Url) -> Result<T, DesktopClientError>
+    where
+        T: DeserializeOwned,
+    {
+        // Cold history remains a cancellable in-flight read instead of hitting the command
+        // timeout. Dropping the request closes its connection and cancels the server reader.
+        let response = self
+            .client
+            .get(url)
+            .header("x-sigil-cancel-observation-on-close", "1")
+            .bearer_auth(self.bearer.expose())
+            .send()
+            .await
+            .map_err(|_| DesktopClientError::RequestFailed)?;
+        self.decode_json_response(response, StatusCode::OK, MAX_JSON_RESPONSE_BYTES)
+            .await
     }
 
     async fn get_json_with_limit<T>(
@@ -1865,6 +1926,39 @@ fn validate_conversation_queue_view(
         {
             return Err(DesktopClientError::InvalidResponse);
         }
+    }
+    Ok(())
+}
+
+fn validate_message_content_page(
+    page: &crate::DesktopMessageContentPage,
+    query: &crate::DesktopMessageContentQuery,
+) -> Result<(), DesktopClientError> {
+    let end = page
+        .offset
+        .checked_add(page.text.len() as u64)
+        .ok_or(DesktopClientError::InvalidResponse)?;
+    if page.display_id != query.display_id
+        || page.offset != query.offset
+        || page.text.len() > query.limit
+        || page.total_bytes > 2 * 1024 * 1024
+        || end > page.total_bytes
+        || page.next_offset != (end < page.total_bytes).then_some(end)
+        || (page.text.is_empty() && page.next_offset.is_some())
+        || page.message_id.is_empty()
+        || page.message_id.len() > 256
+        || page.message_id.chars().any(char::is_control)
+        || page.content_version.len() != 64
+        || !page
+            .content_version
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || query
+            .content_version
+            .as_ref()
+            .is_some_and(|expected| expected != &page.content_version)
+    {
+        return Err(DesktopClientError::InvalidResponse);
     }
     Ok(())
 }

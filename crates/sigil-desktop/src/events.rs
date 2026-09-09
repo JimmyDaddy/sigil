@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sigil_application::LiveRunUpdate;
 use thiserror::Error;
 
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
 };
 
 /// Current HTTP protocol-event envelope accepted by the desktop client.
-pub const DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 2;
+pub const DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 3;
 /// Current public run-event envelope accepted by the desktop client.
 pub const DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION: u32 = 2;
 
@@ -35,7 +36,11 @@ pub struct DesktopProtocolEvent {
     pub approval_request: Option<DesktopPendingApproval>,
     #[serde(default)]
     pub provisional_id: Option<String>,
-    pub run_event: DesktopPublicRunEvent,
+    /// Independent process-local snapshot; mutually exclusive with the public event branch.
+    #[serde(default)]
+    pub live_update: Option<LiveRunUpdate>,
+    #[serde(default)]
+    pub run_event: Option<DesktopPublicRunEvent>,
 }
 
 /// Typed public run envelope consumed by the native client.
@@ -470,6 +475,7 @@ pub enum DesktopTimelineEventKind {
     IntegrationLaneChanged,
     AssistantDelta,
     ReasoningDelta,
+    ToolCallArgsDelta,
     AssistantMessage,
     ToolStarted,
     ToolCompleted,
@@ -624,6 +630,8 @@ pub struct DesktopTimelineEvent {
     pub replay_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provisional_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_preview: Option<DesktopTimelineLivePreview>,
     pub kind: DesktopTimelineEventKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -653,6 +661,17 @@ pub struct DesktopTimelineEvent {
     pub route_recovery: Option<DesktopTimelineRouteRecovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_transition: Option<DesktopTimelineRouteTransition>,
+}
+
+/// Revision and identity of a replacement preview, never a durable replay cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopTimelineLivePreview {
+    pub attempt_id: String,
+    pub slot_id: String,
+    pub revision: String,
+    pub base_sequence: String,
+    pub truncated: bool,
 }
 
 /// Product-safe provider-turn recovery phase mirrored from the shared public contract.
@@ -881,7 +900,14 @@ impl DesktopProtocolEvent {
         renderer_session_id: &str,
     ) -> Result<DesktopTimelineEvent, DesktopProtocolEventError> {
         self.validate(expected_session_id, expected_run_id)?;
-        let event = &self.run_event.event;
+        if self.live_update.is_some() {
+            return self.into_live_timeline(workspace_id, renderer_session_id);
+        }
+        let run_event = self
+            .run_event
+            .as_ref()
+            .ok_or(DesktopProtocolEventError::WrongStream)?;
+        let event = &run_event.event;
         let tool_call = match event {
             DesktopPublicRunEventKind::ToolCallStarted { call }
             | DesktopPublicRunEventKind::ToolCallCompleted { call }
@@ -893,9 +919,6 @@ impl DesktopProtocolEvent {
             .or_else(|| match event {
                 DesktopPublicRunEventKind::ToolResult { result } => {
                     Some(bounded_text(&result.tool_name))
-                }
-                DesktopPublicRunEventKind::ToolProgress { progress } => {
-                    Some(bounded_text(&progress.tool_name))
                 }
                 _ => None,
             });
@@ -1104,18 +1127,12 @@ impl DesktopProtocolEvent {
                 Some(bounded_text(lane_id)),
                 Some(bounded_text(status)),
             ),
-            DesktopPublicRunEventKind::TextDelta { text } => (
-                DesktopTimelineEventKind::AssistantDelta,
-                Some(bounded_text(text)),
-                None,
-                None,
-            ),
-            DesktopPublicRunEventKind::ReasoningDelta { text } => (
-                DesktopTimelineEventKind::ReasoningDelta,
-                Some(bounded_text(text)),
-                None,
-                None,
-            ),
+            DesktopPublicRunEventKind::TextDelta { .. }
+            | DesktopPublicRunEventKind::ReasoningDelta { .. }
+            | DesktopPublicRunEventKind::ToolCallArgsDelta { .. }
+            | DesktopPublicRunEventKind::ToolProgress { .. } => {
+                return Err(DesktopProtocolEventError::UnsupportedLivePayload);
+            }
             DesktopPublicRunEventKind::AssistantMessage { message } => (
                 DesktopTimelineEventKind::AssistantMessage,
                 message.content.as_deref().map(bounded_text),
@@ -1133,12 +1150,6 @@ impl DesktopProtocolEvent {
                 None,
                 Some(bounded_text(&call.id)),
                 Some("ready".to_owned()),
-            ),
-            DesktopPublicRunEventKind::ToolProgress { progress } => (
-                DesktopTimelineEventKind::ToolProgress,
-                progress.message.as_deref().map(bounded_text),
-                Some(bounded_text(&progress.call_id)),
-                Some(bounded_text(&progress.status)),
             ),
             DesktopPublicRunEventKind::TerminalLifecycle { event } => (
                 DesktopTimelineEventKind::TerminalLifecycle,
@@ -1298,8 +1309,7 @@ impl DesktopProtocolEvent {
                 None,
                 Some("cancelled".to_owned()),
             ),
-            DesktopPublicRunEventKind::ToolCallArgsDelta { .. }
-            | DesktopPublicRunEventKind::ContinuationState {}
+            DesktopPublicRunEventKind::ContinuationState {}
             | DesktopPublicRunEventKind::Unknown => {
                 (DesktopTimelineEventKind::Other, None, None, None)
             }
@@ -1313,12 +1323,13 @@ impl DesktopProtocolEvent {
         Ok(DesktopTimelineEvent {
             workspace_id: bounded_machine_label(workspace_id)?,
             session_id: bounded_machine_label(renderer_session_id)?,
-            run_id: self.run_event.run_id,
-            sequence: self.run_event.sequence,
-            run_sequence: self.run_event.sequence.to_string(),
+            run_id: run_event.run_id.clone(),
+            sequence: run_event.sequence,
+            run_sequence: run_event.sequence.to_string(),
             replayable: self.event_class == DesktopProtocolEventClass::Durable,
             replay_id: self.replay_id,
             provisional_id: self.provisional_id,
+            live_preview: None,
             kind,
             text,
             item_id,
@@ -1342,38 +1353,124 @@ impl DesktopProtocolEvent {
         expected_session_id: &str,
         expected_run_id: &str,
     ) -> Result<(), DesktopProtocolEventError> {
-        if self.schema_version != DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION
-            || self.run_event.schema_version != DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION
-        {
+        if self.schema_version != DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION {
             return Err(DesktopProtocolEventError::UnsupportedSchema);
         }
-        if self.run_event.session_id != expected_session_id
-            || self.run_event.run_id != expected_run_id
-            || self.run_event.sequence == 0
+        if let Some(update) = &self.live_update {
+            if self.run_event.is_some()
+                || self.event_class != DesktopProtocolEventClass::Transient
+                || self.replay_id.is_some()
+                || self.approval_request.is_some()
+                || self.provisional_id.is_some()
+                || update.validate().is_err()
+            {
+                return Err(DesktopProtocolEventError::WrongStream);
+            }
+            if update.session_id != expected_session_id || update.run_id != expected_run_id {
+                return Err(DesktopProtocolEventError::WrongStream);
+            }
+            return Ok(());
+        }
+        let run_event = self
+            .run_event
+            .as_ref()
+            .ok_or(DesktopProtocolEventError::WrongStream)?;
+        if run_event.schema_version != DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION {
+            return Err(DesktopProtocolEventError::UnsupportedSchema);
+        }
+        if matches!(
+            &run_event.event,
+            DesktopPublicRunEventKind::TextDelta { .. }
+                | DesktopPublicRunEventKind::ReasoningDelta { .. }
+                | DesktopPublicRunEventKind::ToolCallArgsDelta { .. }
+                | DesktopPublicRunEventKind::ToolProgress { .. }
+        ) {
+            return Err(DesktopProtocolEventError::UnsupportedLivePayload);
+        }
+        if self.event_class != DesktopProtocolEventClass::Durable {
+            return Err(DesktopProtocolEventError::WrongStream);
+        }
+        if run_event.session_id != expected_session_id
+            || run_event.run_id != expected_run_id
+            || run_event.sequence == 0
         {
             return Err(DesktopProtocolEventError::WrongStream);
         }
-        bounded_machine_label(&self.run_event.session_id)?;
-        bounded_machine_label(&self.run_event.run_id)?;
-        match self.event_class {
-            DesktopProtocolEventClass::Durable => {
-                let replay_id = self
-                    .replay_id
-                    .as_deref()
-                    .ok_or(DesktopProtocolEventError::InvalidReplayCursor)?;
-                bounded_cursor(replay_id)?;
-            }
-            DesktopProtocolEventClass::Transient if self.replay_id.is_some() => {
-                return Err(DesktopProtocolEventError::InvalidReplayCursor);
-            }
-            DesktopProtocolEventClass::Transient => {}
-        }
+        bounded_machine_label(&run_event.session_id)?;
+        bounded_machine_label(&run_event.run_id)?;
+        let replay_id = self
+            .replay_id
+            .as_deref()
+            .ok_or(DesktopProtocolEventError::InvalidReplayCursor)?;
+        bounded_cursor(replay_id)?;
         if let Some(provisional_id) = self.provisional_id.as_deref()
             && !valid_provisional_id(provisional_id)
         {
             return Err(DesktopProtocolEventError::InvalidProvisionalIdentity);
         }
         Ok(())
+    }
+
+    fn into_live_timeline(
+        self,
+        workspace_id: &str,
+        renderer_session_id: &str,
+    ) -> Result<DesktopTimelineEvent, DesktopProtocolEventError> {
+        let update = self
+            .live_update
+            .ok_or(DesktopProtocolEventError::WrongStream)?;
+        let tool_name = update
+            .tool_progress
+            .as_ref()
+            .map(|progress| progress.tool_name.clone());
+        let status = update
+            .tool_progress
+            .as_ref()
+            .map(|progress| progress.status.clone());
+        let kind = match update.kind {
+            sigil_application::LiveRunUpdateKind::Text => DesktopTimelineEventKind::AssistantDelta,
+            sigil_application::LiveRunUpdateKind::Reasoning => {
+                DesktopTimelineEventKind::ReasoningDelta
+            }
+            sigil_application::LiveRunUpdateKind::ToolCallArguments => {
+                DesktopTimelineEventKind::ToolCallArgsDelta
+            }
+            sigil_application::LiveRunUpdateKind::ToolProgress => {
+                DesktopTimelineEventKind::ToolProgress
+            }
+        };
+        Ok(DesktopTimelineEvent {
+            workspace_id: bounded_machine_label(workspace_id)?,
+            session_id: bounded_machine_label(renderer_session_id)?,
+            run_id: update.run_id,
+            sequence: update.base_durable_sequence,
+            run_sequence: update.base_durable_sequence.to_string(),
+            replayable: false,
+            replay_id: None,
+            provisional_id: None,
+            live_preview: Some(DesktopTimelineLivePreview {
+                attempt_id: update.attempt_id,
+                slot_id: update.slot_id.clone(),
+                revision: update.live_revision.to_string(),
+                base_sequence: update.base_durable_sequence.to_string(),
+                truncated: update.truncated,
+            }),
+            kind,
+            text: Some(update.preview.as_str().to_owned()),
+            item_id: Some(update.slot_id),
+            tool_name,
+            status,
+            assistant_kind: None,
+            tool_input: None,
+            approval: None,
+            approval_request_id: None,
+            tool_execution: None,
+            task: None,
+            terminal_task: None,
+            provider_turn_recovery: None,
+            route_recovery: None,
+            route_transition: None,
+        })
     }
 
     fn approval_view(
@@ -1404,7 +1501,11 @@ impl DesktopProtocolEvent {
             risk,
             snapshot_required,
             preview,
-        } = &self.run_event.event
+        } = &self
+            .run_event
+            .as_ref()
+            .ok_or(DesktopProtocolEventError::InvalidApproval)?
+            .event
         else {
             return Err(DesktopProtocolEventError::InvalidApproval);
         };
@@ -1586,6 +1687,7 @@ impl DesktopPendingApproval {
             replayable: false,
             replay_id: None,
             provisional_id: None,
+            live_preview: None,
             kind: DesktopTimelineEventKind::ApprovalRequested,
             text: None,
             item_id: Some(call_id.clone()),
@@ -1978,6 +2080,8 @@ fn bounded_text(value: &str) -> String {
 pub enum DesktopProtocolEventError {
     #[error("desktop event schema is unsupported")]
     UnsupportedSchema,
+    #[error("desktop public live event payloads are unsupported; expected typed live_update")]
+    UnsupportedLivePayload,
     #[error("desktop event belongs to a different stream")]
     WrongStream,
     #[error("desktop event replay cursor is invalid")]

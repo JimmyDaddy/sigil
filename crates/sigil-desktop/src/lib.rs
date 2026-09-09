@@ -129,7 +129,7 @@ pub use events::{
     DesktopPublicToolPreview, DesktopPublicToolProgress, DesktopPublicToolResult,
     DesktopRouteRecoveryAction, DesktopRouteRecoveryCode, DesktopRouteTransitionKind,
     DesktopTimelineApproval, DesktopTimelineEvent, DesktopTimelineEventKind,
-    DesktopTimelineProviderTurnRecovery, DesktopTimelineRouteRecovery,
+    DesktopTimelineLivePreview, DesktopTimelineProviderTurnRecovery, DesktopTimelineRouteRecovery,
     DesktopTimelineRouteTransition, DesktopTimelineTask, DesktopTimelineTaskChecklistItem,
     DesktopTimelineTaskExecutionBinding, DesktopTimelineTaskPlanStep, DesktopTimelineTerminalTask,
     DesktopTimelineToolExecution,
@@ -143,3 +143,7 @@ pub use manager::{
     DesktopWorkspaceOpenRequest, DesktopWorkspaceSummary,
 };
 pub use protocol::{DesktopServerAuthentication, DesktopServerCapabilities, DesktopServerInfo};
+pub use sigil_application::message_content::{
+    MessageContentPage as DesktopMessageContentPage,
+    MessageContentQuery as DesktopMessageContentQuery,
+};

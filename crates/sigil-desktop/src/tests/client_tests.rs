@@ -564,6 +564,122 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
     ));
 }
 
+#[tokio::test]
+async fn typed_history_reads_opt_in_to_connection_cancellation() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        for route in ["display", "transcript", "message-content"] {
+            let (mut stream, _) = listener.accept().await.expect("connection");
+            let mut request = Vec::new();
+            let mut bytes = [0_u8; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = stream.read(&mut bytes).await.expect("request");
+                assert!(count > 0);
+                request.extend_from_slice(&bytes[..count]);
+            }
+            let request = String::from_utf8(request)
+                .expect("headers")
+                .to_ascii_lowercase();
+            assert!(request.starts_with(&format!("get /sessions/session-1/{route}")));
+            assert!(request.contains("\r\nx-sigil-cancel-observation-on-close: 1\r\n"));
+            let body = if route == "display" {
+                serde_json::json!({"schema_version":1,"request_scope":"session-1","through_session_stream_sequence":"0","total_items":"0","items":[],"has_more":false})
+            } else if route == "transcript" {
+                serde_json::json!({"session_scope_id":"session-1","total_messages":0,"messages":[]})
+            } else {
+                serde_json::json!({"display_id":"display-1","message_id":"message-1","content_version":"a".repeat(64),"offset":0,"next_offset":null,"total_bytes":4,"text":"body"})
+            }.to_string();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("response");
+        }
+    });
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("token")),
+    );
+    client
+        .conversation_display(
+            "session-1",
+            &crate::DesktopConversationDisplayQuery::default(),
+        )
+        .await
+        .expect("display");
+    client
+        .transcript("session-1", &crate::DesktopTranscriptQuery::default())
+        .await
+        .expect("transcript");
+    client
+        .message_content(
+            "session-1",
+            &crate::DesktopMessageContentQuery {
+                display_id: "display-1".into(),
+                offset: 0,
+                limit: 65_536,
+                content_version: None,
+            },
+        )
+        .await
+        .expect("message content");
+    server.await.expect("server");
+}
+
+#[test]
+fn message_content_client_rejects_cross_identity_and_noncontiguous_pages() {
+    let query = crate::DesktopMessageContentQuery {
+        display_id: "display-1".into(),
+        offset: 4,
+        limit: 8,
+        content_version: Some("a".repeat(64)),
+    };
+    let page = crate::DesktopMessageContentPage {
+        display_id: "display-1".into(),
+        message_id: "message-1".into(),
+        content_version: "a".repeat(64),
+        offset: 4,
+        next_offset: Some(8),
+        total_bytes: 20,
+        text: "body".into(),
+    };
+    assert!(validate_message_content_page(&page, &query).is_ok());
+    for invalid in [
+        crate::DesktopMessageContentPage {
+            display_id: "display-2".into(),
+            ..page.clone()
+        },
+        crate::DesktopMessageContentPage {
+            content_version: "b".repeat(64),
+            ..page.clone()
+        },
+        crate::DesktopMessageContentPage {
+            next_offset: Some(9),
+            ..page.clone()
+        },
+        crate::DesktopMessageContentPage {
+            text: "".into(),
+            next_offset: Some(4),
+            ..page.clone()
+        },
+        crate::DesktopMessageContentPage {
+            text: "x".repeat(9),
+            next_offset: Some(13),
+            ..page.clone()
+        },
+        crate::DesktopMessageContentPage {
+            total_bytes: 3,
+            ..page.clone()
+        },
+    ] {
+        assert!(matches!(
+            validate_message_content_page(&invalid, &query),
+            Err(DesktopClientError::InvalidResponse)
+        ));
+    }
+}
+
 #[test]
 fn conversation_display_rejects_noncanonical_decimal_text() {
     for invalid in ["01", "18446744073709551616", "-1", "1.0"] {
@@ -1433,6 +1549,118 @@ async fn plan_decision_revise_accepts_the_supervised_revision_run_identity() {
 }
 
 #[tokio::test]
+async fn plan_decision_retries_only_typed_admission_busy_with_one_exact_envelope() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    async fn read_command(stream: &mut tokio::net::TcpStream) -> serde_json::Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1_024];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.expect("request should read");
+            assert!(read > 0, "request closed before headers completed");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).expect("UTF-8 headers");
+        assert!(headers.starts_with("POST /sessions/plan-session/plan-decision HTTP/1.1\r\n"));
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::parse::<usize>)
+            })
+            .expect("body length")
+            .expect("numeric body length");
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).await.expect("body should read");
+            assert!(read > 0, "request closed before body completed");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        serde_json::from_slice(&request[header_end..header_end + content_length])
+            .expect("JSON command")
+    }
+
+    for (status, code, refusals, succeeds) in [
+        (409, "plan_decision_busy", 2, true),
+        (409, "plan_decision_busy", 9, false),
+        (409, "registry_error", 1, false),
+        (503, "plan_decision_busy", 1, false),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let mut original = None;
+            for index in 0..refusals + usize::from(succeeds) {
+                let (mut stream, _) = listener.accept().await.expect("request connection");
+                let request = read_command(&mut stream).await;
+                if let Some(original) = &original {
+                    assert_eq!(
+                        &request, original,
+                        "retries must preserve the entire command envelope"
+                    );
+                } else {
+                    original = Some(request.clone());
+                }
+                let (response_status, response_body) = if index < refusals {
+                    (
+                        status,
+                        serde_json::json!({"error": {"code": code, "message": "admission refused"}}),
+                    )
+                } else {
+                    (
+                        200,
+                        serde_json::json!({
+                            "command_id": request["command_id"], "client_id": request["client_id"],
+                            "session_id": "plan-session", "plan_id": "plan-1", "plan_hash": "plan-hash",
+                            "action": "revise", "replayed": false
+                        }),
+                    )
+                };
+                let body = response_body.to_string();
+                let response = format!(
+                    "HTTP/1.1 {response_status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response");
+            }
+        });
+        let client = DesktopHttpClient::new(
+            Client::new(),
+            address,
+            Arc::new(DesktopBearerToken::generate().expect("bearer")),
+        );
+        let result = client
+            .plan_decision(
+                "plan-session",
+                "plan-1",
+                "plan-hash",
+                crate::DesktopPlanDecisionAction::Revise,
+            )
+            .await;
+        if succeeds {
+            assert_eq!(
+                result.expect("busy should settle").action,
+                crate::DesktopPlanDecisionAction::Revise
+            );
+        } else {
+            assert!(
+                matches!(result, Err(DesktopClientError::Rejected { status: actual, code: Some(actual_code), .. })
+                if actual == status && actual_code == code)
+            );
+        }
+        server.await.expect("server assertions should pass");
+    }
+}
+
+#[tokio::test]
 async fn save_provider_default_model_uses_the_exact_put_route_and_compound_identity() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -2115,20 +2343,36 @@ async fn tool_artifact_request_rejects_unbounded_values_before_transport() {
 fn sse_decoder_accepts_durable_and_transient_frames_and_rejects_gaps() {
     let durable = br#"id: sigil-http-run-v1:session-1:run-1:1
 event: run_event
-data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":3,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     let decoded = decode_sse_frame(durable, "session-1", "run-1")
         .expect("frame should decode")
         .expect("frame should contain an event");
-    assert_eq!(decoded.run_event.sequence, 1);
+    assert_eq!(
+        decoded
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        1
+    );
 
     let transient = br#"event: run_event
-data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":3,"event_class":"transient","live_update":{"schema_version":1,"session_id":"session-1","run_id":"run-1","attempt_id":"current-attempt","slot_id":"assistant","live_revision":2,"base_durable_sequence":1,"kind":"text","preview":"live","truncated":false}}
 "#;
     let decoded = decode_sse_frame(transient, "session-1", "run-1")
         .expect("frame should decode")
         .expect("frame should contain an event");
     assert_eq!(decoded.event_class, DesktopProtocolEventClass::Transient);
+    assert!(decoded.run_event.is_none());
+    assert_eq!(
+        decoded
+            .live_update
+            .as_ref()
+            .expect("typed preview")
+            .live_revision,
+        2
+    );
 
     let gap = br#"event: stream_gap
 data: {"dropped_live_events":1}
@@ -2140,10 +2384,98 @@ data: {"dropped_live_events":1}
 }
 
 #[test]
+fn sse_decoder_rejects_noncurrent_envelope_and_public_payload_schemas() {
+    for (envelope_version, payload_version) in [(1, 2), (2, 2), (4, 2), (3, 0), (3, 1), (3, 3)] {
+        let payload = serde_json::json!({
+            "schema_version": envelope_version,
+            "event_class": "durable",
+            "replay_id": "sigil-http-run-v1:session-1:run-1:1",
+            "run_event": {
+                "schema_version": payload_version,
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "sequence": 1,
+                "event": { "type": "run_started", "prompt": "current format only" }
+            }
+        });
+        let frame =
+            format!("id: sigil-http-run-v1:session-1:run-1:1\nevent: run_event\ndata: {payload}\n");
+        assert!(matches!(
+            decode_sse_frame(frame.as_bytes(), "session-1", "run-1"),
+            Err(DesktopClientError::ProtocolEvent(
+                DesktopProtocolEventError::UnsupportedSchema
+            ))
+        ));
+    }
+    for version in [1, 2, 4] {
+        let payload = serde_json::json!({
+            "schema_version": version,
+            "event_class": "transient",
+            "live_update": {
+                "schema_version": 1,
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "attempt_id": "current-attempt",
+                "slot_id": "assistant-text",
+                "live_revision": 1,
+                "base_durable_sequence": 1,
+                "kind": "text",
+                "preview": "current format only",
+                "truncated": false
+            }
+        });
+        let frame = format!("event: run_event\ndata: {payload}\n");
+        assert!(matches!(
+            decode_sse_frame(frame.as_bytes(), "session-1", "run-1"),
+            Err(DesktopClientError::ProtocolEvent(
+                DesktopProtocolEventError::UnsupportedSchema
+            ))
+        ));
+    }
+}
+
+#[test]
+fn sse_decoder_rejects_retired_public_live_payloads_in_current_envelopes() {
+    for event in [
+        serde_json::json!({"type": "text_delta", "text": "old text"}),
+        serde_json::json!({"type": "reasoning_delta", "text": "old reasoning"}),
+        serde_json::json!({"type": "tool_call_args_delta", "id": "call-1", "delta": "{}"}),
+        serde_json::json!({"type": "tool_progress", "progress": {"call_id": "call-1", "tool_name": "terminal_start", "status": "running"}}),
+    ] {
+        for event_class in ["durable", "transient"] {
+            let mut payload = serde_json::json!({
+                "schema_version": 3,
+                "event_class": event_class,
+                "run_event": {
+                    "schema_version": 2,
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "sequence": 1,
+                    "event": event,
+                }
+            });
+            let id = if event_class == "durable" {
+                payload["replay_id"] = serde_json::json!("sigil-http-run-v1:session-1:run-1:1");
+                "id: sigil-http-run-v1:session-1:run-1:1\n"
+            } else {
+                ""
+            };
+            let frame = format!("{id}event: run_event\ndata: {payload}\n");
+            assert!(matches!(
+                decode_sse_frame(frame.as_bytes(), "session-1", "run-1"),
+                Err(DesktopClientError::ProtocolEvent(
+                    DesktopProtocolEventError::UnsupportedLivePayload
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
 fn sse_decoder_rejects_cursor_or_stream_mismatch() {
     let mismatched_cursor = br#"id: cursor-other
 event: run_event
-data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
+data: {"schema_version":3,"event_class":"durable","replay_id":"sigil-http-run-v1:session-1:run-1:1","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-1","sequence":1,"event":{"type":"run_started","prompt":"hello"}}}
 "#;
     assert!(matches!(
         decode_sse_frame(mismatched_cursor, "session-1", "run-1"),
@@ -2151,7 +2483,7 @@ data: {"schema_version":2,"event_class":"durable","replay_id":"sigil-http-run-v1
     ));
 
     let wrong_run = br#"event: run_event
-data: {"schema_version":2,"event_class":"transient","run_event":{"schema_version":2,"session_id":"session-1","run_id":"run-other","sequence":2,"event":{"type":"text_delta","text":"live"}}}
+data: {"schema_version":3,"event_class":"transient","live_update":{"schema_version":1,"session_id":"session-1","run_id":"run-other","attempt_id":"current-attempt","slot_id":"assistant","live_revision":2,"base_durable_sequence":1,"kind":"text","preview":"live","truncated":false}}
 "#;
     assert!(matches!(
         decode_sse_frame(wrong_run, "session-1", "run-1"),
