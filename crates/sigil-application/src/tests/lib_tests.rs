@@ -4,6 +4,9 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+#[path = "client_overflow_tests.rs"]
+mod client_overflow_tests;
+
 fn scope() -> ApplicationScope {
     ApplicationScope {
         application_instance: ApplicationInstanceId::new("app").expect("valid id"),
@@ -167,6 +170,7 @@ fn reducer_rejects_gap_and_accepts_exact_event_chain() {
         next_frontier: next.frontier.clone(),
         payload_digest: digest_event(&payload).expect("digest"),
         payload,
+        delivery_event_ids: Vec::new(),
     };
     reducer
         .apply(ProjectionFeedItem::Event(Box::new(event)))
@@ -307,6 +311,7 @@ fn application_client_acknowledges_only_reducer_commits() {
         next_frontier: next_projection.frontier.clone(),
         payload_digest: event_payload_digest(&payload).expect("digest"),
         payload,
+        delivery_event_ids: vec!["public-1".to_owned()],
     }));
     let port = Arc::new(FeedPort {
         snapshot: Mutex::new(ProjectionSnapshot {
@@ -328,6 +333,12 @@ fn application_client_acknowledges_only_reducer_commits() {
     let projection = futures::executor::block_on(client.refresh()).expect("refresh");
     assert_eq!(projection.frontier.through_sequence, 1);
     assert_eq!(acknowledgements.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        client
+            .take_applied_delivery_event_ids()
+            .expect("delivery ids"),
+        vec!["public-1".to_owned()]
+    );
 }
 
 struct FeedPort {
@@ -586,4 +597,34 @@ fn terminal_task_cancellation_is_an_urgent_monotonic_application_command() {
     let decoded: ApplicationCommand =
         serde_json::from_slice(&encoded).expect("terminal cancel should deserialize");
     assert_eq!(decoded, command);
+}
+
+#[test]
+fn live_run_update_is_bounded_and_separate_from_durable_projection() {
+    let update = LiveRunUpdate {
+        schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
+        session_id: "session".to_owned(),
+        run_id: "run".to_owned(),
+        attempt_id: "physical-attempt-1".to_owned(),
+        slot_id: "assistant-text".to_owned(),
+        live_revision: 1,
+        base_durable_sequence: 7,
+        kind: LiveRunUpdateKind::Text,
+        preview: SafeText::new("partial answer").expect("valid preview"),
+        tool_progress: None,
+        truncated: false,
+    };
+    update.validate().expect("valid live update");
+    let encoded = serde_json::to_vec(&update).expect("live update should serialize");
+    let decoded: LiveRunUpdate =
+        serde_json::from_slice(&encoded).expect("live update should deserialize");
+    assert_eq!(decoded, update);
+    assert!(
+        LiveRunUpdate {
+            live_revision: 0,
+            ..update
+        }
+        .validate()
+        .is_err()
+    );
 }

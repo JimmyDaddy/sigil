@@ -7,7 +7,7 @@
 //! their lane, resource authority, or presentation-completion authority.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
@@ -17,6 +17,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod message_content;
 pub mod resource_recovery;
 pub use resource_recovery::{
     ApplicationResourceRecoveryFacadeV1, ResourceRecoveryDispatchV1,
@@ -114,6 +115,108 @@ pub struct ApplicationFrontier {
     pub stream_generation: u64,
     pub through_sequence: u64,
     pub durable_cursor: String,
+}
+
+/// Process-local preview update for a running turn.
+///
+/// A live update is deliberately separate from [`ApplicationEventEnvelope`]: it has no durable
+/// cursor, delivery receipt, or replay authority. The session/run/slot identities bind it to the
+/// currently attached owner, while `base_durable_sequence` tells an adapter which committed
+/// frontier the preview is based on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct LiveRunUpdate {
+    pub schema_version: u16,
+    pub session_id: String,
+    pub run_id: String,
+    /// Actual provider attempt selected by the execution owner, never a UI-generated identity.
+    pub attempt_id: String,
+    pub slot_id: String,
+    pub live_revision: u64,
+    pub base_durable_sequence: u64,
+    pub kind: LiveRunUpdateKind,
+    pub preview: SafeText,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_progress: Option<LiveToolProgress>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveRunUpdateKind {
+    Text,
+    Reasoning,
+    ToolCallArguments,
+    ToolProgress,
+}
+
+/// Bounded display metadata for the latest state of an existing tool execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct LiveToolProgress {
+    pub execution_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub status: String,
+    pub total_bytes: Option<u64>,
+    pub updated_at_ms: Option<u64>,
+}
+
+impl LiveRunUpdate {
+    /// Validates the bounded, owner-bound live preview envelope.
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        if self.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION {
+            return Err(ApplicationError::UnknownSchema(self.schema_version));
+        }
+        for (label, value) in [
+            ("live session id", &self.session_id),
+            ("live run id", &self.run_id),
+            ("live attempt id", &self.attempt_id),
+            ("live slot id", &self.slot_id),
+        ] {
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                return Err(ApplicationError::InvalidRequest(format!(
+                    "{label} is empty, unbounded, or contains control characters"
+                )));
+            }
+        }
+        if self.live_revision == 0 {
+            return Err(ApplicationError::InvalidRequest(
+                "live revision must be non-zero".to_owned(),
+            ));
+        }
+        SafeText::new(self.preview.as_str())?;
+        match (&self.kind, &self.tool_progress) {
+            (LiveRunUpdateKind::ToolProgress, Some(progress)) => {
+                for value in [
+                    &progress.execution_id,
+                    &progress.call_id,
+                    &progress.tool_name,
+                    &progress.status,
+                ] {
+                    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                    {
+                        return Err(ApplicationError::InvalidRequest(
+                            "live tool progress metadata is not bounded".to_owned(),
+                        ));
+                    }
+                }
+                if progress.call_id != self.slot_id {
+                    return Err(ApplicationError::InvalidRequest(
+                        "live tool progress slot does not match its call".to_owned(),
+                    ));
+                }
+            }
+            (LiveRunUpdateKind::ToolProgress, None) | (_, Some(_)) => {
+                return Err(ApplicationError::InvalidRequest(
+                    "live tool progress metadata does not match preview kind".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 impl ApplicationFrontier {
@@ -1429,13 +1532,26 @@ pub struct ApplicationEventEnvelope {
     pub next_frontier: ApplicationFrontier,
     pub payload_digest: String,
     pub payload: ApplicationEvent,
+    /// Durable public-event identities actually represented by this projection event.
+    ///
+    /// A snapshot cut is not delivery evidence.  Adapters may acknowledge only these identities
+    /// after applying the event, keeping delivery progress independent from the projection cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_event_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionFeedItem {
+    /// The envelope is the latest same-owner state; durable delivery has an independent cursor.
+    CurrentState,
     Event(Box<ApplicationEventEnvelope>),
-    Gap { expected: u64, observed: u64 },
-    ResetRequired { reason: &'static str },
+    Gap {
+        expected: u64,
+        observed: u64,
+    },
+    ResetRequired {
+        reason: &'static str,
+    },
     ScopeMismatch,
     Ahead,
     Expired,
@@ -1533,6 +1649,17 @@ impl ProjectionReducer {
             || event.next_frontier.stream_generation != event.stream_generation
         {
             return Err(ApplicationError::ResetRequired);
+        }
+        let delivery_id_set = event.delivery_event_ids.iter().collect::<BTreeSet<_>>();
+        if event
+            .delivery_event_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+            || delivery_id_set.len() != event.delivery_event_ids.len()
+        {
+            return Err(ApplicationError::CorruptProjection(
+                "projection delivery identities are malformed".to_owned(),
+            ));
         }
         let digest = digest_event(&event.payload)?;
         if digest != event.payload_digest {
@@ -1669,6 +1796,13 @@ impl fmt::Display for ApplicationError {
 impl std::error::Error for ApplicationError {}
 
 pub trait ApplicationPort: Send + Sync {
+    /// Fetches actual durable events independently of the current-state snapshot.
+    fn delivery_batch(
+        &self,
+        _request: DurableDeliveryRequest,
+    ) -> BoxFuture<'static, Result<DurableDeliveryBatch, ApplicationError>> {
+        Box::pin(async { Err(ApplicationError::NotFound) })
+    }
     fn open_projection(
         &self,
         request: OpenProjectionRequest,
@@ -1691,6 +1825,38 @@ pub trait ApplicationPort: Send + Sync {
 #[derive(Debug, Default)]
 struct ApplicationClientState {
     reducer: Option<ProjectionReducer>,
+    applied_delivery_event_ids: BTreeSet<String>,
+    delivery_cursor: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableDeliveryRequest {
+    pub frontier: ApplicationFrontier,
+    pub observer_generation: u64,
+    pub after_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableDeliveryEvent {
+    pub stream_sequence: u64,
+    pub public_event_id: String,
+    pub payload_digest: String,
+    pub event: sigil_kernel::PublicRunEvent,
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableDeliveryBatch {
+    pub request: DurableDeliveryRequest,
+    pub through_sequence: u64,
+    pub events: Vec<DurableDeliveryEvent>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppliedDeliveryBatch {
+    pub frontier: ApplicationFrontier,
+    pub notices: Vec<SafeText>,
+    pub has_more: bool,
 }
 
 /// Transport-neutral client used by product adapters.
@@ -1793,22 +1959,71 @@ impl ApplicationClient {
                 resume_from: resume_from.clone(),
             })
             .await?;
-        let mut reducer = ProjectionReducer::open(snapshot.envelope)?;
-        if reducer.frontier().scope != self.scope
-            || reducer.observer_generation != self.observer_generation
-        {
-            return Err(ApplicationError::ScopeMismatch);
-        }
-        if let Some(resume_from) = resume_from
-            && !reducer.frontier().same_cut(&resume_from)
+        let mut reducer = self.open_owned_snapshot(snapshot.envelope)?;
+        let current_state = matches!(snapshot.feed.as_slice(), [ProjectionFeedItem::CurrentState]);
+        if current_state
+            && resume_from.as_ref().is_some_and(|previous| {
+                reducer.frontier().writer_generation != previous.writer_generation
+                    || reducer.frontier().stream_generation != previous.stream_generation
+                    || reducer.frontier().through_sequence < previous.through_sequence
+            })
         {
             return Err(ApplicationError::ResetRequired);
         }
+        if !current_state
+            && let Some(resume_from) = resume_from.as_ref()
+            && !reducer.frontier().same_cut(resume_from)
+        {
+            return Err(ApplicationError::ResetRequired);
+        }
+        let mut feed = if current_state {
+            Vec::new()
+        } else {
+            snapshot.feed
+        };
+        if let Some(resume_from) = resume_from.as_ref()
+            && matches!(
+                feed.as_slice(),
+                [ProjectionFeedItem::ResetRequired {
+                    reason: "projection-feed-overflow"
+                }]
+            )
+        {
+            // Only the source's explicit bounded-feed overflow permits one full resnapshot.
+            // A bad envelope, gap, corrupt event or source error still fails at its own seam.
+            let fresh = self
+                .port
+                .open_projection(OpenProjectionRequest {
+                    scope: self.scope.clone(),
+                    observer_generation: self.observer_generation,
+                    resume_from: None,
+                })
+                .await?;
+            let fresh_reducer = self.open_owned_snapshot(fresh.envelope)?;
+            let fresh_cut = fresh_reducer.frontier();
+            if fresh_cut.schema_version != APPLICATION_CONTRACT_SCHEMA_VERSION
+                || fresh_cut.writer_generation != resume_from.writer_generation
+                || fresh_cut.stream_generation != resume_from.stream_generation
+                || fresh_cut.through_sequence <= resume_from.through_sequence
+            {
+                return Err(ApplicationError::ResetRequired);
+            }
+            if !fresh.feed.is_empty() {
+                return Err(ApplicationError::CorruptProjection(
+                    "overflow resnapshot must be complete without an incremental feed".to_owned(),
+                ));
+            }
+            // The snapshot replaces local projection state; it does not manufacture delivery
+            // acknowledgements for the individual events omitted by the bounded source feed.
+            reducer = fresh_reducer;
+            feed = fresh.feed;
+        }
 
-        for item in snapshot.feed {
+        for item in feed {
             let ProjectionFeedItem::Event(event) = item else {
                 return Err(ApplicationError::ResetRequired);
             };
+            let delivery_event_ids = event.delivery_event_ids.clone();
             let acknowledgement = ProjectionDeliveryAck {
                 scope: event.scope.clone(),
                 observer_generation: event.observer_generation,
@@ -1817,6 +2032,11 @@ impl ApplicationClient {
             };
             reducer.apply(ProjectionFeedItem::Event(event))?;
             self.port.acknowledge(acknowledgement).await?;
+            if let Ok(mut state) = self.state.lock() {
+                state.applied_delivery_event_ids.extend(delivery_event_ids);
+            } else {
+                return Err(ApplicationError::Unavailable);
+            }
         }
         let projection = reducer.projection().clone();
         self.state
@@ -1824,6 +2044,122 @@ impl ApplicationClient {
             .map_err(|_| ApplicationError::Unavailable)?
             .reducer = Some(reducer);
         Ok(projection)
+    }
+
+    /// Removes the durable public-event identities applied by the most recent refresh.
+    ///
+    /// The caller must invoke this only after its own surface has accepted the returned
+    /// projection.  Initial snapshots intentionally return no identities: a snapshot alone does
+    /// not prove that individual outbox events were consumed.
+    pub fn take_applied_delivery_event_ids(&self) -> Result<Vec<String>, ApplicationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(std::mem::take(&mut state.applied_delivery_event_ids)
+            .into_iter()
+            .collect())
+    }
+
+    /// Consumes one bounded batch of historical events without replacing current business state.
+    /// The surface accepts returned notices before taking IDs for durable acknowledgement.
+    pub async fn refresh_delivery(&self) -> Result<AppliedDeliveryBatch, ApplicationError> {
+        let _guard = self.refresh_gate.lock().await;
+        let frontier = self
+            .current_frontier()?
+            .ok_or(ApplicationError::Unavailable)?;
+        let after_sequence = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?;
+            if !state.applied_delivery_event_ids.is_empty() {
+                return Err(ApplicationError::Unavailable);
+            }
+            state.delivery_cursor
+        };
+        let request = DurableDeliveryRequest {
+            frontier: frontier.clone(),
+            observer_generation: self.observer_generation,
+            after_sequence,
+        };
+        let batch = self.port.delivery_batch(request).await?;
+        if batch.request.frontier != frontier
+            || batch.request.observer_generation != self.observer_generation
+            || batch.request.after_sequence != after_sequence
+            || batch.events.len() > 256
+            || batch.through_sequence < after_sequence
+            || batch.through_sequence > frontier.through_sequence
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let mut cursor = after_sequence;
+        let mut identities = BTreeSet::new();
+        let mut notices = Vec::new();
+        let mut bytes = 0usize;
+        for event in &batch.events {
+            let payload = serde_json::to_vec(&event.event)
+                .map_err(|error| ApplicationError::CorruptProjection(error.to_string()))?;
+            bytes = bytes.saturating_add(payload.len());
+            if event.stream_sequence <= cursor
+                || event.stream_sequence > batch.through_sequence
+                || frontier
+                    .scope
+                    .session
+                    .as_ref()
+                    .is_none_or(|session| session.as_str() != event.event.session_id)
+                || event.public_event_id.is_empty()
+                || event.public_event_id.len() > 256
+                || !identities.insert(event.public_event_id.clone())
+                || sigil_kernel::stable_event_hash(&payload) != event.payload_digest
+                || bytes > 1024 * 1024
+            {
+                return Err(ApplicationError::CorruptProjection(
+                    "invalid durable delivery batch".into(),
+                ));
+            }
+            if let sigil_kernel::PublicRunEventKind::Notice { message } = &event.event.event {
+                // Presentation bounds must not prevent valid durable events from being consumed.
+                // Empty notices have no visible text, but their exact identities are still ACKable.
+                if !message.is_empty() {
+                    let mut end = message.len().min(MAX_SAFE_TEXT_BYTES);
+                    while !message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    notices.push(SafeText::new(&message[..end])?);
+                }
+            }
+            cursor = event.stream_sequence;
+        }
+        if batch.has_more && batch.through_sequence == after_sequence {
+            return Err(ApplicationError::CorruptProjection(
+                "delivery batch made no progress".into(),
+            ));
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        state.delivery_cursor = batch.through_sequence;
+        state.applied_delivery_event_ids.extend(identities);
+        Ok(AppliedDeliveryBatch {
+            frontier,
+            notices,
+            has_more: batch.has_more,
+        })
+    }
+
+    fn open_owned_snapshot(
+        &self,
+        envelope: ProjectionSnapshotEnvelope,
+    ) -> Result<ProjectionReducer, ApplicationError> {
+        let reducer = ProjectionReducer::open(envelope)?;
+        if reducer.frontier().scope != self.scope
+            || reducer.observer_generation != self.observer_generation
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        Ok(reducer)
     }
 
     pub async fn page(
@@ -1874,6 +2210,17 @@ impl ApplicationClient {
         command_id: ApplicationCommandId,
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let request = self.prepare_command(command_id, command)?;
+        self.execute_prepared(request).await
+    }
+
+    /// Freezes one command envelope against the current projection for response-lost retries.
+    /// Preparing reads memory only and never creates a durable reservation.
+    pub fn prepare_command(
+        &self,
+        command_id: ApplicationCommandId,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandRequest, ApplicationError> {
         let expected_frontier = self
             .current_frontier()?
             .ok_or(ApplicationError::Unavailable)?;
@@ -1896,6 +2243,26 @@ impl ApplicationClient {
                 self.scope.clone(),
             )?,
         };
+        Ok(request)
+    }
+
+    /// Executes an exact caller-retained envelope without refreshing its reservation identity.
+    /// Returns `ScopeMismatch` if it belongs to a different attachment or client generation.
+    pub async fn execute_prepared(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let expected_admission = CommandAdmissionContext::host_bound(
+            self.scope.authenticated_subject.clone(),
+            self.client_epoch,
+            self.connection_instance.clone(),
+            self.scope.clone(),
+        )?;
+        if request.admission != expected_admission
+            || request.envelope.expected_frontier.scope != self.scope
+        {
+            return Err(ApplicationError::ScopeMismatch);
+        }
         self.port.execute(request).await
     }
 }
