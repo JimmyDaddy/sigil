@@ -67,6 +67,15 @@ const HTTP_SESSION_ID_HEADER: &str = "x-sigil-session-id";
 const HTTP_OWNER_REVISION_HEADER: &str = "x-sigil-owner-revision";
 const HTTP_MAX_CONVERSATION_DISPLAY_CURSOR_BYTES: usize = 4 * 1024;
 const HTTP_APPLICATION_CLIENT_ID_HEADER: &str = "x-sigil-application-client-id";
+const HTTP_CANCEL_OBSERVATION_ON_CLOSE_HEADER: &str = "x-sigil-cancel-observation-on-close";
+
+struct HttpObservationGuard(sigil_kernel::SessionReadBudget);
+
+impl Drop for HttpObservationGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -376,24 +385,48 @@ impl HttpLocalServer {
         }
         drop(self.listener);
         self.registry.begin_shutdown();
+        let deadline = tokio::time::Instant::now() + HTTP_GRACEFUL_DRAIN_TIMEOUT;
+        // Stop observation immediately. Each connection still joins its actual routing work,
+        // so an aborted outer future cannot be mistaken for a stopped blocking reader.
+        let _ = connection_shutdown.send(true);
         let registry = Arc::clone(&self.registry);
-        let cancellation = tokio::task::spawn_blocking(move || {
-            registry.cancel_active_runs("HTTP server graceful shutdown")
-        })
+        let cancellation = tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || {
+                registry.cancel_active_runs("HTTP server graceful shutdown")
+            }),
+        )
         .await
+        .map_err(|_| HttpListenerError::Response {
+            message:
+                "HTTP shutdown cancellation exceeded its shared deadline; cleanup_complete=false"
+                    .to_owned(),
+        })?
         .map_err(|_| HttpListenerError::Response {
             message: "HTTP shutdown cancellation worker failed".to_owned(),
         })?;
         let registry = Arc::clone(&self.registry);
-        let drained = tokio::task::spawn_blocking(move || {
-            registry.wait_for_driver_idle(HTTP_GRACEFUL_DRAIN_TIMEOUT)
-        })
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let drained = tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || registry.wait_for_driver_idle(remaining)),
+        )
         .await
+        .map_err(|_| HttpListenerError::Response {
+            message: "HTTP shutdown drain exceeded its shared deadline; cleanup_complete=false"
+                .to_owned(),
+        })?
         .map_err(|_| HttpListenerError::Response {
             message: "HTTP shutdown drain worker failed".to_owned(),
         })?;
-        let _ = connection_shutdown.send(true);
-        while connections.join_next().await.is_some() {}
+        tokio::time::timeout_at(deadline, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .map_err(|_| HttpListenerError::Response {
+            message: "HTTP shutdown has unfinished observation work; cleanup_complete=false"
+                .to_owned(),
+        })?;
         cancellation
             .and(drained)
             .map_err(|error| HttpListenerError::Response {
@@ -436,7 +469,22 @@ async fn handle_http_connection(
                 )
                 .await;
             }
-            match tokio::task::spawn_blocking(move || {
+            let observation = HttpObservationGuard(sigil_kernel::SessionReadBudget::default());
+            let budget = observation.0.clone();
+            let cancel_on_peer_close = request.method == "GET"
+                && request
+                    .path
+                    .strip_prefix("/sessions/")
+                    .is_some_and(|suffix| {
+                        suffix.split_once('/').is_some_and(|(session_id, route)| {
+                            !session_id.is_empty()
+                                && matches!(route, "display" | "transcript" | "message-content")
+                        })
+                    })
+                && request
+                    .header(HTTP_CANCEL_OBSERVATION_ON_CLOSE_HEADER)
+                    .is_some_and(|value| value == "1");
+            let mut routing = tokio::task::spawn_blocking(move || {
                 route_http_request(
                     request,
                     &validator,
@@ -446,10 +494,24 @@ async fn handle_http_connection(
                     server_info.as_ref(),
                     support_context.as_deref(),
                     borrowed_native_save_service.as_deref(),
+                    &budget,
                 )
-            })
-            .await
-            {
+            });
+            let mut peer_byte = [0_u8; 1];
+            let result = tokio::select! {
+                result = &mut routing => result,
+                _ = wait_for_shutdown(&mut shutdown) => {
+                    observation.0.cancel();
+                    routing.await
+                }
+                _ = stream.read(&mut peer_byte), if cancel_on_peer_close => {
+                    // This opt-in read contract treats closing the sending half as cancellation.
+                    // Ordinary HTTP clients retain their existing half-close response behavior.
+                    observation.0.cancel();
+                    routing.await
+                }
+            };
+            match result {
                 Ok(response) => response,
                 Err(_) => {
                     http_error_response(500, "route_error", "http request routing worker failed")
@@ -478,6 +540,7 @@ fn route_http_request(
     borrowed_native_save_service: Option<
         &dyn sigil_resource_authority::native_save::BorrowedNativeSaveServiceV1,
     >,
+    observation_budget: &sigil_kernel::SessionReadBudget,
 ) -> HttpResponse {
     if request.method == "GET" && request.path == "/health" {
         return json_response(200, json!({ "status": "ok" }));
@@ -1362,6 +1425,13 @@ fn route_http_request(
         };
         return match registry.plan_decision_command(session_id, command) {
             Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) if crate::registry::plan_decision_admission_is_busy(&error) => {
+                http_error_response(
+                    409,
+                    "plan_decision_busy",
+                    "the session is still releasing its foreground run; retry the identical command",
+                )
+            }
             Err(error) => registry_error_response(error),
         };
     }
@@ -1405,6 +1475,23 @@ fn route_http_request(
         && let Some(session_id) = request
             .path
             .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/message-content"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let query = match parse_message_content_query(request.query.as_deref()) {
+            Ok(query) => query,
+            Err(error) => return registry_error_response(HttpRegistryError::MessageContent(error)),
+        };
+        return match registry.message_content_page(session_id, &query, observation_budget) {
+            Ok(page) => json_response(200, json!(page)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
             .and_then(|suffix| suffix.strip_suffix("/transcript"))
             .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
     {
@@ -1412,7 +1499,12 @@ fn route_http_request(
             Ok(query) => query,
             Err(message) => return http_error_response(400, "invalid_query", message),
         };
-        return match registry.transcript_page(session_id, before, limit) {
+        return match registry.transcript_page_with_budget(
+            session_id,
+            before,
+            limit,
+            observation_budget,
+        ) {
             Ok(page) => json_response(200, json!(page)),
             Err(error) => registry_error_response(error),
         };
@@ -1434,7 +1526,12 @@ fn route_http_request(
                 return http_error_response(400, "invalid_query", message);
             }
         };
-        return match registry.conversation_display_page(session_id, cursor.as_deref(), limit) {
+        return match registry.conversation_display_page_with_budget(
+            session_id,
+            cursor.as_deref(),
+            limit,
+            observation_budget,
+        ) {
             Ok(page) => json_response(200, json!(page)),
             Err(error) => registry_error_response(error),
         };
@@ -1707,9 +1804,12 @@ async fn stream_run_events(
         }
     };
     write_sse_response_head(stream).await?;
-    let mut last_sequence = 0;
+    let mut last_sequence = request
+        .header("last-event-id")
+        .and_then(|cursor| crate::HttpProtocolCursor::parse(cursor).ok())
+        .map_or(0, |cursor| cursor.sequence);
     for event in events {
-        last_sequence = last_sequence.max(event.run_event.sequence);
+        last_sequence = last_sequence.max(event.public_sequence().unwrap_or(0));
         write_protocol_event(stream, &event).await?;
     }
     let stream_accepts_events = event_bus
@@ -1733,11 +1833,45 @@ async fn stream_run_events(
 
     let mut keepalive = tokio::time::interval(HTTP_SSE_KEEPALIVE_INTERVAL);
     keepalive.tick().await;
+    let mut preview_frame = tokio::time::interval(std::time::Duration::from_millis(32));
+    preview_frame.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut live_reader = None;
+    let mut pending_live =
+        std::collections::BTreeMap::<String, sigil_application::LiveRunUpdate>::new();
     loop {
         tokio::select! {
             _ = wait_for_shutdown(shutdown) => {
                 stream.shutdown().await?;
                 return Ok(());
+            }
+            _ = preview_frame.tick() => {
+                if live_reader.as_ref().is_some_and(sigil_runtime::RuntimeLivePreviewReader::is_terminal) {
+                    live_reader = None;
+                    pending_live.clear();
+                }
+                if live_reader.is_none() {
+                    live_reader = event_bus.live_preview_reader(&session.durable_session_scope_id, run_id)
+                        .map_err(|error| HttpListenerError::Response { message: error.to_string() })?;
+                }
+                if let Some(reader) = &mut live_reader {
+                    for update in reader.poll_updates().map_err(|error| HttpListenerError::Response { message: error.to_string() })? {
+                        if !pending_live.contains_key(&update.slot_id) && pending_live.len() == 4
+                            && let Some(oldest) = pending_live.iter().min_by_key(|(_, update)| update.live_revision).map(|(id, _)| id.clone()) {
+                            pending_live.remove(&oldest);
+                        }
+                        pending_live.insert(update.slot_id.clone(), update);
+                    }
+                }
+                let eligible = pending_live.iter().filter(|(_, update)| update.base_durable_sequence <= last_sequence)
+                    .map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                for slot in eligible {
+                    if let Some(update) = pending_live.remove(&slot) {
+                        let event = crate::HttpProtocolEvent::from_live_update(update)
+                            .map_err(|error| HttpListenerError::Response { message: error.to_string() })?;
+                        write_protocol_event(stream, &event).await?;
+                    }
+                }
+                stream.flush().await?;
             }
             _ = keepalive.tick() => {
                 stream.write_all(b": keep-alive\n\n").await?;
@@ -1774,13 +1908,30 @@ async fn stream_run_events(
                         return Ok(());
                     }
                 };
-                if event.run_event.session_id != session.durable_session_scope_id
-                    || event.run_event.run_id != run_id
-                    || event.run_event.sequence <= last_sequence
-                {
+                if event.session_id() != session.durable_session_scope_id || event.run_id() != run_id {
                     continue;
                 }
-                last_sequence = event.run_event.sequence;
+                if let Some(update) = &event.live_update {
+                    if update.base_durable_sequence > last_sequence { continue; }
+                } else if let Some(public) = &event.run_event {
+                    if public.sequence <= last_sequence { continue; }
+                    last_sequence = public.sequence;
+                    if matches!(public.event, sigil_kernel::PublicRunEventKind::AssistantMessage { .. }
+                        | sigil_kernel::PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. }
+                        | sigil_kernel::PublicRunEventKind::RunAwaitingUserInput { .. }) {
+                        pending_live.clear();
+                    }
+                    if matches!(public.event, sigil_kernel::PublicRunEventKind::RunStarted { .. }) {
+                        pending_live.clear();
+                        live_reader = event_bus.live_preview_reader(&session.durable_session_scope_id, run_id)
+                            .map_err(|error| HttpListenerError::Response { message: error.to_string() })?;
+                    }
+                    match &public.event {
+                        sigil_kernel::PublicRunEventKind::ToolCallCompleted { call } => { pending_live.remove(&call.id); }
+                        sigil_kernel::PublicRunEventKind::ToolResult { result } => { pending_live.remove(&result.call_id); }
+                        _ => {}
+                    }
+                } else { continue; }
                 write_protocol_event(stream, &event).await?;
                 stream.flush().await?;
             }
@@ -2039,6 +2190,51 @@ fn parse_transcript_query(raw_query: Option<&str>) -> Result<(Option<u64>, usize
 enum HttpConversationDisplayQueryError {
     InvalidCursor(String),
     InvalidQuery(String),
+}
+
+fn parse_message_content_query(
+    raw: Option<&str>,
+) -> Result<
+    sigil_application::message_content::MessageContentQuery,
+    sigil_application::message_content::MessageContentError,
+> {
+    use sigil_application::message_content::{
+        MAX_MESSAGE_CONTENT_PAGE_BYTES, MessageContentError, MessageContentQuery,
+    };
+    let raw = raw.ok_or(MessageContentError::InvalidQuery)?;
+    validate_percent_encoding(raw).map_err(|_| MessageContentError::InvalidQuery)?;
+    let mut query = MessageContentQuery {
+        display_id: String::new(),
+        offset: 0,
+        limit: MAX_MESSAGE_CONTENT_PAGE_BYTES,
+        content_version: None,
+    };
+    let mut seen = BTreeMap::new();
+    for (name, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        if name.contains('\u{fffd}')
+            || value.contains('\u{fffd}')
+            || seen.insert(name.to_string(), ()).is_some()
+        {
+            return Err(MessageContentError::InvalidQuery);
+        }
+        match name.as_ref() {
+            "display_id" => query.display_id = value.into_owned(),
+            "offset" => {
+                query.offset = value
+                    .parse()
+                    .map_err(|_| MessageContentError::InvalidQuery)?
+            }
+            "limit" => {
+                query.limit = value
+                    .parse()
+                    .map_err(|_| MessageContentError::InvalidQuery)?
+            }
+            "content_version" => query.content_version = Some(value.into_owned()),
+            _ => return Err(MessageContentError::InvalidQuery),
+        }
+    }
+    query.validate()?;
+    Ok(query)
 }
 
 fn parse_conversation_display_query(
@@ -2335,6 +2531,7 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::DurableSessionNotReady
         | HttpRegistryError::DurableSessionIdentityChanged
         | HttpRegistryError::ConversationDisplayCursorStale
+        | HttpRegistryError::ConversationDisplayCorrupt
         | HttpRegistryError::ConversationQueueGenerationStale
         | HttpRegistryError::ConversationQueueEntryTerminal
         | HttpRegistryError::ConversationQueueOwnerLost
@@ -2377,6 +2574,13 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         | HttpRegistryError::ConversationQueueUnavailable
         | HttpRegistryError::ConversationRecoveryUnavailable => 503,
         HttpRegistryError::IntentStackUnavailable => 503,
+        HttpRegistryError::MessageContent(error) => match error {
+            sigil_application::message_content::MessageContentError::InvalidQuery => 400,
+            sigil_application::message_content::MessageContentError::NotFound => 404,
+            sigil_application::message_content::MessageContentError::Stale
+            | sigil_application::message_content::MessageContentError::Corrupt => 409,
+            sigil_application::message_content::MessageContentError::Unavailable => 503,
+        },
     };
     let code = match &error {
         HttpRegistryError::InvalidSessionOpenRequest => "invalid_session_open_request",
@@ -2390,6 +2594,24 @@ fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
         HttpRegistryError::ConversationDisplayCursorInvalid => "invalid_display_cursor",
         HttpRegistryError::ConversationDisplayCursorStale => "display_cursor_stale",
         HttpRegistryError::ConversationDisplayUnavailable => "conversation_display_unavailable",
+        HttpRegistryError::ConversationDisplayCorrupt => "conversation_display_corrupt",
+        HttpRegistryError::MessageContent(error) => match error {
+            sigil_application::message_content::MessageContentError::InvalidQuery => {
+                "message_content_query_invalid"
+            }
+            sigil_application::message_content::MessageContentError::NotFound => {
+                "message_content_not_found"
+            }
+            sigil_application::message_content::MessageContentError::Stale => {
+                "message_content_stale"
+            }
+            sigil_application::message_content::MessageContentError::Corrupt => {
+                "message_content_corrupt"
+            }
+            sigil_application::message_content::MessageContentError::Unavailable => {
+                "message_content_unavailable"
+            }
+        },
         HttpRegistryError::ToolArtifactReferenceInvalid => "invalid_tool_artifact_ref",
         HttpRegistryError::ToolArtifactSelectorInvalid => "invalid_tool_artifact_selector",
         HttpRegistryError::ToolArtifactUnavailable => "tool_artifact_unavailable",

@@ -11,7 +11,6 @@ use std::{
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-#[cfg(test)]
 use sigil_kernel::project_conversation_prompt_for_persistence;
 use sigil_kernel::{PublicRunEvent, PublicRunEventKind, SessionRef, safe_persistence_text};
 use thiserror::Error as ThisError;
@@ -199,6 +198,12 @@ pub enum HttpRegistryError {
     /// The canonical durable display projection could not be proven safely.
     #[error("conversation display projection is unavailable")]
     ConversationDisplayUnavailable,
+    /// Strict validation rejected the committed conversation history.
+    #[error("conversation display history is corrupt")]
+    ConversationDisplayCorrupt,
+    /// A complete message page failed its identity, bounds, or durable-source checks.
+    #[error("{0}")]
+    MessageContent(sigil_application::message_content::MessageContentError),
     /// The opaque tool artifact reference is malformed.
     #[error("tool artifact reference is invalid")]
     ToolArtifactReferenceInvalid,
@@ -337,6 +342,16 @@ pub enum HttpRegistryError {
     /// Graceful shutdown has stopped admission of new commands.
     #[error("http server is shutting down and is not accepting new commands")]
     ServerShuttingDown,
+}
+
+/// These admission errors occur before the Plan driver is called. No durable decision or
+/// side effect has started, so only the identical command may retry after run ownership clears.
+pub(crate) fn plan_decision_admission_is_busy(error: &HttpRegistryError) -> bool {
+    matches!(
+        error,
+        HttpRegistryError::SessionForegroundRunActive { .. }
+            | HttpRegistryError::SessionRunCleanupActive { .. }
+    )
 }
 
 /// In-memory registry for HTTP adapter sessions, runs, cancellations, and approvals.
@@ -1101,9 +1116,25 @@ impl HttpSessionRunRegistry {
         before: Option<u64>,
         limit: usize,
     ) -> Result<HttpSessionTranscriptPage, HttpRegistryError> {
+        self.transcript_page_with_budget(
+            session_id,
+            before,
+            limit,
+            &sigil_kernel::SessionReadBudget::default(),
+        )
+    }
+
+    pub fn transcript_page_with_budget(
+        &self,
+        session_id: &str,
+        before: Option<u64>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpSessionTranscriptPage, HttpRegistryError> {
         let session = self.get_session(session_id)?;
         catch_unwind(AssertUnwindSafe(|| {
-            self.driver.transcript_page(&session, before, limit)
+            self.driver
+                .transcript_page_with_budget(&session, before, limit, budget)
         }))
         .map_err(|_| HttpRegistryError::DriverPanicked {
             operation: "transcript view",
@@ -1114,6 +1145,26 @@ impl HttpSessionRunRegistry {
             run_id: session_id.to_owned(),
             message: error.message,
         })
+    }
+
+    pub fn message_content_page(
+        &self,
+        session_id: &str,
+        query: &sigil_application::message_content::MessageContentQuery,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<sigil_application::message_content::MessageContentPage, HttpRegistryError> {
+        query
+            .validate()
+            .map_err(HttpRegistryError::MessageContent)?;
+        let session = self.get_session(session_id)?;
+        catch_unwind(AssertUnwindSafe(|| {
+            self.driver.message_content_page(&session, query, budget)
+        }))
+        .map_err(|_| HttpRegistryError::DriverPanicked {
+            operation: "message content",
+            run_id: session_id.to_owned(),
+        })?
+        .map_err(HttpRegistryError::MessageContent)
     }
 
     /// Projects one canonical durable conversation page and validates its foreground anchor.
@@ -1132,16 +1183,34 @@ impl HttpSessionRunRegistry {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<HttpConversationDisplayPage, HttpRegistryError> {
+        self.conversation_display_page_with_budget(
+            session_id,
+            cursor,
+            limit,
+            &sigil_kernel::SessionReadBudget::default(),
+        )
+    }
+
+    pub fn conversation_display_page_with_budget(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpConversationDisplayPage, HttpRegistryError> {
         let session = self.get_session(session_id)?;
         let mut page = catch_unwind(AssertUnwindSafe(|| {
             self.driver
-                .conversation_display_page(&session, cursor, limit)
+                .conversation_display_page_with_budget(&session, cursor, limit, budget)
         }))
         .map_err(|_| HttpRegistryError::DriverPanicked {
             operation: "conversation display",
             run_id: session_id.to_owned(),
         })?
         .map_err(|error| match error {
+            HttpConversationDisplayDriverError::Corrupt => {
+                HttpRegistryError::ConversationDisplayCorrupt
+            }
             HttpConversationDisplayDriverError::InvalidCursor => {
                 HttpRegistryError::ConversationDisplayCursorInvalid
             }
@@ -1577,35 +1646,59 @@ impl HttpSessionRunRegistry {
         }
         validate_conversation_queue_command(&command.payload)?;
 
+        // A retained terminal owner keeps the session stream open while its process task settles.
+        // Its projection owner may be unable to produce a fresh application snapshot during that
+        // interval, but queue admission remains a valid host-owned mutation. Use the direct
+        // durable queue seam until the release barrier clears; normal commands continue through
+        // the transport-neutral application port.
+        if self.session_release_pending(session_id)? {
+            return self.command_conversation_queue_direct(session_id, command);
+        }
+
         #[cfg(not(test))]
         {
             let client = self.application_client(session_id, &command.client_id)?;
             self.command_conversation_queue_via_application(session_id, command, client)
         }
         #[cfg(test)]
-        if let Ok(client) = self.application_client(session_id, &command.client_id) {
-            return self.command_conversation_queue_via_application(session_id, command, client);
-        }
-
-        #[cfg(test)]
         {
-            let request = HttpReservedCommand::queue(session_id, &command)?;
-            let reservation =
-                match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
-                    HttpCommandClaim::Execute(reservation) => reservation,
-                    HttpCommandClaim::Wait(reservation) => return reservation.wait_for_queue(),
-                };
-            let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
-            let result = self.command_conversation_queue_effect(
-                session_id,
-                &command.command_id,
-                &command.client_id,
-                &command.payload,
-                command.correlation_id.as_deref(),
-            );
-            completion.complete(HttpCommandCompletion::Queue(Box::new(result.clone())))?;
-            result
+            if let Ok(client) = self.application_client(session_id, &command.client_id) {
+                return self
+                    .command_conversation_queue_via_application(session_id, command, client);
+            }
+            self.command_conversation_queue_direct(session_id, command)
         }
+    }
+
+    fn session_release_pending(&self, session_id: &str) -> Result<bool, HttpRegistryError> {
+        let state = self.lock_state();
+        Ok(state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.release_pending_run_id.is_some()))
+    }
+
+    fn command_conversation_queue_direct(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
+    ) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
+        let request = HttpReservedCommand::queue(session_id, &command)?;
+        let reservation =
+            match self.reserve_command(HttpCommandKey::from_envelope(&command), request)? {
+                HttpCommandClaim::Execute(reservation) => reservation,
+                HttpCommandClaim::Wait(reservation) => return reservation.wait_for_queue(),
+            };
+        let mut completion = HttpCommandExecutionGuard::new(Arc::clone(&reservation));
+        let result = self.command_conversation_queue_effect(
+            session_id,
+            &command.command_id,
+            &command.client_id,
+            &command.payload,
+            command.correlation_id.as_deref(),
+        );
+        completion.complete(HttpCommandCompletion::Queue(Box::new(result.clone())))?;
+        result
     }
 
     pub(crate) fn command_conversation_queue_from_application(
@@ -4484,7 +4577,9 @@ impl HttpSessionRunRegistry {
                     command_id: key.command_id,
                 });
             }
-            return Ok(HttpCommandClaim::Wait(Arc::clone(existing)));
+            if !existing.is_deferred_plan_decision() {
+                return Ok(HttpCommandClaim::Wait(Arc::clone(existing)));
+            }
         }
         if !state.accepting_commands {
             return Err(HttpRegistryError::ServerShuttingDown);
@@ -4516,7 +4611,9 @@ impl HttpSessionRunRegistry {
                 }
                 HttpStoredCommandClaim::Execute => {}
             }
-        } else if state.command_reservations.len() >= self.in_memory_command_capacity {
+        } else if !state.command_reservations.contains_key(&key)
+            && state.command_reservations.len() >= self.in_memory_command_capacity
+        {
             return Err(HttpRegistryError::CommandRegistrySaturated);
         }
         let reservation = Arc::new(HttpCommandReservation::new(
@@ -5071,7 +5168,6 @@ impl HttpReservedCommand {
         Self::new(HttpCommandKind::IntentDrop, &[path_session_id], command)
     }
 
-    #[cfg(test)]
     fn queue(
         path_session_id: &str,
         command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
@@ -5223,6 +5319,15 @@ impl HttpCommandCompletion {
                     .map(|value| safe_persistence_text(&value));
                 HttpStoredCommandCompletion::Integration(Box::new(receipt))
             }
+            Self::PlanDecision(result)
+                if result
+                    .as_ref()
+                    .as_ref()
+                    .err()
+                    .is_some_and(plan_decision_admission_is_busy) =>
+            {
+                HttpStoredCommandCompletion::PlanDecisionDeferred
+            }
             Self::PlanDecision(result) if result.is_ok() => {
                 let receipt = result
                     .as_ref()
@@ -5317,9 +5422,9 @@ impl HttpCommandCompletion {
             HttpStoredCommandCompletion::Recovery(receipt) => {
                 Self::Recovery(Box::new(Ok(*receipt)))
             }
-            HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => {
-                Self::Aborted
-            }
+            HttpStoredCommandCompletion::Reserved
+            | HttpStoredCommandCompletion::Aborted
+            | HttpStoredCommandCompletion::PlanDecisionDeferred => Self::Aborted,
         }
     }
 }
@@ -5435,6 +5540,18 @@ impl HttpCancelOperation {
 }
 
 impl HttpCommandReservation {
+    fn is_deferred_plan_decision(&self) -> bool {
+        let completion = self
+            .completion
+            .lock()
+            .expect("http command completion lock should not be poisoned");
+        matches!(
+            completion.as_ref(),
+            Some(HttpCommandCompletion::PlanDecision(result))
+                if result.as_ref().as_ref().err().is_some_and(plan_decision_admission_is_busy)
+        )
+    }
+
     fn new(
         request: HttpReservedCommand,
         command_store: Option<Arc<HttpDurableCommandStore>>,
@@ -5712,7 +5829,6 @@ impl HttpCommandReservation {
         }
     }
 
-    #[cfg(test)]
     fn wait_for_queue(&self) -> Result<HttpConversationQueueCommandReceipt, HttpRegistryError> {
         match self.wait() {
             HttpCommandCompletion::Queue(result) => {
@@ -6352,7 +6468,6 @@ fn update_command_fingerprint_part(hasher: &mut Sha256, part: &[u8]) {
 /// one durable identity. A user correction must therefore use a fresh command id; retaining a raw
 /// or reversibly keyed exact-prompt digest in the durable command store would violate the queue's
 /// process-local material boundary.
-#[cfg(test)]
 fn secret_safe_queue_command_fingerprint_payload(
     command: &HttpCommandEnvelope<HttpConversationQueueCommandRequest>,
 ) -> Result<Vec<u8>, HttpRegistryError> {

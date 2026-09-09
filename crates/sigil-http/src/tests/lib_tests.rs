@@ -10,6 +10,7 @@ use std::{
 
 use fs2::FileExt;
 use serde_json::{Value, json};
+use sigil_application::{LiveRunUpdate, LiveRunUpdateKind, LiveToolProgress, SafeText};
 use sigil_kernel::{
     ApprovalRequestIdentityV2, AssistantMessageKind, ControlEntry, EgressDataCategory,
     EgressDisclosureKind, EgressNetworkRoute, EvidenceScope, IntegrationPlanId,
@@ -87,6 +88,29 @@ fn unavailable_session_grant_reason() -> Option<ToolApprovalSessionGrantUnavaila
     Some(ToolApprovalSessionGrantUnavailableReason {
         code: ToolApprovalSessionGrantUnavailableReasonCode::OperationNotGrantable,
     })
+}
+
+fn live_preview_update(
+    session_id: &str,
+    run_id: &str,
+    revision: u64,
+    base_durable_sequence: u64,
+    kind: LiveRunUpdateKind,
+    preview: &str,
+) -> LiveRunUpdate {
+    LiveRunUpdate {
+        schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+        session_id: session_id.to_owned(),
+        run_id: run_id.to_owned(),
+        attempt_id: "current-provider-attempt".to_owned(),
+        slot_id: "preview".to_owned(),
+        live_revision: revision,
+        base_durable_sequence,
+        kind,
+        preview: SafeText::new(preview).expect("bounded current preview"),
+        tool_progress: None,
+        truncated: false,
+    }
 }
 
 #[tokio::test]
@@ -846,7 +870,7 @@ fn module_split_facade_exports_protocol_auth_sse_and_dto_contracts() {
         .expect("disabled auth should accept missing headers");
 
     assert_eq!(HTTP_RUN_EVENT_SSE_NAME, "run_event");
-    assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 2);
+    assert_eq!(HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, 3);
     assert_eq!(HttpPermissionMode::ReadOnly.to_string(), "read-only");
 }
 
@@ -2162,6 +2186,139 @@ async fn local_server_authenticates_validates_and_pages_bounded_transcript() {
 }
 
 #[tokio::test]
+async fn local_server_reads_complete_message_pages_from_the_strict_durable_owner() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let store =
+        JsonlSessionStore::new(fixture.path().join("message-content.jsonl")).expect("store");
+    let mut session = Session::load_from_store("fixture", "model", store.clone()).expect("session");
+    session.ensure_identity_entry().expect("identity");
+    let text = format!(
+        "{}🦀{}FINAL_MESSAGE_BODY",
+        "x".repeat(65_535),
+        "y".repeat(40_000)
+    );
+    let mut message = ModelMessage::assistant_with_kind(
+        Some(text.clone()),
+        vec![],
+        AssistantMessageKind::FinalAnswer,
+    );
+    message.id = format!("token=private-message-id-carrier-{}", "s".repeat(300));
+    let raw_message_id = message.id.clone();
+    session.append_assistant_message(message).expect("message");
+    let owner = sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store);
+    let message_id = owner
+        .transcript_page(
+            session.session_scope_id(),
+            None,
+            1,
+            &sigil_kernel::SessionReadBudget::default(),
+        )
+        .expect("safe transcript identity")
+        .messages[0]
+        .message_id
+        .clone();
+    let page = owner
+        .conversation_display_page(
+            sigil_runtime::ConversationDisplayQuery {
+                expected_session_scope_id: session.session_scope_id(),
+                cursor: None,
+                limit: 100,
+                current_workspace_snapshot_id: None,
+                artifact_store: None,
+            },
+            &sigil_kernel::SessionReadBudget::default(),
+        )
+        .expect("display");
+    let display_id = &page.items[0].display_id;
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+    *lock(&driver.next_binding) = Some(HttpSessionBinding {
+        session_scope_id: session.session_scope_id().to_owned(),
+        session_log_path: store.path().display().to_string(),
+        route_transition: None,
+        route_recovery: None,
+    });
+    *lock(&driver.message_content_owner) = Some(owner);
+    let (status, bound) =
+        http_raw_request(address, http_post("/sessions", Some("secret-token"), "{}")).await;
+    assert_eq!(status, 201);
+    let session_id = bound["id"].as_str().expect("id");
+    let path = format!("/sessions/{session_id}/message-content?display_id={display_id}");
+    assert_eq!(
+        http_raw_request(address, http_get(&path, None, None))
+            .await
+            .0,
+        401
+    );
+    let (status, first) =
+        http_raw_request(address, http_get(&path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["message_id"], message_id);
+    assert!(message_id.starts_with("message-sha256:"));
+    assert!(!first.to_string().contains("private-message-id-carrier"));
+    assert!(!first.to_string().contains(&raw_message_id));
+    assert_eq!(first["text"].as_str().expect("text").len(), 65_535);
+    assert_eq!(first["next_offset"], 65_535);
+    assert_eq!(first["total_bytes"], text.len());
+    assert!(first.get("session_scope_id").is_none());
+    assert!(first.get("path").is_none());
+    let version = first["content_version"].as_str().expect("version");
+    let next_path = format!("{path}&offset=65535&content_version={version}");
+    let (status, second) =
+        http_raw_request(address, http_get(&next_path, Some("secret-token"), None)).await;
+    assert_eq!(status, 200, "{second}");
+    assert!(second["next_offset"].is_null());
+    assert_eq!(
+        format!(
+            "{}{}",
+            first["text"].as_str().expect("first"),
+            second["text"].as_str().expect("second")
+        ),
+        text
+    );
+    for suffix in [
+        "&limit=65537".to_owned(),
+        "&offset=1".to_owned(),
+        format!("&offset=65536&content_version={version}"),
+        "&display_id=duplicate".to_owned(),
+        "&unexpected=1".to_owned(),
+    ] {
+        let (status, error) = http_raw_request(
+            address,
+            http_get(&format!("{path}{suffix}"), Some("secret-token"), None),
+        )
+        .await;
+        assert_eq!(status, 400, "{error}");
+        assert_eq!(error["error"]["code"], "message_content_query_invalid");
+    }
+    let (status, error) = http_raw_request(
+        address,
+        http_get(
+            &format!("{path}&content_version={}", "0".repeat(64)),
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(error["error"]["code"], "message_content_stale");
+    let (_, other) =
+        http_raw_request(address, http_post("/sessions", Some("secret-token"), "{}")).await;
+    let other_id = other["id"].as_str().expect("other id");
+    let (status, error) = http_raw_request(
+        address,
+        http_get(
+            &format!("/sessions/{other_id}/message-content?display_id={display_id}"),
+            Some("secret-token"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(error["error"]["code"], "message_content_not_found");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_server_pages_canonical_display_without_private_session_fields() {
     let (address, shutdown, driver) = spawn_test_http_server().await;
     let (status, session) = http_raw_request(
@@ -2478,6 +2635,60 @@ async fn local_server_pages_plan_review_and_routes_typed_plan_decision_idempoten
     .await;
     assert_eq!(status, 401);
     assert_eq!(body["error"]["code"], "unauthorized");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn plan_decision_busy_retries_the_exact_command_after_foreground_release() {
+    let (address, shutdown, driver, registry) = spawn_test_http_server_with_registry().await;
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("review plan", HttpPermissionMode::Manual),
+        )
+        .expect("review run should own foreground");
+    let command = HttpCommandEnvelope::new(
+        "plan-decision-busy",
+        "desktop-client",
+        &session.id,
+        HttpPlanDecisionRequest {
+            plan_id: "plan-review-busy".to_owned(),
+            expected_plan_hash: format!("sha256:{}", "a".repeat(64)),
+            expected_candidate_hash: None,
+            action: HttpPlanDecisionAction::Revise,
+            permission_grant: None,
+        },
+    );
+    let path = format!("/sessions/{}/plan-decision", session.id);
+    let body = serde_json::to_string(&command).expect("exact command body");
+    for _ in 0..2 {
+        let (status, refusal) =
+            http_raw_request(address, http_post(&path, Some("secret-token"), &body)).await;
+        assert_eq!(status, 409);
+        assert_eq!(refusal["error"]["code"], "plan_decision_busy");
+        assert!(
+            driver.plan_decisions().is_empty(),
+            "busy admission cannot drive a decision"
+        );
+    }
+    let mut conflicting = command.clone();
+    conflicting.payload.action = HttpPlanDecisionAction::Reject;
+    assert!(matches!(
+        registry.plan_decision_command(&session.id, conflicting),
+        Err(HttpRegistryError::CommandKeyConflict { .. })
+    ));
+    registry
+        .record_run_terminal(&run.id, HttpRunTerminalOutcome::Finished)
+        .expect("review run should release foreground");
+    for expected_replayed in [false, true] {
+        let (status, receipt) =
+            http_raw_request(address, http_post(&path, Some("secret-token"), &body)).await;
+        assert_eq!(status, 200);
+        assert_eq!(receipt["command_id"], command.command_id);
+        assert_eq!(receipt["replayed"], expected_replayed);
+    }
+    assert_eq!(driver.plan_decisions().len(), 1);
     let _ = shutdown.send(());
 }
 
@@ -3388,20 +3599,20 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
         ))
         .expect("durable start event should publish");
     event_bus
-        .publish_run_event(PublicRunEvent::new(
+        .publish_live_update(live_preview_update(
             "scope-http-session-1",
             "http-run-1",
-            2,
-            PublicRunEventKind::TextDelta {
-                text: "live only".to_owned(),
-            },
+            1,
+            1,
+            LiveRunUpdateKind::Text,
+            "live only",
         ))
         .expect("transient event should publish");
     event_bus
         .publish_run_event(PublicRunEvent::new(
             "scope-http-session-1",
             "http-run-1",
-            3,
+            2,
             PublicRunEventKind::RunFinished {
                 final_text: "done".to_owned(),
             },
@@ -3422,7 +3633,7 @@ async fn desktop_adapter_smoke_surface_covers_list_cancel_approval_and_events() 
     assert_eq!(event_status, 200);
     assert_eq!(event_content_type, "text/event-stream");
     assert!(event_body.contains("id: sigil-http-run-v1:scope-http-session-1:http-run-1:1"));
-    assert!(event_body.contains("id: sigil-http-run-v1:scope-http-session-1:http-run-1:3"));
+    assert!(event_body.contains("id: sigil-http-run-v1:scope-http-session-1:http-run-1:2"));
     assert!(event_body.contains("\"type\":\"run_started\""));
     assert!(event_body.contains("\"type\":\"run_finished\""));
     assert!(!event_body.contains("\"type\":\"text_delta\""));
@@ -3576,6 +3787,116 @@ async fn local_task_pause_route_is_exact_idempotent_and_typed() {
 }
 
 #[tokio::test]
+async fn local_sse_rebinds_the_current_preview_source_after_a_resumed_run_start() {
+    use sigil_kernel::EventHandler;
+    let fixture = tempfile::tempdir().expect("isolated fixture");
+    let store = JsonlSessionStore::new(fixture.path().join("session.jsonl")).expect("store");
+    let session = Session::load_from_store("fixture", "model", store).expect("session");
+    let (address, shutdown, driver, registry, bus) =
+        spawn_test_http_server_with_registry_and_events().await;
+    *lock(&driver.next_binding) = Some(HttpSessionBinding {
+        session_scope_id: session.session_scope_id().to_owned(),
+        session_log_path: session.store_path().expect("path").display().to_string(),
+        route_transition: None,
+        route_recovery: None,
+    });
+    let binding = create_session(&registry, HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &binding.id,
+            run_start("preview resume", HttpPermissionMode::ReadOnly),
+        )
+        .expect("run");
+    driver.set_session_frontier(1);
+    let owner = registry
+        .session_continuity(&binding.id)
+        .expect("continuity")
+        .foreground_owner
+        .expect("owner")
+        .owner_revision;
+    let mut recorder =
+        sigil_runtime::ApplicationRunEventRecorder::start(&session, &run.id, "preview resume")
+            .expect("recorder");
+    recorder.begin_live_attempt("old-attempt").expect("attempt");
+    recorder
+        .handle(sigil_kernel::RunEvent::TextDelta("BEFORE_WAITING".into()))
+        .expect("preview");
+    bus.bind_live_preview_source(recorder.live_preview_source())
+        .expect("bind source");
+    bus.publish_run_event(PublicRunEvent::new(
+        session.session_scope_id(),
+        &run.id,
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "preview resume".into(),
+        },
+    ))
+    .expect("start");
+    let mut stream = TcpStream::connect(address).await.expect("stream");
+    stream
+        .write_all(
+            http_run_events_get(
+                &format!("/runs/{}/events", run.id),
+                Some("secret-token"),
+                &binding.id,
+                &owner,
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request");
+    async fn read_marker(stream: &mut TcpStream, marker: &str) {
+        let mut received = Vec::new();
+        let mut chunk = [0; 4096];
+        while !String::from_utf8_lossy(&received).contains(marker) {
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut chunk))
+                .await
+                .expect("preview deadline")
+                .expect("preview read");
+            assert!(read > 0, "SSE stays open for the resumed source");
+            received.extend_from_slice(&chunk[..read]);
+        }
+    }
+    read_marker(&mut stream, "BEFORE_WAITING").await;
+    bus.publish_run_event(PublicRunEvent::new(
+        session.session_scope_id(),
+        &run.id,
+        2,
+        PublicRunEventKind::RunAwaitingUserInput {
+            request_id: "question".into(),
+            generation: 1,
+            request_hash: "a".repeat(64),
+        },
+    ))
+    .expect("waiting");
+    read_marker(&mut stream, "run_awaiting_user_input").await;
+    let mut resumed = sigil_runtime::ApplicationRunEventRecorder::resume(&session, &run.id)
+        .expect("new execution source");
+    resumed
+        .begin_live_attempt("resumed-attempt")
+        .expect("resumed attempt");
+    resumed
+        .handle(sigil_kernel::RunEvent::TextDelta(
+            "AFTER_RESUMED_START".into(),
+        ))
+        .expect("new source preview");
+    bus.bind_live_preview_source(resumed.live_preview_source())
+        .expect("replace source");
+    bus.publish_run_event(PublicRunEvent::new(
+        session.session_scope_id(),
+        &run.id,
+        3,
+        PublicRunEventKind::RunStarted {
+            prompt: "resumed".into(),
+        },
+    ))
+    .expect("resumed start");
+    read_marker(&mut stream, "AFTER_RESUMED_START").await;
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
 async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_events() {
     let (address, shutdown, driver, registry, event_bus) =
         spawn_test_http_server_with_registry_and_events().await;
@@ -3638,20 +3959,20 @@ async fn local_sse_replays_then_stays_open_for_live_transient_and_terminal_event
     );
 
     event_bus
-        .publish_run_event(PublicRunEvent::new(
+        .publish_live_update(live_preview_update(
             &session.durable_session_scope_id,
             &run.id,
-            2,
-            PublicRunEventKind::TextDelta {
-                text: "live-only".to_owned(),
-            },
+            1,
+            1,
+            LiveRunUpdateKind::Text,
+            "live-only",
         ))
         .expect("transient delta should publish");
     event_bus
         .publish_run_event(PublicRunEvent::new(
             &session.durable_session_scope_id,
             &run.id,
-            3,
+            2,
             PublicRunEventKind::RunFinished {
                 final_text: "done".to_owned(),
             },
@@ -4069,6 +4390,161 @@ async fn local_sse_drains_ordered_terminal_events_before_the_close_marker() {
         "the close marker must preserve protocol publication order"
     );
     let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn graceful_shutdown_cancels_the_actual_display_reader_before_connection_drain() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let driver = Arc::new(RecordingRunDriver::default());
+    let entered = Arc::clone(&started);
+    let finished = Arc::clone(&completed);
+    *lock(&driver.display_observer) = Some(Arc::new(move |budget| {
+        entered.notify_one();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while budget.check().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "real routing work never received cancellation"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        finished.store(true, std::sync::atomic::Ordering::Release);
+    }));
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver));
+    let session = create_session(&registry, HttpSessionCreateRequest::default());
+    let server = HttpLocalServer::bind(HttpServerConfig::default(), Some("secret-token"), registry)
+        .await
+        .expect("listener");
+    let address = server.local_addr().expect("address");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let serving = tokio::spawn(async move {
+        server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+    let mut client = TcpStream::connect(address).await.expect("client");
+    client
+        .write_all(
+            http_get(
+                &format!("/sessions/{}/display", session.id),
+                Some("secret-token"),
+                None,
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("query");
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .expect("query entered");
+    shutdown_tx.send(()).expect("shutdown");
+    tokio::time::timeout(Duration::from_secs(2), serving)
+        .await
+        .expect("bounded shutdown")
+        .expect("server joined")
+        .expect("actual reader completed");
+    assert!(
+        completed.load(std::sync::atomic::Ordering::Acquire),
+        "successful drain requires actual reader completion"
+    );
+}
+
+#[tokio::test]
+async fn display_connection_close_cancels_only_when_the_read_contract_opts_in() {
+    for (route, opt_in) in [
+        ("display", false),
+        ("display", true),
+        ("message-content?display_id=display-1", false),
+        ("message-content?display_id=display-1", true),
+    ] {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let (release, blocked) = std::sync::mpsc::channel();
+        let blocked = Mutex::new(blocked);
+        let driver = Arc::new(RecordingRunDriver::default());
+        let entered = Arc::clone(&started);
+        let finished = Arc::clone(&completed);
+        *lock(&driver.display_observer) = Some(Arc::new(move |budget| {
+            entered.notify_one();
+            if opt_in {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                while budget.check().is_ok() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "closed observation did not cancel"
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            } else {
+                blocked
+                    .lock()
+                    .expect("release receiver")
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("release read");
+                assert!(
+                    budget.check().is_ok(),
+                    "ordinary HTTP half-close must still permit its response"
+                );
+            }
+            finished.notify_one();
+        }));
+        let registry = Arc::new(HttpSessionRunRegistry::new(driver));
+        let session = create_session(&registry, HttpSessionCreateRequest::default());
+        let server =
+            HttpLocalServer::bind(HttpServerConfig::default(), Some("secret-token"), registry)
+                .await
+                .expect("listener");
+        let address = server.local_addr().expect("address");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let serving = tokio::spawn(async move {
+            server
+                .serve_until_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+        let mut client = TcpStream::connect(address).await.expect("client");
+        let mut request = http_get(
+            &format!("/sessions/{}/{route}", session.id),
+            Some("secret-token"),
+            None,
+        );
+        if opt_in {
+            request = request.replacen(
+                "\r\n\r\n",
+                "\r\nx-sigil-cancel-observation-on-close: 1\r\n\r\n",
+                1,
+            );
+        }
+        client.write_all(request.as_bytes()).await.expect("query");
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("query entered");
+        client.shutdown().await.expect("close sending half");
+        if !opt_in {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            release
+                .send(())
+                .expect("release ordinary half-closed request");
+        }
+        tokio::time::timeout(Duration::from_secs(2), completed.notified())
+            .await
+            .expect("actual reader completed");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response after half-close");
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 503"));
+        shutdown_tx.send(()).expect("shutdown");
+        serving
+            .await
+            .expect("server joined")
+            .expect("server shutdown");
+    }
 }
 
 #[tokio::test]
@@ -4935,8 +5411,8 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
         "session-1",
         "run-1",
         12,
-        PublicRunEventKind::TextDelta {
-            text: "hello".to_owned(),
+        PublicRunEventKind::Notice {
+            message: "hello".to_owned(),
         },
     );
 
@@ -4944,10 +5420,10 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
     let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
 
     assert_eq!(sse.event(), HTTP_RUN_EVENT_SSE_NAME);
-    assert_eq!(sse.id(), None);
+    assert_eq!(sse.id(), Some("sigil-http-run-v1:session-1:run-1:12"));
     assert_eq!(data["schema_version"], HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
-    assert_eq!(data["event_class"], "transient");
-    assert_eq!(data.get("replay_id"), None);
+    assert_eq!(data["event_class"], "durable");
+    assert_eq!(data["replay_id"], "sigil-http-run-v1:session-1:run-1:12");
     assert_eq!(
         data["run_event"]["schema_version"],
         PUBLIC_RUN_EVENT_SCHEMA_VERSION
@@ -4955,11 +5431,14 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
     assert_eq!(data["run_event"]["session_id"], "session-1");
     assert_eq!(data["run_event"]["run_id"], "run-1");
     assert_eq!(data["run_event"]["sequence"], 12);
-    assert_eq!(data["run_event"]["event"]["type"], "text_delta");
-    assert_eq!(data["run_event"]["event"]["text"], "hello");
+    assert_eq!(data["run_event"]["event"]["type"], "notice");
+    assert_eq!(data["run_event"]["event"]["message"], "hello");
     assert_eq!(
         sse.encode(),
-        format!("event: run_event\ndata: {}\n\n", sse.data())
+        format!(
+            "id: sigil-http-run-v1:session-1:run-1:12\nevent: run_event\ndata: {}\n\n",
+            sse.data()
+        )
     );
 }
 
@@ -6166,13 +6645,13 @@ fn protocol_event_view_separates_durable_and_transient_shapes() {
         },
     ))
     .expect("durable event should build");
-    let transient = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+    let transient = HttpProtocolEvent::from_live_update(live_preview_update(
         "session-1",
         "run-1",
         2,
-        PublicRunEventKind::ReasoningDelta {
-            text: "thinking".to_owned(),
-        },
+        1,
+        LiveRunUpdateKind::Reasoning,
+        "thinking",
     ))
     .expect("transient event should build");
 
@@ -6180,7 +6659,13 @@ fn protocol_event_view_separates_durable_and_transient_shapes() {
         HttpProtocolEventView::Durable(view) => {
             assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
             assert_eq!(view.replay_id, "sigil-http-run-v1:session-1:run-1:1");
-            assert_eq!(view.run_event.sequence, 1);
+            assert_eq!(
+                view.run_event
+                    .as_ref()
+                    .expect("public event payload")
+                    .sequence,
+                1
+            );
             let provisional_id = view
                 .provisional_id
                 .expect("semantic durable event should have a live identity");
@@ -6194,7 +6679,14 @@ fn protocol_event_view_separates_durable_and_transient_shapes() {
     match transient.view() {
         HttpProtocolEventView::Transient(view) => {
             assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
-            assert_eq!(view.run_event.sequence, 2);
+            assert_eq!(
+                view.live_update
+                    .as_ref()
+                    .expect("typed live payload")
+                    .live_revision,
+                2
+            );
+            assert!(view.run_event.is_none());
             assert_eq!(view.provisional_id, None);
         }
         HttpProtocolEventView::Durable(_) => panic!("transient event should use transient view"),
@@ -6313,7 +6805,7 @@ fn protocol_event_buffer_replays_only_durable_events_after_last_event_id() {
             },
         ))
         .expect("durable start event should record");
-    let first_delta = buffer
+    let rejected_delta = buffer
         .push_run_event(PublicRunEvent::new(
             "session-1",
             "run-1",
@@ -6322,12 +6814,12 @@ fn protocol_event_buffer_replays_only_durable_events_after_last_event_id() {
                 text: "partial".to_owned(),
             },
         ))
-        .expect("transient text delta should record");
+        .expect_err("sequence-bearing live deltas must not enter the replay buffer");
     let finished = buffer
         .push_run_event(PublicRunEvent::new(
             "session-1",
             "run-1",
-            3,
+            2,
             PublicRunEventKind::RunFinished {
                 final_text: "done".to_owned(),
             },
@@ -6344,8 +6836,10 @@ fn protocol_event_buffer_replays_only_durable_events_after_last_event_id() {
         ))
         .expect("other run should record");
 
-    assert_eq!(first_delta.event_class, HttpProtocolEventClass::Transient);
-    assert_eq!(first_delta.replay_id, None);
+    assert_eq!(
+        rejected_delta,
+        crate::HttpProtocolCursorError::UnsupportedPublicLiveEvent
+    );
     assert_eq!(finished.event_class, HttpProtocolEventClass::Durable);
 
     let replay = buffer
@@ -6357,11 +6851,30 @@ fn protocol_event_buffer_replays_only_durable_events_after_last_event_id() {
         .expect("durable cursor should replay later durable events");
 
     assert_eq!(replay.len(), 1);
-    assert_eq!(replay[0].run_event.sequence, 3);
-    let replay_event =
-        serde_json::to_value(&replay[0].run_event.event).expect("replayed event should serialize");
-    let finished_event =
-        serde_json::to_value(&finished.run_event.event).expect("finished event should serialize");
+    assert_eq!(
+        replay[0]
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        2
+    );
+    let replay_event = serde_json::to_value(
+        &replay[0]
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
+    )
+    .expect("replayed event should serialize");
+    let finished_event = serde_json::to_value(
+        &finished
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
+    )
+    .expect("finished event should serialize");
     assert_eq!(replay_event, finished_event);
 }
 
@@ -6406,18 +6919,105 @@ fn protocol_event_buffer_replay_fails_closed_on_bad_or_wrong_cursor() {
 }
 
 #[tokio::test]
+async fn public_live_payloads_are_rejected_before_buffering_or_broadcast() {
+    let bus = HttpLiveEventBus::new(8);
+    let buffer = HttpProtocolEventBuffer::new();
+    let mut subscriber = bus.subscribe();
+    let progress = ToolProgressEvent {
+        execution_id: ToolExecutionId::new("execution-1").expect("execution identity"),
+        call_id: "call-1".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        sequence: 1,
+        status: "running".to_owned(),
+        message: Some("retired wire payload".to_owned()),
+        output_preview: None,
+        output_log_ref: None,
+        total_bytes: None,
+        updated_at_ms: None,
+        details: json!({}),
+    };
+    for kind in [
+        PublicRunEventKind::TextDelta {
+            text: "old text".to_owned(),
+        },
+        PublicRunEventKind::ReasoningDelta {
+            text: "old reasoning".to_owned(),
+        },
+        PublicRunEventKind::ToolCallArgsDelta {
+            id: "call-1".to_owned(),
+            delta: "{}".to_owned(),
+        },
+        PublicRunEventKind::ToolProgress { progress },
+    ] {
+        let event = PublicRunEvent::new("session-1", "run-1", 1, kind);
+        assert!(matches!(
+            HttpProtocolEvent::from_run_event(event.clone()),
+            Err(crate::HttpProtocolCursorError::UnsupportedPublicLiveEvent)
+        ));
+        assert!(matches!(
+            public_run_event_to_sse(&event),
+            Err(HttpSseError::Cursor { .. })
+        ));
+        assert!(matches!(
+            buffer.push_run_event(event.clone()),
+            Err(crate::HttpProtocolCursorError::UnsupportedPublicLiveEvent)
+        ));
+        assert!(matches!(
+            bus.publish_run_event(event.clone()),
+            Err(crate::HttpEventPublishError::Cursor { .. })
+        ));
+        for event_class in [
+            HttpProtocolEventClass::Durable,
+            HttpProtocolEventClass::Transient,
+        ] {
+            let forged = HttpProtocolEvent {
+                schema_version: HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
+                event_class,
+                replay_id: None,
+                approval_request: None,
+                provisional_id: None,
+                live_update: None,
+                run_event: Some(event.clone()),
+            };
+            assert!(!forged.has_valid_payload());
+        }
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), subscriber.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        bus.latest_run_sequence("session-1", "run-1")
+            .expect("watermark"),
+        None
+    );
+    assert!(
+        bus.replay_run_after("session-1", "run-1", None)
+            .expect("replay")
+            .is_empty()
+    );
+    assert!(
+        buffer
+            .replay_run_after("session-1", "run-1", None)
+            .expect("buffer replay")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn live_event_bus_delivers_transient_events_without_replay_id() {
     let bus = HttpLiveEventBus::new(8);
     let mut subscriber = bus.subscribe();
 
     let published = bus
-        .publish_run_event(PublicRunEvent::new(
+        .publish_live_update(live_preview_update(
             "session-1",
             "run-1",
             1,
-            PublicRunEventKind::ReasoningDelta {
-                text: "thinking".to_owned(),
-            },
+            0,
+            LiveRunUpdateKind::Reasoning,
+            "thinking",
         ))
         .expect("transient event should publish");
 
@@ -6428,7 +7028,14 @@ async fn live_event_bus_delivers_transient_events_without_replay_id() {
         .await
         .expect("subscriber should receive transient event");
     assert_eq!(live.event_class, HttpProtocolEventClass::Transient);
-    assert_eq!(live.run_event.sequence, 1);
+    assert_eq!(
+        live.live_update
+            .as_ref()
+            .expect("typed live payload")
+            .live_revision,
+        1
+    );
+    assert!(live.run_event.is_none());
     assert!(
         bus.replay_run_after("session-1", "run-1", None)
             .expect("replay should work")
@@ -6437,44 +7044,84 @@ async fn live_event_bus_delivers_transient_events_without_replay_id() {
     assert_eq!(
         bus.latest_run_sequence("session-1", "run-1")
             .expect("live watermark should remain readable"),
-        Some(1)
+        None
+    );
+}
+
+#[tokio::test]
+async fn live_event_bus_preserves_typed_live_revision_separate_from_durable_replay() {
+    let bus = HttpLiveEventBus::new(8);
+    let mut subscriber = bus.subscribe();
+    let update = LiveRunUpdate {
+        schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+        session_id: "session-live".to_owned(),
+        run_id: "run-live".to_owned(),
+        attempt_id: "physical-attempt-1".to_owned(),
+        slot_id: "assistant".to_owned(),
+        live_revision: 7,
+        base_durable_sequence: 3,
+        kind: LiveRunUpdateKind::Text,
+        preview: SafeText::new("partial answer").expect("bounded preview"),
+        tool_progress: None,
+        truncated: false,
+    };
+    let published = bus
+        .publish_live_update(update.clone())
+        .expect("typed live preview should publish");
+    assert_eq!(published.event_class, HttpProtocolEventClass::Transient);
+    assert_eq!(published.replay_id, None);
+    assert_eq!(published.live_update, Some(update.clone()));
+    assert!(published.run_event.is_none());
+    assert_eq!(published.public_sequence(), None);
+    let received = subscriber
+        .recv()
+        .await
+        .expect("subscriber should receive preview");
+    assert_eq!(received.live_update, Some(update));
+    assert!(
+        bus.replay_run_after("session-live", "run-live", None)
+            .expect("transient preview must not enter replay")
+            .is_empty()
     );
 }
 
 #[tokio::test]
 async fn live_event_bus_treats_tool_progress_as_transient() {
     let bus = HttpLiveEventBus::new(8);
-    let progress = ToolProgressEvent {
-        execution_id: ToolExecutionId::new("execution-1")
-            .expect("test tool execution id should be valid"),
+    let progress = LiveToolProgress {
+        execution_id: "execution-1".to_owned(),
         call_id: "call-1".to_owned(),
         tool_name: "terminal_start".to_owned(),
-        sequence: 1,
         status: "running".to_owned(),
-        message: Some("running workspace check".to_owned()),
-        output_preview: Some("Compiling sigil-tui".to_owned()),
-        output_log_ref: Some("state/artifacts/tasks/terminal-1/output.log".into()),
         total_bytes: Some(64),
         updated_at_ms: Some(10),
-        details: json!({"task_id": "terminal-1"}),
     };
-
-    let published = bus
-        .publish_run_event(PublicRunEvent::new(
+    let update = LiveRunUpdate {
+        slot_id: progress.call_id.clone(),
+        tool_progress: Some(progress.clone()),
+        ..live_preview_update(
             "session-1",
             "run-1",
             1,
-            PublicRunEventKind::ToolProgress { progress },
-        ))
+            0,
+            LiveRunUpdateKind::ToolProgress,
+            "running workspace check",
+        )
+    };
+    let published = bus
+        .publish_live_update(update)
         .expect("tool progress event should publish");
 
     assert_eq!(published.event_class, HttpProtocolEventClass::Transient);
     assert_eq!(published.replay_id, None);
-    assert!(
+    assert!(published.provisional_id.is_none());
+    assert!(published.run_event.is_none());
+    assert_eq!(
         published
-            .provisional_id
-            .as_deref()
-            .is_some_and(|identity| identity.starts_with("live-v1:"))
+            .live_update
+            .as_ref()
+            .and_then(|update| update.tool_progress.as_ref()),
+        Some(&progress)
     );
     assert!(
         bus.replay_run_after("session-1", "run-1", None)
@@ -6496,19 +7143,19 @@ async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
         },
     ))
     .expect("start event should publish");
-    bus.publish_run_event(PublicRunEvent::new(
+    bus.publish_live_update(live_preview_update(
         "session-1",
         "run-1",
-        2,
-        PublicRunEventKind::TextDelta {
-            text: "partial".to_owned(),
-        },
+        1,
+        1,
+        LiveRunUpdateKind::Text,
+        "partial",
     ))
     .expect("transient event should publish");
     bus.publish_run_event(PublicRunEvent::new(
         "session-1",
         "run-1",
-        3,
+        2,
         PublicRunEventKind::Notice {
             message: "durable checkpoint".to_owned(),
         },
@@ -6523,7 +7170,14 @@ async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
         .recv()
         .await
         .expect("latest event should remain available after lag");
-    assert_eq!(remaining.run_event.sequence, 3);
+    assert_eq!(
+        remaining
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        2
+    );
 
     let replay = bus
         .replay_run_after(
@@ -6534,7 +7188,14 @@ async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
         .expect("durable replay should ignore live lag");
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].event_class, HttpProtocolEventClass::Durable);
-    assert_eq!(replay[0].run_event.sequence, 3);
+    assert_eq!(
+        replay[0]
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        2
+    );
 }
 
 #[test]
@@ -6582,6 +7243,7 @@ fn live_event_bus_serializes_next_sequence_allocation_across_event_sources() {
             ))
             .expect("central publication sequence should allocate")
             .run_event
+            .expect("public payload")
             .sequence
         }));
     }
@@ -6664,7 +7326,14 @@ fn live_event_bus_binds_approval_display_to_the_exact_public_sequence() {
     let published = bus
         .publish_run_event_with_approval(event, Some(pending))
         .expect("approval should bind its exact durable sequence");
-    assert_eq!(published.run_event.sequence, 2);
+    assert_eq!(
+        published
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        2
+    );
     assert_eq!(
         published
             .approval_request
@@ -9414,6 +10083,8 @@ impl HttpRunDriver for QueueTestDriver {
 
 #[derive(Default)]
 struct RecordingRunDriver {
+    message_content_owner: Mutex<Option<sigil_runtime::RuntimeSessionProjectionOwner>>,
+    display_observer: Mutex<Option<DisplayObserver>>,
     bound_models: Mutex<Vec<Option<HttpProviderModelRef>>>,
     purged_session_scopes: Mutex<Vec<String>>,
     starts: Mutex<Vec<HttpRunDriverStart>>,
@@ -9890,6 +10561,24 @@ impl HttpRunDriver for RecordingRunDriver {
             .ok_or_else(|| HttpRunDriverError::new("test transcript page is missing"))
     }
 
+    fn message_content_page(
+        &self,
+        session: &HttpSessionSnapshot,
+        query: &sigil_application::message_content::MessageContentQuery,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<
+        sigil_application::message_content::MessageContentPage,
+        sigil_application::message_content::MessageContentError,
+    > {
+        if let Some(observer) = lock(&self.display_observer).clone() {
+            observer(budget);
+        }
+        lock(&self.message_content_owner)
+            .as_ref()
+            .ok_or(sigil_application::message_content::MessageContentError::Unavailable)?
+            .message_content_page(&session.durable_session_scope_id, query, budget)
+    }
+
     fn conversation_display_page(
         &self,
         _session: &super::HttpSessionSnapshot,
@@ -9903,6 +10592,22 @@ impl HttpRunDriver for RecordingRunDriver {
         lock(&self.conversation_display_page)
             .clone()
             .ok_or(HttpConversationDisplayDriverError::Unavailable)
+    }
+
+    fn conversation_display_page_with_budget(
+        &self,
+        session: &super::HttpSessionSnapshot,
+        cursor: Option<&str>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        if let Some(observer) = lock(&self.display_observer).clone() {
+            observer(budget);
+        }
+        budget
+            .check()
+            .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?;
+        self.conversation_display_page(session, cursor, limit)
     }
 
     fn tool_artifact_page(
@@ -10242,6 +10947,7 @@ fn write_catalog_session(path: &std::path::Path, prompt: &str, provider: &str, m
 }
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;
+type DisplayObserver = Arc<dyn Fn(&sigil_kernel::SessionReadBudget) + Send + Sync>;
 type CancelObserver = Arc<dyn Fn(&HttpRunDriverCancel) + Send + Sync>;
 type ApprovalObserver = Arc<dyn Fn(&HttpRunDriverApproval) + Send + Sync>;
 

@@ -6,7 +6,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sigil_kernel::MAX_EVENT_BYTES;
+use sigil_kernel::{
+    MAX_EVENT_BYTES, PUBLIC_RUN_EVENT_SCHEMA_VERSION, is_transient_public_run_event,
+};
 use thiserror::Error as ThisError;
 
 use crate::durable_io::{
@@ -125,11 +127,7 @@ impl HttpDurableProtocolJournal {
             }
             let bytes = read_bounded(&path, MAX_HTTP_PROTOCOL_JOURNAL_BYTES)
                 .map_err(HttpProtocolJournalError::io)?;
-            serde_json::from_slice::<HttpProtocolJournalFile>(&bytes)
-                .map_err(|error| HttpProtocolJournalError::Corrupt {
-                    message: error.to_string(),
-                })?
-                .into_state()?
+            decode_state(&bytes)?
         } else {
             HttpProtocolJournalState::default()
         };
@@ -147,10 +145,8 @@ impl HttpDurableProtocolJournal {
         })
     }
 
-    /// Opens the replay journal and, for rebuildable legacy content, quarantines that source
-    /// through the HTTP replay owner before retrying with an empty journal. Current-schema boot
-    /// uses this only as a one-time legacy import boundary; all subsequent writes are redirected
-    /// by `attach_managed_writer` to the authority-admitted adapter namespace.
+    /// Opens the replay journal and quarantines rebuildable corrupt content before retrying with
+    /// an empty journal. Unsupported formats are rejected without changing the source file.
     ///
     /// # Errors
     ///
@@ -172,7 +168,7 @@ impl HttpDurableProtocolJournal {
     }
 
     /// Switches the current-schema replay owner to the composed managed adapter state writer.
-    /// Existing legacy state is imported once; all later snapshots are written only through the
+    /// Only current-format state is accepted; all later snapshots are written through the
     /// admitted adapter durable-state namespace.
     pub(crate) fn attach_managed_writer(
         &self,
@@ -256,10 +252,8 @@ impl HttpDurableProtocolJournal {
             .lock()
             .map_err(|_| HttpProtocolJournalError::Unavailable)?;
         let mut candidate = state.clone();
-        let key = HttpProtocolStreamKey::new(
-            event.run_event.session_id.clone(),
-            event.run_event.run_id.clone(),
-        );
+        let key =
+            HttpProtocolStreamKey::new(event.session_id().to_owned(), event.run_id().to_owned());
         candidate.append(event, keep_stream_open)?;
         if close_after_append {
             candidate.close_stream(&key)?;
@@ -315,10 +309,7 @@ impl HttpDurableProtocolJournal {
         let canonical_source = source
             .iter()
             .map(|(event, keep_stream_open, close_stream_after_event)| {
-                let key = (
-                    event.run_event.session_id.clone(),
-                    event.run_event.run_id.clone(),
-                );
+                let key = (event.session_id().to_owned(), event.run_id().to_owned());
                 if !runs.contains(&key) {
                     return Err(HttpProtocolJournalError::Corrupt {
                         message:
@@ -337,13 +328,15 @@ impl HttpDurableProtocolJournal {
             BTreeMap::<HttpProtocolStreamKey, u64>::new(),
             |mut frontiers, (event, _, _)| {
                 let key = HttpProtocolStreamKey::new(
-                    event.run_event.session_id.clone(),
-                    event.run_event.run_id.clone(),
+                    event.session_id().to_owned(),
+                    event.run_id().to_owned(),
                 );
                 frontiers
                     .entry(key)
-                    .and_modify(|sequence| *sequence = (*sequence).max(event.run_event.sequence))
-                    .or_insert(event.run_event.sequence);
+                    .and_modify(|sequence| {
+                        *sequence = (*sequence).max(event.public_sequence().unwrap_or(0))
+                    })
+                    .or_insert(event.public_sequence().unwrap_or(0));
                 frontiers
             },
         );
@@ -364,9 +357,9 @@ impl HttpDurableProtocolJournal {
             .map(|(event, _, _)| {
                 (
                     (
-                        event.run_event.session_id.as_str(),
-                        event.run_event.run_id.as_str(),
-                        event.run_event.sequence,
+                        event.session_id(),
+                        event.run_id(),
+                        event.public_sequence().unwrap_or(0),
                     ),
                     &event.run_event,
                 )
@@ -402,22 +395,19 @@ impl HttpDurableProtocolJournal {
         // The source remains authoritative, but an already published identity cannot silently
         // acquire different bytes through the rebuild path. Match the exact-publication guard.
         for current in &state.events {
-            if !runs.contains(&(
-                current.run_event.session_id.clone(),
-                current.run_event.run_id.clone(),
-            )) {
+            if !runs.contains(&(current.session_id().to_owned(), current.run_id().to_owned())) {
                 continue;
             }
             let source = source_by_identity
                 .get(&(
-                    current.run_event.session_id.as_str(),
-                    current.run_event.run_id.as_str(),
-                    current.run_event.sequence,
+                    current.session_id(),
+                    current.run_id(),
+                    current.public_sequence().unwrap_or(0),
                 ))
                 .ok_or_else(|| HttpProtocolJournalError::Corrupt {
                     message: "rebuild source omits a retained durable event identity".to_owned(),
                 })?;
-            let encode = |event: &sigil_kernel::PublicRunEvent| {
+            let encode = |event: &Option<sigil_kernel::PublicRunEvent>| {
                 serde_json::to_value(event).map_err(|error| HttpProtocolJournalError::Corrupt {
                     message: error.to_string(),
                 })
@@ -431,18 +421,15 @@ impl HttpDurableProtocolJournal {
         }
         let mut candidate = state.clone();
         candidate.events.retain(|event| {
-            !runs.contains(&(
-                event.run_event.session_id.clone(),
-                event.run_event.run_id.clone(),
-            ))
+            !runs.contains(&(event.session_id().to_owned(), event.run_id().to_owned()))
         });
         candidate
             .high_watermarks
             .retain(|key, _| !runs.contains(&(key.session_id.clone(), key.run_id.clone())));
         for (event, keep_stream_open, close_stream_after_event) in canonical_source {
             let key = HttpProtocolStreamKey::new(
-                event.run_event.session_id.clone(),
-                event.run_event.run_id.clone(),
+                event.session_id().to_owned(),
+                event.run_id().to_owned(),
             );
             candidate.append(event, keep_stream_open)?;
             if close_stream_after_event {
@@ -484,9 +471,9 @@ impl HttpDurableProtocolJournal {
             .iter()
             .rev()
             .find(|event| {
-                event.run_event.session_id == session_id
-                    && event.run_event.run_id == run_id
-                    && event.run_event.sequence == sequence
+                event.session_id() == session_id
+                    && event.run_id() == run_id
+                    && event.public_sequence().unwrap_or(0) == sequence
             })
             .cloned())
     }
@@ -529,9 +516,9 @@ impl HttpDurableProtocolJournal {
             .events
             .iter()
             .filter(|event| {
-                event.run_event.session_id == session_id
-                    && event.run_event.run_id == run_id
-                    && event.run_event.sequence > after_sequence
+                event.session_id() == session_id
+                    && event.run_id() == run_id
+                    && event.public_sequence().unwrap_or(0) > after_sequence
             })
             .cloned()
             .collect())
@@ -629,6 +616,16 @@ impl Drop for HttpDurableProtocolJournal {
 /// Durable journal failures.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpProtocolJournalError {
+    /// A journal or event uses a format that this version does not support.
+    #[error("unsupported http {component} schema; only version {expected} is accepted")]
+    UnsupportedSchema {
+        component: &'static str,
+        received: Option<u64>,
+        expected: u32,
+    },
+    /// A sequence-bearing live delta belongs to a retired protocol payload format.
+    #[error("http public live event payloads are unsupported; expected typed live_update")]
+    UnsupportedLivePayload,
     /// A rebuild source was read across a concurrent change to this derived cache.
     #[error(
         "http replay projection changed while its source was read; retry with a fresh snapshot"
@@ -685,6 +682,7 @@ impl HttpProtocolJournalError {
     /// These failures describe invalid content in the HTTP replay projection itself. The journal
     /// is not the canonical conversation or command-idempotency store, so a new server process can
     /// safely start with an empty replay window after preserving the invalid file for diagnostics.
+    /// Unsupported versions are not corruption recovery candidates and are never rewritten.
     #[must_use]
     pub const fn permits_replay_rebuild(&self) -> bool {
         matches!(
@@ -718,11 +716,9 @@ impl HttpProtocolJournalState {
         keep_stream_open: bool,
     ) -> Result<(), HttpProtocolJournalError> {
         validate_event_size(&event)?;
-        let key = HttpProtocolStreamKey::new(
-            event.run_event.session_id.clone(),
-            event.run_event.run_id.clone(),
-        );
-        let received = event.run_event.sequence;
+        let key =
+            HttpProtocolStreamKey::new(event.session_id().to_owned(), event.run_id().to_owned());
+        let received = event.public_sequence().unwrap_or(0);
         let existing = self.high_watermarks.get(&key).copied();
         if existing.is_some_and(|watermark| !watermark.accepts_events) {
             return Err(HttpProtocolJournalError::StreamAlreadyTerminal {
@@ -773,12 +769,14 @@ impl HttpProtocolJournalState {
         let remove = self.events.len().saturating_sub(max_events);
         if remove > 0 {
             for event in self.events.drain(..remove) {
-                let key =
-                    HttpProtocolStreamKey::new(event.run_event.session_id, event.run_event.run_id);
+                let key = HttpProtocolStreamKey::new(
+                    event.session_id().to_owned(),
+                    event.run_id().to_owned(),
+                );
                 if let Some(watermark) = self.high_watermarks.get_mut(&key) {
                     watermark.evicted_through_sequence = watermark
                         .evicted_through_sequence
-                        .max(event.run_event.sequence);
+                        .max(event.public_sequence().unwrap_or(0));
                 }
             }
         }
@@ -786,10 +784,7 @@ impl HttpProtocolJournalState {
             .events
             .iter()
             .map(|event| {
-                HttpProtocolStreamKey::new(
-                    event.run_event.session_id.clone(),
-                    event.run_event.run_id.clone(),
-                )
+                HttpProtocolStreamKey::new(event.session_id().to_owned(), event.run_id().to_owned())
             })
             .collect::<BTreeSet<_>>();
         self.high_watermarks
@@ -864,11 +859,11 @@ impl HttpProtocolJournalFile {
     }
 
     fn into_state(self) -> Result<HttpProtocolJournalState, HttpProtocolJournalError> {
-        if self.schema_version != HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION {
-            return Err(HttpProtocolJournalError::Corrupt {
-                message: format!("unsupported schema version {}", self.schema_version),
-            });
-        }
+        require_current_schema(
+            "journal",
+            Some(u64::from(self.schema_version)),
+            HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION,
+        )?;
         if self.events.len() > MAX_HTTP_PROTOCOL_JOURNAL_EVENTS
             || self.high_watermarks.len() > MAX_HTTP_PROTOCOL_JOURNAL_EVENTS
         {
@@ -921,27 +916,32 @@ impl HttpProtocolJournalFile {
                     message: "journal contains a non-canonical durable event".to_owned(),
                 });
             }
-            let expected_cursor = HttpProtocolCursor::from_run_event(&event.run_event)
-                .map_err(|error| HttpProtocolJournalError::Corrupt {
-                    message: error.to_string(),
-                })?
-                .encode();
+            let expected_cursor = HttpProtocolCursor::from_run_event(
+                event
+                    .run_event
+                    .as_ref()
+                    .ok_or(HttpProtocolJournalError::TransientEvent)?,
+            )
+            .map_err(|error| HttpProtocolJournalError::Corrupt {
+                message: error.to_string(),
+            })?
+            .encode();
             if event.replay_id.as_deref() != Some(expected_cursor.as_str()) {
                 return Err(HttpProtocolJournalError::Corrupt {
                     message: "journal event cursor does not match its payload".to_owned(),
                 });
             }
             let key = HttpProtocolStreamKey::new(
-                event.run_event.session_id.clone(),
-                event.run_event.run_id.clone(),
+                event.session_id().to_owned(),
+                event.run_id().to_owned(),
             );
             let (previous, foreground_terminal_seen) =
                 observed.get(&key).copied().unwrap_or((0, false));
-            if event.run_event.sequence <= previous
+            if event.public_sequence().unwrap_or(0) <= previous
                 || (foreground_terminal_seen
                     && !matches!(
-                        event.run_event.event,
-                        sigil_kernel::PublicRunEventKind::TerminalLifecycle { .. }
+                        event.run_event.as_ref().map(|public| &public.event),
+                        Some(sigil_kernel::PublicRunEventKind::TerminalLifecycle { .. })
                     ))
             {
                 return Err(HttpProtocolJournalError::Corrupt {
@@ -951,7 +951,7 @@ impl HttpProtocolJournalFile {
             observed.insert(
                 key,
                 (
-                    event.run_event.sequence,
+                    event.public_sequence().unwrap_or(0),
                     foreground_terminal_seen || protocol_event_is_terminal(event),
                 ),
             );
@@ -992,16 +992,34 @@ struct HttpProtocolJournalWatermark {
 fn canonical_durable_event(
     event: HttpProtocolEvent,
 ) -> Result<HttpProtocolEvent, HttpProtocolJournalError> {
-    if event.schema_version != HTTP_PROTOCOL_EVENT_SCHEMA_VERSION || !event.is_durable() {
+    require_current_schema(
+        "event envelope",
+        Some(u64::from(event.schema_version)),
+        HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
+    )?;
+    if let Some(run_event) = &event.run_event {
+        require_current_schema(
+            "public run event",
+            Some(u64::from(run_event.schema_version)),
+            PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+        )?;
+        if is_transient_public_run_event(&run_event.event) {
+            return Err(HttpProtocolJournalError::UnsupportedLivePayload);
+        }
+    }
+    if !event.is_durable() || !event.has_valid_payload() {
         return Err(HttpProtocolJournalError::TransientEvent);
     }
     let replay_id = event.replay_id;
     let approval_request = event.approval_request;
     let provisional_id = event.provisional_id;
-    let mut canonical = HttpProtocolEvent::from_run_event(event.run_event).map_err(|error| {
-        HttpProtocolJournalError::Corrupt {
-            message: error.to_string(),
-        }
+    let mut canonical = HttpProtocolEvent::from_run_event(
+        event
+            .run_event
+            .ok_or(HttpProtocolJournalError::TransientEvent)?,
+    )
+    .map_err(|error| HttpProtocolJournalError::Corrupt {
+        message: error.to_string(),
     })?;
     if !canonical.is_durable() {
         return Err(HttpProtocolJournalError::TransientEvent);
@@ -1042,16 +1060,18 @@ fn validate_event_size(event: &HttpProtocolEvent) -> Result<(), HttpProtocolJour
 }
 
 fn protocol_event_is_terminal(event: &HttpProtocolEvent) -> bool {
-    matches!(
-        &event.run_event.event,
-        sigil_kernel::PublicRunEventKind::RunFinished { .. }
-            | sigil_kernel::PublicRunEventKind::RunFailed { .. }
-            | sigil_kernel::PublicRunEventKind::RunBlocked { .. }
-            | sigil_kernel::PublicRunEventKind::RunPaused { .. }
-            | sigil_kernel::PublicRunEventKind::RunInterrupted { .. }
-            | sigil_kernel::PublicRunEventKind::RouteRecoveryRequired { .. }
-            | sigil_kernel::PublicRunEventKind::RunCancelled
-    )
+    event.run_event.as_ref().is_some_and(|public| {
+        matches!(
+            &public.event,
+            sigil_kernel::PublicRunEventKind::RunFinished { .. }
+                | sigil_kernel::PublicRunEventKind::RunFailed { .. }
+                | sigil_kernel::PublicRunEventKind::RunBlocked { .. }
+                | sigil_kernel::PublicRunEventKind::RunPaused { .. }
+                | sigil_kernel::PublicRunEventKind::RunInterrupted { .. }
+                | sigil_kernel::PublicRunEventKind::RouteRecoveryRequired { .. }
+                | sigil_kernel::PublicRunEventKind::RunCancelled
+        )
+    })
 }
 
 fn parse_scoped_cursor(
@@ -1098,11 +1118,72 @@ fn encode_state(state: &HttpProtocolJournalState) -> Result<Vec<u8>, HttpProtoco
 }
 
 fn decode_state(bytes: &[u8]) -> Result<HttpProtocolJournalState, HttpProtocolJournalError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| HttpProtocolJournalError::Corrupt {
+            message: error.to_string(),
+        })?;
+    // Check versions before interpreting payload fields. An older shape can otherwise fail
+    // current deserialization as corruption and incorrectly enter the quarantine/rebuild path.
+    require_current_schema(
+        "journal",
+        value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64),
+        HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION,
+    )?;
+    if let Some(events) = value.get("events").and_then(serde_json::Value::as_array) {
+        for event in events {
+            require_current_schema(
+                "event envelope",
+                event
+                    .get("schema_version")
+                    .and_then(serde_json::Value::as_u64),
+                HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
+            )?;
+            if let Some(run_event) = event.get("run_event").filter(|value| !value.is_null()) {
+                require_current_schema(
+                    "public run event",
+                    run_event
+                        .get("schema_version")
+                        .and_then(serde_json::Value::as_u64),
+                    PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+                )?;
+                if matches!(
+                    run_event
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(serde_json::Value::as_str),
+                    Some(
+                        "text_delta" | "reasoning_delta" | "tool_call_args_delta" | "tool_progress"
+                    )
+                ) {
+                    return Err(HttpProtocolJournalError::UnsupportedLivePayload);
+                }
+            }
+        }
+    }
+    drop(value);
+    // Decode the original bytes so duplicate-field rejection is not lost through a Value map.
     serde_json::from_slice::<HttpProtocolJournalFile>(bytes)
         .map_err(|error| HttpProtocolJournalError::Corrupt {
             message: error.to_string(),
         })?
         .into_state()
+}
+
+fn require_current_schema(
+    component: &'static str,
+    received: Option<u64>,
+    expected: u32,
+) -> Result<(), HttpProtocolJournalError> {
+    if received != Some(u64::from(expected)) {
+        return Err(HttpProtocolJournalError::UnsupportedSchema {
+            component,
+            received,
+            expected,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

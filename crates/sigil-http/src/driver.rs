@@ -374,6 +374,33 @@ pub trait HttpRunDriver: Send + Sync {
         ))
     }
 
+    /// Reads a page with the observing connection's cooperative cancellation budget.
+    fn transcript_page_with_budget(
+        &self,
+        session: &HttpSessionSnapshot,
+        before: Option<u64>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
+        budget
+            .check()
+            .map_err(|_| HttpRunDriverError::new("transcript query cancelled"))?;
+        self.transcript_page(session, before, limit)
+    }
+
+    /// Reads one identity-bound page of a complete safely redacted message body.
+    fn message_content_page(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _query: &sigil_application::message_content::MessageContentQuery,
+        _budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<
+        sigil_application::message_content::MessageContentPage,
+        sigil_application::message_content::MessageContentError,
+    > {
+        Err(sigil_application::message_content::MessageContentError::Unavailable)
+    }
+
     /// Projects one canonical durable conversation page for a bound session.
     ///
     /// # Errors
@@ -387,6 +414,20 @@ pub trait HttpRunDriver: Send + Sync {
         _limit: usize,
     ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
         Err(HttpConversationDisplayDriverError::Unavailable)
+    }
+
+    /// Reads canonical display with the observing connection's cancellation budget.
+    fn conversation_display_page_with_budget(
+        &self,
+        session: &HttpSessionSnapshot,
+        cursor: Option<&str>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        budget
+            .check()
+            .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?;
+        self.conversation_display_page(session, cursor, limit)
     }
 
     /// Reads one session-scoped, integrity-checked, bounded tool artifact page.
@@ -734,6 +775,9 @@ pub enum HttpRunDriverErrorKind {
 /// Typed rejection surface for the canonical display query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
 pub enum HttpConversationDisplayDriverError {
+    /// The committed source failed strict validation and requires recovery.
+    #[error("conversation display history is corrupt")]
+    Corrupt,
     /// The opaque cursor is malformed or belongs to another request scope.
     #[error("conversation display cursor is invalid")]
     InvalidCursor,

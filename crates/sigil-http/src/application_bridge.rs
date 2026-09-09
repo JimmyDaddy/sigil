@@ -58,6 +58,7 @@ pub(crate) struct HttpApplicationContext {
     pub(crate) delivery_acks: Arc<RuntimeApplicationDeliveryAckStore>,
     pub(crate) registry: Arc<HttpSessionRunRegistry>,
     pub(crate) runtime: Handle,
+    pub(crate) projection_owner: Option<sigil_runtime::RuntimeSessionProjectionOwner>,
 }
 
 pub(crate) fn application_scope(
@@ -174,6 +175,11 @@ pub(crate) fn build_client(
         1,
     )
     .map_err(application_driver_error)?;
+    let projection = if let Some(owner) = &context.projection_owner {
+        projection.with_owner(owner.clone())
+    } else {
+        projection
+    };
     let executor = Arc::new(HttpApplicationCommandExecutor {
         registry: Arc::clone(&context.registry),
         session_id: session.id.clone(),

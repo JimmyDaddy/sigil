@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, sync::Arc};
 
+use sigil_application::{LiveRunUpdate, LiveRunUpdateKind, SafeText};
 use sigil_kernel::resource::CanonicalHash;
 use sigil_kernel::{
     ApprovalRequestIdentityV2, MAX_EVENT_BYTES, PublicRunEvent, PublicRunEventKind,
@@ -10,6 +11,223 @@ use sigil_kernel::{
 
 use super::*;
 use crate::{HttpLiveEventBus, HttpPendingApproval, HttpProtocolEvent, HttpProtocolReplayError};
+
+#[test]
+fn journal_rejects_noncurrent_envelopes_without_upgrade_or_rebuild() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    {
+        let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal");
+        journal.append(durable_event(1)).expect("durable append");
+    }
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal bytes"))
+            .expect("journal JSON");
+    for version in [1, 2, 4] {
+        persisted["events"][0]["schema_version"] = serde_json::json!(version);
+        persisted["events"][0]["run_event"]["event"] =
+            serde_json::json!({ "type": "old_payload_shape" });
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode"))
+            .expect("unsupported fixture");
+        assert_unsupported_journal_source(
+            &path,
+            "event envelope",
+            Some(version),
+            HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
+        );
+    }
+}
+
+#[test]
+fn journal_rejects_unsupported_file_format_before_decoding_old_fields() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    for version in [None, Some(1), Some(2), Some(4)] {
+        let mut persisted = serde_json::json!({ "old_events": [] });
+        if let Some(version) = version {
+            persisted["schema_version"] = serde_json::json!(version);
+        }
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode"))
+            .expect("unsupported fixture");
+        assert_unsupported_journal_source(
+            &path,
+            "journal",
+            version,
+            HTTP_PROTOCOL_JOURNAL_SCHEMA_VERSION,
+        );
+    }
+}
+
+#[test]
+fn journal_rejects_noncurrent_public_payload_without_rebuild() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    {
+        let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal");
+        journal.append(durable_event(1)).expect("durable append");
+    }
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal bytes"))
+            .expect("journal JSON");
+    for version in [0, 1, 3] {
+        persisted["events"][0]["run_event"]["schema_version"] = serde_json::json!(version);
+        persisted["events"][0]["run_event"]["event"] =
+            serde_json::json!({ "type": "old_payload_shape" });
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode"))
+            .expect("unsupported fixture");
+        assert_unsupported_journal_source(
+            &path,
+            "public run event",
+            Some(version),
+            PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+        );
+    }
+}
+
+fn assert_unsupported_journal_source(
+    path: &std::path::Path,
+    component: &'static str,
+    received: Option<u64>,
+    expected: u32,
+) {
+    let expected_error = HttpProtocolJournalError::UnsupportedSchema {
+        component,
+        received,
+        expected,
+    };
+    assert_rejected_journal_source_unchanged(path, expected_error);
+}
+
+fn assert_rejected_journal_source_unchanged(
+    path: &std::path::Path,
+    expected_error: HttpProtocolJournalError,
+) {
+    let before = std::fs::read(path).expect("source bytes");
+    assert!(matches!(
+        HttpDurableProtocolJournal::open(path, 8),
+        Err(error) if error == expected_error
+    ));
+    assert!(matches!(
+        HttpDurableProtocolJournal::open_with_replay_rebuild(path, 8),
+        Err(error) if error == expected_error && !error.permits_replay_rebuild()
+    ));
+    assert_eq!(std::fs::read(path).expect("unchanged source bytes"), before);
+    assert!(
+        std::fs::read_dir(path.parent().expect("fixture parent"))
+            .expect("fixture directory")
+            .all(|entry| !entry
+                .expect("fixture entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".invalid-")),
+        "unsupported data must not be quarantined"
+    );
+}
+
+#[test]
+fn journal_rejects_retired_live_payloads_before_decoding_or_rebuilding() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    {
+        let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal");
+        journal.append(durable_event(1)).expect("durable append");
+    }
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal bytes"))
+            .expect("journal JSON");
+    for kind in [
+        "text_delta",
+        "reasoning_delta",
+        "tool_call_args_delta",
+        "tool_progress",
+    ] {
+        persisted["events"][0]["run_event"]["event"] = serde_json::json!({ "type": kind });
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode"))
+            .expect("retired fixture");
+        assert_rejected_journal_source_unchanged(
+            &path,
+            HttpProtocolJournalError::UnsupportedLivePayload,
+        );
+    }
+}
+
+#[test]
+fn journal_rejects_noncurrent_append_without_changing_current_replay() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal");
+    journal.append(durable_event(1)).expect("current event");
+    let before = std::fs::read(&path).expect("current bytes");
+    let mut unsupported_envelope = durable_event(2);
+    unsupported_envelope.schema_version = 2;
+    let mut unsupported_payload = durable_event(2);
+    unsupported_payload
+        .run_event
+        .as_mut()
+        .expect("payload")
+        .schema_version = 1;
+    for event in [unsupported_envelope, unsupported_payload] {
+        assert!(matches!(
+            journal.append(event),
+            Err(HttpProtocolJournalError::UnsupportedSchema { .. })
+        ));
+        assert_eq!(std::fs::read(&path).expect("current bytes"), before);
+    }
+    let replay = journal
+        .replay_run_after("session-1", "run-1", None)
+        .expect("current replay");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
+    assert_eq!(replay[0].public_sequence(), Some(1));
+}
+
+#[test]
+fn protocol_envelope_rejects_noncurrent_public_payload_at_construction() {
+    for kind in [
+        PublicRunEventKind::RunStarted {
+            prompt: "current schema only".to_owned(),
+        },
+        PublicRunEventKind::TextDelta {
+            text: "current schema only".to_owned(),
+        },
+    ] {
+        let mut event = PublicRunEvent::new("session-1", "run-1", 1, kind);
+        event.schema_version = 1;
+        assert!(matches!(
+            HttpProtocolEvent::from_run_event(event),
+            Err(
+                crate::HttpProtocolCursorError::UnsupportedPublicEventSchema {
+                    received: 1,
+                    expected: PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+                }
+            )
+        ));
+    }
+}
+
+#[test]
+fn journal_rejects_live_payload_in_current_durable_envelope() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let path = temp.path().join("protocol.json");
+    {
+        let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal");
+        journal.append(durable_event(1)).expect("durable append");
+    }
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal bytes"))
+            .expect("journal JSON");
+    persisted["events"][0]["live_update"] = serde_json::json!({
+        "schema_version": 1, "session_id": "session-1", "run_id": "run-1", "attempt_id": "attempt",
+        "slot_id": "text", "live_revision": 100000, "base_durable_sequence": 1,
+        "kind": "text", "preview": "must never enter replay", "truncated": false
+    });
+    std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode"))
+        .expect("invalid fixture");
+    assert!(matches!(
+        HttpDurableProtocolJournal::open(&path, 8),
+        Err(HttpProtocolJournalError::TransientEvent)
+    ));
+}
 
 fn approval_identity() -> ApprovalRequestIdentityV2 {
     ApprovalRequestIdentityV2 {
@@ -46,6 +264,28 @@ fn durable_event(sequence: u64) -> HttpProtocolEvent {
         },
     ))
     .expect("test event should have a durable cursor")
+}
+
+fn live_preview_update(
+    session_id: &str,
+    run_id: &str,
+    revision: u64,
+    base_durable_sequence: u64,
+    preview: &str,
+) -> LiveRunUpdate {
+    LiveRunUpdate {
+        schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
+        session_id: session_id.to_owned(),
+        run_id: run_id.to_owned(),
+        attempt_id: "current-provider-attempt".to_owned(),
+        slot_id: "assistant".to_owned(),
+        live_revision: revision,
+        base_durable_sequence,
+        kind: LiveRunUpdateKind::Text,
+        preview: SafeText::new(preview).expect("bounded current preview"),
+        tool_progress: None,
+        truncated: false,
+    }
 }
 
 fn durable_event_for(session_id: &str, run_id: &str, sequence: u64) -> HttpProtocolEvent {
@@ -217,7 +457,14 @@ fn durable_journal_replays_after_process_reopen() {
         .expect("retained suffix should replay");
 
     assert_eq!(replay.len(), 1);
-    assert_eq!(replay[0].run_event.sequence, 2);
+    assert_eq!(
+        replay[0]
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        2
+    );
 }
 
 #[test]
@@ -247,13 +494,12 @@ fn replacement_rejects_invalid_source_without_mutating_retained_runs() {
         ),
         Err(HttpProtocolJournalError::Corrupt { .. })
     ));
-    let transient = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+    let transient = HttpProtocolEvent::from_live_update(live_preview_update(
         "session-target",
         "run-target",
-        2,
-        PublicRunEventKind::TextDelta {
-            text: "not a durable journal source".to_owned(),
-        },
+        1,
+        1,
+        "not a durable journal source",
     ))
     .expect("transient event should still project for the rejection test");
     assert!(matches!(
@@ -272,7 +518,11 @@ fn replacement_rejects_invalid_source_without_mutating_retained_runs() {
     assert_eq!(
         retained_other
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![1]
     );
@@ -282,7 +532,11 @@ fn replacement_rejects_invalid_source_without_mutating_retained_runs() {
     assert_eq!(
         retained_target
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![1]
     );
@@ -341,7 +595,11 @@ fn replacement_rejects_a_source_snapshot_behind_the_current_journal_frontier() {
     assert_eq!(
         retained
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
@@ -584,7 +842,14 @@ fn current_schema_protocol_replay_uses_managed_namespace_and_reopens_from_it() {
         .replay_run_after("session-1", "run-1", None)
         .expect("managed event should replay");
     assert_eq!(replay.len(), 1);
-    assert_eq!(replay[0].run_event.sequence, 1);
+    assert_eq!(
+        replay[0]
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        1
+    );
 }
 
 #[test]
@@ -685,7 +950,11 @@ fn bounded_journal_accepts_the_exact_eviction_boundary_cursor() {
     assert_eq!(
         replay
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![2, 3]
     );
@@ -944,7 +1213,12 @@ fn public_journal_append_reapplies_canonical_safe_projection() {
         },
     ))
     .expect("event should project");
-    if let PublicRunEventKind::RunStarted { prompt } = &mut event.run_event.event {
+    if let PublicRunEventKind::RunStarted { prompt } = &mut event
+        .run_event
+        .as_mut()
+        .expect("public event payload")
+        .event
+    {
         *prompt = "prompt token=raw-bypass-secret".to_owned();
     }
 
@@ -1393,7 +1667,7 @@ fn durable_live_bus_persists_before_broadcast_and_recovers_with_a_new_bus() {
         Arc::new(HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize"));
     let first_bus = HttpLiveEventBus::with_durable_journal(8, first_journal);
     first_bus
-        .publish_run_event(durable_event(1).run_event)
+        .publish_run_event(durable_event(1).run_event.expect("durable public payload"))
         .expect("durable event should publish");
     first_bus
         .publish_run_event(PublicRunEvent::new(
@@ -1436,20 +1710,19 @@ fn durable_live_bus_never_accumulates_a_second_in_memory_history() {
     );
     let bus = HttpLiveEventBus::with_durable_journal(4, journal);
     for sequence in 1..=128 {
-        bus.publish_run_event(PublicRunEvent::new(
+        bus.publish_live_update(live_preview_update(
             "session-1",
             "run-1",
             sequence,
-            PublicRunEventKind::TextDelta {
-                text: format!("delta-{sequence}"),
-            },
+            0,
+            &format!("preview-{sequence}"),
         ))
         .expect("transient event should use only bounded live fan-out");
     }
     bus.publish_run_event(PublicRunEvent::new(
         "session-1",
         "run-1",
-        129,
+        1,
         PublicRunEventKind::Notice {
             message: "durable".to_owned(),
         },

@@ -61,18 +61,16 @@ use sigil_runtime::application_run::{
     accept_application_task_integration_review_with_attachment, application_agent_activity_view,
     application_recoverable_user_input_decision, application_run_context_view,
     application_session_frontier_view, application_session_has_unresolved_user_input,
-    application_session_transcript_page, application_task_integration_review_view,
-    application_user_input_request_view_by_key, application_verification_view,
-    bind_application_session_with_model_ref_and_attachment_and_managed_writer,
-    bind_existing_application_session, bind_existing_application_session_with_attachment,
+    application_task_integration_review_view, application_user_input_request_view_by_key,
+    application_verification_view, bind_application_session_with_model_ref_and_projection_owner,
+    bind_existing_application_session,
+    bind_existing_application_session_with_attachment_and_projection_owner,
     prepare_application_run, prepare_application_task_continuation,
     prepare_application_user_input_decision,
     record_application_preparation_cancellation_with_attachment,
     rerun_application_verification_with_attachment,
 };
-use sigil_runtime::conversation_display::{
-    ConversationDisplayProjectionError, conversation_display_page_with_optional_artifact_store,
-};
+use sigil_runtime::conversation_display::ConversationDisplayProjectionError;
 use sigil_runtime::{LocalSessionLifecycleService, LocalSessionReopenError};
 use tokio::{runtime::Handle, sync::mpsc};
 
@@ -248,6 +246,13 @@ enum HttpPreparedApplicationRun {
 }
 
 impl HttpPreparedApplicationRun {
+    fn session_projection_owner(&self) -> sigil_runtime::RuntimeSessionProjectionOwner {
+        match self {
+            Self::Conversation(prepared) => prepared.session_projection_owner(),
+            Self::Task(prepared) => prepared.session_projection_owner(),
+        }
+    }
+
     fn session_id(&self) -> &str {
         match self {
             Self::Conversation(prepared) => prepared.session_id(),
@@ -262,7 +267,7 @@ impl HttpPreparedApplicationRun {
         }
     }
 
-    fn terminal_control(&self) -> ApplicationTerminalTaskControl {
+    fn terminal_control(&self) -> Option<ApplicationTerminalTaskControl> {
         match self {
             Self::Conversation(prepared) => prepared.terminal_control(),
             Self::Task(prepared) => prepared.terminal_control(),
@@ -346,13 +351,9 @@ pub struct HttpProductionRunDriver {
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     exact_queue_prompts: Arc<Mutex<BTreeMap<HttpExactQueuePromptKey, HttpExactQueuePrompt>>>,
     pending_compactions: Arc<Mutex<BTreeMap<String, PendingHttpCompaction>>>,
-    session_attachments: Mutex<
-        BTreeMap<
-            String,
-            Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
-        >,
-    >,
+    session_attachments: Mutex<BTreeMap<String, HttpAttachedSession>>,
     session_projection_stores: Mutex<HttpSessionProjectionStoreCache>,
+    readonly_query_owners: Mutex<HttpSessionQueryOwnerCache>,
     reconciled_terminal_sessions: Mutex<BTreeSet<String>>,
 }
 
@@ -370,6 +371,18 @@ struct HttpPlanReviewRevisionEventHandler {
 impl sigil_runtime::application_run::ApplicationRunEventHandler
     for HttpPlanReviewRevisionEventHandler
 {
+    fn bind_live_preview_source(
+        &mut self,
+        source: sigil_runtime::RuntimeLivePreviewSource,
+    ) -> Result<()> {
+        if source.session_id() != self.durable_session_scope_id || source.run_id() != self.run_id {
+            anyhow::bail!("plan review revision live source scope mismatch");
+        }
+        self.event_bus
+            .bind_live_preview_source(source)
+            .map_err(anyhow::Error::new)
+    }
+
     fn handle_public_event(&mut self, event: sigil_kernel::PublicRunEvent) -> anyhow::Result<()> {
         if event.session_id != self.durable_session_scope_id || event.run_id != self.run_id {
             anyhow::bail!("plan review revision event scope mismatch");
@@ -439,9 +452,44 @@ struct HttpRetainedSessionProjectionStore {
     last_used_sequence: u64,
 }
 
+struct HttpAttachedSession {
+    attachment:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+    projection_owner: Option<HttpBoundProjectionOwner>,
+}
+
+#[derive(Clone)]
+struct HttpBoundProjectionOwner {
+    durable_session_scope_id: String,
+    session_log_path: PathBuf,
+    owner: sigil_runtime::RuntimeSessionProjectionOwner,
+}
+
+impl HttpBoundProjectionOwner {
+    fn for_session(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<sigil_runtime::RuntimeSessionProjectionOwner, HttpRunDriverError> {
+        if self.durable_session_scope_id != session.durable_session_scope_id
+            || self.session_log_path != Path::new(&session.session_log_path)
+        {
+            return Err(HttpRunDriverError::new(
+                "application projection owner does not match its durable session binding",
+            ));
+        }
+        Ok(self.owner.clone())
+    }
+}
+
 #[derive(Default)]
 struct HttpSessionProjectionStoreCache {
     entries: BTreeMap<String, HttpRetainedSessionProjectionStore>,
+    access_sequence: u64,
+}
+
+#[derive(Default)]
+struct HttpSessionQueryOwnerCache {
+    entries: BTreeMap<String, (HttpBoundProjectionOwner, u64)>,
     access_sequence: u64,
 }
 
@@ -472,34 +520,40 @@ struct ArtifactAccessState {
     preparing: bool,
 }
 
-/// Coordinates the short read leases used by HTTP projections with the exclusive artifact lease
-/// acquired while a foreground run is being prepared. The authority remains the final owner of
-/// the namespace reservation; this process-local barrier only prevents two local callers from
-/// racing the authority for the same session namespace.
+/// Serializes the short authority leases used by HTTP readers with each other and with run
+/// preparation. Even read-only artifact operations acquire an exclusive namespace reservation;
+/// different sessions may proceed independently. The authority remains the final owner.
 struct ArtifactAccessCoordinator {
     states: Mutex<BTreeMap<String, ArtifactAccessState>>,
     ready: Condvar,
 }
 
 impl ArtifactAccessCoordinator {
-    fn begin_read(self: &Arc<Self>, key: &str) -> ArtifactReadPermit {
+    fn begin_read(
+        self: &Arc<Self>,
+        key: &str,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<ArtifactReadPermit> {
+        budget.check()?;
         let mut states = self
             .states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
+            budget.check()?;
             let state = states.entry(key.to_owned()).or_default();
-            if !state.preparing {
+            if !state.preparing && state.readers == 0 {
                 state.readers = state.readers.saturating_add(1);
-                return ArtifactReadPermit {
+                return Ok(ArtifactReadPermit {
                     coordinator: Arc::clone(self),
                     key: key.to_owned(),
-                };
+                });
             }
             states = self
                 .ready
-                .wait(states)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .wait_timeout(states, Duration::from_millis(20))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
         }
     }
 
@@ -711,6 +765,7 @@ impl HttpProductionRunDriver {
                     session_id,
                     broker: Arc::new(HttpApprovalBroker::default()),
                     cancel_sender,
+                    projection_owner: Arc::new(Mutex::new(None)),
                 }),
             );
         }
@@ -1125,9 +1180,9 @@ impl HttpProductionRunDriver {
             .session_attachments
             .lock()
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        if let Some(attachment) = attachments.get(durable_session_scope_id) {
-            return if attachment.session_path() == canonical_session_path {
-                Ok(Arc::clone(attachment))
+        if let Some(attached) = attachments.get(durable_session_scope_id) {
+            return if attached.attachment.session_path() == canonical_session_path {
+                Ok(Arc::clone(&attached.attachment))
             } else {
                 Err(HttpRunAdmissionError::Unavailable)
             };
@@ -1206,7 +1261,11 @@ impl HttpProductionRunDriver {
                     authority_recovery_code = HttpSessionRouteRecoveryCode::ConnectionConfigInvalid;
                     (services, false)
                 }
-                Err(_error) => (services, false),
+                Err(error) => {
+                    let detail = safe_persistence_text(&format!("{error:?}"));
+                    tracing::warn!(error = %detail, "HTTP authority boot unavailable");
+                    (services, false)
+                }
             };
         let mut options = options;
         let current_schema = services.cutover().is_some_and(|cutover| {
@@ -1291,6 +1350,7 @@ impl HttpProductionRunDriver {
             pending_compactions: Arc::new(Mutex::new(BTreeMap::new())),
             session_attachments: Mutex::new(BTreeMap::new()),
             session_projection_stores: Mutex::new(HttpSessionProjectionStoreCache::default()),
+            readonly_query_owners: Mutex::new(HttpSessionQueryOwnerCache::default()),
             reconciled_terminal_sessions: Mutex::new(BTreeSet::new()),
         })
     }
@@ -1487,6 +1547,11 @@ impl HttpProductionRunDriver {
             store
         };
         drop(delivery_acks);
+        // Command preflight observes durable state. An idle session can lose the selected
+        // attachment when another session is opened; that does not remove its read capability.
+        // Dispatch still acquires the exact interactive attachment and revalidates authority.
+        // query_projection_owner preserves failure when an active owner has no published handle.
+        let projection_owner = Some(self.query_projection_owner(session)?);
         Ok(crate::application_bridge::HttpApplicationContext {
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
@@ -1496,7 +1561,96 @@ impl HttpProductionRunDriver {
             delivery_acks: delivery_store,
             registry,
             runtime: self.runtime.clone(),
+            projection_owner,
         })
+    }
+
+    fn application_projection_owner(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<Option<sigil_runtime::RuntimeSessionProjectionOwner>, HttpRunDriverError> {
+        let runs = self
+            .active_runs
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("application active-run owner unavailable"))?;
+        let mut has_active_run = false;
+        for run in runs.values().filter(|run| run.session_id == session.id) {
+            has_active_run = true;
+            let owner = run
+                .projection_owner
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("application projection owner unavailable"))?;
+            if let Some(owner) = owner.as_ref() {
+                return owner.for_session(session).map(Some);
+            }
+        }
+        drop(runs);
+        let attachments = self
+            .session_attachments
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("application session owner unavailable"))?;
+        let owner = attachments
+            .get(&session.durable_session_scope_id)
+            .and_then(|attached| attached.projection_owner.as_ref())
+            .map(|owner| owner.for_session(session))
+            .transpose()?;
+        if has_active_run && owner.is_none() {
+            return Err(HttpRunDriverError::new(
+                "active application projection owner is not available yet",
+            ));
+        }
+        Ok(owner)
+    }
+
+    fn query_projection_owner(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<sigil_runtime::RuntimeSessionProjectionOwner, HttpRunDriverError> {
+        // An unavailable active owner fails at its own boundary; only the deliberate detached
+        // browsing path receives a read-only capability, never a replacement writer.
+        let owned = self.application_projection_owner(session)?;
+        let mut queries = self
+            .readonly_query_owners
+            .lock()
+            .map_err(|_| HttpRunDriverError::new("session query cache unavailable"))?;
+        if let Some(owner) = owned {
+            queries.entries.remove(&session.durable_session_scope_id);
+            return Ok(owner);
+        }
+        queries.access_sequence = queries.access_sequence.saturating_add(1);
+        let access_sequence = queries.access_sequence;
+        if let Some((binding, last_used)) =
+            queries.entries.get_mut(&session.durable_session_scope_id)
+        {
+            *last_used = access_sequence;
+            return binding.for_session(session);
+        }
+        let reader = sigil_kernel::SessionRecordReadHandle::open_existing_observer(Path::new(
+            &session.session_log_path,
+        ))
+        .map_err(|_| HttpRunDriverError::new("detached session query unavailable"))?;
+        let owner = sigil_runtime::RuntimeSessionProjectionOwner::from_read_handle(reader);
+        if queries.entries.len() >= MAX_HTTP_RETAINED_SESSION_PROJECTION_STORES
+            && let Some(evicted) = queries
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(scope, _)| scope.clone())
+        {
+            queries.entries.remove(&evicted);
+        }
+        queries.entries.insert(
+            session.durable_session_scope_id.clone(),
+            (
+                HttpBoundProjectionOwner {
+                    durable_session_scope_id: session.durable_session_scope_id.clone(),
+                    session_log_path: PathBuf::from(&session.session_log_path),
+                    owner: owner.clone(),
+                },
+                access_sequence,
+            ),
+        );
+        Ok(owner)
     }
 
     /// Returns the number of owned run supervisors that have not completed cleanup.
@@ -1856,7 +2010,9 @@ impl HttpProductionRunDriver {
             session_id: start.session.id.clone(),
             broker: Arc::clone(&broker),
             cancel_sender,
+            projection_owner: Arc::new(Mutex::new(None)),
         });
+        let projection_owner = Arc::clone(&active.projection_owner);
         {
             let mut runs = self
                 .active_runs
@@ -1898,6 +2054,7 @@ impl HttpProductionRunDriver {
             terminal_owners: Arc::clone(&self.terminal_owners),
             cancel_receiver,
             post_run_maintenance: Arc::clone(&post_run_maintenance),
+            projection_owner,
         };
         let task = self.runtime.spawn(supervisor.run(preprepared));
         let active_runs = Arc::clone(&self.active_runs);
@@ -2017,6 +2174,7 @@ impl HttpProductionRunDriver {
         attachment: Arc<
             sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
         >,
+        projection_owner: Option<sigil_runtime::RuntimeSessionProjectionOwner>,
     ) -> Result<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
         HttpRunAdmissionError,
@@ -2049,8 +2207,25 @@ impl HttpProductionRunDriver {
             .session_attachments
             .lock()
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
+        let previous_owner = attachments
+            .get(durable_session_scope_id)
+            .filter(|attached| attached.attachment.session_path() == canonical_session_path)
+            .and_then(|attached| attached.projection_owner.clone());
+        let projection_owner = projection_owner
+            .map(|owner| HttpBoundProjectionOwner {
+                durable_session_scope_id: durable_session_scope_id.to_owned(),
+                session_log_path: canonical_session_path,
+                owner,
+            })
+            .or(previous_owner);
         attachments.clear();
-        attachments.insert(durable_session_scope_id.to_owned(), Arc::clone(&attachment));
+        attachments.insert(
+            durable_session_scope_id.to_owned(),
+            HttpAttachedSession {
+                attachment: Arc::clone(&attachment),
+                projection_owner,
+            },
+        );
         Ok(attachment)
     }
 
@@ -2069,6 +2244,7 @@ impl HttpProductionRunDriver {
             &session.durable_session_scope_id,
             Path::new(&session.session_log_path),
             attachment,
+            None,
         )
     }
 
@@ -2084,7 +2260,7 @@ impl HttpProductionRunDriver {
             .lock()
             .map_err(|_| HttpRunDriverError::new("session attachment state unavailable"))?
             .get(&session.durable_session_scope_id)
-            .is_some_and(|attachment| attachment.session_path() == canonical_session_path);
+            .is_some_and(|attached| attached.attachment.session_path() == canonical_session_path);
         if owned {
             return Ok(None);
         }
@@ -2212,6 +2388,42 @@ impl HttpProductionRunDriver {
                 Err(HttpToolArtifactReadDriverError::Unavailable)
             }
         }
+    }
+
+    fn owned_tool_artifact_store(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+    ) -> Result<Option<(String, sigil_kernel::ToolArtifactStore)>, HttpToolArtifactReadDriverError>
+    {
+        let stores = self
+            .active_artifact_stores
+            .lock()
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        let mut matches = session
+            .run_ids
+            .iter()
+            .filter_map(|run_id| stores.get(run_id).map(|store| (run_id, store)));
+        let owned = matches
+            .next()
+            .map(|(run_id, store)| (run_id.clone(), store.clone()));
+        if matches.next().is_some() {
+            return Err(HttpToolArtifactReadDriverError::Unavailable);
+        }
+        drop(stores);
+        let Some((run_id, store)) = owned else {
+            return Ok(None);
+        };
+        if store.session_scope_id() != session.durable_session_scope_id {
+            return Err(HttpToolArtifactReadDriverError::Unavailable);
+        }
+        let expected_path = std::fs::canonicalize(&session.session_log_path)
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        let owned_path = std::fs::canonicalize(store.session_log_path())
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
+        if owned_path != expected_path {
+            return Err(HttpToolArtifactReadDriverError::Unavailable);
+        }
+        Ok(Some((run_id, store)))
     }
 }
 
@@ -2341,8 +2553,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
                     .authority_composition()
                     .map(|composition| Arc::clone(&composition.storage_writer))
             });
-        let (binding, attachment) =
-            bind_application_session_with_model_ref_and_attachment_and_managed_writer(
+        let (binding, attachment, projection_owner) =
+            bind_application_session_with_model_ref_and_projection_owner(
                 &self.options.config_path,
                 &self.options.launch_cwd,
                 None,
@@ -2359,6 +2571,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             &binding.session_scope_id,
             &binding.session_log_path,
             attachment,
+            Some(projection_owner),
         )
         .map_err(|_| HttpRunDriverError::new("failed to retain durable session attachment"))?;
         Ok(HttpSessionBinding {
@@ -2439,34 +2652,36 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 Err(_) => return Err(HttpSessionOpenBindingError::Unavailable),
             }
         };
-        let (binding, route_recovery) = if let Some(attachment) = attachment.as_ref() {
-            match bind_existing_application_session_with_attachment(
-                &self.options.config_path,
-                &candidate.session_log_path,
-                attachment.as_ref(),
-            ) {
-                Ok(binding) => (binding, None),
-                Err(error) => {
-                    let Some(recovery) = http_route_recovery_from_prepare_error(
-                        &error,
-                        &stable_http_attachment_recovery_binding(
-                            &candidate.session_id,
-                            attachment.generation(),
-                        ),
-                    ) else {
-                        return Err(HttpSessionOpenBindingError::Unavailable);
-                    };
-                    (read_binding, Some(recovery))
+        let (binding, route_recovery, projection_owner) =
+            if let Some(attachment) = attachment.as_ref() {
+                match bind_existing_application_session_with_attachment_and_projection_owner(
+                    &self.options.config_path,
+                    &candidate.session_log_path,
+                    attachment.as_ref(),
+                ) {
+                    Ok((binding, owner)) => (binding, None, Some(owner)),
+                    Err(error) => {
+                        let Some(recovery) = http_route_recovery_from_prepare_error(
+                            &error,
+                            &stable_http_attachment_recovery_binding(
+                                &candidate.session_id,
+                                attachment.generation(),
+                            ),
+                        ) else {
+                            return Err(HttpSessionOpenBindingError::Unavailable);
+                        };
+                        (read_binding, Some(recovery), None)
+                    }
                 }
-            }
-        } else {
-            (read_binding, attachment_recovery)
-        };
+            } else {
+                (read_binding, attachment_recovery, None)
+            };
         if let Some(attachment) = attachment {
             self.install_session_attachment(
                 &binding.session_scope_id,
                 &binding.session_log_path,
                 attachment,
+                projection_owner,
             )
             .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
         }
@@ -2558,6 +2773,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
     }
 
     fn purge_session_local_state(&self, durable_session_scope_id: &str) {
+        self.readonly_query_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .remove(durable_session_scope_id);
         let _ = self.cancel_owned_terminal_tasks(Some(durable_session_scope_id));
         let mut exact_prompts = self
             .exact_queue_prompts
@@ -2821,13 +3041,28 @@ impl HttpRunDriver for HttpProductionRunDriver {
         before: Option<u64>,
         limit: usize,
     ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
-        let page = application_session_transcript_page(
-            Path::new(&session.session_log_path),
-            &session.durable_session_scope_id,
+        self.transcript_page_with_budget(
+            session,
             before,
             limit,
+            &sigil_kernel::SessionReadBudget::default(),
         )
-        .map_err(|_| HttpRunDriverError::new("durable transcript projection failed"))?;
+    }
+
+    fn transcript_page_with_budget(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        before: Option<u64>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpSessionTranscriptPage, HttpRunDriverError> {
+        budget
+            .check()
+            .map_err(|_| HttpRunDriverError::new("transcript query cancelled"))?;
+        let page = self
+            .query_projection_owner(session)?
+            .transcript_page(&session.durable_session_scope_id, before, limit, budget)
+            .map_err(|_| HttpRunDriverError::new("transcript projection failed"))?;
         Ok(HttpSessionTranscriptPage {
             session_scope_id: page.session_scope_id,
             total_messages: page.total_messages,
@@ -2867,49 +3102,86 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn message_content_page(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        query: &sigil_application::message_content::MessageContentQuery,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<
+        sigil_application::message_content::MessageContentPage,
+        sigil_application::message_content::MessageContentError,
+    > {
+        budget
+            .check()
+            .map_err(|_| sigil_application::message_content::MessageContentError::Unavailable)?;
+        self.query_projection_owner(session)
+            .map_err(|_| sigil_application::message_content::MessageContentError::Unavailable)?
+            .message_content_page(&session.durable_session_scope_id, query, budget)
+    }
+
     fn conversation_display_page(
         &self,
         session: &crate::HttpSessionSnapshot,
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
-        let current_workspace_snapshot_id =
-            sigil_kernel::RootConfig::load(&self.options.config_path)
-                .ok()
-                .and_then(|config| {
-                    let workspace_root = sigil_kernel::resolve_workspace_root(
-                        &self.options.config_path,
-                        &self.options.launch_cwd,
-                        &config.workspace.root,
-                    );
-                    sigil_runtime::plan_handoff_workspace_snapshot_id(&config, &workspace_root).ok()
-                })
-                .flatten();
+        self.conversation_display_page_with_budget(
+            session,
+            cursor,
+            limit,
+            &sigil_kernel::SessionReadBudget::default(),
+        )
+    }
+
+    fn conversation_display_page_with_budget(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        cursor: Option<&str>,
+        limit: usize,
+        budget: &sigil_kernel::SessionReadBudget,
+    ) -> Result<HttpConversationDisplayPage, HttpConversationDisplayDriverError> {
+        budget
+            .check()
+            .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?;
         let _artifact_read_permit = authority_artifact_store_key(&self.services, session)
-            .map(|key| self.artifact_access.begin_read(&key));
+            .map(|key| self.artifact_access.begin_read(&key, budget))
+            .transpose()
+            .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?;
         let artifact_lease = authority_artifact_store_for_session(&self.services, session);
         let artifact_store = artifact_lease
             .as_ref()
             .map(AuthorityArtifactStoreLease::store);
-        let page = conversation_display_page_with_optional_artifact_store(
-            Path::new(&session.session_log_path),
-            &session.durable_session_scope_id,
-            cursor,
-            limit,
-            current_workspace_snapshot_id.as_deref(),
-            artifact_store.as_ref(),
-        )
-        .map_err(|error| match error {
-            ConversationDisplayProjectionError::InvalidCursor { .. } => {
-                HttpConversationDisplayDriverError::InvalidCursor
-            }
-            ConversationDisplayProjectionError::StaleCursor { .. } => {
-                HttpConversationDisplayDriverError::StaleCursor
-            }
-            ConversationDisplayProjectionError::Unavailable { .. } => {
-                HttpConversationDisplayDriverError::Unavailable
-            }
-        })?;
+        let owner = self
+            .query_projection_owner(session)
+            .map_err(|_| HttpConversationDisplayDriverError::Unavailable)?;
+        let page = owner
+            .conversation_display_page(
+                sigil_runtime::ConversationDisplayQuery {
+                    expected_session_scope_id: &session.durable_session_scope_id,
+                    cursor,
+                    limit,
+                    // Display does not perform the auxiliary workspace scan. None preserves the
+                    // existing conservative "snapshot unavailable / may be stale" projection;
+                    // actual Plan/Task admission revalidates the workspace through its owner.
+                    current_workspace_snapshot_id: None,
+                    artifact_store: artifact_store.as_ref(),
+                },
+                budget,
+            )
+            .map_err(|error| match error {
+                ConversationDisplayProjectionError::Corrupt { .. } => {
+                    HttpConversationDisplayDriverError::Corrupt
+                }
+                ConversationDisplayProjectionError::InvalidCursor { .. } => {
+                    HttpConversationDisplayDriverError::InvalidCursor
+                }
+                ConversationDisplayProjectionError::StaleCursor { .. } => {
+                    HttpConversationDisplayDriverError::StaleCursor
+                }
+                ConversationDisplayProjectionError::Unavailable { .. } => {
+                    HttpConversationDisplayDriverError::Unavailable
+                }
+            })?;
         let mut page = HttpConversationDisplayPage::from_runtime(&session.id, page);
         if let Some(run_id) = session.foreground_run_id.as_deref() {
             let run_sequence = self
@@ -2942,13 +3214,15 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .validate()
             .map_err(|_| HttpToolArtifactReadDriverError::InvalidSelector)?;
 
+        let budget = sigil_kernel::SessionReadBudget::default();
+        let _artifact_read_permit = authority_artifact_store_key(&self.services, session)
+            .map(|key| self.artifact_access.begin_read(&key, &budget))
+            .transpose()
+            .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
         let binding = self.projected_tool_artifact_binding(session, &artifact_ref)?;
-        let active_store = session.foreground_run_id.as_deref().and_then(|run_id| {
-            self.active_artifact_stores
-                .lock()
-                .ok()
-                .and_then(|stores| stores.get(run_id).cloned())
-        });
+        // Terminal publication clears the foreground owner before its supervisor releases the
+        // artifact lease. Reuse only an exact-session capability from its registered runs.
+        let active_store = self.owned_tool_artifact_store(session)?;
         let read_from_store = |store: sigil_kernel::ToolArtifactStore| {
             let descriptor = store
                 .resolve(&artifact_ref)
@@ -2982,14 +3256,11 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 .map_err(|_| HttpToolArtifactReadDriverError::Unavailable)?;
             Ok(HttpToolArtifactPage::from_kernel(&session.id, page))
         };
-        if let Some(store) = active_store {
+        if let Some((run_id, store)) = active_store {
             match read_from_store(store) {
                 Ok(page) => return Ok(page),
                 Err(HttpToolArtifactReadDriverError::Unavailable) => {
-                    if let Some(run_id) = session.foreground_run_id.as_deref() {
-                        let _ =
-                            self.wait_for_run_release(run_id, DEFAULT_HTTP_CANCELLATION_TIMEOUT);
-                    }
+                    let _ = self.wait_for_run_release(&run_id, DEFAULT_HTTP_CANCELLATION_TIMEOUT);
                 }
                 Err(error) => return Err(error),
             }
@@ -3938,8 +4209,9 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let _attachment = session_attachment;
         let command: sigil_runtime::ApplicationPlanDecisionCommand = request.clone().into();
-        let root_config =
-            sigil_kernel::RootConfig::load(&self.options.config_path).map_err(|error| {
+        let root_config = sigil_kernel::RootConfig::load(&self.options.config_path)
+            .and_then(|config| config.with_effective_composition())
+            .map_err(|error| {
                 HttpRunDriverError::new(format!("plan decision config failed: {error}"))
             })?;
         // Resolve the same workspace root the display projection uses so stale evaluation and
@@ -4769,6 +5041,7 @@ struct HttpProductionActiveRun {
     session_id: String,
     broker: Arc<HttpApprovalBroker>,
     cancel_sender: mpsc::UnboundedSender<HttpProductionRunControlCommand>,
+    projection_owner: Arc<Mutex<Option<HttpBoundProjectionOwner>>>,
 }
 
 #[derive(Clone)]
@@ -5010,9 +5283,24 @@ struct HttpRunSupervisor {
     terminal_owners: Arc<Mutex<BTreeMap<String, HttpProductionTerminalOwner>>>,
     cancel_receiver: mpsc::UnboundedReceiver<HttpProductionRunControlCommand>,
     post_run_maintenance: Arc<Mutex<Option<ApplicationPostRunMaintenance>>>,
+    projection_owner: Arc<Mutex<Option<HttpBoundProjectionOwner>>>,
 }
 
 impl HttpRunSupervisor {
+    fn retain_prepared_projection_owner(
+        &self,
+        prepared: &HttpPreparedApplicationRun,
+    ) -> Result<(), HttpRunDriverError> {
+        *self.projection_owner.lock().map_err(|_| {
+            HttpRunDriverError::new("application prepared projection owner unavailable")
+        })? = Some(HttpBoundProjectionOwner {
+            durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
+            session_log_path: prepared.session_log_path().to_path_buf(),
+            owner: prepared.session_projection_owner(),
+        });
+        Ok(())
+    }
+
     fn evict_promoted_exact_prompt(
         &self,
         queued: Option<&HttpQueuedRunTerminalContext>,
@@ -5256,17 +5544,26 @@ impl HttpRunSupervisor {
                 "prepared application run does not match its durable HTTP session binding",
             ));
         }
-        self.terminal_owners
-            .lock()
-            .map_err(|_| HttpRunDriverError::new("production terminal-owner state unavailable"))?
-            .insert(
-                self.start.run.id.clone(),
-                HttpProductionTerminalOwner {
-                    session_id: self.start.session.id.clone(),
-                    durable_session_scope_id: self.start.session.durable_session_scope_id.clone(),
-                    control: prepared.terminal_control(),
-                },
-            );
+        self.retain_prepared_projection_owner(&prepared)?;
+        if let Some(control) = prepared.terminal_control() {
+            self.terminal_owners
+                .lock()
+                .map_err(|_| {
+                    HttpRunDriverError::new("production terminal-owner state unavailable")
+                })?
+                .insert(
+                    self.start.run.id.clone(),
+                    HttpProductionTerminalOwner {
+                        session_id: self.start.session.id.clone(),
+                        durable_session_scope_id: self
+                            .start
+                            .session
+                            .durable_session_scope_id
+                            .clone(),
+                        control,
+                    },
+                );
+        }
         if let Some(store) = prepared.tool_artifact_store()
             && let Ok(mut stores) = self.active_artifact_stores.lock()
         {
@@ -6003,6 +6300,15 @@ impl HttpRunSupervisor {
                 error,
             ));
         }
+        self.retain_prepared_projection_owner(&prepared)
+            .map_err(|error| {
+                quarantine_cancellation_failure(
+                    registry,
+                    &self.start.run.id,
+                    &acknowledgement,
+                    error,
+                )
+            })?;
         let (execution, control) = prepared.into_parts();
         let control = Arc::new(control);
         let request_control = Arc::clone(&control);
@@ -6449,8 +6755,7 @@ fn is_application_terminal_public_event(event: &PublicRunEventKind) -> bool {
 ///
 /// The public outbox is the durable authority for identity/sequence/payload. Durable HTTP event
 /// classes are projected into the bounded replay journal exactly once; equal bytes at one
-/// sequence establish a prior accepted projection. Transient HTTP classes retain their existing
-/// best-effort live semantics and are deliberately not inferred from the durable journal.
+/// sequence establish a prior accepted projection. Live previews use the separate typed source.
 fn publish_exact_http_outbox_event(
     event_bus: &HttpLiveEventBus,
     durable_session_scope_id: &str,
@@ -6479,17 +6784,6 @@ fn publish_exact_http_outbox_event_with_stream_close(
         ));
     }
     let canonical = crate::HttpProtocolEvent::from_run_event(event.clone())?;
-    if !canonical.is_durable() {
-        let protocol = event_bus
-            .publish_run_event(event)
-            .map_err(anyhow::Error::new)?;
-        if close_stream_after_event {
-            event_bus
-                .close_run_stream(durable_session_scope_id, run_id)
-                .map_err(anyhow::Error::new)?;
-        }
-        return Ok(protocol);
-    }
     let existing = event_bus
         .retained_run_event_at(durable_session_scope_id, run_id, event.sequence)
         .map_err(|error| anyhow!("HTTP public replay state is unavailable: {error}"))?;
@@ -6530,6 +6824,37 @@ fn publish_exact_http_outbox_event_with_stream_close(
 }
 
 impl ApplicationRunEventHandler for HttpProductionEventHandler {
+    fn bind_live_preview_source(
+        &mut self,
+        source: sigil_runtime::RuntimeLivePreviewSource,
+    ) -> Result<()> {
+        if source.run_id() != self.run_id || source.session_id() != self.durable_session_scope_id {
+            return Err(anyhow!(
+                "live preview source belongs to another production owner"
+            ));
+        }
+        self.event_bus
+            .bind_live_preview_source(source)
+            .map_err(anyhow::Error::new)
+    }
+
+    fn handle_live_update(&mut self, update: sigil_application::LiveRunUpdate) -> Result<()> {
+        if update.run_id != self.run_id {
+            return Err(anyhow!(
+                "live application event belongs to another production run"
+            ));
+        }
+        if update.session_id != self.durable_session_scope_id {
+            return Err(anyhow!(
+                "live application event belongs to another durable production session"
+            ));
+        }
+        self.event_bus
+            .publish_live_update(update)
+            .map(|_| ())
+            .map_err(anyhow::Error::new)
+    }
+
     fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
         if event.run_id != self.run_id {
             return Err(anyhow!(
@@ -6644,14 +6969,17 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                     .event_bus
                     .publish_run_event_with_approval(event.clone(), Some(pending.clone()));
                 if let Ok(protocol) = &published {
+                    let sequence = protocol
+                        .public_sequence()
+                        .ok_or_else(|| anyhow!("approval publication has no public sequence"))?;
                     registry.update_approval_event_sequence(
                         &self.run_id,
                         &pending.call_id,
                         &pending.approval_request_id,
-                        protocol.run_event.sequence,
+                        sequence,
                     );
                     if let Some(approval) = approval_request.as_mut() {
-                        approval.display.event_sequence = protocol.run_event.sequence;
+                        approval.display.event_sequence = sequence;
                     }
                 }
                 published.map(|_| ()).map_err(anyhow::Error::new)
@@ -7300,16 +7628,6 @@ fn replay_pending_http_public_outboxes_matching(
     let recorder = PublicEventOutboxRecorder::new(store);
     let mut expired_runs = BTreeSet::new();
     for entry in &pending_entries {
-        let protocol =
-            crate::HttpProtocolEvent::from_run_event(entry.event.clone()).map_err(|error| {
-                HttpRunDriverError::new(format!(
-                    "HTTP adapter could not canonicalize pending public outbox event {}: {error}",
-                    entry.public_event_id
-                ))
-            })?;
-        if !protocol.is_durable() {
-            continue;
-        }
         if event_bus
             .retained_run_event_at(durable_session_scope_id, &entry.run_id, entry.sequence)
             .map_err(|error| {

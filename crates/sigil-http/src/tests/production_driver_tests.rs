@@ -42,6 +42,12 @@ use crate::{
     HttpUserInputDecisionRequest,
 };
 
+#[path = "production_projection_owner_tests.rs"]
+mod projection_owner;
+
+#[path = "production_artifact_access_tests.rs"]
+mod artifact_access;
+
 #[test]
 fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
     let error = anyhow::Error::new(
@@ -177,6 +183,35 @@ credential = {{ source = "none" }}
 "#
     );
     std::fs::write(path, config).expect("production test config should write");
+}
+
+#[tokio::test]
+async fn conversation_display_keeps_task_selection_out_of_auxiliary_history_reads() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let driver = production_queue_driver(&fixture, "display-task-selection");
+    let registry = driver.build_registry(Arc::new(HttpDurableCommandStore::open(
+        fixture.path().join("commands.json"),
+        16,
+    )?))?;
+    let session = registry.create_session(HttpSessionCreateRequest::default())?;
+    let page = registry.conversation_display_page(&session.id, None, 20)?;
+    let config_path = fixture.path().join("sigil.toml");
+    let base = std::fs::read_to_string(&config_path)?;
+    std::fs::write(fixture.path().join("visible.txt"), "snapshot content")?;
+    for composition in [
+        "\n[composition]\nprofile = 'core'\n[task]\nenabled = 'deferred invalid value'\n",
+        "\n[composition]\nprofile = 'core'\nenhancements = ['task_orchestration']\n[task]\nenabled = false\n",
+        "\n[composition]\nprofile = 'standard'\n[task]\nenabled = false\n",
+        "\n[composition]\nprofile = 'core'\nenhancements = ['task_orchestration']\n[task]\nenabled = true\n",
+    ] {
+        std::fs::write(&config_path, format!("{base}{composition}"))?;
+        assert_eq!(
+            registry.conversation_display_page(&session.id, None, 20)?,
+            page,
+            "historical display must not load Task configuration or scan the workspace"
+        );
+    }
+    Ok(())
 }
 
 fn write_production_preparation_failure_config(path: &std::path::Path, workspace_root: &str) {
@@ -2978,6 +3013,11 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
     session
         .ensure_identity_entry()
         .expect("durable session identity should append");
+    sigil_runtime::bind_session_composition(
+        &mut session,
+        &sigil_kernel::RootConfig::load(&config_path).expect("fixture config should load"),
+    )
+    .expect("current session contract should bind before execution history");
     session
         .append_user_message(sigil_kernel::ModelMessage::user("history"))
         .expect("durable message should append");
@@ -3124,10 +3164,10 @@ async fn production_driver_session_reopen_revalidates_lifecycle_and_durable_trut
         .conversation_display_page(&opened.id, None, 50)
         .expect("production canonical display should project");
     assert_eq!(display.request_scope, opened.id);
-    assert_eq!(display.through_session_stream_sequence, "7");
+    assert_eq!(display.through_session_stream_sequence, "8");
     assert_eq!(display.total_items, "2");
     assert_eq!(display.items.len(), 2);
-    assert_eq!(display.items[1].display_order.session_stream_sequence, "3");
+    assert_eq!(display.items[1].display_order.session_stream_sequence, "4");
     assert!(display.live_provisional_anchor.is_none());
     let task = display
         .task_control
@@ -3799,9 +3839,18 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
                 .recv()
                 .await
                 .expect("production failure event should remain observable");
-            if event.run_event.run_id == run.id
+            if event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .run_id
+                == run.id
                 && matches!(
-                    &event.run_event.event,
+                    &event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .event,
                     PublicRunEventKind::RouteRecoveryRequired {
                         code: PublicRouteRecoveryCode::ProviderUnavailable,
                         ..
@@ -3815,7 +3864,11 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
     .await
     .expect("pre-Started preparation failure should publish its typed recovery promptly");
     assert!(matches!(
-        preparation_event.run_event.event,
+        preparation_event
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
         PublicRunEventKind::RouteRecoveryRequired {
             code: PublicRouteRecoveryCode::ProviderUnavailable,
             ..
@@ -3839,7 +3892,11 @@ async fn production_driver_projects_pre_started_runtime_preparation_failure_with
         .replay_run_after(&session.durable_session_scope_id, &run.id, None)
         .expect("typed preparation failure should remain replayable by HTTP");
     assert!(matches!(
-        replay.last().map(|event| &event.run_event.event),
+        replay.last().map(|event| &event
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event),
         Some(PublicRunEventKind::RouteRecoveryRequired {
             code: PublicRouteRecoveryCode::ProviderUnavailable,
             ..
@@ -3914,8 +3971,20 @@ async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_
                 .recv()
                 .await
                 .expect("network recovery terminal should remain observable");
-            if event.run_event.run_id == run.id
-                && matches!(&event.run_event.event, PublicRunEventKind::RunPaused { .. })
+            if event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .run_id
+                == run.id
+                && matches!(
+                    &event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .event,
+                    PublicRunEventKind::RunPaused { .. }
+                )
             {
                 break event;
             }
@@ -3924,7 +3993,11 @@ async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_
     .await
     .expect("bounded network recovery should terminalize promptly");
     assert!(matches!(
-        terminal.run_event.event,
+        terminal
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
         PublicRunEventKind::RunPaused { .. }
     ));
 
@@ -3953,7 +4026,11 @@ async fn production_driver_bounded_network_failure_uses_durable_paused_terminal_
         .replay_run_after(&session.durable_session_scope_id, &run.id, None)
         .expect("durable HTTP terminal should remain replayable");
     assert!(matches!(
-        replay.last().map(|event| &event.run_event.event),
+        replay.last().map(|event| &event
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event),
         Some(PublicRunEventKind::RunPaused { .. })
     ));
 }
@@ -4024,6 +4101,44 @@ fn plan_review_revision_interrupted_terminal_is_not_collapsed_to_failed() {
     ));
 }
 
+#[test]
+fn plan_review_revision_handler_binds_only_its_actual_live_source() -> Result<()> {
+    use sigil_kernel::EventHandler;
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("preview.jsonl"))?;
+    let session = sigil_kernel::Session::load_from_store("fixture", "model", store)?;
+    let mut recorder =
+        sigil_runtime::ApplicationRunEventRecorder::start(&session, "revision-preview", "revise")?;
+    recorder.begin_live_attempt("revision-physical-attempt")?;
+    recorder.handle(sigil_kernel::RunEvent::TextDelta("revision preview".into()))?;
+    let event_bus = Arc::new(HttpLiveEventBus::new(8));
+    let mut handler = HttpPlanReviewRevisionEventHandler {
+        durable_session_scope_id: session.session_scope_id().to_owned(),
+        run_id: "revision-preview".to_owned(),
+        event_bus: Arc::clone(&event_bus),
+    };
+    handler.bind_live_preview_source(recorder.live_preview_source())?;
+    let mut reader = event_bus
+        .live_preview_reader(session.session_scope_id(), "revision-preview")?
+        .expect("bound source");
+    let updates = reader.poll_updates()?;
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].preview.as_str(), "revision preview");
+    assert_eq!(updates[0].attempt_id, "revision-physical-attempt");
+    handler.run_id = "another-revision".to_owned();
+    assert!(
+        handler
+            .bind_live_preview_source(recorder.live_preview_source())
+            .is_err()
+    );
+    assert!(
+        event_bus
+            .live_preview_reader(session.session_scope_id(), "another-revision")?
+            .is_none()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn plan_review_waiting_input_closes_only_live_delivery_and_preserves_exact_resume_sequence()
 -> anyhow::Result<()> {
@@ -4060,9 +4175,20 @@ async fn plan_review_waiting_input_closes_only_live_delivery_and_preserves_exact
             panic!("waiting event must precede its live stream close")
         }
     };
-    assert_eq!(waiting.run_event.sequence, 7);
+    assert_eq!(
+        waiting
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        7
+    );
     assert!(matches!(
-        waiting.run_event.event,
+        waiting
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
         PublicRunEventKind::RunAwaitingUserInput { .. }
     ));
     assert!(matches!(
@@ -4103,7 +4229,11 @@ async fn plan_review_waiting_input_closes_only_live_delivery_and_preserves_exact
     assert_eq!(
         replay
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![7, 8]
     );
@@ -4148,7 +4278,11 @@ fn terminal_outbox_replay_keeps_the_original_gapped_http_sequence() -> anyhow::R
     assert_eq!(
         replay
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![3, 9]
     );
@@ -4214,7 +4348,14 @@ async fn full_public_outbox_replay_recovers_nonterminal_http_publication_before_
             panic!("nonterminal public event must reach the live HTTP consumer")
         }
     };
-    assert_eq!(first_live.run_event.run_id, "run-first");
+    assert_eq!(
+        first_live
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .run_id,
+        "run-first"
+    );
 
     assert_eq!(
         replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
@@ -4227,8 +4368,22 @@ async fn full_public_outbox_replay_recovers_nonterminal_http_publication_before_
             panic!("the later pending public event must not be overtaken or dropped")
         }
     };
-    assert_eq!(second_live.run_event.run_id, "run-second");
-    assert_eq!(second_live.run_event.sequence, 1);
+    assert_eq!(
+        second_live
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .run_id,
+        "run-second"
+    );
+    assert_eq!(
+        second_live
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        1
+    );
 
     let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
         &store.read_event_records_writer()?,
@@ -4294,8 +4449,8 @@ async fn evicted_http_projection_rebuilds_from_full_outbox_before_ordered_receip
             &session_id,
             run_id,
             2,
-            PublicRunEventKind::TextDelta {
-                text: "transient two".to_owned(),
+            PublicRunEventKind::Notice {
+                message: "durable two".to_owned(),
             },
         )?,
         entry(
@@ -4346,18 +4501,23 @@ async fn evicted_http_projection_rebuilds_from_full_outbox_before_ordered_receip
     assert_eq!(
         replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)?,
         source.len(),
-        "all source items, including the transient gap, must be re-attempted in order"
+        "all current durable source items must be re-attempted in order"
     );
     for expected_sequence in 1..=5 {
         let crate::sse::HttpRunStreamReceive::Event(event) = subscriber.recv_run_stream().await?
         else {
             panic!("rebuild must fan out every pending source item before its receipt");
         };
-        assert_eq!(event.run_event.sequence, expected_sequence);
-        if expected_sequence == 2 {
-            assert!(!event.is_durable());
-            assert!(event.replay_id.is_none());
-        }
+        assert_eq!(
+            event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence,
+            expected_sequence
+        );
+        assert!(event.is_durable());
+        assert!(event.replay_id.is_some());
     }
     let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
         &store.read_event_records_writer()?,
@@ -4448,7 +4608,14 @@ async fn fully_evicted_closed_http_stream_rebuilds_pending_durable_outbox_events
         else {
             panic!("rebuilt durable outbox events must fan out before their receipts");
         };
-        assert_eq!(event.run_event.sequence, expected_sequence);
+        assert_eq!(
+            event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence,
+            expected_sequence
+        );
     }
     let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
         &store.read_event_records_writer()?,
@@ -4684,7 +4851,14 @@ async fn pending_terminal_lifecycle_replay_projects_registry_and_closes_before_r
     else {
         panic!("a missing final lifecycle must be delivered before stream close");
     };
-    assert_eq!(event.run_event.sequence, 4);
+    assert_eq!(
+        event
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        4
+    );
     assert!(matches!(
         second_subscriber.recv_run_stream().await?,
         crate::sse::HttpRunStreamReceive::StreamClosed { run_id: ref closed, .. }
@@ -4910,7 +5084,14 @@ async fn pending_terminal_lifecycle_replay_projects_registry_and_closes_before_r
     else {
         panic!("the pending foreground terminal must follow the rebuilt lifecycle source");
     };
-    assert_eq!(ordered_terminal.run_event.sequence, 4);
+    assert_eq!(
+        ordered_terminal
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence,
+        4
+    );
     assert!(matches!(
         ordered_subscriber.recv_run_stream().await?,
         crate::sse::HttpRunStreamReceive::StreamClosed { run_id: ref closed, .. }
@@ -4924,80 +5105,105 @@ async fn pending_terminal_lifecycle_replay_projects_registry_and_closes_before_r
 }
 
 #[tokio::test]
-async fn transient_public_outbox_receipt_retries_live_without_claiming_durable_replay()
+async fn http_rejects_transient_public_outboxes_without_rewriting_or_acknowledging_them()
 -> anyhow::Result<()> {
-    let temp = tempfile::tempdir()?;
-    let run_id = "run-transient-retry";
-    let session_path = temp.path().join("session.jsonl");
-    let journal_path = temp.path().join("protocol.json");
-    let store = JsonlSessionStore::new(&session_path)?;
-    let mut session =
-        sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
-    session.ensure_identity_entry()?;
-    let session_id = session.session_scope_id().to_owned();
-    drop(session);
-    let event = PublicRunEvent::new(
-        &session_id,
-        run_id,
-        1,
-        PublicRunEventKind::TextDelta {
-            text: "partial live output".to_owned(),
-        },
-    );
-    let outbox = sigil_kernel::PublicEventOutboxEntryV1 {
-        schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
-        public_event_id: "http-transient-retry:1".to_owned(),
-        domain_event_id: "http-transient-retry:1".to_owned(),
-        run_id: run_id.to_owned(),
-        sequence: 1,
-        payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
-        event: event.clone(),
-    };
-    sigil_kernel::PublicEventOutboxRecorder::new(store.clone()).append_outbox(&outbox)?;
-
-    {
-        let journal = Arc::new(HttpDurableProtocolJournal::open(&journal_path, 8)?);
-        let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, journal));
-        let mut subscriber = event_bus.subscribe();
-        let live = publish_exact_http_outbox_event(&event_bus, &session_id, run_id, event.clone())?;
-        assert!(!live.is_durable());
-        assert!(live.replay_id.is_none());
-        let crate::sse::HttpRunStreamReceive::Event(received) =
-            subscriber.recv_run_stream().await?
-        else {
-            panic!("the initial transient attempt must be delivered live");
+    for already_acknowledged in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let run_id = "run-unsupported-transient";
+        let session_path = temp.path().join("session.jsonl");
+        let store = JsonlSessionStore::new(&session_path)?;
+        let mut session =
+            sigil_kernel::Session::new("http-test", "test-model").with_store(store.clone());
+        session.ensure_identity_entry()?;
+        let session_id = session.session_scope_id().to_owned();
+        drop(session);
+        let event = PublicRunEvent::new(
+            &session_id,
+            run_id,
+            1,
+            PublicRunEventKind::TextDelta {
+                text: "unsupported durable preview".to_owned(),
+            },
+        );
+        let outbox = sigil_kernel::PublicEventOutboxEntryV1 {
+            schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+            public_event_id: "http-unsupported-transient:1".to_owned(),
+            domain_event_id: "http-unsupported-transient:1".to_owned(),
+            run_id: run_id.to_owned(),
+            sequence: 1,
+            payload_digest: sigil_kernel::stable_event_hash(&serde_json::to_vec(&event)?),
+            event: event.clone(),
         };
-        assert!(received.replay_id.is_none());
+        let before = std::fs::read(&session_path)?;
+        assert!(
+            sigil_kernel::PublicEventOutboxRecorder::new(store.clone())
+                .append_outbox(&outbox)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&session_path)?, before);
+        let next_sequence = store
+            .read_handle()
+            .read_event_records()?
+            .last()
+            .expect("identity record")
+            .stream_sequence()
+            + 1;
+        let raw = sigil_kernel::StoredEvent::new(
+            sigil_kernel::DurableEventType::PublicEventOutbox,
+            sigil_kernel::EventClass::Critical,
+            outbox.public_event_id.clone(),
+            session_id.clone(),
+            next_sequence,
+            serde_json::to_value(&outbox)?,
+        )?;
+        let mut original = before;
+        original.extend_from_slice(raw.to_json_line()?.as_bytes());
+        if already_acknowledged {
+            let receipt = sigil_kernel::PublicEventDeliveryReceiptV1 {
+                schema_version: sigil_kernel::PUBLIC_EVENT_OUTBOX_SCHEMA_VERSION,
+                public_event_id: outbox.public_event_id,
+                adapter: "http".to_owned(),
+                delivered_at_unix_ms: 1,
+            };
+            let raw_receipt = sigil_kernel::StoredEvent::new(
+                sigil_kernel::DurableEventType::PublicEventDeliveryReceipt,
+                sigil_kernel::EventClass::Critical,
+                "unsupported-transient-receipt".to_owned(),
+                session_id.clone(),
+                next_sequence + 1,
+                serde_json::to_value(receipt)?,
+            )?;
+            original.extend_from_slice(raw_receipt.to_json_line()?.as_bytes());
+        }
+        drop(store);
+        // Materialize old bytes directly: the current writer must never manufacture them.
+        std::fs::write(&session_path, &original)?;
+        let journal = Arc::new(HttpDurableProtocolJournal::open(
+            temp.path().join("protocol.json"),
+            8,
+        )?);
+        let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, journal));
+        assert!(publish_exact_http_outbox_event(&event_bus, &session_id, run_id, event).is_err());
+        assert!(
+            replay_pending_http_public_outboxes(&session_path, &session_id, &event_bus, None)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&session_path)?,
+            original,
+            "unsupported history must not be migrated or acknowledged"
+        );
+        assert!(
+            event_bus
+                .latest_run_sequence(&session_id, run_id)?
+                .is_none()
+        );
         assert!(
             event_bus
                 .replay_run_after(&session_id, run_id, None)?
                 .is_empty()
         );
-        // Intentionally omit the receipt to model a process death after live delivery.
     }
-
-    let reopened_journal = Arc::new(HttpDurableProtocolJournal::open(&journal_path, 8)?);
-    let reopened_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, reopened_journal));
-    let mut subscriber = reopened_bus.subscribe();
-    assert_eq!(
-        replay_pending_http_public_outboxes(&session_path, &session_id, &reopened_bus, None)?,
-        1
-    );
-    let crate::sse::HttpRunStreamReceive::Event(retried) = subscriber.recv_run_stream().await?
-    else {
-        panic!("a receipt-lost transient outbox must receive one best-effort live retry");
-    };
-    assert!(!retried.is_durable());
-    assert!(retried.replay_id.is_none());
-    assert!(
-        reopened_bus
-            .replay_run_after(&session_id, run_id, None)?
-            .is_empty()
-    );
-    let projection = sigil_kernel::PublicEventOutboxProjectionV1::from_records(
-        &store.read_event_records_writer()?,
-    )?;
-    assert!(projection.pending_for_adapter("http").is_empty());
     Ok(())
 }
 
@@ -5249,7 +5455,11 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
         recovery_event_bus
             .replay_run_after(&durable_session_scope_id, &run_id, None)?
             .iter()
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![durable_outbox.event.sequence],
         "recovery must preserve rather than renumber or duplicate the exact terminal event"
@@ -5818,6 +6028,7 @@ async fn production_cancel_returns_only_after_supervisor_acknowledges_activation
                 session_id: "session-1".to_owned(),
                 broker: Arc::new(HttpApprovalBroker::default()),
                 cancel_sender,
+                projection_owner: Arc::new(Mutex::new(None)),
             }),
         );
     let (finished, finished_rx) = std_mpsc::channel();
@@ -5894,6 +6105,7 @@ async fn production_task_pause_returns_only_after_supervisor_acknowledges_activa
                 session_id: "session-task-pause".to_owned(),
                 broker: Arc::new(HttpApprovalBroker::default()),
                 cancel_sender,
+                projection_owner: Arc::new(Mutex::new(None)),
             }),
         );
     let request = TaskPauseRequest::new(
@@ -6186,6 +6398,7 @@ credential = {{ source = "none" }}
                 session_id: session.id.clone(),
                 broker: Arc::new(HttpApprovalBroker::default()),
                 cancel_sender: mpsc::unbounded_channel().0,
+                projection_owner: Arc::new(Mutex::new(None)),
             }),
         );
 
@@ -6661,9 +6874,18 @@ credential = {{ source = "none" }}
         loop {
             match subscriber.recv_run_stream().await.expect("live event") {
                 crate::sse::HttpRunStreamReceive::Event(event) => {
-                    if event.run_event.run_id == revision_run_id
+                    if event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .run_id
+                        == revision_run_id
                         && matches!(
-                            &event.run_event.event,
+                            &event
+                                .run_event
+                                .as_ref()
+                                .expect("public event payload")
+                                .event,
                             PublicRunEventKind::RunFinished { .. }
                         )
                     {
@@ -6688,13 +6910,22 @@ credential = {{ source = "none" }}
         .zip(closed)
         .expect("revision terminal event and stream close");
     assert!(matches!(
-        &terminal.run_event.event,
+        &terminal
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .event,
         PublicRunEventKind::RunFinished { .. }
     ));
     assert_eq!(closed_session, session.durable_session_scope_id);
     assert_eq!(closed_run, revision_run_id);
     assert!(
-        terminal.run_event.sequence > 1,
+        terminal
+            .run_event
+            .as_ref()
+            .expect("public event payload")
+            .sequence
+            > 1,
         "the revision terminal must retain the bridge sequence after preceding live events"
     );
     assert_eq!(
@@ -6737,7 +6968,12 @@ credential = {{ source = "none" }}
         .into_iter()
         .find(|entry| {
             entry.run_id == revision_run_id
-                && entry.sequence == terminal.run_event.sequence
+                && entry.sequence
+                    == terminal
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .sequence
                 && matches!(&entry.event.event, PublicRunEventKind::RunFinished { .. })
         })
         .expect("revision must persist exactly one terminal outbox");
@@ -7114,7 +7350,14 @@ credential = {{ source = "none" }}
             .expect("cancelled revision must retain its canonical HTTP event")
             .into_iter()
             .filter(|event| {
-                http_terminal_from_durable_public_event(&event.run_event.event).is_some()
+                http_terminal_from_durable_public_event(
+                    &event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .event,
+                )
+                .is_some()
             })
             .map(|event| {
                 serde_json::to_value(&event.run_event)
@@ -7452,13 +7695,22 @@ credential = {{ source = "none" }}
                 .expect("waiting live event")
             {
                 crate::sse::HttpRunStreamReceive::Event(event)
-                    if event.run_event.run_id == revision_run_id
+                    if event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .run_id
+                        == revision_run_id
                         && matches!(
-                            event.run_event.event,
+                            event
+                                .run_event
+                                .as_ref()
+                                .expect("public event payload")
+                                .event,
                             PublicRunEventKind::RunAwaitingUserInput { .. }
                         ) =>
                 {
-                    break event.run_event;
+                    break event.run_event.expect("filtered public payload");
                 }
                 crate::sse::HttpRunStreamReceive::Event(_)
                 | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
@@ -7588,13 +7840,22 @@ credential = {{ source = "none" }}
                 .expect("revision terminal live event")
             {
                 crate::sse::HttpRunStreamReceive::Event(event)
-                    if event.run_event.run_id == revision_run_id
+                    if event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .run_id
+                        == revision_run_id
                         && matches!(
-                            event.run_event.event,
+                            event
+                                .run_event
+                                .as_ref()
+                                .expect("public event payload")
+                                .event,
                             PublicRunEventKind::RunFinished { .. }
                         ) =>
                 {
-                    break event.run_event;
+                    break event.run_event.expect("filtered public payload");
                 }
                 crate::sse::HttpRunStreamReceive::Event(_)
                 | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
@@ -7851,13 +8112,22 @@ credential = {{ source = "none" }}
                 .expect("waiting live event")
             {
                 crate::sse::HttpRunStreamReceive::Event(event)
-                    if event.run_event.run_id == revision_run_id
+                    if event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .run_id
+                        == revision_run_id
                         && matches!(
-                            event.run_event.event,
+                            event
+                                .run_event
+                                .as_ref()
+                                .expect("public event payload")
+                                .event,
                             PublicRunEventKind::RunAwaitingUserInput { .. }
                         ) =>
                 {
-                    break event.run_event;
+                    break event.run_event.expect("filtered public payload");
                 }
                 crate::sse::HttpRunStreamReceive::Event(_)
                 | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
@@ -8043,10 +8313,22 @@ credential = {{ source = "none" }}
                 .expect("revision cancellation terminal live event")
             {
                 crate::sse::HttpRunStreamReceive::Event(event)
-                    if event.run_event.run_id == revision_run_id
-                        && matches!(event.run_event.event, PublicRunEventKind::RunCancelled) =>
+                    if event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .run_id
+                        == revision_run_id
+                        && matches!(
+                            event
+                                .run_event
+                                .as_ref()
+                                .expect("public event payload")
+                                .event,
+                            PublicRunEventKind::RunCancelled
+                        ) =>
                 {
-                    break event.run_event;
+                    break event.run_event.expect("filtered public payload");
                 }
                 crate::sse::HttpRunStreamReceive::Event(_)
                 | crate::sse::HttpRunStreamReceive::StreamClosed { .. } => {}
@@ -8106,12 +8388,20 @@ credential = {{ source = "none" }}
             .into_iter()
             .filter(|event| {
                 matches!(
-                    event.run_event.event,
+                    event
+                        .run_event
+                        .as_ref()
+                        .expect("public event payload")
+                        .event,
                     PublicRunEventKind::RunAwaitingUserInput { .. }
                         | PublicRunEventKind::RunCancelled
                 )
             })
-            .map(|event| event.run_event.sequence)
+            .map(|event| event
+                .run_event
+                .as_ref()
+                .expect("public event payload")
+                .sequence)
             .collect::<Vec<_>>(),
         vec![waiting_sequence, terminal_event.sequence]
     );

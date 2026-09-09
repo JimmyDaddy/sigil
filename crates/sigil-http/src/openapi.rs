@@ -540,6 +540,7 @@ pub fn http_openapi_document() -> Value {
                     "description": "Projects user, assistant and tool-result text from scope-checked append-only session truth. System/control entries, tool arguments, resolved image bytes and server-private paths are excluded.",
                     "parameters": [
                         { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/CancelObservationOnClose" },
                         {
                             "name": "limit",
                             "in": "query",
@@ -566,12 +567,44 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/message-content": {
+                "get": {
+                    "summary": "Read one bounded UTF-8 page of a complete saved message",
+                    "description": "Resolves a canonical display identity through the same strict session owner. Redacts the complete body before slicing. Nonzero offsets require the content version from the first page; each response contains at most 65536 UTF-8 bytes.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/CancelObservationOnClose" },
+                        { "name": "display_id", "in": "query", "required": true,
+                          "schema": { "type": "string", "minLength": 1, "maxLength": 256 } },
+                        { "name": "offset", "in": "query", "required": false,
+                          "description": "UTF-8 byte offset on a character boundary",
+                          "schema": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 2097152, "default": 0 } },
+                        { "name": "limit", "in": "query", "required": false,
+                          "schema": { "type": "integer", "minimum": 4, "maximum": 65536, "default": 65536 } },
+                        { "name": "content_version", "in": "query", "required": false,
+                          "description": "Opaque version binding the scope, display identity and immutable source record; required after offset zero",
+                          "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" } }
+                    ],
+                    "responses": {
+                        "200": { "description": "One complete-message page",
+                          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MessageContentPage" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "description": "Saved content version changed or source validation failed",
+                          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                        "503": { "description": "The source is temporarily unavailable",
+                          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+                    }
+                }
+            },
             "/sessions/{session_id}/display": {
                 "get": {
                     "summary": "Read one canonical durable conversation display page",
                     "description": "Returns stable identity/order projection from scope-checked append-only session truth. Durable sequences use decimal strings; raw durable scope, paths, checksums, credentials and tool arguments are excluded.",
                     "parameters": [
                         { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/CancelObservationOnClose" },
                         {
                             "name": "limit",
                             "in": "query",
@@ -1209,6 +1242,13 @@ pub fn http_openapi_document() -> Value {
                 }
             },
             "parameters": {
+                "CancelObservationOnClose": {
+                    "name": "x-sigil-cancel-observation-on-close",
+                    "in": "header",
+                    "required": false,
+                    "description": "Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write.",
+                    "schema": { "type": "string", "enum": ["1"] }
+                },
                 "SessionId": {
                     "name": "session_id",
                     "in": "path",
@@ -1822,6 +1862,21 @@ pub fn http_openapi_document() -> Value {
                             "items": { "$ref": "#/components/schemas/SessionTranscriptMessage" }
                         },
                         "next_before": { "type": ["integer", "null"], "format": "uint64", "minimum": 1 }
+                    }
+                },
+                "MessageContentPage": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["display_id", "message_id", "content_version", "offset", "next_offset", "total_bytes", "text"],
+                    "properties": {
+                        "display_id": { "type": "string" },
+                        "message_id": { "type": "string" },
+                        "content_version": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                        "offset": { "type": "integer", "format": "uint64", "minimum": 0 },
+                        "next_offset": { "type": ["integer", "null"], "format": "uint64", "minimum": 0 },
+                        "total_bytes": { "type": "integer", "format": "uint64", "minimum": 0,
+                          "description": "Byte length of the complete safely redacted UTF-8 body" },
+                        "text": { "type": "string", "maxLength": 65536 }
                     }
                 },
                 "SessionTranscriptMessage": {
@@ -4394,17 +4449,57 @@ fn public_event_schemas() -> Map<String, Value> {
         json!({
             "type": "object",
             "additionalProperties": false,
-            "required": ["schema_version", "event_class", "run_event"],
+            "required": ["schema_version", "event_class"],
+            "oneOf": [
+                { "required": ["run_event"], "not": { "required": ["live_update"] } },
+                {
+                    "required": ["live_update"],
+                    "properties": { "event_class": { "const": "transient" } },
+                    "not": { "anyOf": [
+                        { "required": ["run_event"] }, { "required": ["replay_id"] },
+                        { "required": ["approval_request"] }, { "required": ["provisional_id"] }
+                    ] }
+                }
+            ],
             "properties": {
                 "schema_version": { "type": "integer", "const": crate::HTTP_PROTOCOL_EVENT_SCHEMA_VERSION },
                 "event_class": { "type": "string", "enum": ["durable", "transient"] },
                 "replay_id": { "type": "string" },
                 "approval_request": { "$ref": "#/components/schemas/PendingApproval" },
                 "provisional_id": { "type": "string", "pattern": "^live-v1:[0-9a-f]{64}$" },
-                "run_event": { "$ref": "#/components/schemas/PublicRunEvent" }
+                "run_event": { "$ref": "#/components/schemas/PublicRunEvent" },
+                "live_update": { "$ref": "#/components/schemas/LiveRunUpdate" }
             }
         }),
     );
+    schemas.insert("LiveRunUpdate".to_owned(), json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["schema_version", "session_id", "run_id", "attempt_id", "slot_id", "live_revision", "base_durable_sequence", "kind", "preview"],
+        "properties": {
+            "schema_version": { "type": "integer", "const": sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION },
+            "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "run_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "attempt_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "slot_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "live_revision": { "type": "integer", "format": "uint64", "minimum": 1 },
+            "base_durable_sequence": { "type": "integer", "format": "uint64", "minimum": 0 },
+            "kind": { "type": "string", "enum": ["text", "reasoning", "tool_call_arguments", "tool_progress"] },
+            "preview": { "type": "string", "minLength": 1, "maxLength": sigil_application::MAX_SAFE_TEXT_BYTES, "description": "replacement snapshot bounded to 64 KiB of UTF-8" },
+            "truncated": { "type": "boolean" },
+            "tool_progress": {
+                "type": "object", "additionalProperties": false,
+                "required": ["execution_id", "call_id", "tool_name", "status", "total_bytes", "updated_at_ms"],
+                "properties": {
+                    "execution_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "call_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "tool_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "status": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "total_bytes": { "type": ["integer", "null"], "minimum": 0 },
+                    "updated_at_ms": { "type": ["integer", "null"], "minimum": 0 }
+                }
+            }
+        }
+    }));
     schemas.insert(
         "SessionGrantUnavailableReasonCode".to_owned(),
         json!({

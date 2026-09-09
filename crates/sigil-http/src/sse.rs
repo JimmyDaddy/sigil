@@ -4,8 +4,10 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sigil_application::LiveRunUpdate;
 use sigil_kernel::{
-    PublicRunEvent, PublicRunEventKind, ToolCall, ToolResultStatus, safe_persistence_json_value,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PublicRunEvent, PublicRunEventKind, ToolCall,
+    ToolResultStatus, is_transient_public_run_event, safe_persistence_json_value,
     safe_persistence_text,
 };
 use sigil_runtime::conversation_display::{
@@ -20,7 +22,7 @@ use crate::journal::HttpDurableProtocolJournal;
 /// SSE event name used for public run events.
 pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
 /// Current schema version for HTTP protocol event envelopes.
-pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 2;
+pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 3;
 
 const HTTP_PROTOCOL_CURSOR_PREFIX: &str = "sigil-http-run-v1";
 
@@ -144,36 +146,113 @@ pub struct HttpProtocolEvent {
     /// Opaque identity for an exact live semantic slot that a durable display item may reconcile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_id: Option<String>,
-    /// Public run event payload.
-    pub run_event: PublicRunEvent,
+    /// Typed process-local preview. It is absent for durable events and never contributes to the
+    /// replay cursor or durable delivery receipts. Exactly one payload branch is populated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_update: Option<LiveRunUpdate>,
+    /// Public event payload, absent for process-local preview snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_event: Option<PublicRunEvent>,
 }
 
 impl HttpProtocolEvent {
-    /// Wraps one public run event in the HTTP protocol envelope.
+    /// Wraps one durable public run event in the HTTP protocol envelope.
     ///
     /// # Errors
     ///
-    /// Returns an error when a durable cursor cannot be generated for the event.
+    /// Returns an error when the public payload schema is unsupported or a durable cursor cannot
+    /// be generated for the event.
     pub fn from_run_event(mut event: PublicRunEvent) -> Result<Self, HttpProtocolCursorError> {
-        let event_class = protocol_event_class(&event.event);
-        let provisional_id = protocol_provisional_id(&event)?;
-        if event_class == HttpProtocolEventClass::Durable {
-            project_durable_text_for_persistence(&mut event.event);
+        if event.schema_version != PUBLIC_RUN_EVENT_SCHEMA_VERSION {
+            return Err(HttpProtocolCursorError::UnsupportedPublicEventSchema {
+                received: event.schema_version,
+                expected: PUBLIC_RUN_EVENT_SCHEMA_VERSION,
+            });
         }
-        let replay_id = match event_class {
-            HttpProtocolEventClass::Durable => {
-                Some(HttpProtocolCursor::from_run_event(&event)?.encode())
-            }
-            HttpProtocolEventClass::Transient => None,
-        };
+        if is_transient_public_run_event(&event.event) {
+            return Err(HttpProtocolCursorError::UnsupportedPublicLiveEvent);
+        }
+        let provisional_id = protocol_provisional_id(&event)?;
+        project_durable_text_for_persistence(&mut event.event);
+        let replay_id = Some(HttpProtocolCursor::from_run_event(&event)?.encode());
         Ok(Self {
             schema_version: HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
-            event_class,
+            event_class: HttpProtocolEventClass::Durable,
             replay_id,
             approval_request: None,
             provisional_id,
-            run_event: event,
+            live_update: None,
+            run_event: Some(event),
         })
+    }
+
+    /// Wraps a typed process-local preview without assigning a durable sequence or replay cursor.
+    pub fn from_live_update(update: LiveRunUpdate) -> Result<Self, HttpProtocolCursorError> {
+        update
+            .validate()
+            .map_err(|_| HttpProtocolCursorError::InvalidProvisionalIdentity)?;
+        Ok(Self {
+            schema_version: HTTP_PROTOCOL_EVENT_SCHEMA_VERSION,
+            event_class: HttpProtocolEventClass::Transient,
+            replay_id: None,
+            approval_request: None,
+            provisional_id: None,
+            live_update: Some(update),
+            run_event: None,
+        })
+    }
+
+    /// Returns the payload session binding for either branch.
+    pub fn session_id(&self) -> &str {
+        self.run_event
+            .as_ref()
+            .map(|event| event.session_id.as_str())
+            .or_else(|| {
+                self.live_update
+                    .as_ref()
+                    .map(|update| update.session_id.as_str())
+            })
+            .unwrap_or("")
+    }
+
+    /// Returns the payload run binding for either branch.
+    pub fn run_id(&self) -> &str {
+        self.run_event
+            .as_ref()
+            .map(|event| event.run_id.as_str())
+            .or_else(|| {
+                self.live_update
+                    .as_ref()
+                    .map(|update| update.run_id.as_str())
+            })
+            .unwrap_or("")
+    }
+
+    /// Returns only a real public event sequence. Live revisions are never replay cursors.
+    pub fn public_sequence(&self) -> Option<u64> {
+        self.run_event.as_ref().map(|event| event.sequence)
+    }
+
+    /// Rejects contradictory or incomplete payload branches before consumer dispatch.
+    pub fn has_valid_payload(&self) -> bool {
+        if self.schema_version != HTTP_PROTOCOL_EVENT_SCHEMA_VERSION {
+            return false;
+        }
+        match (&self.run_event, &self.live_update) {
+            (Some(event), None) => {
+                self.event_class == HttpProtocolEventClass::Durable
+                    && event.schema_version == PUBLIC_RUN_EVENT_SCHEMA_VERSION
+                    && !is_transient_public_run_event(&event.event)
+            }
+            (None, Some(update)) => {
+                self.event_class == HttpProtocolEventClass::Transient
+                    && self.replay_id.is_none()
+                    && self.approval_request.is_none()
+                    && self.provisional_id.is_none()
+                    && update.validate().is_ok()
+            }
+            _ => false,
+        }
     }
 
     /// Returns whether this protocol event is replayable after reconnect.
@@ -192,6 +271,7 @@ impl HttpProtocolEvent {
                     replay_id: self.replay_id.clone().unwrap_or_default(),
                     approval_request: self.approval_request.clone(),
                     provisional_id: self.provisional_id.clone(),
+                    live_update: None,
                     run_event: self.run_event.clone(),
                 }))
             }
@@ -199,6 +279,7 @@ impl HttpProtocolEvent {
                 HttpProtocolEventView::Transient(Box::new(HttpTransientEventView {
                     schema_version: self.schema_version,
                     provisional_id: self.provisional_id.clone(),
+                    live_update: self.live_update.clone(),
                     run_event: self.run_event.clone(),
                 }))
             }
@@ -206,7 +287,13 @@ impl HttpProtocolEvent {
     }
 
     pub(crate) fn has_valid_approval_metadata(&self) -> bool {
-        match (&self.approval_request, &self.run_event.event) {
+        if !self.has_valid_payload() {
+            return false;
+        }
+        let Some(run_event) = &self.run_event else {
+            return self.approval_request.is_none();
+        };
+        match (&self.approval_request, &run_event.event) {
             (None, _) => true,
             (
                 Some(approval),
@@ -223,11 +310,11 @@ impl HttpProtocolEvent {
                     && approval.approval_request_id == approval_identity.approval_request_id
                     && approval.policy_version == approval_identity.policy_version
                     && approval.expires_at_ms == approval_identity.expires_at_ms
-                    && approval_identity.session_id == self.run_event.session_id
-                    && approval_identity.run_id == self.run_event.run_id
+                    && approval_identity.session_id == run_event.session_id
+                    && approval_identity.run_id == run_event.run_id
                     && approval_identity.call_id == call.id
                     && approval_guard_is_persistence_safe(approval)
-                    && approval.display.event_sequence == self.run_event.sequence
+                    && approval.display.event_sequence == run_event.sequence
             }
             (Some(_), _) => false,
         }
@@ -260,19 +347,15 @@ fn protocol_provisional_id(
             };
             Some(slot)
         }
-        PublicRunEventKind::ToolCallArgsDelta { id, .. } => {
-            Some(ConversationLiveProvisionalSlotV1::Tool {
-                call_id: id.clone(),
-            })
+        PublicRunEventKind::TextDelta { .. }
+        | PublicRunEventKind::ReasoningDelta { .. }
+        | PublicRunEventKind::ToolCallArgsDelta { .. }
+        | PublicRunEventKind::ToolProgress { .. } => {
+            return Err(HttpProtocolCursorError::UnsupportedPublicLiveEvent);
         }
         PublicRunEventKind::ToolResult { result } => {
             Some(ConversationLiveProvisionalSlotV1::Tool {
                 call_id: result.call_id.clone(),
-            })
-        }
-        PublicRunEventKind::ToolProgress { progress } => {
-            Some(ConversationLiveProvisionalSlotV1::Tool {
-                call_id: progress.call_id.clone(),
             })
         }
         PublicRunEventKind::ApprovalResolved { call_id, .. } => {
@@ -302,8 +385,6 @@ fn protocol_provisional_id(
         | PublicRunEventKind::ProviderTurnRecoveryChanged { .. }
         | PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. }
         | PublicRunEventKind::UserInputChanged { .. }
-        | PublicRunEventKind::TextDelta { .. }
-        | PublicRunEventKind::ReasoningDelta { .. }
         | PublicRunEventKind::Usage { .. }
         | PublicRunEventKind::ContinuationState { .. }
         | PublicRunEventKind::TerminalLifecycle { .. }
@@ -714,7 +795,10 @@ pub struct HttpDurableEventView {
     pub approval_request: Option<HttpPendingApproval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_id: Option<String>,
-    pub run_event: PublicRunEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_update: Option<LiveRunUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_event: Option<PublicRunEvent>,
 }
 
 /// Process-local event view that is not replayable after reconnect.
@@ -724,7 +808,10 @@ pub struct HttpTransientEventView {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional_id: Option<String>,
-    pub run_event: PublicRunEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_update: Option<LiveRunUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_event: Option<PublicRunEvent>,
 }
 
 /// Durable HTTP replay cursor carried in SSE `id:` and `Last-Event-ID`.
@@ -798,6 +885,12 @@ impl HttpProtocolCursor {
 /// Cursor parsing and encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq, ThisError)]
 pub enum HttpProtocolCursorError {
+    /// Legacy sequence-bearing live events cannot enter the current HTTP protocol.
+    #[error("public live event payloads are unsupported; use typed live_update")]
+    UnsupportedPublicLiveEvent,
+    /// A public event uses a schema unsupported by the current HTTP envelope.
+    #[error("unsupported public run event schema {received}; only version {expected} is accepted")]
+    UnsupportedPublicEventSchema { received: u32, expected: u32 },
     /// Cursor does not match the HTTP protocol cursor format.
     #[error("invalid cursor format: {cursor}")]
     InvalidFormat { cursor: String },
@@ -931,10 +1024,8 @@ impl HttpProtocolEventBuffer {
             .expect("http protocol event buffer lock should not be poisoned");
         let latest_sequence = events
             .iter()
-            .filter(|event| {
-                event.run_event.session_id == session_id && event.run_event.run_id == run_id
-            })
-            .map(|event| event.run_event.sequence)
+            .filter(|event| event.session_id() == session_id && event.run_id() == run_id)
+            .filter_map(HttpProtocolEvent::public_sequence)
             .max()
             .unwrap_or(0);
         if after_sequence > latest_sequence {
@@ -944,9 +1035,11 @@ impl HttpProtocolEventBuffer {
             .iter()
             .filter(|event| {
                 event.is_durable()
-                    && event.run_event.session_id == session_id
-                    && event.run_event.run_id == run_id
-                    && event.run_event.sequence > after_sequence
+                    && event.session_id() == session_id
+                    && event.run_id() == run_id
+                    && event
+                        .public_sequence()
+                        .is_some_and(|sequence| sequence > after_sequence)
             })
             .cloned()
             .collect())
@@ -957,10 +1050,8 @@ impl HttpProtocolEventBuffer {
             .lock()
             .expect("http protocol event buffer lock should not be poisoned")
             .iter()
-            .filter(|event| {
-                event.run_event.session_id == session_id && event.run_event.run_id == run_id
-            })
-            .map(|event| event.run_event.sequence)
+            .filter(|event| event.session_id() == session_id && event.run_id() == run_id)
+            .filter_map(HttpProtocolEvent::public_sequence)
             .max()
     }
 
@@ -978,9 +1069,9 @@ impl HttpProtocolEventBuffer {
             .iter()
             .rev()
             .find(|event| {
-                event.run_event.session_id == session_id
-                    && event.run_event.run_id == run_id
-                    && event.run_event.sequence == sequence
+                event.session_id() == session_id
+                    && event.run_id() == run_id
+                    && event.public_sequence() == Some(sequence)
             })
             .cloned())
     }
@@ -997,6 +1088,7 @@ pub struct HttpLiveEventBus {
     durable_journal: Option<std::sync::Arc<HttpDurableProtocolJournal>>,
     publication_lock: Mutex<()>,
     latest_sequences: Mutex<BTreeMap<HttpRunSequenceKey, u64>>,
+    live_sources: Mutex<BTreeMap<HttpRunSequenceKey, sigil_runtime::RuntimeLivePreviewSource>>,
     sender: broadcast::Sender<HttpLiveBusMessage>,
 }
 
@@ -1017,6 +1109,7 @@ impl HttpLiveEventBus {
             durable_journal: None,
             publication_lock: Mutex::new(()),
             latest_sequences: Mutex::new(BTreeMap::new()),
+            live_sources: Mutex::new(BTreeMap::new()),
             sender,
         }
     }
@@ -1034,6 +1127,7 @@ impl HttpLiveEventBus {
             durable_journal: Some(journal),
             publication_lock: Mutex::new(()),
             latest_sequences: Mutex::new(BTreeMap::new()),
+            live_sources: Mutex::new(BTreeMap::new()),
             sender,
         }
     }
@@ -1096,6 +1190,80 @@ impl HttpLiveEventBus {
         event: PublicRunEvent,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
         self.publish_run_event_with_policy(event, None, false, false)
+    }
+
+    /// Publishes one typed process-local preview to the bounded broadcast only. It is never
+    /// retained in the replay buffer or durable protocol journal and has no replay cursor.
+    pub fn publish_live_update(
+        &self,
+        update: LiveRunUpdate,
+    ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        let _publication =
+            self.publication_lock
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http event publication sequencer is unavailable".to_owned(),
+                })?;
+        let event = HttpProtocolEvent::from_live_update(update).map_err(|error| {
+            HttpEventPublishError::Cursor {
+                message: error.to_string(),
+            }
+        })?;
+        // Direct snapshot producers use the bounded broadcast; runtime owners instead attach
+        // a latest-slot source, so provider delta rate cannot fill this queue.
+        let _ = self
+            .sender
+            .send(HttpLiveBusMessage::Event(Box::new(event.clone())));
+        Ok(event)
+    }
+
+    /// Registers the current execution owner's preview source without a producer task or queue.
+    pub fn bind_live_preview_source(
+        &self,
+        source: sigil_runtime::RuntimeLivePreviewSource,
+    ) -> Result<(), HttpEventPublishError> {
+        let key = HttpRunSequenceKey {
+            session_id: source.session_id().to_owned(),
+            run_id: source.run_id().to_owned(),
+        };
+        let mut sources = self
+            .live_sources
+            .lock()
+            .map_err(|_| HttpEventPublishError::Journal {
+                message: "http live source registry is unavailable".to_owned(),
+            })?;
+        sources.retain(|_, source| !source.is_terminal());
+        sources.insert(key, source);
+        Ok(())
+    }
+
+    /// Returns an independent paced reader for the current live owner. Reconnect restores
+    /// durable replay first, then reads the current snapshots instead of replaying deltas.
+    pub fn live_preview_reader(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<sigil_runtime::RuntimeLivePreviewReader>, HttpEventPublishError> {
+        let key = HttpRunSequenceKey {
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+        };
+        let mut sources = self
+            .live_sources
+            .lock()
+            .map_err(|_| HttpEventPublishError::Journal {
+                message: "http live source registry is unavailable".to_owned(),
+            })?;
+        if sources
+            .get(&key)
+            .is_some_and(sigil_runtime::RuntimeLivePreviewSource::is_terminal)
+        {
+            sources.remove(&key);
+            return Ok(None);
+        }
+        Ok(sources
+            .get(&key)
+            .map(sigil_runtime::RuntimeLivePreviewSource::reader))
     }
 
     /// Publishes a foreground terminal while retaining the stream for owned terminal tasks.
@@ -1198,12 +1366,17 @@ impl HttpLiveEventBus {
         keep_stream_open: bool,
         close_stream_after_event: bool,
     ) -> Result<HttpProtocolEvent, HttpEventPublishError> {
+        let Some(public) = event.run_event.as_ref() else {
+            return Err(HttpEventPublishError::Journal {
+                message: "durable publication requires a public event payload".to_owned(),
+            });
+        };
         let sequence_key = HttpRunSequenceKey {
-            session_id: event.run_event.session_id.clone(),
-            run_id: event.run_event.run_id.clone(),
+            session_id: public.session_id.clone(),
+            run_id: public.run_id.clone(),
         };
         let terminal = matches!(
-            &event.run_event.event,
+            &public.event,
             PublicRunEventKind::RunFinished { .. }
                 | PublicRunEventKind::RunFailed { .. }
                 | PublicRunEventKind::RunBlocked { .. }
@@ -1217,13 +1390,21 @@ impl HttpLiveEventBus {
             .lock()
             .expect("http live sequence watermark lock should not be poisoned");
         let stream_closed = close_stream_after_event || (terminal && !keep_stream_open);
+        if terminal {
+            self.live_sources
+                .lock()
+                .map_err(|_| HttpEventPublishError::Journal {
+                    message: "http live source registry is unavailable".to_owned(),
+                })?
+                .remove(&sequence_key);
+        }
         if stream_closed {
             latest_sequences.remove(&sequence_key);
         } else {
             latest_sequences
                 .entry(sequence_key)
-                .and_modify(|sequence| *sequence = (*sequence).max(event.run_event.sequence))
-                .or_insert(event.run_event.sequence);
+                .and_modify(|sequence| *sequence = (*sequence).max(public.sequence))
+                .or_insert(public.sequence);
         }
         drop(latest_sequences);
         let _ = self
@@ -1231,8 +1412,8 @@ impl HttpLiveEventBus {
             .send(HttpLiveBusMessage::Event(Box::new(event.clone())));
         if stream_closed {
             let _ = self.sender.send(HttpLiveBusMessage::StreamClosed {
-                session_id: event.run_event.session_id.clone(),
-                run_id: event.run_event.run_id.clone(),
+                session_id: public.session_id.clone(),
+                run_id: public.run_id.clone(),
             });
         }
         Ok(event)
@@ -1309,8 +1490,6 @@ impl HttpLiveEventBus {
                     message: error.to_string(),
                 }
             })?;
-            // Preserve the source order, including transient protocol classes: a rebuilt durable
-            // window must not ACK durable sequence 1 and 3 before re-attempting transient 2.
             prepared.push((event.clone(), protocol));
         }
         if seen_runs != *runs {
@@ -1335,7 +1514,6 @@ impl HttpLiveEventBus {
         }
         let journal_source = prepared
             .iter()
-            .filter(|(_, protocol)| protocol.is_durable())
             .map(|(event, protocol)| {
                 (
                     protocol.clone(),
@@ -1715,51 +1893,6 @@ fn append_sse_field(buffer: &mut String, field: &str, value: &str) {
         buffer.push_str(": ");
         buffer.push_str(line);
         buffer.push('\n');
-    }
-}
-
-fn protocol_event_class(event: &PublicRunEventKind) -> HttpProtocolEventClass {
-    match event {
-        PublicRunEventKind::TextDelta { .. }
-        | PublicRunEventKind::ReasoningDelta { .. }
-        | PublicRunEventKind::ToolCallArgsDelta { .. }
-        | PublicRunEventKind::ToolProgress { .. } => HttpProtocolEventClass::Transient,
-        PublicRunEventKind::RouteTransition { .. }
-        | PublicRunEventKind::RunStarted { .. }
-        | PublicRunEventKind::TaskRunStarted { .. }
-        | PublicRunEventKind::RunFinished { .. }
-        | PublicRunEventKind::RunAwaitingUserInput { .. }
-        | PublicRunEventKind::TaskRunFinished { .. }
-        | PublicRunEventKind::TaskRoutingChanged { .. }
-        | PublicRunEventKind::ConversationRouteChanged { .. }
-        | PublicRunEventKind::PlanReviewChanged { .. }
-        | PublicRunEventKind::UserInputChanged { .. }
-        | PublicRunEventKind::TaskPhaseChanged { .. }
-        | PublicRunEventKind::TaskExecutionAdmitted { .. }
-        | PublicRunEventKind::TaskPlanUpdated { .. }
-        | PublicRunEventKind::TaskChecklistUpdated { .. }
-        | PublicRunEventKind::TaskBatchChanged { .. }
-        | PublicRunEventKind::TaskStepChanged { .. }
-        | PublicRunEventKind::IntegrationLaneChanged { .. }
-        | PublicRunEventKind::ProviderTurnRecoveryChanged { .. }
-        | PublicRunEventKind::ProviderTurnPartialOutputDiscarded { .. }
-        | PublicRunEventKind::RunFailed { .. }
-        | PublicRunEventKind::RunBlocked { .. }
-        | PublicRunEventKind::RunPaused { .. }
-        | PublicRunEventKind::RunInterrupted { .. }
-        | PublicRunEventKind::RouteRecoveryRequired { .. }
-        | PublicRunEventKind::RunCancelled
-        | PublicRunEventKind::ToolCallStarted { .. }
-        | PublicRunEventKind::ToolCallCompleted { .. }
-        | PublicRunEventKind::ApprovalRequested { .. }
-        | PublicRunEventKind::ApprovalResolved { .. }
-        | PublicRunEventKind::ToolResult { .. }
-        | PublicRunEventKind::Usage { .. }
-        | PublicRunEventKind::ContinuationState { .. }
-        | PublicRunEventKind::TerminalLifecycle { .. }
-        | PublicRunEventKind::Control { .. }
-        | PublicRunEventKind::AssistantMessage { .. }
-        | PublicRunEventKind::Notice { .. } => HttpProtocolEventClass::Durable,
     }
 }
 

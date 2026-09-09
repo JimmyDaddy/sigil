@@ -318,12 +318,15 @@ impl HttpDurableCommandStore {
             if existing.identity != identity {
                 return Ok(HttpStoredCommandClaim::Conflict);
             }
-            if matches!(
+            let retryable_user_input = matches!(
                 existing.completion,
                 HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted
-            ) && identity.kind == "user_input_decision"
-            {
-                if existing.completion == HttpStoredCommandCompletion::Aborted {
+            ) && identity.kind == "user_input_decision";
+            let deferred_plan = existing.completion
+                == HttpStoredCommandCompletion::PlanDecisionDeferred
+                && identity.kind == "plan_decision";
+            if retryable_user_input || deferred_plan {
+                if existing.completion != HttpStoredCommandCompletion::Reserved {
                     let mut candidate = state.clone();
                     candidate
                         .entries
@@ -510,6 +513,9 @@ pub(crate) enum HttpStoredCommandCompletion {
     Verification(Box<HttpVerificationRerunCommandReceipt>),
     Integration(Box<HttpTaskIntegrationAcceptanceCommandReceipt>),
     PlanDecision(HttpPlanDecisionCommandReceipt),
+    /// The exact Plan command was refused before the driver ran because a run still owns
+    /// the session. Its identity remains reserved against conflicting payloads.
+    PlanDecisionDeferred,
     UserInputDecision(HttpUserInputDecisionCommandReceipt),
     IntentDrop(Box<HttpIntentDropCommandReceipt>),
     Queue(Box<HttpConversationQueueCommandReceipt>),
@@ -619,6 +625,7 @@ fn validate_completion(
 ) -> Result<(), HttpCommandStoreError> {
     let valid = match completion {
         HttpStoredCommandCompletion::Reserved | HttpStoredCommandCompletion::Aborted => true,
+        HttpStoredCommandCompletion::PlanDecisionDeferred => identity.kind == "plan_decision",
         HttpStoredCommandCompletion::Start(receipt) => {
             identity.kind == "start"
                 && receipt.command_id == identity.key.command_id

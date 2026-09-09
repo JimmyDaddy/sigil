@@ -496,6 +496,46 @@ fn aborted_user_input_decision_can_recover_only_with_the_exact_identity() {
 }
 
 #[test]
+fn deferred_plan_admission_preserves_identity_across_restart_without_retrying_aborted_execution() {
+    let temp = tempfile::tempdir().expect("temp directory should create");
+    let path = temp.path().join("commands.json");
+    let mut exact = identity("plan-command-1", 'a');
+    exact.kind = "plan_decision".to_owned();
+    {
+        let store = HttpDurableCommandStore::open(&path, 1).expect("store should open");
+        assert!(matches!(
+            store.reserve(exact.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(&exact, HttpStoredCommandCompletion::PlanDecisionDeferred)
+            .expect("pre-execution refusal should persist");
+    }
+    {
+        let store = HttpDurableCommandStore::open(&path, 1).expect("store should reopen");
+        let mut conflict = exact.clone();
+        conflict.fingerprint_sha256 = "b".repeat(64);
+        assert!(matches!(
+            store.reserve(conflict),
+            Ok(HttpStoredCommandClaim::Conflict)
+        ));
+        assert!(matches!(
+            store.reserve(exact.clone()),
+            Ok(HttpStoredCommandClaim::Execute)
+        ));
+        store
+            .complete(&exact, HttpStoredCommandCompletion::Aborted)
+            .expect("an ambiguous execution must remain aborted");
+    }
+    let store = HttpDurableCommandStore::open(&path, 1).expect("aborted store should reopen");
+    assert!(matches!(
+        store.reserve(exact),
+        Ok(HttpStoredCommandClaim::Existing(completion))
+            if *completion == HttpStoredCommandCompletion::Aborted
+    ));
+}
+
+#[test]
 fn durable_command_store_round_trips_queue_completion_without_prompt_material() {
     const EXACT_PROMPT: &str =
         "open https://example.com/private?token=queue-command-token-must-never-persist";
