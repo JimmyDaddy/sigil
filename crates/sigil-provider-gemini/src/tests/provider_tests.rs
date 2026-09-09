@@ -88,11 +88,13 @@ fn constructor_uses_common_http_client_ca_validation() -> anyhow::Result<()> {
     unsafe {
         std::env::set_var("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");
     }
-    assert!(GeminiProvider::new(
-        GeminiProviderConfig::default(),
-        ModelRequestTimeouts::default(),
-    )
-    .is_err());
+    assert!(
+        GeminiProvider::new(
+            GeminiProviderConfig::default(),
+            ModelRequestTimeouts::default(),
+        )
+        .is_err()
+    );
     Ok(())
 }
 

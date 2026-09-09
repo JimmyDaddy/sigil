@@ -17,6 +17,7 @@ use crate::{
 fn new_openai_compatible_provider(
     config: OpenAiCompatibleProviderConfig,
 ) -> Result<OpenAiCompatibleProvider> {
+    let _guard = crate::test_env::lock();
     OpenAiCompatibleProvider::new(config, ModelRequestTimeouts::default())
 }
 
@@ -28,10 +29,13 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
             (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
             ("OPENAI_API_KEY", "   "),
         ]);
-        new_openai_compatible_provider(OpenAiCompatibleProviderConfig {
-            api_key: None,
-            ..OpenAiCompatibleProviderConfig::default()
-        })?
+        OpenAiCompatibleProvider::new(
+            OpenAiCompatibleProviderConfig {
+                api_key: None,
+                ..OpenAiCompatibleProviderConfig::default()
+            },
+            ModelRequestTimeouts::default(),
+        )?
     };
 
     assert_eq!(provider.name(), "openai_compat");
@@ -50,15 +54,15 @@ async fn provider_reports_name_capabilities_and_missing_api_key() -> Result<()> 
 #[test]
 fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
     let _guard = crate::test_env::lock();
-    let _scope = EnvScope::set_many(&[(
-        "SSL_CERT_FILE",
-        "/definitely/missing/sigil-provider-ca.pem",
-    )]);
-    assert!(OpenAiCompatibleProvider::new(
-        OpenAiCompatibleProviderConfig::default(),
-        ModelRequestTimeouts::default(),
-    )
-    .is_err());
+    let _scope =
+        EnvScope::set_many(&[("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem")]);
+    assert!(
+        OpenAiCompatibleProvider::new(
+            OpenAiCompatibleProviderConfig::default(),
+            ModelRequestTimeouts::default(),
+        )
+        .is_err()
+    );
     Ok(())
 }
 
@@ -69,14 +73,17 @@ async fn provider_allows_unauthenticated_loopback_without_authorization_header()
          data: [DONE]\n\n",
     )
     .await?;
-    let provider = OpenAiCompatibleProvider::new_exact(
-        OpenAiCompatibleProviderConfig {
-            base_url: server.base_url(),
-            api_key: None,
-            ..OpenAiCompatibleProviderConfig::default()
-        },
-        ModelRequestTimeouts::default(),
-    )?;
+    let provider = {
+        let _guard = crate::test_env::lock();
+        OpenAiCompatibleProvider::new_exact(
+            OpenAiCompatibleProviderConfig {
+                base_url: server.base_url(),
+                api_key: None,
+                ..OpenAiCompatibleProviderConfig::default()
+            },
+            ModelRequestTimeouts::default(),
+        )?
+    };
 
     let chunks = provider
         .stream(test_request())

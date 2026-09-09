@@ -1524,6 +1524,9 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
+        # Install the append fault before releasing tools/list so the host's
+        # post-spawn lifecycle scan cannot race ahead of the fault injection.
+        STORE_PATH.unlink()
         STORE_PATH.mkdir()
         write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
 "#,

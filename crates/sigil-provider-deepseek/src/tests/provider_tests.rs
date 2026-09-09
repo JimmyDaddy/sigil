@@ -129,11 +129,13 @@ fn constructor_uses_common_http_client_ca_validation() -> Result<()> {
         unsafe {
             std::env::set_var("SSL_CERT_FILE", "/definitely/missing/sigil-provider-ca.pem");
         }
-        assert!(DeepSeekProvider::new(
-            crate::DeepSeekProviderConfig::default(),
-            ModelRequestTimeouts::default(),
-        )
-        .is_err());
+        assert!(
+            DeepSeekProvider::new(
+                crate::DeepSeekProviderConfig::default(),
+                ModelRequestTimeouts::default(),
+            )
+            .is_err()
+        );
         Ok(())
     })
 }
