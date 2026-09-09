@@ -269,6 +269,18 @@ pub enum ProcessTerminationV1 {
     OutcomeUncertain { evidence_digest: CanonicalHash },
 }
 
+/// Observation of the owned output reader, independent of process termination or retention.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManagedOutputSourceV1 {
+    /// The reader observed the source's actual end of stream.
+    Complete,
+    /// The reader failed before observing end of stream.
+    ReadFailed,
+    /// Capture stopped without observing end of stream, or no reader evidence is available.
+    #[default]
+    Incomplete,
+}
+
 /// Bounded output summary (never fabricated by a consumer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundedOutputSummaryV1 {
@@ -279,6 +291,10 @@ pub struct BoundedOutputSummaryV1 {
     /// output from an unbounded post-execution source.
     pub retained_payload: Vec<u8>,
     pub content_digest: CanonicalHash,
+    /// Missing evidence in an older receipt must never imply successful capture.
+    #[serde(default)]
+    pub source: ManagedOutputSourceV1,
+    /// Only reports omitted retained bytes; source completeness is recorded separately.
     pub truncated: bool,
     pub artifact_ref: Option<crate::resource::OpaqueArtifactRefV1>,
 }

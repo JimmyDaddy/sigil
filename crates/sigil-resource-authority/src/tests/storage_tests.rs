@@ -159,6 +159,167 @@ fn quota_journal_path(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn storage_capacity_grant_checks_live_handle_generation_and_typed_limits() {
+    let directory = tempfile::tempdir().expect("storage root");
+    let mut service = AuthorityManagedStorageServiceV1::new_with_state_root(
+        table_with_session_grant(),
+        authority(),
+        directory.path(),
+    )
+    .expect("durable authority");
+    let namespace = CanonicalHash::from_bytes([0x71; 32]);
+    let handle = service
+        .admit_namespace(
+            request(namespace),
+            ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+        )
+        .expect("handle");
+    assert_eq!(
+        service
+            .reserve_namespace_quota_capacity(&handle, 10, 100, 1)
+            .expect("capacity"),
+        100
+    );
+    let before = fs::read(quota_journal_path(directory.path())).expect("before rejection");
+    assert!(matches!(
+        service.reserve_namespace_quota_capacity(&handle, 1025, 2048, 1),
+        Err(ManagedStorageErrorV1::QuotaExceeded {
+            dimension: sigil_kernel::managed_storage::ManagedStorageQuotaDimensionV1::Bytes,
+            requested: 1025,
+            limit: 1024,
+        })
+    ));
+    assert!(matches!(
+        service.reserve_namespace_quota_capacity(&handle, 100, 100, 101),
+        Err(ManagedStorageErrorV1::QuotaExceeded {
+            dimension: sigil_kernel::managed_storage::ManagedStorageQuotaDimensionV1::Entries,
+            requested: 101,
+            limit: 100,
+        })
+    ));
+    let wrong_family = ManagedStorageNamespaceHandleV1::new(
+        OpaqueKernelCapabilityHandleId::new(handle.handle_id.as_str().to_owned()),
+        namespace,
+        ManagedStorageCapabilityFamilyV1::AtomicObject,
+        OpaqueKernelCapabilityAuthenticatorV1::new("test".to_owned()),
+    );
+    assert!(matches!(
+        service.reserve_namespace_quota_capacity(&wrong_family, 100, 100, 1),
+        Err(ManagedStorageErrorV1::CapabilityMismatch)
+    ));
+    service.authority_generation.epoch += 1;
+    assert!(matches!(
+        service.reserve_namespace_quota_capacity(&handle, 100, 100, 1),
+        Err(ManagedStorageErrorV1::CapabilityMismatch)
+    ));
+    service.authority_generation = authority();
+    assert_eq!(
+        fs::read(quota_journal_path(directory.path())).expect("no quota change"),
+        before
+    );
+    let stale = ManagedStorageNamespaceHandleV1::new(
+        OpaqueKernelCapabilityHandleId::new(handle.handle_id.as_str().to_owned()),
+        namespace,
+        handle.capability_family,
+        OpaqueKernelCapabilityAuthenticatorV1::new("test".to_owned()),
+    );
+    service
+        .finalize_namespace(handle, "capacity-test".to_owned())
+        .expect("finalize");
+    assert!(matches!(
+        service.reserve_namespace_quota_capacity(&stale, 1, 100, 1),
+        Err(ManagedStorageErrorV1::HandleFinalized)
+    ));
+}
+
+#[test]
+fn storage_shared_quota_poison_rejects_writes_against_existing_capacity() {
+    let directory = tempfile::tempdir().expect("storage root");
+    let first = AuthorityManagedStorageServiceV1::new_with_state_root(
+        table_with_session_grant(),
+        authority(),
+        directory.path(),
+    )
+    .expect("first service");
+    let second = AuthorityManagedStorageServiceV1::new_with_state_root(
+        table_with_session_grant(),
+        authority(),
+        directory.path(),
+    )
+    .expect("second service sharing the quota book");
+    let first_handle = first
+        .admit_namespace(
+            request(CanonicalHash::from_bytes([0x72; 32])),
+            ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+        )
+        .expect("first namespace");
+    let second_handle = second
+        .admit_namespace(
+            request(CanonicalHash::from_bytes([0x73; 32])),
+            ValidatedStorageAdmissionCapabilityV1::startup_probe(),
+        )
+        .expect("second namespace");
+    assert_eq!(
+        first
+            .reserve_namespace_quota_capacity(&first_handle, 4, 100, 1)
+            .expect("existing capacity"),
+        100
+    );
+    first
+        .validate_namespace_write(&first_handle)
+        .expect("healthy capacity can be consumed");
+    let first_record = first
+        .record_for_handle(&first_handle)
+        .expect("live first record");
+    let first_owner =
+        storage_quota_owner_key(first_record.grant.grant_hash, first_record.namespace_hash);
+    let previous = first
+        .quota
+        .lock()
+        .expect("quota")
+        .reservation_for_owner(&first_owner)
+        .expect("first reservation");
+    second
+        .quota
+        .lock()
+        .expect("shared quota")
+        .inject_next_directory_sync_failure();
+    assert!(matches!(
+        second.reserve_namespace_quota_capacity(&second_handle, 4, 100, 1),
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    ));
+    let after_uncertain_write =
+        fs::read(quota_journal_path(directory.path())).expect("installed snapshot");
+    assert!(
+        first.record_for_handle(&first_handle).is_ok(),
+        "the namespace remains live"
+    );
+    assert_eq!(
+        first
+            .quota
+            .lock()
+            .expect("quota")
+            .reservation_for_owner(&first_owner),
+        Some(previous),
+        "the previous capacity is still charged"
+    );
+    for _ in 0..10 {
+        assert!(
+            matches!(
+                first.validate_namespace_write(&first_handle),
+                Err(ManagedStorageErrorV1::AuthorityUnavailable)
+            ),
+            "a live namespace cannot consume capacity from a poisoned shared book"
+        );
+    }
+    assert_eq!(
+        fs::read(quota_journal_path(directory.path())).expect("validation snapshot"),
+        after_uncertain_write,
+        "validation must not write the journal"
+    );
+}
+
+#[test]
 fn storage_workspace_policy_cold_migration_preserves_settled_records() {
     let directory = tempfile::tempdir().expect("storage root");
     let journal = quota_journal_path(directory.path());

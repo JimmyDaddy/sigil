@@ -556,7 +556,15 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         &self,
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageErrorV1> {
-        self.record_for_handle(handle).map(|_| ())
+        self.record_for_handle(handle)?;
+        // Even an existing capacity grant stops authorizing writes when another namespace's
+        // uncertain persistence poisons the shared quota book. record_for_handle releases the
+        // admission lock before taking this quota lock; the check performs no filesystem I/O.
+        self.quota
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
+            .ensure_healthy()
+            .map_err(storage_quota_error)
     }
 
     fn reconcile_namespace_quota(
@@ -567,6 +575,28 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
     ) -> Result<(), ManagedStorageErrorV1> {
         let record = self.record_for_handle(handle)?;
         self.reconcile_quota(&record, bytes, entries)
+    }
+
+    fn reserve_namespace_quota_capacity(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+        minimum_bytes: u64,
+        preferred_bytes: u64,
+        entries: u64,
+    ) -> Result<u64, ManagedStorageErrorV1> {
+        let record = self.record_for_handle(handle)?;
+        self.quota
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
+            .reserve_owned_capacity(
+                storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash),
+                &record.grant.quota_profile,
+                minimum_bytes,
+                preferred_bytes,
+                entries,
+            )
+            .map(|reservation| reservation.reserved_bytes)
+            .map_err(storage_quota_error)
     }
 
     fn finalize_namespace(
@@ -687,8 +717,31 @@ fn storage_quota_owner_key(grant_hash: CanonicalHash, namespace_hash: CanonicalH
     )
 }
 
-fn storage_quota_error(_error: QuotaErrorV1) -> ManagedStorageErrorV1 {
-    ManagedStorageErrorV1::AuthorityUnavailable
+fn storage_quota_error(error: QuotaErrorV1) -> ManagedStorageErrorV1 {
+    use sigil_kernel::managed_storage::ManagedStorageQuotaDimensionV1;
+    let (dimension, requested, limit) = match error {
+        QuotaErrorV1::ReservationExceeded { reserved, max, .. } => {
+            (ManagedStorageQuotaDimensionV1::Bytes, reserved, max)
+        }
+        QuotaErrorV1::EntryExceeded { reserved, max, .. } => {
+            (ManagedStorageQuotaDimensionV1::Entries, reserved, max)
+        }
+        QuotaErrorV1::WorkspaceOvercommit {
+            used,
+            incoming,
+            cap,
+        } => (
+            ManagedStorageQuotaDimensionV1::WorkspaceBytes,
+            used.saturating_add(incoming),
+            cap,
+        ),
+        _ => return ManagedStorageErrorV1::AuthorityUnavailable,
+    };
+    ManagedStorageErrorV1::QuotaExceeded {
+        dimension,
+        requested,
+        limit,
+    }
 }
 
 fn acquire_storage_process_lock(root: &Path) -> Result<File, QuotaErrorV1> {

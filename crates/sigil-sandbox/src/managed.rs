@@ -24,10 +24,10 @@ use sigil_kernel::managed_execution::{
     BoundedProcessOutputFrameV1, BoundedPtySizeV1, ExecutionResourceReceiptV1,
     ManagedExecutionErrorV1, ManagedExecutionPlanDraftV1, ManagedExecutionPlanRequestV1,
     ManagedExecutionPlannerV1, ManagedExecutionReceiptV1, ManagedExecutionRequestV1,
-    ManagedExecutionServiceV1, ManagedProcessControlErrorV1, ManagedProcessHandleV1,
-    ManagedProcessOutputChannelV1, ManagedProcessOutputStreamV1, ProcessCancelReasonV1,
-    ProcessControlActionV1, ProcessControlReceiptV1, ProcessExecutionReceiptV1,
-    ProcessTerminationV1, ResourceEnforcementReceiptV1,
+    ManagedExecutionServiceV1, ManagedOutputSourceV1, ManagedProcessControlErrorV1,
+    ManagedProcessHandleV1, ManagedProcessOutputChannelV1, ManagedProcessOutputStreamV1,
+    ProcessCancelReasonV1, ProcessControlActionV1, ProcessControlReceiptV1,
+    ProcessExecutionReceiptV1, ProcessTerminationV1, ResourceEnforcementReceiptV1,
 };
 use sigil_kernel::resource::{
     CanonicalHash, EffectiveEnforcementV1, EnforcementCompletenessV1,
@@ -41,6 +41,9 @@ use sigil_kernel::resource::{
 use crate::environment::{apply_reserved_environment, standard_reserved_environment};
 use crate::launch_plan::SealedSandboxLaunchPlanV1;
 use crate::receipt::verify_enforcement;
+
+mod summary_capture;
+use summary_capture::spawn_summary_capture;
 
 fn zero_hash() -> CanonicalHash {
     CanonicalHash::from_bytes([0u8; 32])
@@ -113,6 +116,9 @@ pub trait ManagedOneShotLaunchServiceV1: Send + Sync {
 
 /// Host-owned policy-safe sink for one-shot process bytes. The sandbox only sees the typed
 /// channel and chunk; it never receives an artifact path or a second persistence authority.
+/// `write_chunk` must perform bounded, nonblocking enqueue only. The host owns the bounded
+/// storage queue, writer lifetime and finalization, and must latch rejected or failed writes.
+/// An error disables subsequent writes for that channel while its pipe continues draining.
 pub trait ManagedOutputCaptureSinkV1: Send + Sync {
     fn write_chunk(
         &self,
@@ -823,7 +829,6 @@ struct BoundedReadOutcome {
     summary: BoundedOutputSummaryV1,
 }
 
-const POST_LEADER_CAPTURE_BUDGET: Duration = Duration::from_millis(50);
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const OWNED_TREE_CLEANUP_GRACE: Duration = Duration::from_millis(250);
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1187,6 +1192,7 @@ struct CapState {
     retained: Vec<u8>,
     observed: u64,
     cap: u64,
+    source: ManagedOutputSourceV1,
 }
 
 impl CapState {
@@ -1195,6 +1201,7 @@ impl CapState {
             retained: Vec::new(),
             observed: 0,
             cap,
+            source: ManagedOutputSourceV1::Incomplete,
         }
     }
 
@@ -1213,82 +1220,10 @@ impl CapState {
             retained_bytes: self.retained.len() as u64,
             retained_payload: self.retained.clone(),
             content_digest: content_digest(&self.retained),
+            source: self.source,
             truncated: self.observed > self.cap,
             artifact_ref: None,
         }
-    }
-
-    fn incomplete_summary(&self) -> BoundedOutputSummaryV1 {
-        let mut summary = self.summary();
-        summary.truncated = true;
-        summary
-    }
-}
-
-/// Starts an unbounded pipe drain with bounded retention. The reader never sends retained frames
-/// through a bounded channel, because that would reintroduce backpressure and let a child block
-/// once the consumer stops reading. Completion is reported separately so the caller can stop
-/// waiting after the leader has exited without inferring EOF from that fact.
-fn spawn_summary_capture(
-    mut pipe: impl Read + Send + 'static,
-    cap: u64,
-    channel: ManagedProcessOutputChannelV1,
-    sink: Option<Arc<dyn ManagedOutputCaptureSinkV1>>,
-) -> (
-    std::sync::mpsc::Receiver<io::Result<BoundedReadOutcome>>,
-    Arc<Mutex<CapState>>,
-) {
-    let state = Arc::new(Mutex::new(CapState::new(cap)));
-    let state_for_reader = Arc::clone(&state);
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut chunk = [0u8; 4096];
-        let result = loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => {
-                    let summary = state_for_reader
-                        .lock()
-                        .map(|state| state.summary())
-                        .map_err(|_| io::Error::other("managed output state poisoned"));
-                    break summary.map(|summary| BoundedReadOutcome { summary });
-                }
-                Ok(read) => {
-                    match state_for_reader.lock() {
-                        Ok(mut state) => state.push(&chunk[..read]),
-                        Err(_) => break Err(io::Error::other("managed output state poisoned")),
-                    }
-                    if let Some(sink) = sink.as_ref() {
-                        // Capture is secondary to process ownership. A failed sink must not
-                        // stop this reader, otherwise the child can deadlock on a full pipe. Do
-                        // not hold the bounded-summary mutex while crossing the sink seam.
-                        let _ = sink.write_chunk(channel, &chunk[..read]);
-                    }
-                }
-                Err(error) => break Err(error),
-            }
-        };
-        let _ = done_tx.send(result);
-    });
-    (done_rx, state)
-}
-
-/// Returns a complete reader result when EOF arrives promptly. If a descendant still owns the
-/// write end, return the bounded snapshot and mark it incomplete instead of waiting indefinitely.
-fn finish_summary_capture(
-    done_rx: &std::sync::mpsc::Receiver<io::Result<BoundedReadOutcome>>,
-    state: &Arc<Mutex<CapState>>,
-) -> io::Result<BoundedReadOutcome> {
-    match done_rx.recv_timeout(POST_LEADER_CAPTURE_BUDGET) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => state
-            .lock()
-            .map(|state| BoundedReadOutcome {
-                summary: state.incomplete_summary(),
-            })
-            .map_err(|_| io::Error::other("managed output state poisoned")),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-            "managed output reader stopped unexpectedly",
-        )),
     }
 }
 
@@ -1308,7 +1243,21 @@ fn spawn_drain(
         let mut chunk = [0u8; 4096];
         loop {
             match pipe.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .source = ManagedOutputSourceV1::Complete;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .source = ManagedOutputSourceV1::ReadFailed;
+                    break;
+                }
                 Ok(read) => {
                     let mut guard = state
                         .lock()
@@ -1475,18 +1424,40 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         // Start both drains before the first process probe. This makes the runtime deadline cover
         // the whole launch-to-settlement interval and prevents a full stderr pipe from blocking
         // stdout (or delaying timeout/cancellation) behind a sequential read.
-        let (stdout_done, stdout_state) = spawn_summary_capture(
+        let stdout_capture = match spawn_summary_capture(
             stdout_pipe,
             cap,
             ManagedProcessOutputChannelV1::Stdout,
             self.output_sink.clone(),
-        );
-        let (stderr_done, stderr_state) = spawn_summary_capture(
+        ) {
+            Ok(capture) => capture,
+            Err(_) => {
+                terminate_reap_one_shot_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let stderr_capture = match spawn_summary_capture(
             stderr_pipe,
             cap,
             ManagedProcessOutputChannelV1::Stderr,
             self.output_sink.clone(),
-        );
+        ) {
+            Ok(capture) => capture,
+            Err(_) => {
+                terminate_reap_one_shot_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
         let termination = poll_one_shot_termination(
             &mut child,
             process_owner.as_ref(),
@@ -1495,32 +1466,12 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             cancellation,
         )
         .await?;
-        let stdout_outcome = match finish_summary_capture(&stdout_done, &stdout_state) {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                inventory
-                    .settle_spawn(
-                        claim
-                            .take()
-                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
-                    )
-                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
-            }
-        };
-        let stderr_outcome = match finish_summary_capture(&stderr_done, &stderr_state) {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                inventory
-                    .settle_spawn(
-                        claim
-                            .take()
-                            .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?,
-                    )
-                    .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
-                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
-            }
-        };
+        // Both readers enter their post-leader window together. Completion requires actual EOF
+        // and joining the reader; a deadline/read failure remains distinct from process exit.
+        stdout_capture.mark_leader_finished();
+        stderr_capture.mark_leader_finished();
+        let stdout_outcome = stdout_capture.finish().await;
+        let stderr_outcome = stderr_capture.finish().await;
         inventory
             .settle_spawn(
                 claim
@@ -2065,6 +2016,7 @@ fn zero_summary() -> BoundedOutputSummaryV1 {
         retained_bytes: 0,
         retained_payload: Vec::new(),
         content_digest: zero_hash(),
+        source: ManagedOutputSourceV1::ReadFailed,
         truncated: false,
         artifact_ref: None,
     }

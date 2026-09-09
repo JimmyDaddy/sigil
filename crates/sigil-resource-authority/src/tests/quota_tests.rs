@@ -246,3 +246,243 @@ fn r71_quota_release_unknown_epoch_is_idempotent() {
     .expect("unknown release is idempotent");
     assert_eq!(book.workspace_used_bytes(), 0);
 }
+
+#[test]
+fn r71_quota_adjustment_is_one_durable_record_with_no_release_gap() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut book = QuotaBookV1::open(&path, 200).expect("durable quota");
+    let previous = book
+        .reserve_owned("capture", &prof, 20, 1)
+        .expect("reserve");
+    let replacement = book
+        .reconcile_owned("capture", &prof, 40, 2)
+        .expect("adjust");
+    let snapshot: QuotaJournalSnapshotV1 =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal")).expect("snapshot");
+    assert_eq!(snapshot.records.len(), 2);
+    assert!(matches!(
+        &snapshot.records[1].event,
+        QuotaJournalEventV1::Adjusted {
+            previous_reservation_epoch,
+            previous_bytes: 20,
+            previous_entries: 1,
+            reserved_bytes: 40,
+            reserved_entries: 2,
+            ..
+        } if *previous_reservation_epoch == previous.reservation_epoch
+    ));
+    let before = std::fs::read(&path).expect("before no-op");
+    assert_eq!(
+        book.reconcile_owned("capture", &prof, 40, 2)
+            .expect("no-op"),
+        replacement
+    );
+    assert_eq!(std::fs::read(&path).expect("after no-op"), before);
+    let reopened = QuotaBookV1::open(&path, 200).expect("replay adjustment");
+    assert_eq!(reopened.reservation_for_owner("capture"), Some(replacement));
+    assert_eq!(reopened.workspace_used_bytes(), 40);
+}
+
+#[test]
+fn r71_quota_rejected_adjustment_preserves_reservation_memory_and_disk() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut book = QuotaBookV1::open(&path, 80).expect("durable quota");
+    let previous = book
+        .reserve_owned("capture", &prof, 20, 2)
+        .expect("capture");
+    book.reserve_owned("other", &prof, 30, 3)
+        .expect("other owner");
+    let before = std::fs::read(&path).expect("before failures");
+    assert!(matches!(
+        book.reconcile_owned("capture", &prof, 71, 2),
+        Err(QuotaErrorV1::ReservationExceeded { .. })
+    ));
+    assert!(matches!(
+        book.reconcile_owned("capture", &prof, 20, 8),
+        Err(QuotaErrorV1::EntryExceeded { .. })
+    ));
+    assert!(matches!(
+        book.reconcile_owned("capture", &prof, 51, 2),
+        Err(QuotaErrorV1::WorkspaceOvercommit { .. })
+    ));
+    assert_eq!(book.reservation_for_owner("capture"), Some(previous));
+    assert_eq!(book.workspace_used_bytes(), 50);
+    assert_eq!(std::fs::read(&path).expect("unchanged journal"), before);
+    let reopened = QuotaBookV1::open(&path, 80).expect("replay old reservation");
+    assert_eq!(reopened.reservation_for_owner("capture"), Some(previous));
+    book.release(&prof, &previous)
+        .expect("old receipt still settles");
+    assert_eq!(book.workspace_used_bytes(), 30);
+}
+
+#[test]
+fn r71_quota_capacity_clamps_spare_to_available_class_and_workspace_bytes() {
+    let mut book = QuotaBookV1::new(80);
+    let prof = profile(100, 10);
+    let first = book
+        .reserve_owned_capacity("first", &prof, 20, 35, 1)
+        .expect("first");
+    assert_eq!(first.reserved_bytes, 35);
+    let second = book
+        .reserve_owned_capacity("second", &prof, 30, 100, 1)
+        .expect("second");
+    assert_eq!(second.reserved_bytes, 45);
+    assert_eq!(book.workspace_used_bytes(), 80);
+    assert!(matches!(
+        book.reserve_owned_capacity("first", &prof, 36, 100, 1),
+        Err(QuotaErrorV1::WorkspaceOvercommit { .. })
+    ));
+    assert_eq!(book.reservation_for_owner("first"), Some(first));
+    book.release_owner("second").expect("settle second");
+    assert_eq!(
+        book.reserve_owned_capacity("first", &prof, 36, 100, 1)
+            .expect("grow")
+            .reserved_bytes,
+        80
+    );
+
+    let mut class_limited = QuotaBookV1::new(200);
+    class_limited
+        .reserve_owned("other", &prof, 70, 1)
+        .expect("class peer");
+    assert_eq!(
+        class_limited
+            .reserve_owned_capacity("capture", &prof, 10, 80, 1)
+            .expect("class clamp")
+            .reserved_bytes,
+        30
+    );
+}
+
+#[test]
+fn r71_quota_capacity_rejects_invalid_range_and_integer_overcommit() {
+    let mut book = QuotaBookV1::new(u64::MAX);
+    let prof = profile(u64::MAX, u64::MAX);
+    assert_eq!(
+        book.reserve_owned_capacity("capture", &prof, 2, 1, 1),
+        Err(QuotaErrorV1::InvalidCapacityRange)
+    );
+    book.reserve_owned("other", &prof, u64::MAX, 1)
+        .expect("full capacity");
+    assert!(matches!(
+        book.reserve_owned_capacity("capture", &prof, 1, u64::MAX, 1),
+        Err(QuotaErrorV1::ReservationExceeded { .. })
+    ));
+    assert!(book.reservation_for_owner("capture").is_none());
+}
+
+#[test]
+fn r71_quota_stale_adjustment_cannot_overwrite_current_owner_capacity() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut first = QuotaBookV1::open(&path, 200).expect("first writer");
+    let previous = first
+        .reserve_owned("capture", &prof, 20, 1)
+        .expect("reserve");
+    let mut stale = QuotaBookV1::open(&path, 200).expect("stale writer");
+    let current = first
+        .reconcile_owned("capture", &prof, 40, 1)
+        .expect("first growth");
+    assert!(matches!(stale.reconcile_owned("capture", &prof, 30, 1),
+        Err(QuotaErrorV1::Journal(message)) if message.contains("precondition mismatch")));
+    assert_eq!(stale.reservation_for_owner("capture"), Some(previous));
+    assert_eq!(
+        QuotaBookV1::open(&path, 200)
+            .expect("replay")
+            .reservation_for_owner("capture"),
+        Some(current)
+    );
+}
+
+#[test]
+fn r71_quota_adjustment_replay_checks_exact_predecessor_even_with_valid_hash() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut book = QuotaBookV1::open(&path, 200).expect("quota");
+    book.reserve_owned("capture", &prof, 20, 1)
+        .expect("reserve");
+    book.reconcile_owned("capture", &prof, 40, 1).expect("grow");
+    drop(book);
+    let mut snapshot: QuotaJournalSnapshotV1 =
+        serde_json::from_slice(&std::fs::read(&path).expect("journal")).expect("snapshot");
+    let adjustment = snapshot.records.last_mut().expect("adjustment");
+    let QuotaJournalEventV1::Adjusted { previous_bytes, .. } = &mut adjustment.event else {
+        panic!("expected adjustment event");
+    };
+    *previous_bytes += 1;
+    adjustment.record_hash = quota_record_hash(
+        adjustment.sequence,
+        adjustment.previous_hash,
+        &adjustment.event,
+    )
+    .expect("rehash");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&snapshot).expect("tampered snapshot"),
+    )
+    .expect("tamper");
+    assert!(matches!(QuotaBookV1::open(&path, 200),
+        Err(QuotaErrorV1::Journal(message)) if message.contains("does not match its predecessor")));
+}
+
+#[test]
+fn r71_quota_adjustment_file_sync_failure_keeps_previous_reservation_retryable() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut book = QuotaBookV1::open(&path, 200).expect("quota");
+    let previous = book
+        .reserve_owned("capture", &prof, 20, 1)
+        .expect("reserve");
+    let before = std::fs::read(&path).expect("before failure");
+    book.journal
+        .as_ref()
+        .expect("journal")
+        .persistence_failure
+        .set(Some(QuotaPersistenceFailurePoint::FileSync));
+    assert!(book.reconcile_owned("capture", &prof, 40, 1).is_err());
+    assert_eq!(book.reservation_for_owner("capture"), Some(previous));
+    assert_eq!(std::fs::read(&path).expect("unchanged journal"), before);
+    book.reconcile_owned("capture", &prof, 40, 1)
+        .expect("retry growth");
+    assert_eq!(
+        QuotaBookV1::open(&path, 200)
+            .expect("reopen")
+            .workspace_used_bytes(),
+        40
+    );
+}
+
+#[test]
+fn r71_quota_uncertain_adjustment_poisoning_requires_reopen_before_reuse() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("quota.json");
+    let prof = profile(100, 10);
+    let mut book = QuotaBookV1::open(&path, 200).expect("quota");
+    let previous = book
+        .reserve_owned("capture", &prof, 40, 1)
+        .expect("reserve");
+    book.journal
+        .as_ref()
+        .expect("journal")
+        .persistence_failure
+        .set(Some(QuotaPersistenceFailurePoint::DirectorySync));
+    assert!(matches!(book.reconcile_owned("capture", &prof, 20, 1),
+        Err(QuotaErrorV1::Journal(message)) if message.contains("uncertain")));
+    assert_eq!(book.reservation_for_owner("capture"), Some(previous));
+    assert!(matches!(book.reconcile_owned("capture", &prof, 40, 1),
+        Err(QuotaErrorV1::Journal(message)) if message.contains("poisoned")));
+    assert!(book.reserve_owned("other", &prof, 1, 1).is_err());
+    assert!(book.release_owner("capture").is_err());
+    let mut reopened = QuotaBookV1::open(&path, 200).expect("reopen installed snapshot");
+    assert_eq!(reopened.workspace_used_bytes(), 20);
+    reopened
+        .reconcile_owned("capture", &prof, 30, 1)
+        .expect("recovered growth");
+}

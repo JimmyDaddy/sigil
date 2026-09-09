@@ -383,8 +383,7 @@ impl Tool for BashTool {
                 anyhow::anyhow!("session scratch lease could not be durably established: {error}")
             })?;
         // RFC-0062 8.1: create the harness-owned capture plan and staging sink BEFORE spawn so
-        // stdout/stderr chunks are tee'd as they arrive instead of being reconstructed from the
-        // bounded post-execution content.
+        // stdout/stderr capture is independent of the bounded post-execution preview.
         let mut request = request;
         let capture_plan = ctx.tool_artifact_store().map(|store| {
             sigil_kernel::ToolExecutionCapturePlanV1::process_defaults(
@@ -453,6 +452,8 @@ impl Tool for BashTool {
             cancellation.mark_cleanup_incomplete();
         }
         let observed_bytes = receipt.effective_output().combined_total_bytes;
+        let capture_completion_missing =
+            capture_plan.is_some() && !capture_setup_failed && receipt.capture.is_none();
         let mut result = if let Some(analysis) = fallback_analysis.as_ref() {
             bash_tool_result_from_execution_receipt_with_analysis(
                 call_id,
@@ -473,6 +474,9 @@ impl Tool for BashTool {
         };
         if capture_setup_failed {
             attach_capture_storage_failure(&mut result, observed_bytes, "capture_setup_failed");
+            result = result.with_unavailable_artifact_capture(observed_bytes);
+        } else if capture_completion_missing {
+            attach_capture_storage_failure(&mut result, observed_bytes, "capture_transfer_failed");
             result = result.with_unavailable_artifact_capture(observed_bytes);
         }
         let capture_outcome = result.take_capture_outcome();

@@ -4198,9 +4198,9 @@ impl Drop for StagingCleanupGuard {
 }
 
 impl ToolArtifactCaptureSink {
-    /// RFC-0062 8.1: enters process capture mode before spawn. Two bounded owner-only
-    /// files are created inside the store staging namespace; their paths never enter the child
-    /// environment, model, session, UI, or logs.
+    /// RFC-0062 8.1: enters process capture mode before spawn. The managed backend binds the
+    /// authority-owned staging namespace; each bounded owner-only stream file is created on
+    /// its first write. Paths never enter the child environment, model, session, UI, or logs.
     pub fn begin_process_capture(&self, config: ProcessStreamCaptureConfigV1) -> Result<Self> {
         let mut sink = self.store.begin_policy_safe_capture(
             &self.tool_call_id,
@@ -4301,6 +4301,32 @@ impl ToolArtifactCaptureSink {
         self.process_write_failed = true;
     }
 
+    /// Records the reader's final byte count after a bounded transport has discarded the
+    /// suffix beyond its staging limit. Call after the last write, with the real observed
+    /// count; this carries no payload and never authorizes additional storage.
+    ///
+    /// # Errors
+    /// Returns an error outside process capture mode or for a combined stream.
+    pub fn record_process_stream_observation(
+        &mut self,
+        stream: ToolOutputStreamV1,
+        observed_bytes: u64,
+    ) -> Result<()> {
+        let state = self.process.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("process capture observation requires process capture mode")
+        })?;
+        let (stored_observation, truncated) = match stream {
+            ToolOutputStreamV1::Stdout => (&mut state.stdout_bytes, &mut state.stdout_truncated),
+            ToolOutputStreamV1::Stderr => (&mut state.stderr_bytes, &mut state.stderr_truncated),
+            ToolOutputStreamV1::Combined => {
+                bail!("process capture observation requires a separate stream")
+            }
+        };
+        *truncated |= observed_bytes > *stored_observation;
+        *stored_observation = (*stored_observation).max(observed_bytes);
+        Ok(())
+    }
+
     /// RFC-0062 8.2: writes one stream chunk into its bounded staging file. Once a stream's
     /// staging bound is reached, later chunks are counted but not persisted (storage truncation);
     /// the child keeps running because this cap is independent of the observed resource meter.
@@ -4391,10 +4417,10 @@ impl ToolArtifactCaptureSink {
             let snapshot = backend.finish()?;
             stdout_bytes = snapshot.stdout_bytes;
             stderr_bytes = snapshot.stderr_bytes;
-            state.stdout_bytes = snapshot.stdout_observed_bytes;
-            state.stderr_bytes = snapshot.stderr_observed_bytes;
-            state.stdout_truncated = snapshot.stdout_truncated;
-            state.stderr_truncated = snapshot.stderr_truncated;
+            state.stdout_bytes = state.stdout_bytes.max(snapshot.stdout_observed_bytes);
+            state.stderr_bytes = state.stderr_bytes.max(snapshot.stderr_observed_bytes);
+            state.stdout_truncated |= snapshot.stdout_truncated;
+            state.stderr_truncated |= snapshot.stderr_truncated;
         } else if let Some(mut file) = state.stdout_staging.take() {
             use std::io::{Read as _, Seek as _, SeekFrom};
             file.seek(SeekFrom::Start(0))?;

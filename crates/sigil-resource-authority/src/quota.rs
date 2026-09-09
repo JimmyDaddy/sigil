@@ -48,6 +48,8 @@ pub enum QuotaErrorV1 {
     BorrowedClaimsEnforcement,
     #[error("quota owner already has an active reservation")]
     OwnerAlreadyReserved,
+    #[error("preferred quota capacity is below the required minimum")]
+    InvalidCapacityRange,
     #[error("durable quota journal failure: {0}")]
     Journal(String),
 }
@@ -78,6 +80,17 @@ enum QuotaJournalEventV1 {
         reserved_bytes: u64,
         reserved_entries: u64,
     },
+    Adjusted {
+        previous_reservation_epoch: u64,
+        previous_class: ResourceQuotaClassV1,
+        previous_bytes: u64,
+        previous_entries: u64,
+        reservation_epoch: u64,
+        owner_key: String,
+        profile: ResourceQuotaProfileV1,
+        reserved_bytes: u64,
+        reserved_entries: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +116,15 @@ struct QuotaJournalV1 {
     workspace_cap: u64,
     records: Vec<QuotaJournalRecordV1>,
     poisoned: bool,
+    #[cfg(test)]
+    persistence_failure: std::cell::Cell<Option<QuotaPersistenceFailurePoint>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaPersistenceFailurePoint {
+    FileSync,
+    DirectorySync,
 }
 
 impl QuotaJournalV1 {
@@ -152,6 +174,8 @@ impl QuotaJournalV1 {
                 workspace_cap,
                 records: snapshot.records,
                 poisoned: false,
+                #[cfg(test)]
+                persistence_failure: std::cell::Cell::new(None),
             };
             if authorized_migration {
                 journal.persist(Some(&expected_predecessor))?;
@@ -163,6 +187,8 @@ impl QuotaJournalV1 {
                 workspace_cap,
                 records: Vec::new(),
                 poisoned: false,
+                #[cfg(test)]
+                persistence_failure: std::cell::Cell::new(None),
             };
             journal.persist(None)?;
             Ok((journal, QuotaBookV1::new(workspace_cap)))
@@ -170,11 +196,7 @@ impl QuotaJournalV1 {
     }
 
     fn append(&mut self, event: QuotaJournalEventV1) -> Result<(), QuotaErrorV1> {
-        if self.poisoned {
-            return Err(QuotaErrorV1::Journal(
-                "journal is poisoned after an uncertain durability failure".to_owned(),
-            ));
-        }
+        self.ensure_healthy()?;
         let record = QuotaJournalRecordV1 {
             sequence: self.records.len() as u64 + 1,
             previous_hash: self.records.last().map(|record| record.record_hash),
@@ -198,6 +220,15 @@ impl QuotaJournalV1 {
                 self.poisoned = true;
             }
             return Err(error);
+        }
+        Ok(())
+    }
+
+    fn ensure_healthy(&self) -> Result<(), QuotaErrorV1> {
+        if self.poisoned {
+            return Err(QuotaErrorV1::Journal(
+                "journal is poisoned after an uncertain durability failure".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -268,12 +299,26 @@ impl QuotaJournalV1 {
             }
             let mut file = options.open(&temp_path).map_err(quota_io_error)?;
             file.write_all(&bytes).map_err(quota_io_error)?;
+            #[cfg(test)]
+            if self.persistence_failure.get() == Some(QuotaPersistenceFailurePoint::FileSync) {
+                self.persistence_failure.set(None);
+                return Err(quota_io_error(std::io::Error::other(
+                    "injected file fsync failure",
+                )));
+            }
             file.sync_all().map_err(quota_io_error)?;
             fs::rename(&temp_path, &self.path).map_err(quota_io_error)?;
+            #[cfg(test)]
+            if self.persistence_failure.get() == Some(QuotaPersistenceFailurePoint::DirectorySync) {
+                self.persistence_failure.set(None);
+                return Err(quota_uncertain_io_error(std::io::Error::other(
+                    "injected directory fsync failure",
+                )));
+            }
             #[cfg(unix)]
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
-                .map_err(quota_io_error)?;
+                .map_err(quota_uncertain_io_error)?;
             Ok(())
         })();
         if write_result.is_err() {
@@ -285,6 +330,13 @@ impl QuotaJournalV1 {
 
 fn quota_io_error(error: std::io::Error) -> QuotaErrorV1 {
     QuotaErrorV1::Journal(error.to_string())
+}
+
+#[cfg(any(unix, test))]
+fn quota_uncertain_io_error(error: std::io::Error) -> QuotaErrorV1 {
+    QuotaErrorV1::Journal(format!(
+        "uncertain durability after quota snapshot installation: {error}"
+    ))
 }
 
 fn secure_quota_path(path: &std::path::Path) -> Result<(), QuotaErrorV1> {
@@ -360,6 +412,57 @@ fn verify_and_replay_records(
                 *reserved_bytes,
                 *reserved_entries,
             )?,
+            QuotaJournalEventV1::Adjusted {
+                previous_reservation_epoch,
+                previous_class,
+                previous_bytes,
+                previous_entries,
+                reservation_epoch,
+                owner_key,
+                profile,
+                reserved_bytes,
+                reserved_entries,
+            } => {
+                let previous = book
+                    .active_reservations
+                    .get(previous_reservation_epoch)
+                    .filter(|previous| {
+                        previous.owner_key == *owner_key
+                            && previous.class == *previous_class
+                            && previous.reserved_bytes == *previous_bytes
+                            && previous.reserved_entries == *previous_entries
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        QuotaErrorV1::Journal(
+                            "quota adjustment does not match its predecessor".to_owned(),
+                        )
+                    })?;
+                if *reservation_epoch <= book.reservation_epoch {
+                    return Err(QuotaErrorV1::Journal(
+                        "quota adjustment has a stale reservation epoch".to_owned(),
+                    ));
+                }
+                book.validate_replacement(
+                    Some(&previous),
+                    profile,
+                    *reserved_bytes,
+                    *reserved_entries,
+                )?;
+                book.apply_release(
+                    *previous_reservation_epoch,
+                    *previous_class,
+                    *previous_bytes,
+                    *previous_entries,
+                );
+                book.apply_replayed_reservation(
+                    *reservation_epoch,
+                    owner_key,
+                    profile,
+                    *reserved_bytes,
+                    *reserved_entries,
+                )?;
+            }
         }
         previous_hash = Some(record.record_hash);
     }
@@ -432,6 +535,26 @@ impl QuotaBookV1 {
         self.journal.is_some()
     }
 
+    /// Checks whether previously granted capacity can still authorize a physical write.
+    /// This reads only the in-memory durability latch and performs no journal I/O.
+    ///
+    /// # Errors
+    /// Rejects a journal poisoned by uncertain persistence until verified state is reopened.
+    pub(crate) fn ensure_healthy(&self) -> Result<(), QuotaErrorV1> {
+        self.journal
+            .as_ref()
+            .map_or(Ok(()), QuotaJournalV1::ensure_healthy)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_next_directory_sync_failure(&self) {
+        self.journal
+            .as_ref()
+            .expect("durable quota fault fixture")
+            .persistence_failure
+            .set(Some(QuotaPersistenceFailurePoint::DirectorySync));
+    }
+
     /// Atomically reserves bytes/entries under one profile. No mutation occurs on failure.
     pub fn reserve(
         &mut self,
@@ -451,6 +574,9 @@ impl QuotaBookV1 {
         bytes: u64,
         entries: u64,
     ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        if let Some(journal) = &self.journal {
+            journal.ensure_healthy()?;
+        }
         let owner_key = owner_key.into();
         if !owner_key.is_empty()
             && self
@@ -460,36 +586,13 @@ impl QuotaBookV1 {
         {
             return Err(QuotaErrorV1::OwnerAlreadyReserved);
         }
-        if profile.hard_runtime_enforcement_required
-            && profile.class == ResourceQuotaClassV1::BorrowedAccountingOnly
-        {
-            return Err(QuotaErrorV1::BorrowedClaimsEnforcement);
-        }
-        let class_name = quota_class_label(profile.class);
+        self.validate_replacement(None, profile, bytes, entries)?;
         let used_bytes = *self.per_class_bytes.get(&profile.class).unwrap_or(&0);
         let used_entries = *self.per_class_entries.get(&profile.class).unwrap_or(&0);
-        if used_bytes.saturating_add(bytes) > profile.max_bytes {
-            return Err(QuotaErrorV1::ReservationExceeded {
-                class: class_name,
-                reserved: used_bytes.saturating_add(bytes),
-                max: profile.max_bytes,
-            });
-        }
-        if used_entries.saturating_add(entries) > profile.max_entries {
-            return Err(QuotaErrorV1::EntryExceeded {
-                class: class_name,
-                reserved: used_entries.saturating_add(entries),
-                max: profile.max_entries,
-            });
-        }
-        if self.workspace_bytes.saturating_add(bytes) > self.workspace_cap {
-            return Err(QuotaErrorV1::WorkspaceOvercommit {
-                used: self.workspace_bytes,
-                incoming: bytes,
-                cap: self.workspace_cap,
-            });
-        }
-        let reservation_epoch = self.reservation_epoch.saturating_add(1);
+        let reservation_epoch = self
+            .reservation_epoch
+            .checked_add(1)
+            .ok_or_else(|| QuotaErrorV1::Journal("quota reservation epoch exhausted".to_owned()))?;
         if let Some(journal) = self.journal.as_mut() {
             journal.append(QuotaJournalEventV1::Reserved {
                 reservation_epoch,
@@ -521,9 +624,16 @@ impl QuotaBookV1 {
         })
     }
 
-    /// Reconciles one owner's current measured usage. A repeated call with identical facts is
-    /// idempotent; a changed measurement settles the prior reservation before reserving the new
-    /// frontier, and both events are durable when this book is journal-backed.
+    /// Atomically replaces one owner's measured usage. Admission and journal failure leave
+    /// the previous reservation intact; one durable adjustment has no unreserved midpoint.
+    /// The namespace authority must validate the owner's live lease and generation before
+    /// calling this bookkeeping operation and serialize it with the corresponding mutation.
+    ///
+    /// # Errors
+    /// Fails if the profile claims unsupported enforcement, a byte/entry/workspace limit would
+    /// be exceeded, the reservation epoch is exhausted, or journal CAS/persistence fails. The
+    /// old in-memory charge is retained on rejection; uncertain durability poisons the journal
+    /// and requires reopening verified durable state before further mutation.
     pub fn reconcile_owned(
         &mut self,
         owner_key: impl Into<String>,
@@ -531,6 +641,9 @@ impl QuotaBookV1 {
         bytes: u64,
         entries: u64,
     ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        if let Some(journal) = &self.journal {
+            journal.ensure_healthy()?;
+        }
         let owner_key = owner_key.into();
         if let Some((epoch, active)) = self
             .active_reservations
@@ -538,6 +651,7 @@ impl QuotaBookV1 {
             .find(|(_, reservation)| reservation.owner_key == owner_key)
             .map(|(epoch, reservation)| (*epoch, reservation.clone()))
         {
+            self.validate_replacement(Some(&active), profile, bytes, entries)?;
             if active.class == profile.class
                 && active.reserved_bytes == bytes
                 && active.reserved_entries == entries
@@ -548,9 +662,147 @@ impl QuotaBookV1 {
                     reserved_entries: entries,
                 });
             }
-            self.release_active(epoch, active)?;
+            let reservation_epoch = self.reservation_epoch.checked_add(1).ok_or_else(|| {
+                QuotaErrorV1::Journal("quota reservation epoch exhausted".to_owned())
+            })?;
+            if let Some(journal) = self.journal.as_mut() {
+                journal.append(QuotaJournalEventV1::Adjusted {
+                    previous_reservation_epoch: epoch,
+                    previous_class: active.class,
+                    previous_bytes: active.reserved_bytes,
+                    previous_entries: active.reserved_entries,
+                    reservation_epoch,
+                    owner_key: owner_key.clone(),
+                    profile: profile.clone(),
+                    reserved_bytes: bytes,
+                    reserved_entries: entries,
+                })?;
+            }
+            self.apply_release(
+                epoch,
+                active.class,
+                active.reserved_bytes,
+                active.reserved_entries,
+            );
+            self.apply_replayed_reservation(
+                reservation_epoch,
+                &owner_key,
+                profile,
+                bytes,
+                entries,
+            )?;
+            return Ok(QuotaReservationV1 {
+                reservation_epoch,
+                reserved_bytes: bytes,
+                reserved_entries: entries,
+            });
         }
         self.reserve_owned(owner_key, profile, bytes, entries)
+    }
+
+    /// Reserves total byte capacity for one stable owner using currently available quota.
+    /// Requires `minimum_bytes <= preferred_bytes`; the granted total lies within that range
+    /// and `entries` is the exact total entry charge. Existing capacity for this owner is
+    /// replaced atomically while other owners remain charged. The namespace authority must
+    /// validate the same live lease and generation and serialize admission with its write;
+    /// this book neither authenticates handles nor grants physical storage access.
+    ///
+    /// # Errors
+    /// Returns [`QuotaErrorV1::InvalidCapacityRange`] for an inverted range, or a quota error
+    /// when the minimum bytes or exact entries cannot fit the class/workspace limits. Also
+    /// rejects unsupported enforcement, exhausted epochs, durable snapshot CAS mismatches,
+    /// persistence failures and a poisoned journal. Rejection does not release the preceding
+    /// charge; uncertain durability requires reopening verified state before further mutation.
+    pub fn reserve_owned_capacity(
+        &mut self,
+        owner_key: impl Into<String>,
+        profile: &ResourceQuotaProfileV1,
+        minimum_bytes: u64,
+        preferred_bytes: u64,
+        entries: u64,
+    ) -> Result<QuotaReservationV1, QuotaErrorV1> {
+        if preferred_bytes < minimum_bytes {
+            return Err(QuotaErrorV1::InvalidCapacityRange);
+        }
+        let owner_key = owner_key.into();
+        let previous = self
+            .active_reservations
+            .values()
+            .find(|active| active.owner_key == owner_key);
+        self.validate_replacement(previous, profile, minimum_bytes, entries)?;
+        let previous_class_bytes = previous
+            .filter(|active| active.class == profile.class)
+            .map_or(0, |active| active.reserved_bytes);
+        let class_used = self
+            .per_class_bytes
+            .get(&profile.class)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(previous_class_bytes);
+        let workspace_used = self
+            .workspace_bytes
+            .saturating_sub(previous.map_or(0, |active| active.reserved_bytes));
+        let capacity = preferred_bytes
+            .min(profile.max_bytes.saturating_sub(class_used))
+            .min(self.workspace_cap.saturating_sub(workspace_used));
+        self.reconcile_owned(owner_key, profile, capacity, entries)
+    }
+
+    fn validate_replacement(
+        &self,
+        previous: Option<&ActiveReservationV1>,
+        profile: &ResourceQuotaProfileV1,
+        bytes: u64,
+        entries: u64,
+    ) -> Result<(), QuotaErrorV1> {
+        if profile.hard_runtime_enforcement_required
+            && profile.class == ResourceQuotaClassV1::BorrowedAccountingOnly
+        {
+            return Err(QuotaErrorV1::BorrowedClaimsEnforcement);
+        }
+        let same_class = previous.filter(|active| active.class == profile.class);
+        let class_bytes = self
+            .per_class_bytes
+            .get(&profile.class)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(same_class.map_or(0, |active| active.reserved_bytes));
+        let class_entries = self
+            .per_class_entries
+            .get(&profile.class)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(same_class.map_or(0, |active| active.reserved_entries));
+        let workspace_bytes = self
+            .workspace_bytes
+            .saturating_sub(previous.map_or(0, |active| active.reserved_bytes));
+        if class_bytes > profile.max_bytes || bytes > profile.max_bytes.saturating_sub(class_bytes)
+        {
+            return Err(QuotaErrorV1::ReservationExceeded {
+                class: quota_class_label(profile.class),
+                reserved: class_bytes.saturating_add(bytes),
+                max: profile.max_bytes,
+            });
+        }
+        if class_entries > profile.max_entries
+            || entries > profile.max_entries.saturating_sub(class_entries)
+        {
+            return Err(QuotaErrorV1::EntryExceeded {
+                class: quota_class_label(profile.class),
+                reserved: class_entries.saturating_add(entries),
+                max: profile.max_entries,
+            });
+        }
+        if workspace_bytes > self.workspace_cap
+            || bytes > self.workspace_cap.saturating_sub(workspace_bytes)
+        {
+            return Err(QuotaErrorV1::WorkspaceOvercommit {
+                used: workspace_bytes,
+                incoming: bytes,
+                cap: self.workspace_cap,
+            });
+        }
+        Ok(())
     }
 
     /// Returns the current replayed reservation for an owner, if any.

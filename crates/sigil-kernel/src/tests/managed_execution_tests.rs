@@ -1,5 +1,26 @@
 use super::*;
 
+#[test]
+fn historical_output_without_reader_evidence_is_incomplete() {
+    let summary = BoundedOutputSummaryV1 {
+        observed_bytes: 0,
+        retained_bytes: 0,
+        retained_payload: Vec::new(),
+        content_digest: CanonicalHash::from_bytes([0; 32]),
+        source: ManagedOutputSourceV1::Complete,
+        truncated: false,
+        artifact_ref: None,
+    };
+    let mut historical = serde_json::to_value(summary).expect("serialized receipt");
+    historical
+        .as_object_mut()
+        .expect("summary object")
+        .remove("source");
+    let restored: BoundedOutputSummaryV1 = serde_json::from_value(historical).expect("old receipt");
+    assert_eq!(restored.source, ManagedOutputSourceV1::Incomplete);
+    assert!(!restored.truncated);
+}
+
 fn receipt(
     pipeline_outcome: PipelineOutcomeV1,
     verification_evidence: VerificationEvidenceV1,

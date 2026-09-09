@@ -371,7 +371,12 @@ pub trait ManagedStorageServiceV1: Send + Sync {
 
     /// Validates that a physical mutation is still covered by an admitted namespace. The
     /// runtime calls this while holding the namespace lock, so settlement wins the race before a
-    /// post-settlement write can reach the physical object.
+    /// post-settlement write can reach the physical object. Existing reserved capacity remains
+    /// usable only while the shared quota authority's durability state is healthy.
+    ///
+    /// # Errors
+    /// Rejects a stale or mismatched handle, unavailable authority, or uncertain quota
+    /// durability. This validation must not perform a new reservation or journal mutation.
     fn validate_namespace_write(
         &self,
         handle: &ManagedStorageNamespaceHandleV1,
@@ -386,6 +391,28 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         _bytes: u64,
         _entries: u64,
     ) -> Result<(), ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    /// Reserves total byte capacity for this exact live namespace before physical writes.
+    /// The authority must revalidate the handle, current grant and generation; the caller keeps
+    /// the same lease and namespace mutation lock through admission and the physical write.
+    /// `minimum_bytes <= preferred_bytes` is required. The returned capacity lies within that
+    /// range and may be reduced under quota pressure; `entries` is the exact total entry charge.
+    /// This pathless operation leaves quota ownership and durable accounting in the authority.
+    ///
+    /// # Errors
+    /// Fails for an invalid range, stale or mismatched handle, insufficient byte/entry/workspace
+    /// quota, unavailable authority, or durable snapshot CAS or persistence failure. Rejected
+    /// growth does not release the preceding charge. Uncertain durability must reject further
+    /// mutation until the authority reopens and verifies its durable state.
+    fn reserve_namespace_quota_capacity(
+        &self,
+        _handle: &ManagedStorageNamespaceHandleV1,
+        _minimum_bytes: u64,
+        _preferred_bytes: u64,
+        _entries: u64,
+    ) -> Result<u64, ManagedStorageErrorV1> {
         Err(ManagedStorageErrorV1::AuthorityUnavailable)
     }
 
@@ -423,6 +450,22 @@ pub enum ManagedStorageErrorV1 {
     FamilyMismatch,
     #[error("managed storage authority is unavailable")]
     AuthorityUnavailable,
+    #[error(
+        "managed storage quota exceeded for {dimension:?}: requested={requested} limit={limit}"
+    )]
+    QuotaExceeded {
+        dimension: ManagedStorageQuotaDimensionV1,
+        requested: u64,
+        limit: u64,
+    },
+}
+
+/// The authority-owned limit which rejected a physical storage reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedStorageQuotaDimensionV1 {
+    Bytes,
+    Entries,
+    WorkspaceBytes,
 }
 
 /// Closed artifact id for the dual-grant publish path.

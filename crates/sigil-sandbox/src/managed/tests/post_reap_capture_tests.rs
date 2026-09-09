@@ -23,6 +23,7 @@ fn post_reap_capture_preserves_real_output() -> io::Result<()> {
     let result = bounded_post_reap_read(&mut child.stdout.take().expect("owned stdout"), 4096)?;
     assert!(String::from_utf8_lossy(&result.summary.retained_payload).contains("actual-output"));
     assert!(!result.summary.truncated);
+    assert_eq!(result.summary.source, ManagedOutputSourceV1::Complete);
     Ok(())
 }
 
@@ -39,10 +40,8 @@ fn post_reap_capture_does_not_wait_for_an_inherited_writer() -> io::Result<()> {
     let result = bounded_post_reap_read(&mut child.stdout.take().expect("owned stdout"), 4096)?;
     assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(result.summary.retained_payload, b"inherited-output");
-    assert!(
-        result.summary.truncated,
-        "open inherited pipe is not complete capture"
-    );
+    assert!(!result.summary.truncated);
+    assert_eq!(result.summary.source, ManagedOutputSourceV1::Incomplete);
     Ok(())
 }
 

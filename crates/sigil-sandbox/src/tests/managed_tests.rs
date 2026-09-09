@@ -413,6 +413,94 @@ fn r71_managed_output_cap_truncates_truthfully() {
     assert!(receipt.process.stdout_summary.truncated);
     assert_eq!(receipt.process.stdout_summary.observed_bytes, 100);
     assert_eq!(receipt.process.stdout_summary.retained_bytes, 10);
+    assert_eq!(
+        receipt.process.stdout_summary.source,
+        ManagedOutputSourceV1::Complete
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_managed_ten_mib_output_drains_to_eof_with_bounded_preview() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let svc = service(false, dir.path());
+    let request = exec_request(
+        &[
+            "/bin/sh",
+            "-c",
+            "dd if=/dev/zero bs=1048576 count=10 2>/dev/null; printf 'stdout-end'; printf 'stderr-end' >&2",
+        ],
+        false,
+    );
+    let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+        .expect("execute");
+    assert_eq!(
+        receipt.process.termination,
+        ProcessTerminationV1::Exited { code: 0 }
+    );
+    assert_eq!(
+        receipt.process.stdout_summary.source,
+        ManagedOutputSourceV1::Complete
+    );
+    assert_eq!(
+        receipt.process.stdout_summary.observed_bytes,
+        10 * 1024 * 1024 + 10
+    );
+    assert_eq!(receipt.process.stdout_summary.retained_bytes, 4096);
+    assert!(receipt.process.stdout_summary.truncated);
+    assert_eq!(
+        receipt.process.stderr_summary.source,
+        ManagedOutputSourceV1::Complete
+    );
+    assert_eq!(
+        receipt.process.stderr_summary.retained_payload,
+        b"stderr-end"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn r71_managed_rejected_sink_stops_enqueue_but_continues_pipe_drain() {
+    struct RejectingSink(std::sync::atomic::AtomicUsize);
+
+    impl ManagedOutputCaptureSinkV1 for RejectingSink {
+        fn write_chunk(
+            &self,
+            _channel: ManagedProcessOutputChannelV1,
+            _bytes: &[u8],
+        ) -> Result<(), ManagedExecutionErrorV1> {
+            self.0.fetch_add(1, Ordering::AcqRel);
+            Err(ManagedExecutionErrorV1::ProviderUnavailable)
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sink = Arc::new(RejectingSink(std::sync::atomic::AtomicUsize::new(0)));
+    let svc = service(false, dir.path()).with_output_capture_sink(sink.clone());
+    let request = exec_request(
+        &[
+            "/bin/sh",
+            "-c",
+            "dd if=/dev/zero bs=1048576 count=10 2>/dev/null",
+        ],
+        false,
+    );
+    let receipt = futures::executor::block_on(svc.execute_once(bundle("one-shot"), request))
+        .expect("execute despite rejected storage enqueue");
+    assert_eq!(
+        receipt.process.termination,
+        ProcessTerminationV1::Exited { code: 0 }
+    );
+    assert_eq!(
+        receipt.process.stdout_summary.source,
+        ManagedOutputSourceV1::Complete
+    );
+    assert_eq!(
+        receipt.process.stdout_summary.observed_bytes,
+        10 * 1024 * 1024
+    );
+    assert_eq!(receipt.process.stdout_summary.retained_bytes, 4096);
+    assert_eq!(sink.0.load(Ordering::Acquire), 1);
 }
 
 #[test]
@@ -438,6 +526,7 @@ fn r71_output_observation_count_saturates_instead_of_wrapping() {
         retained: Vec::new(),
         observed: u64::MAX - 1,
         cap: 0,
+        source: ManagedOutputSourceV1::Incomplete,
     };
     state.push(&[1, 2]);
     assert_eq!(state.observed, u64::MAX);

@@ -4,7 +4,7 @@
 use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
-use super::{BoundedOutputSummaryV1, BoundedReadOutcome, content_digest};
+use super::{BoundedOutputSummaryV1, BoundedReadOutcome, ManagedOutputSourceV1, content_digest};
 
 const MAX_DRAIN_TIME: Duration = Duration::from_millis(50);
 
@@ -116,7 +116,12 @@ fn drain_available(
             retained_bytes: retained.len() as u64,
             content_digest: content_digest(&retained),
             retained_payload: retained,
-            truncated: incomplete || observed > cap_bytes,
+            source: if incomplete {
+                ManagedOutputSourceV1::Incomplete
+            } else {
+                ManagedOutputSourceV1::Complete
+            },
+            truncated: observed > cap_bytes,
             artifact_ref: None,
         },
     })
