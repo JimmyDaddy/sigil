@@ -203,10 +203,13 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
     assert_eq!(state.model, "deepseek-v4-flash");
     assert_eq!(state.context_window_tokens, "128000");
     assert_eq!(state.max_output_tokens, "8000");
-    state.selected_field = SetupField::Save;
+    assert_eq!(state.selected_field, SetupField::Save);
     let setup_lines = app.setup_lines().join("\n");
     assert!(setup_lines.contains("current configuration is valid"));
-    assert!(setup_lines.contains("inspect the current configuration and storage permissions"));
+    assert!(setup_lines.contains("authority state requires reconciliation"));
+    assert!(setup_lines.contains("> [Retry Start]"));
+    assert!(!setup_lines.contains("Review the current connection"));
+    assert!(!setup_lines.contains("inspect the current configuration and storage permissions"));
 
     let action =
         app.handle_setup_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?;
@@ -216,6 +219,26 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
     assert_eq!(saved.permission.mode, PermissionMode::ReadOnly);
     assert_eq!(saved.model_request.max_output_tokens, Some(8_000));
     assert!(saved.connections.contains_key("local-secondary"));
+    let existing_connections =
+        sigil_runtime::provider_connections::load_provider_connections(&existing);
+    let saved_connections = sigil_runtime::provider_connections::load_provider_connections(&saved);
+    assert_eq!(
+        saved_connections.default_model,
+        existing_connections.default_model
+    );
+    assert_eq!(
+        saved_connections.connections.len(),
+        existing_connections.connections.len()
+    );
+    for (id, existing_connection) in &existing_connections.connections {
+        assert_eq!(
+            saved_connections
+                .connections
+                .get(id)
+                .map(|connection| &connection.config),
+            Some(&existing_connection.config)
+        );
+    }
     assert_eq!(
         saved.connections["deepseek-default"]["credential"]["name"],
         "SIGIL_API_KEY"
@@ -224,6 +247,71 @@ fn setup_enter_retries_after_a_valid_config_boot_failure_and_accepts_return_code
         saved.connections["deepseek-default"]["model_context_windows"]["deepseek-v4-flash"],
         128_000
     );
+    Ok(())
+}
+
+#[test]
+fn setup_authority_boot_failure_shows_its_cause_without_changing_the_connection() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config().save(&config_path)?;
+    let original = std::fs::read(&config_path)?;
+    let error = "authority bootstrap metadata corrupted: cutover pointer validation failed: missing field composition";
+    let app = AppState::from_setup_with_recovery(
+        config_path.clone(),
+        temp.path().to_path_buf(),
+        Some(error.to_owned()),
+        Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable),
+    );
+
+    let state = app.setup_state.as_ref().expect("setup state should exist");
+    assert!(state.authority_boot_retry_required());
+    assert_eq!(state.selected_field, SetupField::Save);
+    assert_eq!(state.provider_name, "deepseek");
+    assert_eq!(state.model, "deepseek-v4-flash");
+    assert!(state.api_key.is_empty());
+    let lines = app.setup_lines();
+    assert_eq!(lines[0], "Startup needs attention");
+    let rendered = lines.join("\n");
+    assert!(rendered.contains(error));
+    assert!(rendered.contains("> [Retry Start]"));
+    assert!(!rendered.contains("Set up a model connection"));
+    assert!(!rendered.contains("Review the current connection"));
+    assert!(!rendered.contains("storage permissions"));
+    assert_eq!(std::fs::read(&config_path)?, original);
+    Ok(())
+}
+
+#[test]
+fn setup_authority_retry_requires_a_typed_failure_and_a_valid_saved_config() -> Result<()> {
+    let _env_guard = crate::test_env::lock();
+    let temp = tempdir()?;
+    let valid = temp.path().join("valid.toml");
+    let invalid = temp.path().join("invalid.toml");
+    let missing = temp.path().join("missing.toml");
+    test_config().save(&valid)?;
+    std::fs::write(&invalid, "this = [is malformed")?;
+    let authority_code = Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable);
+    for (config_path, error, recovery_code) in [
+        (&valid, Some("authority startup failed"), None),
+        (&valid, None, authority_code),
+        (&invalid, Some("authority startup failed"), authority_code),
+        (&missing, Some("authority startup failed"), authority_code),
+    ] {
+        let app = AppState::from_setup_with_recovery(
+            config_path.clone(),
+            temp.path().to_path_buf(),
+            error.map(str::to_owned),
+            recovery_code,
+        );
+        let state = app.setup_state.as_ref().expect("setup state should exist");
+        assert!(!state.authority_boot_retry_required());
+        assert_eq!(state.selected_field, SetupField::Provider);
+        let lines = app.setup_lines();
+        assert_eq!(lines[0], "Set up a model connection");
+        assert!(!lines.join("\n").contains("> [Retry Start]"));
+    }
     Ok(())
 }
 

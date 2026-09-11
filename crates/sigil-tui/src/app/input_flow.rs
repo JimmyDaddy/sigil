@@ -126,6 +126,10 @@ impl AppState {
             return;
         }
 
+        if self.handle_user_input_form_paste_text(&pasted) {
+            return;
+        }
+
         if self.try_attach_pasted_image_path(&pasted) {
             return;
         }

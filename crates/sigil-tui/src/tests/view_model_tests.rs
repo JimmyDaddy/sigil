@@ -35,6 +35,7 @@ fn test_approval_identity(call_id: &str) -> sigil_kernel::ApprovalRequestIdentit
 fn test_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -591,6 +592,7 @@ fn detail_info_rail_projects_bounded_runtime_context_summary() -> Result<()> {
     )];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1034,6 +1036,60 @@ fn footer_hints_track_slash_selector_state() -> anyhow::Result<()> {
 }
 
 #[test]
+fn footer_hints_track_plan_revision_editor_submission_and_recovery() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let mut request = crate::app::tests::worker_bridge_tests::pending_text_user_input_request()?;
+    request.source = sigil_kernel::UserInputSourceV1::PlanRevision {
+        base_plan_id: sigil_kernel::PlanId::new("plan-footer")?,
+        base_plan_hash: format!("sha256:{}", "c".repeat(64)),
+    };
+    request.purpose = sigil_kernel::UserInputPurposeV1::RevisionGuidance;
+    app.set_pending_user_input(request.clone());
+
+    let editing = UiViewModel::from_app(&app).footer.hints;
+    assert!(editing.contains("Enter submit revision"));
+    assert!(editing.contains("Shift-Enter/Ctrl-J new line"));
+    assert!(!editing.contains("Ctrl-Enter actions"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(crate::app::AppAction::SubmitUserInputDecision { .. })
+    ));
+    let submitting = UiViewModel::from_app(&app).footer.hints;
+    assert!(submitting.contains("waiting for confirmation"));
+    assert!(!submitting.contains("Enter submit"));
+    assert!(!submitting.contains("new line"));
+
+    assert!(app.fail_pending_user_input_submission(
+        request.identity.request_id.as_str(),
+        request.identity.generation,
+        &request.request_hash,
+        "Submission failed".to_owned(),
+    ));
+    let failed = UiViewModel::from_app(&app).footer.hints;
+    assert!(failed.contains("submission failed · Enter retry revision"));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    let closed = UiViewModel::from_app(&app).footer.hints;
+    assert!(closed.contains("revision draft kept · Shift-Tab reopen"));
+    assert!(!closed.contains("Enter retry"));
+
+    let recovery = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: request.identity.clone(),
+        request_hash: request.request_hash.clone(),
+        command_id: sigil_kernel::UserInputCommandId::new("revision-footer-recovery")?,
+        decision: sigil_kernel::UserInputDecisionV1::Declined,
+    };
+    app.set_pending_user_input_recovery(request, recovery);
+    let recovering = UiViewModel::from_app(&app).footer.hints;
+    assert!(recovering.contains("Tab fields/actions"));
+    assert!(recovering.contains("Enter continue"));
+    assert!(!recovering.contains("Enter submit revision"));
+    assert!(!recovering.contains("Ctrl-Enter actions"));
+    Ok(())
+}
+
+#[test]
 fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Result<()> {
     let mut plan_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
@@ -1077,7 +1133,7 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     stale_app.set_pending_plan_approval_from_draft(&draft, Some("different-snapshot"));
     let stale_view = UiViewModel::from_app(&stale_app);
     assert!(stale_view.footer.hints.contains("Enter review"));
-    assert!(stale_view.footer.hints.contains("plan stale"));
+    assert!(stale_view.footer.hints.contains("workspace notice"));
     let stale_live = LivePanelViewModel::from_app(&stale_app, 4);
     let stale_approval = stale_live
         .plan_approval
@@ -1087,7 +1143,7 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
         stale_approval
             .stale_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("stale"))
+            .is_some_and(|reason| reason.contains("workspace changed"))
     );
 
     let mut mention_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());

@@ -5,11 +5,10 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
     Agent, CompletionRequest, ControlEntry, IntentDigest, IntentDropRequestV1, IntentOperationId,
-    IntentStackVersion, JsonlSessionStore, MessageRole, PermissionMode, PlanApprovalPermission,
-    PlanArtifactProjection, PlanTaskStartMode, Provider, ProviderCapabilities, ProviderChunk,
-    PublicIntentStackStateV1, ReasoningEffort, ReasoningStreamSupport, SessionLogEntry,
-    TaskRunStatus, ToolCall, ToolRegistry, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    stable_workspace_id,
+    IntentStackVersion, JsonlSessionStore, MessageRole, PermissionMode, PlanArtifactProjection,
+    PlanTaskStartMode, Provider, ProviderCapabilities, ProviderChunk, PublicIntentStackStateV1,
+    ReasoningEffort, ReasoningStreamSupport, SessionLogEntry, TaskRunStatus, ToolCall,
+    ToolRegistry, WorkspaceTrust, WorkspaceTrustDecisionEntry, stable_workspace_id,
 };
 use sigil_runtime::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 use tempfile::tempdir;
@@ -18,7 +17,8 @@ use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
         PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config, spawn_test_worker,
-        spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
+        spawn_test_worker_with_role_provider_builder, submit_plan_review_result_chunks,
+        test_root_config,
     },
 };
 
@@ -262,83 +262,14 @@ fn approved_plan_intent_proposals_do_not_become_execution_authority() -> Result<
     root_config.task.max_parallel_changeset_steps = 3;
     root_config.task.max_subagents = 8;
 
-    let plan_args = r#"{
-  "schema_version": 2,
-  "summary": "Implement retry behavior, retry telemetry, and operator guidance",
-  "intents": [
-    {
-      "intent_alias": "retry",
-      "title": "Retry behavior",
-      "statement": "Use bounded exponential backoff for failed operations.",
-      "acceptance_criteria": [{
-        "criterion_alias": "retry-content",
-        "statement": "The retry policy is recorded in retry.txt.",
-        "required": true
-      }],
-      "depends_on_aliases": []
-    },
-    {
-      "intent_alias": "telemetry",
-      "title": "Retry telemetry",
-      "statement": "Expose retry attempts and terminal outcomes.",
-      "acceptance_criteria": [{
-        "criterion_alias": "telemetry-content",
-        "statement": "Retry telemetry is recorded in telemetry.txt.",
-        "required": true
-      }],
-      "depends_on_aliases": ["retry"]
-    },
-    {
-      "intent_alias": "operations",
-      "title": "Operator guidance",
-      "statement": "Document retry alerts and rollback guidance.",
-      "acceptance_criteria": [{
-        "criterion_alias": "operations-content",
-        "statement": "Operator guidance is recorded in operations.md.",
-        "required": true
-      }],
-      "depends_on_aliases": ["retry"]
-    }
-  ],
-  "steps": [
-    {
-      "step_id": "implement-retry",
-      "title": "Implement retry policy",
-      "role": "subagent_write",
-      "depends_on": [],
-      "intent_aliases": ["retry"],
-      "mode": "write",
-      "isolation": "worktree",
-      "target_paths": ["retry.txt"]
-    },
-    {
-      "step_id": "add-telemetry",
-      "title": "Add retry telemetry",
-      "role": "subagent_write",
-      "depends_on": [],
-      "intent_aliases": ["telemetry"],
-      "mode": "write",
-      "isolation": "worktree",
-      "target_paths": ["telemetry.txt"]
-    },
-    {
-      "step_id": "document-operations",
-      "title": "Document operator guidance",
-      "role": "subagent_write",
-      "depends_on": [],
-      "intent_aliases": ["operations"],
-      "mode": "write",
-      "isolation": "worktree",
-      "target_paths": ["operations.md"]
-    }
-  ],
-  "target_paths": ["retry.txt", "telemetry.txt", "operations.md"],
-  "suggested_checks": ["cargo test -p sigil-tui intent_stack"]
-}"#;
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
-        "intent-stack-plan-draft",
-        plan_args,
-    ))]);
+    let plan_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Implement retry behavior, retry telemetry, and operator guidance\n\n1. Implement retry policy\n2. Add retry telemetry\n3. Document operator guidance\n\nRetry behavior: Use bounded exponential backoff for failed operations.\n\nRetry telemetry: Expose retry attempts and terminal outcomes.\n\nOperator guidance: Document retry alerts and rollback guidance.\n\nPaths: retry.txt, telemetry.txt, operations.md\n\nChecks: cargo test -p sigil-tui intent_stack"
+}"##;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(
+        submit_plan_review_result_chunks("intent-stack-plan-draft", plan_args),
+    )]);
     let mut tools = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut tools);
     let worker = spawn_test_worker_with_role_provider_builder(
@@ -367,25 +298,29 @@ fn approved_plan_intent_proposals_do_not_become_execution_authority() -> Result<
         .latest_pending_plan()
         .context("plan run should append an intent-enabled draft")?
         .clone();
-    assert_eq!(
-        draft
-            .intent_proposal
-            .as_ref()
-            .context("plan should retain the model's semantic intent proposal")?
-            .intents
-            .len(),
-        3
+    let content = draft
+        .inline_text
+        .as_deref()
+        .context("the complete Plan body is retained")?;
+    for proposal in ["Retry behavior", "Retry telemetry", "Operator guidance"] {
+        assert!(content.contains(proposal));
+    }
+    assert!(
+        draft.intent_proposal.is_none(),
+        "readable suggestions do not create an executable intent contract"
     );
 
     worker.send(WorkerCommand::CreateTaskFromPlan {
         plan_id: draft.plan_id.as_str().to_owned(),
         expected_plan_hash: draft.plan_hash.clone(),
         start_mode: PlanTaskStartMode::CreateAndRun,
-        permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
+        permission_grant: None,
     })?;
-    let created = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
-        matches!(message, WorkerMessage::TaskCreatedFromPlan { .. })
-    })?;
+    let created = worker.recv_until_with_timeout_diagnostic(
+        "create intent task",
+        Duration::from_secs(20),
+        |message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }),
+    )?;
     let WorkerMessage::TaskCreatedFromPlan {
         entry: created_task,
         entries,

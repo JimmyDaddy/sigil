@@ -177,6 +177,10 @@ pub(in crate::runner) fn fork_local_session(
             .with_context(|| format!("failed to read {}", entry.path.display()))?;
         (entry.session_ref, records)
     };
+    sigil_runtime::session_lifecycle::validate_conversation_fork_source_composition(
+        &records,
+        root_config,
+    )?;
     let point = ConversationForkProjection::from_records(&records)?
         .latest()
         .cloned()

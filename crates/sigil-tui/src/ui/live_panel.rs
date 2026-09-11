@@ -449,7 +449,9 @@ fn live_plan_approval_rows(plan: &crate::app::PendingPlanApproval, _width: usize
         LIVE_PLAN_APPROVAL_BASE_ROWS as usize
             + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT)
             + overflow_rows
-            + stale_rows,
+            + stale_rows
+            + usize::from(plan.revision_detail().is_some())
+            + usize::from(plan.action_feedback.is_some()),
     )
     .unwrap_or(u16::MAX)
     .min(LIVE_PLAN_APPROVAL_ROW_LIMIT as u16)
@@ -462,7 +464,9 @@ fn live_plan_approval_view_rows(plan: &PlanApprovalViewModel, _width: usize) -> 
         LIVE_PLAN_APPROVAL_BASE_ROWS as usize
             + plan.steps.len().min(LIVE_PLAN_APPROVAL_STEP_LIMIT)
             + overflow_rows
-            + stale_rows,
+            + stale_rows
+            + usize::from(plan.revision_detail.is_some())
+            + usize::from(plan.action_feedback.is_some()),
     )
     .unwrap_or(u16::MAX)
     .min(LIVE_PLAN_APPROVAL_ROW_LIMIT as u16)
@@ -1100,7 +1104,12 @@ fn render_queue_actions(
             ));
         }
         let button = &buttons[placement.button_index];
-        let style = if panel_focused && button.selected {
+        let style = if !button.enabled {
+            Style::default()
+                .fg(palette.text_muted)
+                .bg(bg)
+                .add_modifier(Modifier::DIM)
+        } else if panel_focused && button.selected {
             Style::default()
                 .fg(palette.selection_fg)
                 .bg(palette.selection_bg)
@@ -1281,19 +1290,24 @@ fn render_plan_approval_lines(
     } else {
         "steps"
     };
-    let counts = format!(
-        "{} {} · {} {} · {} {}",
-        plan.steps.len(),
-        step_label,
-        plan.target_path_count,
-        path_label,
-        plan.suggested_check_count,
-        check_label
-    );
-    let header_detail = format!("  ·  {counts}  ·  {}", plan.summary);
+    let counts = [
+        (plan.steps.len(), step_label),
+        (plan.target_path_count, path_label),
+        (plan.suggested_check_count, check_label),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let header_detail = if counts.is_empty() {
+        format!("  ·  {}", plan.summary)
+    } else {
+        format!("  ·  {counts}  ·  {}", plan.summary)
+    };
     let header_detail = truncate_status_text(
         &header_detail,
-        width.saturating_sub(terminal_cell_width("Plan ready")),
+        width.saturating_sub(terminal_cell_width(&format!("Plan {}", plan.status_label))),
     );
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -1305,7 +1319,7 @@ fn render_plan_approval_lines(
         ),
         Span::raw(" "),
         Span::styled(
-            "ready",
+            plan.status_label.clone(),
             Style::default()
                 .fg(palette.text_primary)
                 .bg(bg)
@@ -1316,6 +1330,30 @@ fn render_plan_approval_lines(
             Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])];
+    if let Some(detail) = plan.revision_detail.as_deref() {
+        lines.push(Line::from(Span::styled(
+            truncate_status_text(detail, width),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        )));
+    }
+    if let Some(feedback) = plan.action_feedback.as_ref() {
+        let (message, color) = match feedback {
+            crate::app::PlanActionFeedback::Pending(action) => {
+                (format!("{}…", action.pending_label()), palette.accent_info)
+            }
+            crate::app::PlanActionFeedback::Succeeded { message, .. } => {
+                (message.clone(), palette.status_success)
+            }
+            crate::app::PlanActionFeedback::Failed { action, message } => (
+                format!("{} failed: {message}", action.label()),
+                palette.status_error,
+            ),
+        };
+        lines.push(Line::from(Span::styled(
+            truncate_status_text(&message, width),
+            Style::default().fg(color).bg(bg),
+        )));
+    }
     for (index, step) in plan
         .steps
         .iter()
@@ -1342,12 +1380,15 @@ fn render_plan_approval_lines(
         )]));
     }
     if plan.stale {
-        let reason = plan.stale_reason.as_deref().unwrap_or("plan may be stale");
+        let reason = plan
+            .stale_reason
+            .as_deref()
+            .unwrap_or("Run and Save remain available; execution uses current files");
         lines.push(Line::from(vec![
             Span::styled(
-                "Stale",
+                "Workspace",
                 Style::default()
-                    .fg(palette.status_error)
+                    .fg(palette.accent_info)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),

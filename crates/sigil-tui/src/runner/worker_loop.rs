@@ -33,7 +33,7 @@ use sigil_kernel::{
     ToolArtifactReadBudgetV1, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
     ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
     ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    build_workspace_snapshot, default_user_config_dir, discover_candidate_checks_with_user_config,
+    default_user_config_dir, discover_candidate_checks_with_user_config,
     plain_text_plan_draft_entry, plan_draft_created_entry, rerun_task_verification_check,
     saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
@@ -59,7 +59,7 @@ use super::{
         QueueMoveDirection, TerminalTaskControlIdentity, ToolArtifactDisplayReadFailure,
         V2CompactionApplySource, WORKER_COMMAND_PROTOCOL_VERSION, WorkerApprovalCommand,
         WorkerApprovalCommandReceipt, WorkerApprovalDecision, WorkerApprovalRouteState,
-        WorkerCommand, WorkerMessage,
+        WorkerCommand, WorkerMessage, WorkerShutdownStage,
     },
     session_flow::{
         load_routed_session_with_runtime_attachments, load_session,
@@ -87,9 +87,35 @@ mod queue_driver;
 mod scheduler;
 mod session_lifecycle_runtime;
 mod session_transition;
+mod shutdown;
 mod state;
 mod task_runtime;
 mod terminal_control;
+
+/// Re-reads the private accepted command from the worker's existing session owner.
+/// The caller must establish that no provider execution still owns the continuation before
+/// dispatch; durable `ContinuationStarted` alone is not proof that its previous owner stopped.
+pub(in crate::runner) fn recover_owned_user_input_attention(
+    state: &WorkerLoopState,
+) -> anyhow::Result<Option<sigil_kernel::UserInputDecisionCommandV1>> {
+    let Some(session) = state.session.current.as_ref() else {
+        return Ok(None);
+    };
+    if let Some(command) =
+        sigil_kernel::recoverable_user_input_decision_from_entries(session.entries())?
+    {
+        return Ok(Some(command));
+    }
+    if let Some(path) = session.store_path()
+        && let Some(command) = sigil_runtime::application_run::recoverable_agent_user_input_decision_from_child_sessions(
+            path,
+            session.entries(),
+        )?
+    {
+        return Ok(Some(command));
+    }
+    recover_managed_plan_review_research_attention(state)
+}
 
 /// Reads a recoverable PlanReview research receipt while the worker retains the composed child
 /// authority.  The returned command is an in-process handoff to the existing Resume form only;
@@ -127,8 +153,8 @@ pub(in crate::runner) fn recover_managed_plan_review_research_attention(
 
 pub(in crate::runner) use active_run::{
     ActiveRun, ActiveRunStopDisposition, RunTaskPayload, RunTaskResult,
-    bind_task_run_cancellation_scope, cancel_active_run, prepare_run_cancellation,
-    prepare_task_run_cancellation,
+    bind_task_run_cancellation_scope, cancel_active_run, finalize_completed_run_cancellation,
+    prepare_run_cancellation, prepare_task_run_cancellation,
 };
 #[cfg(test)]
 pub(in crate::runner) use active_run::{

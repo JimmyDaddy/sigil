@@ -200,6 +200,8 @@ fn session_review_reads_v2_mutation_and_readiness_evidence() -> Result<()> {
 
     app.session_log_path = session_path.clone();
     app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
+    app.attach_session_query_reader(Some(store.read_handle()));
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert_eq!(app.review.latest_checkpoint_restore_sequence, None);
     assert!(
@@ -267,6 +269,8 @@ fn session_review_warns_for_unknown_mutation_without_precise_rewind() -> Result<
 
     app.session_log_path = session_path.clone();
     app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
+    app.attach_session_query_reader(Some(store.read_handle()));
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     let review = app.session_review_sidebar_lines().join("\n");
     assert!(review.contains("review: turn 1/1"));
@@ -326,6 +330,8 @@ fn checkpoint_restore_modal_loads_diff_and_owns_action_keys() -> Result<()> {
     )?;
     app.session_log_path = session_path.clone();
     app.sync_current_session_state(JsonlSessionStore::read_entries(&session_path)?);
+    app.attach_session_query_reader(Some(store.read_handle()));
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     app.review.verification_card_focused = true;
     app.composer.input = "keep this draft".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();

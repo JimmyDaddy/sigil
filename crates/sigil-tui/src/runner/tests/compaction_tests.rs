@@ -391,12 +391,20 @@ impl Provider for OverflowRecoveryProvider {
     }
 }
 
-fn seed_overflow_recovery_history(store: &JsonlSessionStore) -> Result<()> {
+fn seed_overflow_recovery_history(
+    store: &JsonlSessionStore,
+    root_config: &sigil_kernel::RootConfig,
+) -> Result<()> {
     store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
         provider_name: "openai_responses".to_owned(),
         model_name: "gpt-4.1-2025-04-14".to_owned(),
         resolved_model_route: None,
     }))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::SessionCompositionBound(sigil_kernel::SessionCompositionSnapshotV1::new(
+            root_config.selected_capabilities(),
+        )),
+    ))?;
     for index in 0..6 {
         store.append(&SessionLogEntry::User(ModelMessage::user(format!(
             "older user request {index}: {}",
@@ -432,6 +440,163 @@ fn overflow_recovery_config(workspace_root: &Path) -> sigil_kernel::RootConfig {
     config
 }
 
+fn assert_overflow_public_run_boundaries(
+    records: &[sigil_kernel::SessionStreamRecord],
+    recovery_terminal_status: sigil_kernel::ConversationRunTerminalStatusV1,
+) -> Result<()> {
+    let attempts = sigil_kernel::ProviderPhysicalAttemptProjection::from_records(records)?;
+    let provider_recoveries = sigil_kernel::ProviderTurnRecoveryProjection::from_records(records)?;
+    let conversation_attempts = attempts
+        .attempts()
+        .into_iter()
+        .filter(|attempt| {
+            attempt.entry.purpose
+                == sigil_kernel::ProviderPhysicalAttemptPurpose::ConversationGeneration
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conversation_attempts.len(), 2);
+    let original = conversation_attempts[0];
+    let recovery = conversation_attempts[1];
+    assert_eq!(
+        recovery.entry.logical_run_id,
+        format!("overflow-recovery-{}", original.entry.physical_attempt_id)
+    );
+    assert_ne!(original.entry.logical_run_id, recovery.entry.logical_run_id);
+    assert_ne!(
+        original.entry.request_material_fingerprint, recovery.entry.request_material_fingerprint,
+        "portable compaction creates a new frozen request with its own logical provider identity"
+    );
+
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(records)?;
+    let public = outbox.events_in_order();
+    let mut run_boundaries = Vec::new();
+    for (attempt, expected_status) in [
+        (
+            original,
+            sigil_kernel::ConversationRunTerminalStatusV1::Blocked,
+        ),
+        (recovery, recovery_terminal_status),
+    ] {
+        let run_id = attempt.entry.logical_run_id.as_str();
+        assert!(
+            attempts
+                .effective_attempt_for_logical_run_id(run_id)?
+                .is_some()
+        );
+        if expected_status == sigil_kernel::ConversationRunTerminalStatusV1::Blocked {
+            // Exact capacity rejection requires a new request; it is a typed blocked
+            // provider turn, even when the legacy worker reports RunFailed.
+            let physical_terminal = attempt
+                .terminal
+                .as_ref()
+                .context("blocked overflow attempt must have a durable physical terminal")?;
+            assert_eq!(
+                physical_terminal.outcome,
+                sigil_kernel::ProviderPhysicalAttemptOutcome::ConfirmedNoModelConsumption
+            );
+            assert_eq!(
+                physical_terminal.rejection,
+                Some(ProviderRequestRejection::ContextWindowExceeded)
+            );
+            let recovery_terminal = provider_recoveries
+                .terminal_for_logical_run_id(run_id)
+                .context("overflow rejection must retain its typed recovery disposition")?;
+            assert_eq!(
+                recovery_terminal.last_physical_attempt_id,
+                attempt.entry.physical_attempt_id
+            );
+            assert_eq!(
+                recovery_terminal.terminal_disposition,
+                sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Blocked
+            );
+            assert_eq!(
+                recovery_terminal.reason_code,
+                "provider_configuration_or_capacity_required"
+            );
+        }
+        let events = public
+            .iter()
+            .filter(|entry| entry.run_id == run_id)
+            .collect::<Vec<_>>();
+        assert!(!events.is_empty());
+        for (index, entry) in events.iter().enumerate() {
+            assert_eq!(entry.sequence, index as u64 + 1);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event.event,
+                    sigil_kernel::PublicRunEventKind::RunStarted { .. }
+                ))
+                .count(),
+            1,
+            "each provider logical run publishes exactly one RunStarted"
+        );
+        assert!(matches!(
+            events.first().map(|entry| &entry.event.event),
+            Some(sigil_kernel::PublicRunEventKind::RunStarted { .. })
+        ));
+        let terminals = records
+            .iter()
+            .map(sigil_kernel::conversation_run_lifecycle_record_from_stream)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .filter_map(|record| match record {
+                sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(
+                    terminal,
+                ) if terminal.run_id() == run_id => Some(terminal),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(terminals.len(), 1);
+        assert_eq!(terminals[0].status(), expected_status);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event.event,
+                    sigil_kernel::PublicRunEventKind::RunFinished { .. }
+                        | sigil_kernel::PublicRunEventKind::RunBlocked { .. }
+                        | sigil_kernel::PublicRunEventKind::RunFailed { .. }
+                ))
+                .count(),
+            1
+        );
+        let terminal = events.last().expect("run public events are present");
+        assert!(match &terminal.event.event {
+            sigil_kernel::PublicRunEventKind::RunFinished { .. } => {
+                expected_status == sigil_kernel::ConversationRunTerminalStatusV1::Succeeded
+            }
+            sigil_kernel::PublicRunEventKind::RunBlocked { .. } => {
+                expected_status == sigil_kernel::ConversationRunTerminalStatusV1::Blocked
+            }
+            _ => false,
+        });
+        let start_id = &events[0].public_event_id;
+        let terminal_id = &terminal.public_event_id;
+        let start_sequence = records
+            .iter()
+            .map(sigil_kernel::SessionStreamRecord::stored_event)
+            .find(|event| &event.event_id == start_id)
+            .expect("public start has a durable envelope")
+            .stream_sequence;
+        let terminal_sequence = records
+            .iter()
+            .map(sigil_kernel::SessionStreamRecord::stored_event)
+            .find(|event| &event.event_id == terminal_id)
+            .expect("public terminal has a durable envelope")
+            .stream_sequence;
+        run_boundaries.push((start_sequence, terminal_sequence));
+    }
+    assert!(
+        run_boundaries[0].1 < run_boundaries[1].0,
+        "the rejected run is terminal before the separately owned retry starts"
+    );
+    Ok(())
+}
+
 #[test]
 fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() -> Result<()> {
     let temp = tempdir()?;
@@ -440,7 +605,8 @@ fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() ->
         .path()
         .join(".sigil/sessions/session-overflow-recovery.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    seed_overflow_recovery_history(&store)?;
+    let root_config = overflow_recovery_config(&workspace_root);
+    seed_overflow_recovery_history(&store, &root_config)?;
     let provider = OverflowRecoveryProvider::new(vec![
         StreamPlan::Fail("exact context-window rejection"),
         StreamPlan::Chunks(vec![
@@ -450,7 +616,7 @@ fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() ->
     ]);
     let observed_provider = provider.clone();
     let worker = spawn_test_worker(
-        overflow_recovery_config(&workspace_root),
+        root_config,
         session_log_path.clone(),
         Agent::new(provider, ToolRegistry::new()),
         workspace_root,
@@ -495,6 +661,10 @@ fn exact_overflow_rejection_applies_and_retries_once_with_owned_preparation() ->
     assert_eq!(observed_provider.stream_calls(), 3);
 
     let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    assert_overflow_public_run_boundaries(
+        &records,
+        sigil_kernel::ConversationRunTerminalStatusV1::Succeeded,
+    )?;
     assert_eq!(
         records
             .iter()
@@ -520,14 +690,15 @@ fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
         .path()
         .join(".sigil/sessions/session-overflow-no-retry.jsonl");
     let store = JsonlSessionStore::new(&session_log_path)?;
-    seed_overflow_recovery_history(&store)?;
+    let root_config = overflow_recovery_config(&workspace_root);
+    seed_overflow_recovery_history(&store, &root_config)?;
     let provider = OverflowRecoveryProvider::new(vec![
         StreamPlan::Fail("first exact context-window rejection"),
         StreamPlan::Fail("second exact context-window rejection"),
     ]);
     let observed_provider = provider.clone();
     let worker = spawn_test_worker(
-        overflow_recovery_config(&workspace_root),
+        root_config,
         session_log_path.clone(),
         Agent::new(provider, ToolRegistry::new()),
         workspace_root,
@@ -563,6 +734,10 @@ fn overflow_recovery_is_not_recursively_retried() -> Result<()> {
     assert_eq!(observed_provider.target_proof_calls(), 2);
     assert_eq!(observed_provider.stream_calls(), 3);
     assert!(has_v2_compaction_lifecycle_event(&session_log_path)?);
+    assert_overflow_public_run_boundaries(
+        &JsonlSessionStore::read_event_records(&session_log_path)?,
+        sigil_kernel::ConversationRunTerminalStatusV1::Blocked,
+    )?;
 
     worker.shutdown()?;
     Ok(())
@@ -635,8 +810,10 @@ fn compact_preview_without_older_history_reports_message_count_and_minimum_tail(
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-compact-raw-tail.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     session.append_user_message(ModelMessage::user("first request"))?;
     session.append_assistant_message(ModelMessage::assistant(
         Some("first response".to_owned()),
@@ -649,7 +826,6 @@ fn compact_preview_without_older_history_reports_message_count_and_minimum_tail(
     ))?;
     drop(session);
 
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;

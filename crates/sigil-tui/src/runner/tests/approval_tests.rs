@@ -25,7 +25,6 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-approval.jsonl");
-    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -52,7 +51,7 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
 
     worker.send(approval_command(
         "command-approval-once",
-        &session_id,
+        approval_session_id(&approval_request),
         "call-1",
         approval_request_id(&approval_request),
         true,
@@ -99,7 +98,6 @@ fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-approval-command.jsonl");
-    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -119,17 +117,18 @@ fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
         )
     })?;
     let approval_request_id = approval_request_id(&request).to_owned();
+    let session_id = approval_session_id(&request);
 
     worker.send(approval_command(
         "command-approval-1",
-        &session_id,
+        session_id,
         "call-1",
         &approval_request_id,
         true,
     ))?;
     worker.send(approval_command(
         "command-approval-1",
-        &session_id,
+        session_id,
         "call-1",
         &approval_request_id,
         true,
@@ -162,6 +161,119 @@ fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
 }
 
 #[test]
+fn approval_command_requires_the_durable_session_scope_before_delivery_or_replay() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/approval-scope.jsonl");
+    let path_alias = session_log_path.display().to_string();
+    let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool));
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path,
+        Agent::new(ApprovalFlowProvider, registry),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "write".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let request = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { call, .. } if call.id == "call-1")
+        )
+    })?;
+    let session_id = approval_session_id(&request);
+    uuid::Uuid::parse_str(session_id)?;
+    assert_ne!(session_id, path_alias);
+    let foreign_session_id = uuid::Uuid::new_v4().to_string();
+    let request_id = approval_request_id(&request);
+    let command_id = "approval-scope-command";
+
+    for invalid_scope in [&path_alias, &foreign_session_id] {
+        worker.send(approval_command(
+            command_id,
+            invalid_scope,
+            "call-1",
+            request_id,
+            true,
+        ))?;
+        let rejected = worker.recv_until(|message| {
+            matches!(message, WorkerMessage::ApprovalCommandReceipt(receipt) if receipt.command_id == command_id)
+        })?;
+        assert!(matches!(
+            rejected,
+            WorkerMessage::ApprovalCommandReceipt(receipt)
+                if receipt.route_state == crate::runner::WorkerApprovalRouteState::Rejected
+                    && !receipt.replayed
+        ));
+    }
+
+    // A rejected envelope must leave both the approval and the command ID available.
+    worker.send(approval_command(
+        command_id, session_id, "call-1", request_id, true,
+    ))?;
+    let mut accepted = false;
+    let mut finished = false;
+    while !accepted || !finished {
+        match worker.recv_with_timeout(Duration::from_secs(10))? {
+            WorkerMessage::ApprovalCommandReceipt(receipt) if receipt.command_id == command_id => {
+                assert_eq!(
+                    receipt.route_state,
+                    crate::runner::WorkerApprovalRouteState::DecisionAccepted
+                );
+                assert!(!receipt.replayed);
+                accepted = true;
+            }
+            WorkerMessage::RunFinished { result, entries } => {
+                assert_eq!(result.tool_calls, 1);
+                assert_eq!(
+                    entries
+                        .iter()
+                        .filter(|entry| matches!(entry, SessionLogEntry::ToolResultV3(_)))
+                        .count(),
+                    1
+                );
+                finished = true;
+            }
+            WorkerMessage::RunFailed(error) => anyhow::bail!("approval run failed: {error}"),
+            _ => {}
+        }
+    }
+
+    for (scope, expected_state, expected_replay) in [
+        (
+            foreign_session_id.as_str(),
+            crate::runner::WorkerApprovalRouteState::Rejected,
+            false,
+        ),
+        (
+            session_id,
+            crate::runner::WorkerApprovalRouteState::DecisionAccepted,
+            true,
+        ),
+    ] {
+        worker.send(approval_command(
+            command_id, scope, "call-1", request_id, true,
+        ))?;
+        let replay = worker.recv_until(|message| {
+            matches!(message, WorkerMessage::ApprovalCommandReceipt(receipt) if receipt.command_id == command_id)
+        })?;
+        let WorkerMessage::ApprovalCommandReceipt(receipt) = replay else {
+            unreachable!("receipt predicate selected the message");
+        };
+        assert_eq!(receipt.route_state, expected_state);
+        assert_eq!(receipt.replayed, expected_replay);
+    }
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn spawn_agent_tool_request_surfaces_approval_preview_in_worker() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -182,7 +294,6 @@ allowed_tools = ["grep"]
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-agent-approval.jsonl");
-    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let mut registry = ToolRegistry::new();
     register_agent_tools_with_workspace(&mut registry, &root_config, &workspace_root)?;
@@ -246,7 +357,7 @@ allowed_tools = ["grep"]
 
     worker.send(approval_command(
         "command-deny-spawn-agent",
-        &session_id,
+        approval_session_id(&approval_request),
         "call-spawn-agent",
         approval_request_id(&approval_request),
         false,
@@ -303,6 +414,19 @@ fn approval_request_id(message: &WorkerMessage) -> &str {
         panic!("expected approval request event");
     };
     &approval_identity.approval_request_id
+}
+
+fn approval_session_id(message: &WorkerMessage) -> &str {
+    let WorkerMessage::Event(event) = message else {
+        panic!("expected approval request event");
+    };
+    let RunEvent::ToolApprovalRequested {
+        approval_identity, ..
+    } = event.as_ref()
+    else {
+        panic!("expected approval request event");
+    };
+    &approval_identity.session_id
 }
 
 #[test]
@@ -487,7 +611,6 @@ fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-approval-deny.jsonl");
-    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool));
@@ -509,7 +632,7 @@ fn approval_denial_is_forwarded_to_active_run() -> Result<()> {
 
     worker.send(approval_command(
         "command-deny-write",
-        &session_id,
+        approval_session_id(&approval_request),
         "call-1",
         approval_request_id(&approval_request),
         false,
@@ -610,15 +733,20 @@ fn approval_decision_without_active_run_reports_error() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-stray-approval.jsonl");
-    let session_id = session_log_path.display().to_string();
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let session = sigil_kernel::Session::load_from_store(
+        "planned",
+        "planned-model",
+        sigil_kernel::JsonlSessionStore::open_existing(&session_log_path)?,
+    )?;
 
     worker.send(approval_command(
         "command-stray",
-        &session_id,
+        session.session_scope_id(),
         "missing-call",
         "approval-missing",
         true,

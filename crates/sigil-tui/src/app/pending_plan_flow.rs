@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::PlanDraftCreatedEntry;
 use sigil_kernel::{PlanApprovalPermission, PlanTaskStartMode};
 
-use super::{AppAction, AppState, PendingPlanApproval, PlanWorkbenchAction};
+use super::{AppAction, AppState, PendingPlanApproval, PlanActionFeedback, PlanWorkbenchAction};
 
 impl AppState {
     pub(in crate::app) fn handle_pending_plan_approval_key_event(
@@ -149,6 +149,15 @@ impl AppState {
     }
 
     fn execute_plan_workbench_action(&mut self, action: PlanWorkbenchAction) -> Option<AppAction> {
+        let pending = self.composer.pending_plan_approval.as_ref()?;
+        if pending.action_pending() {
+            return None;
+        }
+        if self.runtime.is_busy {
+            let message = "wait for the current operation before changing this plan".to_owned();
+            self.set_pending_plan_action_failure(action, message);
+            return None;
+        }
         match action {
             PlanWorkbenchAction::Run => {
                 self.create_task_from_pending_plan(PlanTaskStartMode::CreateAndRun, None)
@@ -183,7 +192,7 @@ impl AppState {
         let available = PlanWorkbenchAction::ORDER
             .iter()
             .copied()
-            .filter(|candidate| pending.action_allowed(*candidate))
+            .filter(|candidate| pending.action_enabled(*candidate))
             .collect::<Vec<_>>();
         if available.is_empty() {
             return;
@@ -204,18 +213,10 @@ impl AppState {
             self.last_notice = Some("save is unavailable in the current plan state".to_owned());
             return None;
         }
-        if pending.stale {
-            self.last_notice = Some(
-                pending
-                    .stale_reason
-                    .clone()
-                    .unwrap_or_else(|| "plan may be stale; cannot save".to_owned()),
-            );
-            return None;
-        }
         let plan_id = pending.plan_id.clone()?;
         let expected_plan_hash = pending.plan_hash.clone();
-        self.last_notice = Some("saving plan".to_owned());
+        self.begin_pending_plan_action(PlanWorkbenchAction::Save);
+        self.last_notice = Some("saving plan for later".to_owned());
         self.push_event("plan", "save");
         Some(AppAction::SavePlan {
             plan_id,
@@ -231,6 +232,7 @@ impl AppState {
         }
         let plan_id = pending.plan_id.clone()?;
         let expected_plan_hash = pending.plan_hash.clone();
+        self.begin_pending_plan_action(PlanWorkbenchAction::Revise);
         self.last_notice = Some("revising plan".to_owned());
         self.push_event("plan", "revise");
         Some(AppAction::RevisePlan {
@@ -252,6 +254,7 @@ impl AppState {
             return None;
         };
         let expected_plan_hash = pending.plan_hash.clone();
+        self.begin_pending_plan_action(PlanWorkbenchAction::Reject);
         self.last_notice = Some("rejecting plan".to_owned());
         self.push_event("plan", "reject");
         Some(AppAction::RejectPlan {
@@ -260,13 +263,9 @@ impl AppState {
         })
     }
 
-    /// Returns whether the durable Task attached to this exact approved Plan may retry
-    /// materialization despite a workspace-staleness presentation warning.
-    ///
-    /// This deliberately replays the durable facts instead of trusting
-    /// `PendingPlanApproval::retrying_materialization`, which is UI state and can be stale
-    /// across a refresh or restart.
-    fn has_durable_materialization_retry_admission(&self, pending: &PendingPlanApproval) -> bool {
+    /// A materialization retry must match its durable approved Plan content.
+    /// Workspace observations and the presentation-only retry flag do not authorize this action.
+    fn pending_plan_run_matches_durable_task(&self, pending: &PendingPlanApproval) -> bool {
         let Some(plan_id) = pending
             .plan_id
             .as_ref()
@@ -277,28 +276,35 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
-        let draft_matches = plans
+        let Some(links) = plans.tasks_created.get(&plan_id).filter(|links| {
+            links.iter().any(|link| {
+                link.plan_hash == pending.plan_hash
+                    && plans
+                        .materialization_blocker_for_task(&link.task_id)
+                        .is_some()
+            })
+        }) else {
+            return true;
+        };
+        plans
             .plans
             .get(&plan_id)
-            .is_some_and(|draft| draft.plan_hash == pending.plan_hash);
-        let accepted = plans.latest_decision(&plan_id).is_some_and(|decision| {
-            decision.decision == sigil_kernel::PlanDecision::Accepted
-                && decision.plan_hash == pending.plan_hash
-        });
-        draft_matches
-            && accepted
-            && plans.tasks_created.get(&plan_id).is_some_and(|links| {
-                links.iter().any(|link| {
-                    link.plan_hash == pending.plan_hash
-                        && plans
-                            .materialization_blocker_for_task(&link.task_id)
-                            .is_some_and(|blocked| {
-                                blocked.plan_hash == pending.plan_hash
-                                    && blocked.blocker.available_actions.contains(
-                                        &sigil_kernel::TaskBlockerActionV1::RetryAdmission,
-                                    )
-                            })
-                })
+            .is_some_and(|draft| draft.plan_hash == pending.plan_hash)
+            && plans.latest_decision(&plan_id).is_some_and(|decision| {
+                decision.decision == sigil_kernel::PlanDecision::Accepted
+                    && decision.plan_hash == pending.plan_hash
+            })
+            && links.iter().any(|link| {
+                link.plan_hash == pending.plan_hash
+                    && plans
+                        .materialization_blocker_for_task(&link.task_id)
+                        .is_some_and(|blocked| {
+                            blocked.plan_hash == pending.plan_hash
+                                && blocked
+                                    .blocker
+                                    .available_actions
+                                    .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission)
+                        })
             })
     }
 
@@ -312,21 +318,17 @@ impl AppState {
             self.last_notice = Some("run is unavailable in the current plan state".to_owned());
             return None;
         }
-        if pending.stale && !self.has_durable_materialization_retry_admission(pending) {
-            self.last_notice = Some(
-                pending
-                    .stale_reason
-                    .clone()
-                    .unwrap_or_else(|| "plan may be stale; cannot create a task".to_owned()),
-            );
+        if !self.pending_plan_run_matches_durable_task(pending) {
+            self.last_notice =
+                Some("plan content or task retry state changed; refresh the review".to_owned());
             return None;
         }
-        let pending = self.composer.pending_plan_approval.take()?;
-        let Some(plan_id) = pending.plan_id else {
+        let Some(plan_id) = pending.plan_id.clone() else {
             self.last_notice = Some("plan is not durable yet".to_owned());
-            self.composer.pending_plan_approval = Some(pending);
             return None;
         };
+        let expected_plan_hash = pending.plan_hash.clone();
+        self.begin_pending_plan_action(PlanWorkbenchAction::Run);
         self.last_notice = Some(match start_mode {
             PlanTaskStartMode::CreatePaused if permission_grant.is_some() => {
                 "creating task with scoped edits".to_owned()
@@ -337,7 +339,7 @@ impl AppState {
         self.push_event("plan", "create_task");
         Some(AppAction::CreateTaskFromPlan {
             plan_id,
-            expected_plan_hash: pending.plan_hash,
+            expected_plan_hash,
             start_mode,
             permission_grant,
         })
@@ -366,6 +368,7 @@ impl AppState {
         };
         self.set_pending_plan_approval_from_detail(&detail, current_workspace_snapshot_id);
         if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.status = Some(sigil_kernel::PublicPlanReviewStatus::DraftReady);
             pending.allowed_actions = vec![
                 sigil_kernel::PublicPlanAction::Run,
                 sigil_kernel::PublicPlanAction::Save,
@@ -380,6 +383,7 @@ impl AppState {
         detail: &sigil_kernel::PlanReviewDetailV1,
         current_workspace_snapshot_id: Option<&str>,
     ) {
+        let previous = self.composer.pending_plan_approval.take();
         if detail.steps.is_empty()
             && detail
                 .legacy_markdown
@@ -422,13 +426,17 @@ impl AppState {
             // Action authority comes only from the canonical public projection. A detail payload
             // is immutable display data and must never grant actions by itself.
             allowed_actions: Vec::new(),
+            status: None,
             revision: None,
+            saved_for_later: false,
+            action_feedback: None,
             detail: detail.clone(),
             workbench_open: false,
             workbench_scroll: 0,
             workbench_scroll_extent: Default::default(),
             selected_action: PlanWorkbenchAction::Run,
         });
+        self.restore_pending_plan_presentation(previous);
     }
 
     pub(crate) fn set_pending_plan_candidate(
@@ -442,6 +450,7 @@ impl AppState {
         let Ok(plan_id) = sigil_kernel::PlanId::new(review.plan_id.clone()) else {
             return;
         };
+        let lineage = self.pending_plan_lineage(&plan_id);
         let summary = candidate
             .content
             .lines()
@@ -468,12 +477,7 @@ impl AppState {
             notes: vec![
                 "Complete Plan candidate preserved from read-only review; adopt it to create a durable draft.".to_owned(),
             ],
-            lineage: sigil_kernel::PlanLineageV1 {
-                source: sigil_kernel::PlanSourceRef::default(),
-                plan_review_id: None,
-                attempt_id: None,
-                created_at_ms: 0,
-            },
+            lineage,
             legacy_markdown: Some(candidate.content.clone()),
             compile: sigil_kernel::PlanCompileDetailV1 {
                 state: sigil_kernel::PlanReadyStateV1::NotReady,
@@ -493,7 +497,6 @@ impl AppState {
             } else {
                 pending.selected_action
             };
-            pending.workbench_open = false;
         }
     }
 
@@ -514,6 +517,8 @@ impl AppState {
         let Ok(plan_id) = sigil_kernel::PlanId::new(review.plan_id.clone()) else {
             return;
         };
+        let previous = self.composer.pending_plan_approval.take();
+        let lineage = self.pending_plan_lineage(&plan_id);
         let source = match review.source {
             sigil_kernel::PublicPlanReviewSource::ExplicitPlanCommand => {
                 sigil_kernel::PlanReviewSource::ExplicitPlanCommand
@@ -539,12 +544,7 @@ impl AppState {
                 "The previous Plan review ended before producing a draft; retry it to continue."
                     .to_owned(),
             ],
-            lineage: sigil_kernel::PlanLineageV1 {
-                source: sigil_kernel::PlanSourceRef::default(),
-                plan_review_id: None,
-                attempt_id: None,
-                created_at_ms: 0,
-            },
+            lineage,
             legacy_markdown: None,
             compile: sigil_kernel::PlanCompileDetailV1 {
                 state: sigil_kernel::PlanReadyStateV1::NotReady,
@@ -566,13 +566,17 @@ impl AppState {
             last_run_failure: None,
             retrying_materialization: false,
             allowed_actions: review.allowed_actions.clone(),
+            status: Some(review.status),
             revision: review.revision.clone(),
+            saved_for_later: false,
+            action_feedback: None,
             detail,
             workbench_open: false,
             workbench_scroll: 0,
             workbench_scroll_extent: Default::default(),
             selected_action: PlanWorkbenchAction::RetryReview,
         });
+        self.restore_pending_plan_presentation(previous);
     }
 
     fn adopt_pending_candidate(&mut self) -> Option<AppAction> {
@@ -584,7 +588,7 @@ impl AppState {
         }
         let plan_id = pending.plan_id.clone()?;
         let expected_candidate_hash = pending.plan_hash.clone();
-        self.composer.pending_plan_approval = None;
+        self.begin_pending_plan_action(PlanWorkbenchAction::AdoptCandidate);
         self.last_notice = Some("adopting preserved Plan candidate".to_owned());
         self.push_event("plan", "adopt_candidate");
         Some(AppAction::AdoptPlanCandidate {
@@ -611,7 +615,7 @@ impl AppState {
                     .then(|| pending.plan_hash.clone())
             })
             .filter(|hash| !hash.trim().is_empty());
-        self.composer.pending_plan_approval = None;
+        self.begin_pending_plan_action(PlanWorkbenchAction::RetryReview);
         self.last_notice = Some("retrying preserved Plan review".to_owned());
         self.push_event("plan", "retry_review");
         Some(AppAction::RetryPlanReview {
@@ -631,7 +635,40 @@ impl AppState {
             return;
         }
         pending.allowed_actions = review.allowed_actions.clone();
+        pending.status = Some(review.status);
+        let previous_revision = pending.revision.clone();
         pending.revision = review.revision.clone();
+        pending.saved_for_later = self
+            .session_browser
+            .current_entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::PlanDecisionRecorded(decision),
+                ) if decision.plan_id.as_str() == review.plan_id => Some(decision),
+                _ => None,
+            })
+            .is_some_and(|decision| {
+                decision.plan_hash == pending.plan_hash
+                    && decision.decision == sigil_kernel::PlanDecision::SavedOnly
+            });
+        if previous_revision != pending.revision {
+            pending.action_feedback = None;
+        }
+        if pending.status == Some(sigil_kernel::PublicPlanReviewStatus::DraftReady)
+            && matches!(
+                pending.action_feedback,
+                Some(PlanActionFeedback::Pending(
+                    PlanWorkbenchAction::AdoptCandidate
+                ))
+            )
+        {
+            pending.action_feedback = Some(PlanActionFeedback::Succeeded {
+                action: PlanWorkbenchAction::AdoptCandidate,
+                message: "Candidate adopted. Review the plan before choosing Run.".to_owned(),
+            });
+        }
         if !pending.action_allowed(pending.selected_action)
             && let Some(action) = PlanWorkbenchAction::ORDER
                 .iter()
@@ -645,18 +682,331 @@ impl AppState {
     pub(in crate::app) fn clear_pending_plan_approval(&mut self) {
         self.composer.pending_plan_approval = None;
     }
+
+    fn begin_pending_plan_action(&mut self, action: PlanWorkbenchAction) {
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.action_feedback = Some(PlanActionFeedback::Pending(action));
+        }
+    }
+
+    fn set_pending_plan_action_failure(&mut self, action: PlanWorkbenchAction, message: String) {
+        self.last_notice = Some(message.clone());
+        if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
+            pending.action_feedback = Some(PlanActionFeedback::Failed { action, message });
+        }
+    }
+
+    /// Applies a local operation failure only to the exact Plan operation still awaiting it.
+    pub(crate) fn fail_pending_plan_action(
+        &mut self,
+        action: sigil_kernel::PublicPlanAction,
+        plan_id: &str,
+        expected_plan_hash: &str,
+        message: String,
+    ) -> bool {
+        let action = PlanWorkbenchAction::from_public(action);
+        let matches = self
+            .composer
+            .pending_plan_approval
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.plan_id.as_deref() == Some(plan_id)
+                    && pending.plan_hash == expected_plan_hash
+                    && pending.action_feedback == Some(PlanActionFeedback::Pending(action))
+            });
+        if !matches {
+            return false;
+        }
+        self.set_pending_plan_action_failure(action, message);
+        true
+    }
+
+    /// Returns a rejected launcher command to its exact workbench without changing run state.
+    pub(crate) fn fail_plan_action(&mut self, action: &AppAction, message: String) -> bool {
+        let (action, plan_id, plan_hash) = match action {
+            AppAction::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            } => (
+                sigil_kernel::PublicPlanAction::Save,
+                plan_id,
+                expected_plan_hash.as_str(),
+            ),
+            AppAction::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            } => (
+                sigil_kernel::PublicPlanAction::Revise,
+                plan_id,
+                expected_plan_hash.as_str(),
+            ),
+            AppAction::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            } => (
+                sigil_kernel::PublicPlanAction::Reject,
+                plan_id,
+                expected_plan_hash.as_str(),
+            ),
+            AppAction::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                ..
+            } => (
+                sigil_kernel::PublicPlanAction::Run,
+                plan_id,
+                expected_plan_hash.as_str(),
+            ),
+            AppAction::AdoptPlanCandidate {
+                plan_id,
+                expected_candidate_hash,
+            } => (
+                sigil_kernel::PublicPlanAction::AdoptCandidate,
+                plan_id,
+                expected_candidate_hash.as_str(),
+            ),
+            AppAction::RetryPlanReview {
+                plan_id,
+                expected_candidate_hash,
+            } => (
+                sigil_kernel::PublicPlanAction::RetryReview,
+                plan_id,
+                expected_candidate_hash.as_deref().unwrap_or_default(),
+            ),
+            _ => return false,
+        };
+        self.fail_pending_plan_action(action, plan_id, plan_hash, message)
+    }
+
+    pub(crate) fn complete_pending_plan_save(&mut self, plan_id: &str, plan_hash: &str) {
+        let Some(pending) = self
+            .composer
+            .pending_plan_approval
+            .as_mut()
+            .filter(|pending| {
+                pending.plan_id.as_deref() == Some(plan_id)
+                    && pending.plan_hash == plan_hash
+                    && pending.saved_for_later
+            })
+        else {
+            return;
+        };
+        pending.action_feedback = Some(PlanActionFeedback::Succeeded {
+            action: PlanWorkbenchAction::Save,
+            message: "Saved for later. The plan remains available; choose Run when you are ready."
+                .to_owned(),
+        });
+    }
+
+    fn pending_plan_lineage(&self, plan_id: &sigil_kernel::PlanId) -> sigil_kernel::PlanLineageV1 {
+        let projection =
+            sigil_kernel::PlanReviewProjection::from_entries(&self.session_browser.current_entries);
+        let attempt = projection.attempt_for_plan(plan_id);
+        sigil_kernel::PlanLineageV1 {
+            source: sigil_kernel::PlanSourceRef::default(),
+            plan_review_id: attempt.map(|attempt| attempt.plan_review_id.clone()),
+            attempt_id: attempt.map(|attempt| attempt.attempt_id.clone()),
+            created_at_ms: attempt.map_or(0, |attempt| attempt.recorded_at_ms),
+        }
+    }
+
+    /// Carries only presentation across an authoritative refresh of the same Plan lineage.
+    pub(super) fn restore_pending_plan_presentation(
+        &mut self,
+        previous: Option<PendingPlanApproval>,
+    ) {
+        let (Some(previous), Some(pending)) =
+            (previous, self.composer.pending_plan_approval.as_mut())
+        else {
+            return;
+        };
+        let same_plan =
+            previous.plan_id == pending.plan_id && previous.plan_hash == pending.plan_hash;
+        let same_review = previous
+            .detail
+            .lineage
+            .plan_review_id
+            .as_ref()
+            .is_some_and(|review| pending.detail.lineage.plan_review_id.as_ref() == Some(review));
+        if !same_plan && !same_review {
+            return;
+        }
+        pending.workbench_open = previous.workbench_open;
+        if same_plan {
+            pending.workbench_scroll = previous.workbench_scroll;
+            pending.workbench_scroll_extent = previous.workbench_scroll_extent;
+            if pending.status.is_none() {
+                pending.status = previous.status;
+                pending.revision = previous.revision.clone();
+            }
+            if pending.revision == previous.revision && pending.action_feedback.is_none() {
+                pending.action_feedback = previous.action_feedback;
+            }
+            if pending.status == Some(sigil_kernel::PublicPlanReviewStatus::DraftReady)
+                && pending.action_feedback
+                    == Some(PlanActionFeedback::Pending(
+                        PlanWorkbenchAction::AdoptCandidate,
+                    ))
+            {
+                pending.action_feedback = Some(PlanActionFeedback::Succeeded {
+                    action: PlanWorkbenchAction::AdoptCandidate,
+                    message: "The adopted plan is ready for review. It has not been started."
+                        .to_owned(),
+                });
+            }
+        } else if pending.workbench_open
+            && pending.status == Some(sigil_kernel::PublicPlanReviewStatus::DraftReady)
+        {
+            pending.action_feedback = Some(PlanActionFeedback::Succeeded {
+                action: PlanWorkbenchAction::Revise,
+                message: "The revised plan is ready for review. It has not been started."
+                    .to_owned(),
+            });
+        }
+    }
 }
 
 impl PendingPlanApproval {
     pub(crate) fn action_allowed(&self, action: PlanWorkbenchAction) -> bool {
-        let public = match action {
+        self.allowed_actions.contains(&action.public_action())
+    }
+
+    pub(crate) fn action_pending(&self) -> bool {
+        matches!(self.action_feedback, Some(PlanActionFeedback::Pending(_)))
+    }
+
+    pub(crate) fn action_enabled(&self, action: PlanWorkbenchAction) -> bool {
+        // Workspace observations are advisory. Durable Plan state owns action availability.
+        self.action_allowed(action) && !self.action_pending()
+    }
+
+    pub(crate) fn status_label(&self) -> &'static str {
+        if self.saved_for_later {
+            return "saved for later";
+        }
+        if let Some(revision) = self.revision.as_ref() {
+            return match revision.status {
+                sigil_kernel::PublicPlanRevisionStatusV1::AwaitingGuidance => {
+                    "revision awaiting guidance"
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Queued => "revision queued",
+                sigil_kernel::PublicPlanRevisionStatusV1::Researching => "revision researching",
+                sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput => {
+                    "revision waiting for input"
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Finalizing => "revision finalizing",
+                sigil_kernel::PublicPlanRevisionStatusV1::Failed => "revision failed",
+                sigil_kernel::PublicPlanRevisionStatusV1::Cancelled => "revision cancelled",
+                sigil_kernel::PublicPlanRevisionStatusV1::Succeeded => "revision succeeded",
+            };
+        }
+        match self.status {
+            Some(sigil_kernel::PublicPlanReviewStatus::DraftReady) => "ready",
+            Some(sigil_kernel::PublicPlanReviewStatus::Started) => "researching",
+            Some(sigil_kernel::PublicPlanReviewStatus::WaitingForInput) => "waiting for input",
+            Some(sigil_kernel::PublicPlanReviewStatus::Finalizing) => "finalizing",
+            Some(sigil_kernel::PublicPlanReviewStatus::CompileFailed) => "needs changes",
+            Some(sigil_kernel::PublicPlanReviewStatus::Paused) => "paused",
+            Some(sigil_kernel::PublicPlanReviewStatus::Blocked) => "blocked",
+            Some(sigil_kernel::PublicPlanReviewStatus::Failed) => "failed",
+            Some(sigil_kernel::PublicPlanReviewStatus::Interrupted) => "interrupted",
+            Some(sigil_kernel::PublicPlanReviewStatus::Cancelled) => "cancelled",
+            Some(sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft) => {
+                "finished without a draft"
+            }
+            None => "review",
+        }
+    }
+
+    pub(crate) fn revision_detail(&self) -> Option<&'static str> {
+        self.revision
+            .as_ref()
+            .map(|revision| match revision.status {
+                sigil_kernel::PublicPlanRevisionStatusV1::AwaitingGuidance => {
+                    "Original plan · read-only while revision guidance is open."
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Queued => {
+                    "Original plan · read-only while the revision waits to start."
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Researching
+                | sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput
+                | sigil_kernel::PublicPlanRevisionStatusV1::Finalizing => {
+                    "Original plan · read-only while the revised plan is prepared."
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Failed => {
+                    "Revision failed. The original plan remains available for review and later use."
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Cancelled => {
+                    "Revision cancelled. The original plan remains available."
+                }
+                sigil_kernel::PublicPlanRevisionStatusV1::Succeeded => {
+                    "Revised plan · review it before choosing Run. It has not been started."
+                }
+            })
+    }
+
+    pub(crate) fn structure_summary(&self) -> Option<String> {
+        let counts = [
+            (self.steps.len(), "step", "steps"),
+            (self.target_path_count, "path", "paths"),
+            (self.suggested_check_count, "check", "checks"),
+        ]
+        .into_iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, singular, plural)| {
+            format!("{count} {}", if count == 1 { singular } else { plural })
+        })
+        .collect::<Vec<_>>();
+        (!counts.is_empty()).then(|| counts.join(" · "))
+    }
+
+    pub(crate) fn workbench_key_hint(&self) -> String {
+        let actions = PlanWorkbenchAction::ORDER
+            .into_iter()
+            .filter(|action| self.action_enabled(*action))
+            .map(|action| format!("{} {}", action.shortcut(), action.label().to_lowercase()))
+            .collect::<Vec<_>>();
+        if actions.is_empty() {
+            return "↑↓/Pg scroll · Esc close".to_owned();
+        }
+        format!(
+            "↑↓/Pg scroll · Tab action · {} · Enter confirm · Esc close",
+            actions.join(" · ")
+        )
+    }
+}
+
+impl PlanWorkbenchAction {
+    pub(crate) fn pending_label(self) -> &'static str {
+        match self {
+            Self::Run => "Starting the plan",
+            Self::Save => "Saving for later",
+            Self::Revise => "Opening revision guidance",
+            Self::Reject => "Rejecting the plan",
+            Self::AdoptCandidate => "Adopting the candidate",
+            Self::RetryReview => "Preparing the review retry",
+        }
+    }
+
+    fn public_action(self) -> sigil_kernel::PublicPlanAction {
+        match self {
             PlanWorkbenchAction::Run => sigil_kernel::PublicPlanAction::Run,
             PlanWorkbenchAction::Save => sigil_kernel::PublicPlanAction::Save,
             PlanWorkbenchAction::Revise => sigil_kernel::PublicPlanAction::Revise,
             PlanWorkbenchAction::Reject => sigil_kernel::PublicPlanAction::Reject,
             PlanWorkbenchAction::AdoptCandidate => sigil_kernel::PublicPlanAction::AdoptCandidate,
             PlanWorkbenchAction::RetryReview => sigil_kernel::PublicPlanAction::RetryReview,
-        };
-        self.allowed_actions.contains(&public)
+        }
+    }
+
+    fn from_public(action: sigil_kernel::PublicPlanAction) -> Self {
+        match action {
+            sigil_kernel::PublicPlanAction::Run => Self::Run,
+            sigil_kernel::PublicPlanAction::Save => Self::Save,
+            sigil_kernel::PublicPlanAction::Revise => Self::Revise,
+            sigil_kernel::PublicPlanAction::Reject => Self::Reject,
+            sigil_kernel::PublicPlanAction::AdoptCandidate => Self::AdoptCandidate,
+            sigil_kernel::PublicPlanAction::RetryReview => Self::RetryReview,
+        }
     }
 }

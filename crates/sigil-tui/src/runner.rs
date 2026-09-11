@@ -24,10 +24,10 @@ pub(crate) use protocol::{
     V2ContinuityPreview, WorkerApprovalCommandReceipt,
 };
 pub(crate) use protocol::{
-    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, TerminalTaskControlIdentity,
-    ToolArtifactDisplayReadFailure, V2CompactionAdmission, V2CompactionApplySource,
-    V2CompactionPreviewState, V2CompactionReview, WorkerCommand, WorkerCommandSender,
-    WorkerMessage, WorkerRouteRecoverySessionTarget,
+    McpActivationStatus, McpOAuthUserAction, QueueMoveDirection, QueueOperation,
+    QueueOperationFailure, TerminalTaskControlIdentity, ToolArtifactDisplayReadFailure,
+    V2CompactionAdmission, V2CompactionApplySource, V2CompactionPreviewState, V2CompactionReview,
+    WorkerCommand, WorkerCommandSender, WorkerMessage, WorkerRouteRecoverySessionTarget,
 };
 pub(crate) use route_recovery::worker_session_route_recovery_message;
 pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;

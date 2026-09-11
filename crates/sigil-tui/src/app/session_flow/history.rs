@@ -7,12 +7,12 @@ use std::{
 use sigil_kernel::{ControlEntry, JsonlSessionStore, SessionLogEntry};
 
 use super::super::{
-    AppState, PaneFocus, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
-    formatting::truncate_session_view_text,
+    AppState, PaneFocus, SessionHistoryEntry, formatting::truncate_session_view_text,
 };
 
 const SESSION_HISTORY_TITLE_LINE_MAX_BYTES: usize = 256 * 1024;
 
+#[cfg(test)]
 pub(super) fn session_id_from_path(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     stem.strip_prefix("session-").map(ToOwned::to_owned)
@@ -41,10 +41,11 @@ pub(in crate::app) fn session_history_display_label(entry: &SessionHistoryEntry)
         .unwrap_or_else(|| session_history_label(&entry.label))
 }
 
+#[cfg(test)]
 pub(super) fn session_history_title_from_log(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    for physical_line in 1..=SESSION_HISTORY_TITLE_SCAN_LIMIT {
+    for physical_line in 1..=super::super::SESSION_HISTORY_TITLE_SCAN_LIMIT {
         let line = read_bounded_line(&mut reader, SESSION_HISTORY_TITLE_LINE_MAX_BYTES)
             .ok()
             .flatten()?;

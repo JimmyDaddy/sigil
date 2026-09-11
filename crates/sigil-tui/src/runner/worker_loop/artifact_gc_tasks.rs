@@ -50,6 +50,7 @@ pub(in crate::runner) struct ArtifactGcTaskResult {
 pub(in crate::runner) struct ArtifactGcTaskManager {
     active: Option<ActiveArtifactGcTask>,
     retired: Vec<JoinHandle<()>>,
+    task_panicked: bool,
 }
 
 struct ActiveArtifactGcTask {
@@ -126,7 +127,7 @@ impl ArtifactGcTaskManager {
     }
 
     pub(in crate::runner) fn reap_finished(&mut self) {
-        self.retired.retain(|handle| !handle.is_finished());
+        super::shutdown::reap_finished_owned_tasks(&mut self.retired, &mut self.task_panicked);
     }
 
     pub(in crate::runner) fn accept_result(
@@ -137,9 +138,7 @@ impl ArtifactGcTaskManager {
         if self.active.as_ref().is_some_and(|task| {
             task.request_id == request_id && task.session_scope_id == session_scope_id
         }) {
-            if let Some(task) = self.active.take()
-                && !task.handle.is_finished()
-            {
+            if let Some(task) = self.active.take() {
                 self.retired.push(task.handle);
             }
             self.reap_finished();
@@ -158,10 +157,26 @@ impl ArtifactGcTaskManager {
         self.reap_finished();
     }
 
+    pub(in crate::runner) fn shutdown_until(
+        &mut self,
+        runtime: &Runtime,
+        deadline: std::time::Instant,
+    ) -> Result<(), super::shutdown::OwnedTaskDrainFailure> {
+        self.abort_all();
+        super::shutdown::drain_owned_tasks_until(
+            &mut self.retired,
+            &mut self.task_panicked,
+            runtime,
+            deadline,
+        )
+    }
+
     pub(in crate::runner) fn cancel_and_join(&mut self, runtime: &Runtime) {
         self.abort_all();
         for handle in self.retired.drain(..) {
-            let _ = runtime.block_on(handle);
+            self.task_panicked |= runtime
+                .block_on(handle)
+                .is_err_and(|error| error.is_panic());
         }
     }
 }

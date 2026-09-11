@@ -1187,7 +1187,7 @@ fn task_verification_card_binds_exact_rerun_request_and_failure_evidence() {
     assert_eq!(request.plan_version, 1);
     assert_eq!(request.step_id.as_str(), "fix_typo");
     assert_eq!(request.policy_hash, "policy-hash");
-    assert_eq!(request.workspace_snapshot_id, "snapshot-1");
+    assert_eq!(request.workspace_snapshot_id.as_deref(), Some("snapshot-1"));
     assert!(
         card.inspect_lines
             .iter()

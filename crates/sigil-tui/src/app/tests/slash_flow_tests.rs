@@ -1141,7 +1141,10 @@ fn ideographic_comma_starts_command_palette() -> Result<()> {
 
 #[test]
 fn slash_selector_shows_all_commands_for_root_slash() {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let fixture = tempfile::tempdir().expect("isolated workspace");
+    let mut config = test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
     app.composer.input = "/".to_owned();
 
     let rows = app.slash_selector_rows();

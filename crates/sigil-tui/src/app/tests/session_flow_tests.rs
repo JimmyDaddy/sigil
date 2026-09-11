@@ -46,6 +46,79 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
 }
 
 #[test]
+fn managed_leaf_resume_preserves_the_durable_session_identity() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let restored_path = temp
+        .path()
+        .join("state/managed/session-log/owned/records.jsonl");
+    write_session_log(
+        &restored_path,
+        &restored_entries("restored-provider", "restored-model"),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&restored_path)?;
+    let durable_id = records
+        .first()
+        .expect("durable identity")
+        .stored_event()
+        .session_id
+        .clone();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    assert!(app.restore_session_path_from_disk(
+        restored_path.clone(),
+        "restored-provider",
+        "restored-model",
+        "resumed managed session",
+    ));
+    assert_eq!(app.session_log_path, restored_path);
+    assert_eq!(app.session_id, durable_id);
+    Ok(())
+}
+
+#[test]
+fn managed_leaf_session_switch_uses_worker_identity_without_reopening_the_log() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let restored_path = temp
+        .path()
+        .join("state/managed/session-log/owned/records.jsonl");
+    write_session_log(
+        &restored_path,
+        &restored_entries("restored-provider", "restored-model"),
+    )?;
+    let records = JsonlSessionStore::read_event_records(&restored_path)?;
+    let durable_id = records
+        .first()
+        .expect("durable identity")
+        .stored_event()
+        .session_id
+        .clone();
+    let entries = JsonlSessionStore::read_entries(&restored_path)?;
+    std::fs::remove_file(&restored_path)?;
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: durable_id.clone(),
+        session_log_path: restored_path.clone(),
+        provider_name: "restored-provider".to_owned(),
+        model_name: "restored-model".to_owned(),
+        entries,
+    })?;
+    assert_eq!(app.session_log_path, restored_path);
+    assert_eq!(app.session_id, durable_id);
+    Ok(())
+}
+
+#[test]
 fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
@@ -88,6 +161,7 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -129,6 +203,7 @@ fn restored_read_file_tool_result_uses_original_tool_call_for_code_preview() -> 
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -201,6 +276,7 @@ fn restored_bash_result_uses_safe_tool_call_when_execution_audit_is_hash_only() 
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -243,6 +319,7 @@ fn restored_reused_call_id_keeps_each_bash_command_with_its_own_result() -> Resu
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -340,6 +417,7 @@ fn restored_reused_call_id_keeps_each_preview_with_its_own_result() -> Result<()
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -408,6 +486,7 @@ fn restored_completed_and_incomplete_invocations_with_same_call_id_both_render()
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -456,6 +535,7 @@ fn restored_prefix_snapshot_keeps_materialization_metadata_out_of_activity() -> 
     )];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -482,6 +562,7 @@ fn restored_terminal_task_control_renders_user_facing_card() -> Result<()> {
     ))];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -562,6 +643,7 @@ fn restored_agent_thread_controls_render_user_facing_cards() -> Result<()> {
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -621,6 +703,7 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -682,6 +765,7 @@ fn restored_interrupted_tool_execution_renders_user_facing_card() -> Result<()> 
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -748,6 +832,7 @@ fn restored_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -839,6 +924,7 @@ fn restored_delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Res
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -945,6 +1031,7 @@ fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pres
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -971,6 +1058,7 @@ fn restored_session_view_shows_v2_compaction_invitation_and_restored_prompt_pres
 fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&app.session_log_path),
         session_log_path: app.session_log_path.clone(),
         provider_name: app.runtime.provider_name.clone(),
         model_name: app.runtime.model_name.clone(),
@@ -1000,6 +1088,7 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
 fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&app.session_log_path),
         session_log_path: app.session_log_path.clone(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1064,6 +1153,7 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     app.session_browser.history_filter = "b".to_owned();
     let lines = app.recent_session_lines().join("\n");
     assert!(lines.contains("beta"));
@@ -1100,6 +1190,7 @@ fn session_history_hides_bootstrap_only_sessions() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert!(
         app.session_browser
@@ -1189,6 +1280,7 @@ fn clean_exit_keeps_the_only_hidden_workspace_trust_anchor() -> Result<()> {
     assert!(!app.discard_current_bootstrap_only_session());
     assert!(bootstrap_path.exists());
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     assert!(app.session_browser.history.is_empty());
     assert!(app.workspace_is_trusted_from_history());
     Ok(())
@@ -1217,6 +1309,7 @@ fn session_rows_mark_selected_and_current_entry() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.session_log_path = beta.clone();
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     let rows = app.recent_session_rows();
     assert!(rows.iter().any(|row| {
@@ -1260,6 +1353,7 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert_eq!(
         app.session_browser
@@ -1299,6 +1393,7 @@ fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert_eq!(
         app.session_browser
@@ -1329,6 +1424,7 @@ fn resume_command_shows_session_selector_and_enter_switches_selected_session() -
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.composer.input = "/resume".to_owned();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     let selector_rows = app.slash_selector_rows();
     assert_eq!(app.slash_selector_title(), Some("Resume session"));
@@ -1365,6 +1461,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.composer.input = "/resume 1".to_owned();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -1379,6 +1476,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 
     let entries = JsonlSessionStore::read_entries(&restored_path)?;
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         session_log_path: restored_path.clone(),
         provider_name: "restored-provider".to_owned(),
         model_name: "restored-model".to_owned(),
@@ -1387,7 +1485,12 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 
     assert_eq!(app.runtime.provider_name, "restored-provider");
     assert_eq!(app.runtime.model_name, "restored-model");
-    assert_eq!(app.session_id, "restored");
+    assert_eq!(
+        app.session_id,
+        JsonlSessionStore::read_event_records(&restored_path)?[0]
+            .stored_event()
+            .session_id,
+    );
     assert_eq!(app.session_log_path, restored_path);
     assert!(app.composer.optimistic_queue_items.is_empty());
     assert!(app.composer.deferred_queue_promotions.is_empty());
@@ -1468,6 +1571,7 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
     let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
     app.session_log_path = current_path.clone();
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert!(
         app.session_browser
@@ -1476,25 +1580,29 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
             .any(|entry| entry.path == alpha_path && entry.title.as_deref() == Some("alpha title"))
     );
     assert!(
-        app.session_browser
+        !app.session_browser
             .history
             .iter()
-            .any(|entry| entry.path == beta_path && entry.title.as_deref() == Some("beta plan"))
+            .any(|entry| entry.path == beta_path),
+        "catalog hides a corrupt stream instead of making its valid prefix resumable"
     );
 
-    assert_eq!(app.resolve_resume_target(""), Some(beta_path.clone()));
-    assert_eq!(app.resolve_resume_target("latest"), Some(beta_path.clone()));
-    assert_eq!(app.resolve_resume_target("1"), Some(beta_path.clone()));
+    assert_eq!(app.resolve_resume_target(""), Some(alpha_path.clone()));
+    assert_eq!(
+        app.resolve_resume_target("latest"),
+        Some(alpha_path.clone())
+    );
+    assert_eq!(app.resolve_resume_target("1"), Some(alpha_path.clone()));
     assert_eq!(
         app.resolve_resume_target(beta_path.to_str().unwrap_or_default()),
-        Some(beta_path.clone())
+        None
     );
     assert_eq!(
         app.resolve_resume_target("alpha title"),
         Some(alpha_path.clone())
     );
 
-    app.session_browser.history_filter = "beta".to_owned();
+    app.session_browser.history_filter = "alpha".to_owned();
     let rows = app.recent_session_rows();
     assert!(matches!(
         rows.first(),
@@ -1748,6 +1856,7 @@ fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1797,6 +1906,7 @@ fn restored_reasoning_trace_before_final_answer_stays_visible_as_thinking() -> R
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1865,6 +1975,7 @@ fn restored_reasoning_traces_between_tools_before_final_stay_visible() -> Result
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1912,6 +2023,7 @@ fn restored_reasoning_trace_before_agent_poll_tool_does_not_render() -> Result<(
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -1961,6 +2073,7 @@ fn restored_tool_preamble_before_final_answer_does_not_render_as_second_reply() 
     ];
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&session_log_path),
         session_log_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),
@@ -2016,6 +2129,7 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.session_log_path = current;
     app.refresh_session_history();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert_eq!(app.resolve_resume_target("alpha"), None);
     assert_eq!(app.resolve_resume_target("latest"), Some(alpha_copy));

@@ -26,8 +26,10 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
     std::fs::write(workspace_root.join("note.txt"), "verify me\n")?;
     let workspace_root = std::fs::canonicalize(workspace_root)?;
     let session_log_path = temp.path().join(".sigil/sessions/verification.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
 
     let task_id = TaskId::new("task_1")?;
     let step_id = TaskStepId::new("step_1")?;
@@ -131,9 +133,8 @@ fn exact_verification_rerun_crosses_worker_loop_and_persists_receipt_link() -> R
         check_spec.check_spec_id.clone(),
         check_spec.check_spec_hash.clone(),
         policy_hash,
-        workspace_snapshot_id.clone(),
+        Some(workspace_snapshot_id.clone()),
     );
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let agent = Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
     worker.send(WorkerCommand::RerunTaskVerification { request })?;
@@ -208,8 +209,10 @@ fn exact_integration_review_reads_and_digest_checks_the_bound_artifact() -> Resu
     std::fs::write(workspace_root.join("note.txt"), "review me\n")?;
     let workspace_root = std::fs::canonicalize(workspace_root)?;
     let session_log_path = temp.path().join(".sigil/sessions/integration-review.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     let aggregate_diff = b"diff --git a/src/lib.rs b/src/lib.rs\n-old\n+new\n";
     let recorder = session
         .mutation_event_recorder()
@@ -233,7 +236,6 @@ fn exact_integration_review_reads_and_digest_checks_the_bound_artifact() -> Resu
     }
     drop(session);
 
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let agent = Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
     worker.send(WorkerCommand::ReviewTaskIntegration {

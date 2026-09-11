@@ -104,7 +104,7 @@ impl AppState {
             self.composer.input_cursor = 0;
             self.composer.input_paste_spans.clear();
             self.reset_slash_selector();
-            self.last_notice = Some("follow-up will run next".to_owned());
+            self.last_notice = Some("saving follow-up".to_owned());
             return Ok(Some(AppAction::QueueConversationInput {
                 prompt,
                 kind,

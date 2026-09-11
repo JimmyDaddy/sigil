@@ -27,6 +27,27 @@ where
         managed_verification_execution,
         state,
     } = context;
+    let unavailable = match &command {
+        VerificationCheckpointCommand::CheckChangedFilesDiagnostics
+            if !root_config.code_intelligence.enabled =>
+        {
+            Some("code intelligence is not selected for this session composition")
+        }
+        VerificationCheckpointCommand::ApproveVerificationCheck { .. }
+        | VerificationCheckpointCommand::SandboxVerificationCheck { .. }
+        | VerificationCheckpointCommand::RerunTaskVerification { .. }
+        | VerificationCheckpointCommand::ReviewTaskIntegration { .. }
+        | VerificationCheckpointCommand::AcceptTaskIntegration { .. }
+            if !root_config.task.enabled =>
+        {
+            Some("task orchestration is not selected for this session composition")
+        }
+        _ => None,
+    };
+    if let Some(message) = unavailable {
+        let _ = message_tx.send(WorkerMessage::RunFailed(message.to_owned()));
+        return WorkerCommandDispatchControl::Continue;
+    }
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
@@ -220,6 +241,7 @@ where
                             attachment: Arc::clone(&transition.session_attachment),
                         });
                         let _ = message_tx.send(WorkerMessage::ConversationForked {
+                            session_id: transition.session_id,
                             request_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,

@@ -1217,3 +1217,173 @@ fn queued_plan_candidate_is_blocked_without_changing_queue_state() -> Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn queue_cancel_uses_durable_terminal_status_for_idempotence_and_refusal() -> Result<()> {
+    for status in [
+        ConversationInputStatus::Cancelled,
+        ConversationInputStatus::Dispatching,
+        ConversationInputStatus::Delivered,
+        ConversationInputStatus::Rejected,
+        ConversationInputStatus::Stale,
+        ConversationInputStatus::Unknown,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
+        let mut exact = ExactConversationPromptStore::new();
+        let entries = queue_conversation_input(
+            store.path(),
+            &mut session,
+            &mut exact,
+            "queued follow-up".to_owned(),
+            ConversationInputKind::Chat,
+            ConversationInputTarget::MainThread,
+            ReasoningEffort::High,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let queue_id = ConversationQueueProjection::from_entries(&entries).items[0]
+            .queued
+            .queue_id
+            .clone();
+        session.as_mut().expect("session").append_control(
+            ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+                queue_id: queue_id.clone(),
+                status,
+                reason: None,
+                updated_at_ms: None,
+            }),
+        )?;
+        let before = std::fs::read(store.path())?;
+        // An active run leaves no local Session; status must still come from durable records.
+        let mut detached_session = None;
+        let result = cancel_queued_conversation_input(
+            store.path(),
+            &mut detached_session,
+            &mut Vec::new(),
+            &mut exact,
+            queue_id.clone(),
+        );
+        if status == ConversationInputStatus::Cancelled {
+            assert!(result.is_ok());
+            assert!(!exact.contains_key(&queue_id));
+            assert!(
+                cancel_queued_conversation_input(
+                    store.path(),
+                    &mut detached_session,
+                    &mut Vec::new(),
+                    &mut exact,
+                    queue_id.clone()
+                )
+                .is_ok()
+            );
+        } else {
+            assert!(
+                matches!(result, Err(QueueOperationFailure::ItemUnavailable { status: actual, .. }) if actual == status)
+            );
+            assert!(exact.contains_key(&queue_id));
+        }
+        let missing = ConversationInputQueueId::new("queue_missing")?;
+        assert!(
+            matches!(cancel_queued_conversation_input(store.path(), &mut detached_session,
+            &mut Vec::new(), &mut exact, missing.clone()), Err(QueueOperationFailure::UnknownItem { queue_id }) if queue_id == missing)
+        );
+        assert_eq!(
+            std::fs::read(store.path())?,
+            before,
+            "terminal retries must not write new controls"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn queue_mutations_preserve_consumed_status_and_keep_durable_state_on_refusal() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
+    let mut exact = ExactConversationPromptStore::new();
+    let entries = queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact,
+        "queued follow-up".to_owned(),
+        ConversationInputKind::Chat,
+        ConversationInputTarget::MainThread,
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let queue_id = ConversationQueueProjection::from_entries(&entries).items[0]
+        .queued
+        .queue_id
+        .clone();
+    session.as_mut().expect("session").append_control(
+        ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+            queue_id: queue_id.clone(),
+            status: ConversationInputStatus::Delivered,
+            reason: None,
+            updated_at_ms: None,
+        }),
+    )?;
+    let before = std::fs::read(store.path())?;
+    for result in [
+        edit_queued_conversation_input(
+            store.path(),
+            &mut session,
+            &mut Vec::new(),
+            &mut exact,
+            queue_id.clone(),
+            "changed".to_owned(),
+            ReasoningEffort::High,
+        ),
+        move_queued_conversation_input(
+            store.path(),
+            &mut session,
+            &mut Vec::new(),
+            queue_id.clone(),
+            QueueMoveDirection::Down,
+        ),
+        promote_queued_conversation_input(
+            store.path(),
+            &mut session,
+            &mut Vec::new(),
+            queue_id.clone(),
+        ),
+    ] {
+        assert!(matches!(
+            result,
+            Err(QueueOperationFailure::ItemUnavailable {
+                status: ConversationInputStatus::Delivered,
+                ..
+            })
+        ));
+    }
+    assert_eq!(std::fs::read(store.path())?, before);
+    assert_eq!(
+        exact
+            .get(&queue_id)
+            .expect("exact prompt retained")
+            .expose_secret(),
+        "queued follow-up"
+    );
+    Ok(())
+}
+
+#[test]
+fn queue_pause_repeated_confirmation_does_not_append_duplicate_control() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Some(Session::load_from_store("test", "model", store.clone())?);
+    for paused in [true, false] {
+        let entries =
+            set_conversation_queue_paused(store.path(), &mut session, &mut Vec::new(), paused)?;
+        assert_eq!(
+            ConversationQueueProjection::from_entries(&entries).paused,
+            paused
+        );
+        let before = std::fs::read(store.path())?;
+        set_conversation_queue_paused(store.path(), &mut session, &mut Vec::new(), paused)?;
+        assert_eq!(std::fs::read(store.path())?, before);
+    }
+    Ok(())
+}

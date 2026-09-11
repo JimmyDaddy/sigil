@@ -242,6 +242,9 @@ fn session_switch_closes_intent_stack_and_late_load_response_is_ignored() {
     };
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(Path::new(
+            "session-switched.jsonl",
+        )),
         session_log_path: Path::new("session-switched.jsonl").to_path_buf(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),

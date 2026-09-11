@@ -48,6 +48,7 @@ fn test_config() -> RootConfig {
     ));
     let base = RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -480,7 +481,13 @@ fn short_shell_reserves_the_pending_plan_action_above_a_tall_composer() -> anyho
 #[test]
 fn long_plan_workbench_is_fully_reachable_at_all_supported_acceptance_sizes() -> anyhow::Result<()>
 {
-    for (width, height) in [(32, 8), (56, 12), (96, 16), (132, 34)] {
+    for (width, height, retrying) in [
+        (32, 8, false),
+        (32, 8, true),
+        (56, 12, false),
+        (96, 16, false),
+        (132, 34, false),
+    ] {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.set_terminal_size(width, height);
         let step_titles = (1..=6)
@@ -503,6 +510,7 @@ fn long_plan_workbench_is_fully_reachable_at_all_supported_acceptance_sizes() ->
                     .join("\n"),
             );
         }
+        pending.retrying_materialization = retrying;
         pending.workbench_open = true;
         app.composer.pending_plan_approval = Some(pending);
 
@@ -547,8 +555,14 @@ fn long_plan_workbench_is_fully_reachable_at_all_supported_acceptance_sizes() ->
             "End did not expose the immutable plan footer at {width}x{height}"
         );
         assert!(
-            reachable.contains("Run") && reachable.contains("Reject"),
+            reachable.contains(if retrying { "Retry" } else { "Run" })
+                && reachable.contains("Save")
+                && reachable.contains("Reject"),
             "explicit actions disappeared at {width}x{height}"
+        );
+        assert!(
+            (reachable.contains("S:") || reachable.contains("[S]")) && reachable.contains("Esc"),
+            "save and close keys disappeared at {width}x{height}"
         );
     }
     Ok(())

@@ -348,7 +348,8 @@ fn check_changed_files_is_rejected_while_run_is_active() -> Result<()> {
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-diagnostics-busy.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.code_intelligence.enabled = true;
     let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
     let agent = Agent::new(provider, sigil_kernel::ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;

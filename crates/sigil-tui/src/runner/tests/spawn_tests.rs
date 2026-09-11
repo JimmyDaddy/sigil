@@ -25,6 +25,7 @@ use super::super::{
 fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -181,6 +182,46 @@ fn test_authority_composition(
         .activate_workspace(root)
         .map_err(anyhow::Error::msg)?;
     Ok((Arc::new(composition), Arc::new(cutover)))
+}
+
+#[test]
+fn worker_rejects_capability_drift_from_core_boot_before_new_session_effects() -> Result<()> {
+    let temp = tempdir()?;
+    let mut config = v2_loopback_root_config(temp.path())?;
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    let (authority, cutover) = test_authority_composition(&config, temp.path())?;
+    config.composition = sigil_kernel::RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        [sigil_kernel::OptionalCapability::Terminal],
+    );
+    config.save(&temp.path().join("sigil.toml"))?;
+    let destination = temp.path().join("must-not-create/session.jsonl");
+    let result = super::super::spawn::spawn_agent_worker_with_route_directive_and_attachment(
+        config,
+        temp.path().join("sigil.toml"),
+        destination.clone(),
+        temp.path().to_path_buf(),
+        sigil_kernel::InteractionMode::Interactive,
+        super::super::spawn::WorkerSessionRouteDirective::default(),
+        Some(authority),
+        Some(cutover),
+        None,
+    );
+    let error = match result {
+        Ok(worker) => {
+            let _ = worker.command_tx.send(WorkerCommand::Shutdown);
+            let _ = worker.join_handle.join();
+            anyhow::bail!("changed capabilities reused an older Core authority boot");
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("differs from the current authority boot")
+    );
+    assert!(!destination.parent().expect("session parent").exists());
+    Ok(())
 }
 
 #[test]

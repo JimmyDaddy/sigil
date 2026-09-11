@@ -50,6 +50,7 @@ fn record_worker_advancement() {
 }
 
 pub(in crate::runner) struct WorkerLoopTerminalRuntime {
+    stop_control: super::super::protocol::WorkerStopControl,
     lifecycle_router: ChannelTerminalLifecycleRouter,
     control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     /// Session-scoped scratch lease registry shared with bash/terminal tools; used by startup
@@ -63,10 +64,19 @@ impl WorkerLoopTerminalRuntime {
         control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
     ) -> Self {
         Self {
+            stop_control: Default::default(),
             lifecycle_router,
             control,
             scratch_control: None,
         }
+    }
+
+    pub(in crate::runner) fn with_stop_control(
+        mut self,
+        stop_control: super::super::protocol::WorkerStopControl,
+    ) -> Self {
+        self.stop_control = stop_control;
+        self
     }
 
     pub(in crate::runner) fn with_scratch_control(
@@ -136,6 +146,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         lease: attachment_lease,
     } = session_attachment;
     let provider_capabilities = agent.provider_capabilities();
+    let task_orchestration_enabled = super::agent_runtime::task_orchestration_enabled(&root_config);
     let (event_tx, event_rx, urgent_command_rx) = event_inbox;
     let WorkerLoopMcpHandlers {
         elicitation_handler,
@@ -147,6 +158,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_plan_review_child_resources,
     } = mcp_handlers;
     let WorkerLoopTerminalRuntime {
+        stop_control,
         lifecycle_router: terminal_lifecycle_router,
         control: terminal_control,
         scratch_control,
@@ -169,6 +181,11 @@ pub(in crate::runner) fn run_worker_loop<P>(
         None,
     ) {
         Ok(mut session) => {
+            if let Err(error) = sigil_runtime::bind_session_composition(&mut session, &root_config)
+            {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                return;
+            }
             if let Some(artifact_store) = managed_artifact_store.as_ref() {
                 session.attach_tool_artifact_store_override(artifact_store.store());
             }
@@ -181,38 +198,39 @@ pub(in crate::runner) fn run_worker_loop<P>(
                 )));
                 return;
             }
-            super::super::spawn::send_startup_notice(
-                &message_tx,
-                "checking workspace recovery state",
-            );
-            match runtime.block_on(
-                sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
-                    &mut session,
-                    &workspace_root,
-                ),
-            ) {
-                Ok(report) if report.inspected > 0 => {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+            if task_orchestration_enabled {
+                super::super::spawn::send_startup_notice(
+                    &message_tx,
+                    "checking workspace recovery state",
+                );
+                match runtime.block_on(
+                    sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                        &mut session,
+                        &workspace_root,
+                    ),
+                ) {
+                    Ok(report) if report.inspected > 0 => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
                         report.inspected, report.removed, report.already_missing, report.failed
                     )));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to reconcile isolated task workspaces: {error:#}"
+                        )));
+                        return;
+                    }
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                        "failed to reconcile isolated task workspaces: {error:#}"
-                    )));
-                    return;
-                }
-            }
-            match runtime.block_on(
-                sigil_runtime::integration_lanes::reconcile_integration_promotions(
-                    &mut session,
-                    &workspace_root,
-                ),
-            ) {
-                Ok(report) if report.inspected > 0 => {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                match runtime.block_on(
+                    sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                        &mut session,
+                        &workspace_root,
+                    ),
+                ) {
+                    Ok(report) if report.inspected > 0 => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
                         "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
                         report.inspected,
                         report.promoted,
@@ -220,13 +238,14 @@ pub(in crate::runner) fn run_worker_loop<P>(
                         report.failed,
                         report.needs_review
                     )));
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                        "failed to reconcile integration promotions: {error:#}"
-                    )));
-                    return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to reconcile integration promotions: {error:#}"
+                        )));
+                        return;
+                    }
                 }
             }
             mark_stale_dispatching_conversation_queue_items(
@@ -241,52 +260,100 @@ pub(in crate::runner) fn run_worker_loop<P>(
             return;
         }
     };
-    let pending_task_handoffs = {
-        super::super::spawn::send_startup_notice(&message_tx, "reconciling task handoffs");
-        session_ref_for_log_path(&session_log_path)
-    }
-    .and_then(|parent_session_ref| {
-        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
-            .reconcile(
-                &mut initial_session,
-                &parent_session_ref,
-                current_unix_time_ms(),
-            )
-            .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))
-    });
-    let pending_task_handoffs = match pending_task_handoffs {
-        Ok(actions) => actions,
-        Err(error) => {
-            let _ = message_tx.send(WorkerMessage::RunFailed(error));
-            return;
+    let pending_task_handoffs = if task_orchestration_enabled {
+        let pending_task_handoffs = {
+            super::super::spawn::send_startup_notice(&message_tx, "reconciling task handoffs");
+            session_ref_for_log_path(&session_log_path)
         }
+        .and_then(|parent_session_ref| {
+            ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+                .reconcile(
+                    &mut initial_session,
+                    &parent_session_ref,
+                    current_unix_time_ms(),
+                )
+                .map_err(|error| format!("failed to reconcile durable task handoffs: {error:#}"))
+        });
+        match pending_task_handoffs {
+            Ok(actions) => actions,
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return;
+            }
+        }
+    } else {
+        Vec::new()
     };
 
-    super::super::spawn::send_startup_notice(&message_tx, "loading agent profiles");
+    // Startup owns the exclusive session attachment and has not admitted any foreground work.
+    // Task crash recovery above settles its durable attempt first; the shared lifecycle owner
+    // then closes only the exact unfinished public run as Interrupted, without asserting that
+    // external resources are quiescent or that the interrupted Task completed.
+    let public_recovery = (|| -> anyhow::Result<bool> {
+        let attachment = attachment_lease
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("public run recovery requires a session attachment"))?;
+        anyhow::ensure!(
+            initial_session.store_path() == Some(attachment.session_path()),
+            "public run recovery attachment belongs to another session"
+        );
+        initial_session
+            .conversation_run_lifecycle_recorder()?
+            .reconcile_unfinished(current_unix_time_ms())
+    })();
+    match public_recovery {
+        Ok(true) => {
+            // A projection observed before recovery may have latched the native busy state.
+            // Release it through the existing terminal delivery path before WorkerReady;
+            // a later passive projection must not be allowed to clear an unrelated live run.
+            let _ = message_tx.send(WorkerMessage::RunInterrupted {
+                session_id: initial_session.session_scope_id().to_owned(),
+                session_log_path: session_log_path.clone(),
+                provider_name: initial_session.provider_name().to_owned(),
+                model_name: initial_session.model_name().to_owned(),
+                reason: "run interrupted before durable terminal recovery".to_owned(),
+                entries: initial_session.entries().to_vec(),
+            });
+        }
+        Ok(false) => {}
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                "failed to reconcile interrupted public run: {error:#}"
+            )));
+            return;
+        }
+    }
+
     let session_entries = initial_session.entries();
     let wake_coalescer = WorkerWakeCoalescer::new(
         event_tx.clone(),
         Some(initial_session.session_scope_id().to_owned()),
     );
-    let agent_supervisor =
-        match sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &root_config,
-            &workspace_root,
-            session_entries,
-        ) {
-            Ok(registry) => sigil_runtime::AgentSupervisor::new(
-                registry,
-                sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
-                provider_capabilities.clone(),
-            )
-            .with_event_sink(Arc::new(WorkerSupervisorEventSink {
-                wake_coalescer: wake_coalescer.clone(),
-            })),
-            Err(error) => {
-                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                return;
-            }
-        };
+    let agent_supervisor = if task_orchestration_enabled {
+        super::super::spawn::send_startup_notice(&message_tx, "loading agent profiles");
+        Some(
+            match sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+                &root_config,
+                &workspace_root,
+                session_entries,
+            ) {
+                Ok(registry) => sigil_runtime::AgentSupervisor::new(
+                    registry,
+                    sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
+                    provider_capabilities.clone(),
+                )
+                .with_event_sink(Arc::new(WorkerSupervisorEventSink {
+                    wake_coalescer: wake_coalescer.clone(),
+                })),
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            },
+        )
+    } else {
+        None
+    };
     let background_agent_runs =
         sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
             sender: message_tx.clone(),
@@ -306,8 +373,9 @@ pub(in crate::runner) fn run_worker_loop<P>(
         managed_storage_writer,
         managed_artifact_store,
     );
+    state.stop_control = stop_control;
     state.managed_plan_review_child_resources = managed_plan_review_child_resources;
-    match super::recover_managed_plan_review_research_attention(&state) {
+    match super::recover_owned_user_input_attention(&state) {
         Ok(Some(command)) => {
             let entries = state
                 .session
@@ -321,7 +389,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
         Ok(None) => {}
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::Notice(format!(
-                "accepted plan-review input recovery is unavailable: {error:#}"
+                "accepted input recovery is unavailable: {error:#}"
             )));
         }
     }
@@ -358,6 +426,16 @@ pub(in crate::runner) fn run_worker_loop<P>(
     let _ = message_tx.send(WorkerMessage::WorkerReady);
 
     loop {
+        state.stop_control.stage(WorkerShutdownStage::WorkerLoop);
+        super::shutdown::reap_finished_owned_tasks(
+            &mut state.run.retired,
+            &mut state.run.task_panicked,
+        );
+        if state.run.task_panicked {
+            state
+                .stop_control
+                .fail_stage(WorkerShutdownStage::RunQuiescence);
+        }
         state.compaction.preparation_tasks.reap_finished();
         state.artifact_gc.tasks.reap_finished();
         if let Err(error) = state.synchronize_route_execution_owner() {
@@ -508,9 +586,13 @@ pub(in crate::runner) fn run_worker_loop<P>(
         ingest_worker_event_batch(&event_rx, &mut state.readiness, event);
     }
 
-    state.refresh.provider_status_tasks.abort_all();
-    state.compaction.preparation_tasks.cancel_and_join(&runtime);
-    state.artifact_gc.tasks.cancel_and_join(&runtime);
+    super::shutdown::shutdown_worker_state(
+        &mut state,
+        &runtime,
+        &root_config,
+        &message_tx,
+        &elicitation_handler,
+    );
 }
 
 fn pop_next_urgent_command(
@@ -847,6 +929,98 @@ mod reactor_tests {
         {
             panic!("non-OAuth test server must not perform network I/O")
         }
+    }
+
+    #[test]
+    fn retired_root_completion_releases_route_owner_without_an_external_wakeup()
+    -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let session_path = temp.path().join("retired-root.jsonl");
+        let session =
+            Session::load_from_store("test", "test", JsonlSessionStore::new(&session_path)?)?;
+        let scope = session.session_scope_id().to_owned();
+        let attachment = Arc::new(sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(&session_path)?);
+        let authority = attachment.route_mutation_authority(&scope)?;
+        let (event_tx, event_rx) = mpsc::channel();
+        let rescue_tx = event_tx.clone();
+        let mut state = WorkerLoopState::new_with_optional_attachment(
+            session_path,
+            Some(session),
+            Some(attachment),
+            None,
+            sigil_runtime::AgentToolBackgroundRuns::default(),
+            event_tx.clone(),
+            WorkerWakeCoalescer::new(event_tx.clone(), Some(scope)),
+            ChannelTerminalLifecycleRouter::new(event_tx),
+            None,
+            None,
+            None,
+            None,
+        );
+        let runtime = tokio::runtime::Runtime::new()?;
+        let (delivered, delivery) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let handle = runtime.spawn_blocking(move || {
+            delivered.send(()).expect("announce retired task entry");
+            released.recv().expect("wait for retired task release");
+        });
+        delivery.recv_timeout(Duration::from_secs(1))?;
+        state.run.retired.push(handle);
+        state
+            .synchronize_route_execution_owner()
+            .map_err(anyhow::Error::msg)?;
+        assert!(matches!(
+            authority.issue_quiescence_permit(),
+            Err(sigil_runtime::provider_connections::SessionRouteAuthorityError::ActiveOwners)
+        ));
+        let (reaped, reaping) = mpsc::channel();
+        let (waiting, wait_started) = mpsc::channel();
+        let reactor = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut waiting = Some(waiting);
+            loop {
+                super::super::shutdown::reap_finished_owned_tasks(
+                    &mut state.run.retired,
+                    &mut state.run.task_panicked,
+                );
+                state
+                    .synchronize_route_execution_owner()
+                    .expect("synchronize retired route owner");
+                if state.run.retired.is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "retired root must arrange its own reap wake"
+                );
+                if let Some(waiting) = waiting.take() {
+                    waiting.send(()).expect("announce scheduler wait");
+                }
+                assert!(matches!(
+                    recv_next_worker_event(&event_rx, state.nearest_deadline()),
+                    Err(WorkerEventReceiveError::DeadlineElapsed)
+                ));
+            }
+            assert!(
+                state.nearest_deadline().is_none(),
+                "idle workers return to event-driven waiting"
+            );
+            reaped.send(()).expect("announce retired task reaping");
+            drop(runtime);
+        });
+        // No WorkerEvent or command is sent after the already-delivered result.
+        wait_started.recv_timeout(Duration::from_secs(1))?;
+        release.send(())?;
+        let reaped_without_event = reaping.recv_timeout(Duration::from_secs(2));
+        if reaped_without_event.is_err() {
+            // Rescue only a regressed blocking fixture so the test itself never leaks a worker.
+            let _ = rescue_tx.send(WorkerEvent::TimerDue);
+        }
+        let joined = reactor.join();
+        reaped_without_event?;
+        joined.expect("join scheduler fixture");
+        assert!(authority.issue_quiescence_permit().is_ok());
+        Ok(())
     }
 
     #[test]

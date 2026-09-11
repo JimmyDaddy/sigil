@@ -8,6 +8,28 @@ use super::{AppAction, AppState, TimelineRole, UpdateTaskResult};
 use crate::app::tests::common::test_config;
 
 #[test]
+fn core_updater_does_not_begin_automatic_or_explicit_work() {
+    let mut config = test_config();
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.maybe_start_automatic_update_check());
+    assert!(!app.update_state.startup_check_considered);
+    assert!(!app.has_pending_update_task());
+    assert!(app.start_update_check(true, true, UpdateChannel::Current));
+    assert_eq!(
+        app.last_notice(),
+        Some("updates are disabled in this configuration")
+    );
+    assert!(app.start_update_apply(UpdateChannel::Current));
+    assert!(!app.has_pending_update_task());
+    assert_eq!(
+        app.last_notice(),
+        Some("updates are disabled in this configuration")
+    );
+}
+
+#[test]
 fn update_slash_command_maps_check_refresh_and_apply_actions() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 

@@ -70,6 +70,11 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
     match control {
+        ControlEntry::SessionCompositionBound(entry) => format!(
+            "[ctl] session composition core {} with {} enhancements",
+            entry.core_contract_version,
+            entry.capabilities.len()
+        ),
         ControlEntry::UserInputRequested(entry) => format!(
             "[ctl] user input {} generation {} requested",
             entry.request.identity.request_id.as_str(),

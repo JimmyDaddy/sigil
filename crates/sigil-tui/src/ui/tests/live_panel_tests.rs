@@ -34,6 +34,7 @@ fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
 fn test_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -75,6 +76,158 @@ fn test_config() -> RootConfig {
         web: Default::default(),
         mcp_servers: Vec::new(),
     }
+}
+
+#[test]
+fn plan_revision_status_matches_live_card_and_full_review_without_empty_counts()
+-> anyhow::Result<()> {
+    use sigil_kernel::PublicPlanRevisionStatusV1 as RevisionStatus;
+    for (status, expected, read_only) in [
+        (
+            RevisionStatus::AwaitingGuidance,
+            "revision awaiting guidance",
+            true,
+        ),
+        (RevisionStatus::Queued, "revision queued", true),
+        (RevisionStatus::Researching, "revision researching", true),
+        (
+            RevisionStatus::WaitingForInput,
+            "revision waiting for input",
+            true,
+        ),
+        (RevisionStatus::Finalizing, "revision finalizing", true),
+        (RevisionStatus::Failed, "revision failed", false),
+        (RevisionStatus::Cancelled, "revision cancelled", false),
+        (RevisionStatus::Succeeded, "revision succeeded", false),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+        let mut pending = crate::app::PendingPlanApproval::test_fixture(
+            "revision-plan",
+            "The full plan remains readable.",
+            "plan-hash",
+            "Review the proposed work",
+            vec![],
+            vec![],
+            vec![],
+        );
+        pending.revision = Some(sigil_kernel::PublicPlanRevisionSummaryV1 {
+            request_id: "revision-request".to_owned(),
+            attempt_id: None,
+            attempt_ordinal: None,
+            status,
+            terminal_reason: None,
+        });
+        if read_only {
+            pending.allowed_actions.clear();
+        }
+        pending.workbench_open = true;
+        app.composer.pending_plan_approval = Some(pending);
+        let view = LivePanelViewModel::from_app(&app, 8);
+        let plan = view.plan_approval.as_ref().expect("live plan");
+        let card = render_plan_approval_lines(plan, 180, &Theme::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut terminal = Terminal::new(TestBackend::new(180, 20))?;
+        terminal.draw(|frame| {
+            crate::ui::plan_workbench::render_plan_workbench(
+                frame,
+                frame.area(),
+                app.pending_plan_approval().expect("plan"),
+                &Theme::default(),
+            )
+        })?;
+        let review = rendered_rows(&terminal).join("\n");
+        for rendered in [&card, &review] {
+            assert!(rendered.contains(expected), "{expected}: {rendered}");
+            assert!(!rendered.contains("0 steps"));
+            assert!(!rendered.contains("0 paths"));
+            assert!(!rendered.contains("0 checks"));
+        }
+        assert!(review.contains("The full plan remains readable."));
+        if read_only {
+            assert!(card.contains("read-only"));
+            assert!(review.contains("read-only"));
+            assert!(!review.contains("S save for later"));
+            assert!(!review.contains("R run"));
+        } else {
+            assert!(review.contains("S save for later"));
+            assert!(review.contains("R run"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn plan_save_feedback_is_visible_inside_review_and_on_the_live_card() -> anyhow::Result<()> {
+    use crate::app::{PlanActionFeedback, PlanWorkbenchAction};
+    for (feedback, expected) in [
+        (
+            PlanActionFeedback::Pending(PlanWorkbenchAction::Save),
+            "Saving for later",
+        ),
+        (
+            PlanActionFeedback::Succeeded {
+                action: PlanWorkbenchAction::Save,
+                message: "Saved for later.".to_owned(),
+            },
+            "Saved for later.",
+        ),
+        (
+            PlanActionFeedback::Failed {
+                action: PlanWorkbenchAction::Save,
+                message: "Storage is unavailable.".to_owned(),
+            },
+            "Storage is unavailable.",
+        ),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+        let mut pending = crate::app::PendingPlanApproval::test_fixture(
+            "save-plan",
+            "Complete plan body",
+            "plan-hash",
+            "Plan summary",
+            vec![],
+            vec![],
+            vec![],
+        );
+        pending.action_feedback = Some(feedback);
+        app.composer.pending_plan_approval = Some(pending);
+        let view = LivePanelViewModel::from_app(&app, 8);
+        let card = render_plan_approval_lines(
+            view.plan_approval.as_ref().expect("live plan"),
+            180,
+            &Theme::default(),
+        )
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+        let mut terminal = Terminal::new(TestBackend::new(180, 20))?;
+        terminal.draw(|frame| {
+            crate::ui::plan_workbench::render_plan_workbench(
+                frame,
+                frame.area(),
+                app.pending_plan_approval().expect("plan"),
+                &Theme::default(),
+            )
+        })?;
+        let review = rendered_rows(&terminal).join("\n");
+        assert!(card.contains(expected), "{card}");
+        assert!(review.contains(expected), "{review}");
+    }
+    Ok(())
 }
 
 #[test]
@@ -234,24 +387,28 @@ fn queue_action_ultranarrow_selected_delete_keeps_semantic_and_style_coordinates
 -> anyhow::Result<()> {
     let buttons = vec![
         QueueActionButtonViewModel {
+            enabled: true,
             label: "Run next".to_owned(),
             detail: "run after the current turn".to_owned(),
             selected: false,
             destructive: false,
         },
         QueueActionButtonViewModel {
+            enabled: true,
             label: "Interrupt".to_owned(),
             detail: "stop current turn and run this follow-up".to_owned(),
             selected: false,
             destructive: false,
         },
         QueueActionButtonViewModel {
+            enabled: true,
             label: "Edit".to_owned(),
             detail: "edit follow-up".to_owned(),
             selected: false,
             destructive: false,
         },
         QueueActionButtonViewModel {
+            enabled: true,
             label: "Delete".to_owned(),
             detail: "remove follow-up".to_owned(),
             selected: true,
@@ -738,24 +895,28 @@ fn render_live_panel_shows_queue_strip_actions_above_status() -> anyhow::Result<
         queue_panel_focused: true,
         queue_action_buttons: vec![
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Run next".to_owned(),
                 detail: "run after the current turn".to_owned(),
                 selected: true,
                 destructive: false,
             },
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Interrupt".to_owned(),
                 detail: "stop current turn and run this follow-up".to_owned(),
                 selected: false,
                 destructive: false,
             },
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Edit".to_owned(),
                 detail: "edit follow-up".to_owned(),
                 selected: false,
                 destructive: false,
             },
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Delete".to_owned(),
                 detail: "remove follow-up".to_owned(),
                 selected: false,
@@ -816,6 +977,7 @@ fn render_live_panel_queue_strip_covers_paused_and_unfocused_rows() -> anyhow::R
         queue_paused: true,
         queue_panel_focused: false,
         queue_action_buttons: vec![QueueActionButtonViewModel {
+            enabled: true,
             label: "Interrupt".to_owned(),
             detail: "stop current turn and run this follow-up".to_owned(),
             selected: false,
@@ -860,12 +1022,14 @@ fn render_live_panel_keeps_focused_queue_rows_single_line_on_narrow_width() -> a
         queue_panel_focused: true,
         queue_action_buttons: vec![
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Run next".to_owned(),
                 detail: "run after the current turn".to_owned(),
                 selected: true,
                 destructive: false,
             },
             QueueActionButtonViewModel {
+                enabled: true,
                 label: "Delete".to_owned(),
                 detail: "remove follow-up".to_owned(),
                 selected: false,
@@ -923,6 +1087,7 @@ fn render_live_panel_short_queue_keeps_selected_last_item_and_action_visible() -
         queue_paused: false,
         queue_panel_focused: true,
         queue_action_buttons: vec![QueueActionButtonViewModel {
+            enabled: true,
             label: "Delete".to_owned(),
             detail: "remove follow-up".to_owned(),
             selected: true,
@@ -960,6 +1125,7 @@ fn render_live_panel_one_row_queue_budget_labels_the_destructive_target() -> any
         queue_paused: false,
         queue_panel_focused: true,
         queue_action_buttons: vec![QueueActionButtonViewModel {
+            enabled: true,
             label: "Delete".to_owned(),
             detail: "remove follow-up".to_owned(),
             selected: true,
@@ -997,6 +1163,9 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
+            status_label: "ready".to_owned(),
+            revision_detail: None,
+            action_feedback: None,
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("plan body")],
@@ -1043,6 +1212,9 @@ fn render_live_panel_one_row_plan_budget_discloses_hidden_plan_before_run() -> a
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
+            status_label: "ready".to_owned(),
+            revision_detail: None,
+            action_feedback: None,
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
@@ -1095,6 +1267,9 @@ fn render_live_panel_bounds_long_plan_and_keeps_actions_on_short_narrow_terminal
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
+            status_label: "ready".to_owned(),
+            revision_detail: None,
+            action_feedback: None,
         }),
         task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
@@ -1130,6 +1305,7 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
         queue_paused: false,
         queue_panel_focused: true,
         queue_action_buttons: vec![QueueActionButtonViewModel {
+            enabled: true,
             label: "Run next".to_owned(),
             detail: "run after the current turn".to_owned(),
             selected: true,
@@ -1146,6 +1322,9 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
             suggested_check_count: 1,
             stale: false,
             stale_reason: None,
+            status_label: "ready".to_owned(),
+            revision_detail: None,
+            action_feedback: None,
         }),
         task_strip: Some(TaskStripViewModel {
             task_id: "task_1".to_owned(),

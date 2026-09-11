@@ -293,6 +293,7 @@ impl AppState {
         let history_anchor =
             history_anchor.map(|anchor| anchor.after_removing_timeline_entries(removed_indices));
         self.remap_tool_activity_state_after_entry_removal(removed_indices);
+        self.remap_live_preview_after_entry_removal(removed_indices);
         self.timeline_state.streaming_assistant_index = None;
         self.timeline_state.streaming_reasoning_index = None;
         self.timeline_state.provisional_provider_output_indices = self
@@ -511,7 +512,7 @@ impl AppState {
         self.restore_timeline_history_anchor(history_anchor);
     }
 
-    fn rerender_timeline_entry_deferred(&mut self, index: usize) {
+    pub(in crate::app) fn rerender_timeline_entry_deferred(&mut self, index: usize) {
         if self.timeline_state.defer_renders {
             self.timeline_state.deferred_render_indexes.insert(index);
             return;

@@ -350,6 +350,11 @@ fn worker_forks_complete_conversation_and_switches_to_destination() -> Result<()
         &root_config,
         "default-model",
     )?))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::SessionCompositionBound(sigil_kernel::SessionCompositionSnapshotV1::new(
+            root_config.selected_capabilities(),
+        )),
+    ))?;
     store.append(&SessionLogEntry::User(ModelMessage::user("edit note")))?;
     let recorder = MutationEventRecorder::new(store.clone());
     write_file_with_mutation(
@@ -529,8 +534,10 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
             ref provider_name,
             ref model_name,
             ref entries,
+            ref session_id,
         }
             if session_log_path == &restore_log_path
+                && session_id == &crate::app::tests::common::fixture_session_id(session_log_path)
                 && provider_name == "deepseek"
                 && model_name == "restored-model"
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("restored prompt")))
@@ -547,6 +554,8 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
     let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
     let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
     let root_config = routed_test_root_config(&workspace_root, "default-model");
+    let expected_composition =
+        sigil_kernel::SessionCompositionSnapshotV1::new(root_config.selected_capabilities());
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
 
@@ -564,16 +573,24 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
             ref provider_name,
             ref model_name,
             ref entries,
+            ref session_id,
         }
             if session_log_path == &new_log_path
+                && session_id == &crate::app::tests::common::fixture_session_id(session_log_path)
                 && provider_name == "deepseek"
                 && model_name == "default-model"
-                && entries.len() == 2
+                && entries.len() == 3
                 && matches!(entries[0], SessionLogEntry::Control(ControlEntry::SessionIdentity { .. }))
                 && matches!(entries[1], SessionLogEntry::Control(ControlEntry::SessionRouteTrustBound { .. }))
+                && matches!(&entries[2], SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot)) if snapshot == &expected_composition)
     ));
     let entries = JsonlSessionStore::read_entries(&new_log_path)?;
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(
+        &entries[2],
+        SessionLogEntry::Control(ControlEntry::SessionCompositionBound(snapshot))
+            if snapshot == &expected_composition
+    ));
 
     worker.shutdown()?;
     Ok(())
@@ -616,8 +633,10 @@ fn start_new_session_carries_workspace_trust_decision() -> Result<()> {
         WorkerMessage::NewSessionStarted {
             ref session_log_path,
             ref entries,
+            ref session_id,
             ..
         } if session_log_path == &new_log_path
+                && session_id == &crate::app::tests::common::fixture_session_id(session_log_path)
             && entries.iter().any(|entry| matches!(
                 entry,
                 SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision))
@@ -732,12 +751,73 @@ fn cancel_active_run_restores_current_session_from_log() -> Result<()> {
             ref provider_name,
             ref model_name,
             ref entries,
+            ref session_id,
         }
             if session_log_path == &expected_session_log_path
+                && session_id == &crate::app::tests::common::fixture_session_id(session_log_path)
                 && provider_name == "planned"
                 && model_name == "planned-model"
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("hang forever")))
     ));
+
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let lifecycle = records
+        .iter()
+        .map(sigil_kernel::conversation_run_lifecycle_record_from_stream)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let [
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started),
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+    ] = lifecycle.as_slice()
+    else {
+        panic!("a cancelled run must have one canonical conversation start/terminal pair");
+    };
+    assert_eq!(started.run_id(), finalized.run_id());
+    assert_eq!(
+        finalized.status(),
+        sigil_kernel::ConversationRunTerminalStatusV1::Cancelled
+    );
+    assert!(finalized.final_message_id().is_none());
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let public = outbox.events_in_order();
+    assert!(matches!(
+        public.first().map(|entry| &entry.event.event),
+        Some(sigil_kernel::PublicRunEventKind::RunStarted { .. })
+    ));
+    let terminal = public.last().expect("cancelled run has a public terminal");
+    assert_eq!(terminal.run_id, started.run_id());
+    assert!(matches!(
+        terminal.event.event,
+        sigil_kernel::PublicRunEventKind::RunCancelled
+    ));
+    let cancellation_audit = records
+        .iter()
+        .map(SessionStreamRecord::stored_event)
+        .find(|event| {
+            event
+                .payload
+                .get("record")
+                .and_then(serde_json::Value::as_str)
+                == Some("finalized")
+        })
+        .expect("the cancellation owner committed its cleanup outcome");
+    let public_terminal = records
+        .iter()
+        .map(SessionStreamRecord::stored_event)
+        .find(|event| event.event_id == terminal.public_event_id)
+        .expect("the cancelled public event is durable");
+    assert!(
+        cancellation_audit.stream_sequence < public_terminal.stream_sequence,
+        "public cancellation must follow the durable quiescence outcome"
+    );
+    assert_eq!(
+        outbox.pending_for_adapter("tui").len(),
+        public.len(),
+        "a worker producer must not acknowledge events before the TUI applies its projection"
+    );
 
     worker.shutdown()?;
     Ok(())
@@ -833,9 +913,11 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
         session_log_path: invalid_log_path,
         attachment_recovery_binding: None,
     })?;
-    let recovery = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. })
-    })?;
+    let recovery = worker.recv_until_with_timeout_diagnostic(
+        "missing-session recovery",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::SessionRouteRecoveryRequired { .. }),
+    )?;
 
     assert!(matches!(
         recovery,
@@ -1024,8 +1106,11 @@ fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
         session_log_path: invalid_log_path.clone(),
         attachment_recovery_binding: None,
     })?;
-    let switched =
-        worker.recv_until(|message| matches!(message, WorkerMessage::SessionSwitched { .. }))?;
+    let switched = worker.recv_until_with_timeout_diagnostic(
+        "tail-corrupt session switch",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::SessionSwitched { .. }),
+    )?;
 
     assert!(matches!(
         switched,
@@ -1034,7 +1119,9 @@ fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
             ref provider_name,
             ref model_name,
             ref entries,
+            ref session_id,
         } if session_log_path == &invalid_log_path
+                && session_id == &crate::app::tests::common::fixture_session_id(session_log_path)
             && provider_name == "deepseek"
             && model_name == "planned-model"
             && entries.iter().any(|entry| matches!(

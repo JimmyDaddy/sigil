@@ -79,7 +79,7 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
     )?;
 
     assert!(app.active_agent_view_is_terminal());
-    app.reload_active_agent_child_transcript();
+    crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
     let transcript = app
         .agent_panel
         .active_child_transcript
@@ -113,7 +113,7 @@ fn active_agent_terminal_status_and_transcript_error_paths_are_bounded() -> anyh
             blocked_ref,
         )?;
         app.agent_panel.active_child_transcript = None;
-        app.reload_active_agent_child_transcript();
+        crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
         fs::set_permissions(&blocked_dir, fs::Permissions::from_mode(0o700))?;
 
         let transcript = app
@@ -314,7 +314,7 @@ fn child_transcript_restore_pairs_maximum_batch_before_latest_eighty_raw_entries
         child_session_ref: child_ref,
     };
 
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     let transcript = app
         .agent_panel
         .active_child_transcript

@@ -4,16 +4,19 @@ use std::{
 };
 
 use sigil_kernel::{
-    CheckpointRestored, ControlEntry, DomainEvent, JsonlSessionStore, MutationCommitted,
-    MutationPrepared, MutationSubject, ReadinessEvaluatedEntry, RunStatus, SessionLogEntry,
-    SessionStreamRecord, SnapshotCoverage, ToolExecutionStatus, VerificationVerdict,
-    WorkspaceMutationDetected,
+    CheckpointRestored, ControlEntry, DomainEvent, MutationCommitted, MutationPrepared,
+    MutationSubject, ReadinessEvaluatedEntry, RunStatus, SessionLogEntry, SessionStreamRecord,
+    SnapshotCoverage, ToolExecutionStatus, VerificationVerdict, WorkspaceMutationDetected,
 };
+
+#[cfg(test)]
+use sigil_kernel::JsonlSessionStore;
 
 use super::formatting::truncate_session_view_text;
 
 const REVIEW_FILE_LIMIT: usize = 3;
 
+#[derive(Debug, Clone)]
 pub(super) struct SessionReviewSnapshot {
     pub(super) latest_checkpoint_restore_sequence: Option<u64>,
     pub(super) readiness_sequences_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
@@ -32,6 +35,60 @@ struct ReviewTurnSummary {
     precise_restore_available: bool,
     limited_restore_evidence: bool,
     latest_readiness: Option<(RunStatus, VerificationVerdict)>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SessionReviewReducer {
+    turns_seen: usize,
+    current: ReviewTurnSummary,
+    latest_completed: ReviewTurnSummary,
+    latest_restore: Option<u64>,
+    readiness_by_scope: BTreeMap<sigil_kernel::EvidenceScope, u64>,
+}
+
+impl SessionReviewReducer {
+    pub(super) fn apply(&mut self, records: &[SessionStreamRecord]) {
+        for record in records {
+            if let Some(entry) = session_entry_from_stream_record(record) {
+                apply_session_entry(
+                    &entry,
+                    &mut self.current,
+                    &mut self.latest_completed,
+                    &mut self.turns_seen,
+                );
+            }
+            apply_durable_event(record, &mut self.current);
+        }
+        let (restore, readiness) = checkpoint_verification_order_from_records(records);
+        if restore.is_some() {
+            self.latest_restore = restore;
+        }
+        self.readiness_by_scope.extend(readiness);
+    }
+
+    pub(super) fn snapshot(&self) -> SessionReviewSnapshot {
+        let latest = if self.current.index > 0 || self.current.has_reviewable_evidence() {
+            &self.current
+        } else {
+            &self.latest_completed
+        };
+        SessionReviewSnapshot {
+            latest_checkpoint_restore_sequence: self.latest_restore,
+            readiness_sequences_by_scope: self.readiness_by_scope.clone(),
+            lines: if self.turns_seen == 0 && !latest.has_reviewable_evidence() {
+                Vec::new()
+            } else {
+                render_review_lines(
+                    self.turns_seen,
+                    latest,
+                    verification_stale_after_checkpoint(
+                        self.latest_restore,
+                        &self.readiness_by_scope,
+                    ),
+                )
+            },
+        }
+    }
 }
 
 impl ReviewTurnSummary {
@@ -53,13 +110,7 @@ impl ReviewTurnSummary {
     }
 }
 
-pub(super) fn session_review_sidebar_lines(
-    session_log_path: &Path,
-    entries: &[SessionLogEntry],
-) -> Vec<String> {
-    session_review_snapshot(session_log_path, entries).lines
-}
-
+#[cfg(test)]
 pub(super) fn session_review_snapshot(
     session_log_path: &Path,
     entries: &[SessionLogEntry],
@@ -100,6 +151,31 @@ pub(super) fn session_review_snapshot(
             entries,
             verification_stale_after_checkpoint,
         ),
+    }
+}
+
+/// Builds the review surface from the durable entries already delivered by the worker.
+///
+/// Worker messages carry a coherent session snapshot after their append has committed. Reading
+/// the JSONL path again here only to render a sidebar can race the same writer that delivered the
+/// message (and can turn a completed run into a transient `ReaderBusy` error). Callers that have
+/// no delivered entries still use [`session_review_snapshot`] for the cold-start disk read.
+pub(super) fn session_review_snapshot_from_entries(
+    entries: &[SessionLogEntry],
+) -> SessionReviewSnapshot {
+    let latest_checkpoint_restore_sequence = None;
+    let mut readiness_sequences_by_scope = BTreeMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        // Checkpoint restoration is a domain event and is therefore unavailable in the
+        // entry-only snapshot. The durable cold-start path computes this exact cursor.
+        if let SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness)) = entry {
+            readiness_sequences_by_scope.insert(readiness.scope.clone(), index as u64 + 1);
+        }
+    }
+    SessionReviewSnapshot {
+        latest_checkpoint_restore_sequence,
+        readiness_sequences_by_scope,
+        lines: render_session_review_sidebar_lines_from_records(&[], entries, false),
     }
 }
 

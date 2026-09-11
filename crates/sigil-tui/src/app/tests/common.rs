@@ -122,6 +122,7 @@ pub(crate) fn test_config() -> RootConfig {
 
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -529,6 +530,17 @@ pub(crate) fn select_root_slash_command(app: &mut AppState, command: &str) -> Re
     Ok(())
 }
 
+/// Supplies the worker-owned identity for presentation fixtures without a running worker.
+pub(crate) fn fixture_session_id(path: &Path) -> String {
+    if path.exists() {
+        let records = JsonlSessionStore::read_event_records(path).expect("valid fixture session");
+        if let Some(record) = records.first() {
+            return record.stored_event().session_id.clone();
+        }
+    }
+    sigil_kernel::stable_event_uuid("sigil-session-path", &path.to_string_lossy())
+}
+
 pub(crate) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     for entry in entries {
@@ -771,6 +783,29 @@ pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPrevie
         command_permission_matches: Vec::new(),
         preview: Some(preview),
     })
+}
+
+pub(crate) fn settle_session_auxiliary(app: &mut AppState) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        app.poll_session_auxiliary();
+        if !app.has_session_auxiliary_work() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session auxiliary query did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+pub(crate) fn refresh_child_transcript_for_test(app: &mut AppState) -> bool {
+    let previous = format!("{:?}", app.agent_panel.active_child_transcript);
+    app.reload_active_agent_child_transcript();
+    app.request_session_auxiliary_refresh();
+    settle_session_auxiliary(app);
+    previous != format!("{:?}", app.agent_panel.active_child_transcript)
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ pub(crate) struct SpawnedAgentWorker {
     pub(crate) command_tx: WorkerCommandSender,
     pub(crate) message_rx: mpsc::Receiver<WorkerMessage>,
     pub(crate) join_handle: thread::JoinHandle<()>,
+    pub(crate) projection_owner: sigil_runtime::RuntimeSessionProjectionOwner,
 }
 
 /// Emits a bounded, non-sensitive startup milestone for the interactive TUI.
@@ -86,7 +87,11 @@ pub fn spawn_agent_worker(
         command_tx,
         message_rx,
         join_handle,
+        projection_owner,
     } = worker;
+    // This command-only test helper does not attach an application projection. Release the
+    // projection capability explicitly; the production launcher transfers it to its binding.
+    drop(projection_owner);
     drop(join_handle);
     Ok((command_tx, message_rx))
 }
@@ -128,6 +133,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
 ) -> Result<SpawnedAgentWorker> {
+    let root_config = root_config.with_effective_composition()?;
     let effective_session_log_path = session_log_path.clone();
     // Production launch must receive the current-schema composition from the boot owner. The
     // no-composition branch is retained only for this crate's unit fixtures; it opens the
@@ -154,6 +160,10 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     };
     let session_epoch = sigil_kernel::cutover_manifest::StartupEpochV1::NewCurrentSchema;
     if let Some(boot_cutover) = boot_cutover.as_ref() {
+        sigil_runtime::validate_boot_composition(
+            &root_config,
+            &boot_cutover.manifest().composition,
+        )?;
         boot_cutover
             .admit_session_open(session_epoch)
             .map_err(anyhow::Error::new)?;
@@ -182,7 +192,16 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             .map_err(anyhow::Error::new)?,
         )
     };
-    let (provider_name, route, route_rebound) = initialize_worker_session_route(
+    if let Some(composition) = authority_composition.as_ref() {
+        sigil_runtime::PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            JsonlSessionStore::new(&effective_session_log_path)?,
+            composition
+                .plan_review_child_resource_provisioner()
+                .as_ref(),
+            sigil_runtime::current_unix_time_ms(),
+        )?;
+    }
+    let (provider_name, route, route_rebound, projection_owner) = initialize_worker_session_route(
         &root_config,
         &effective_session_log_path,
         &route_directive,
@@ -191,6 +210,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
+    let stop_control = command_tx.stop_control();
     let (message_tx, message_rx) = mpsc::channel();
 
     let join_handle = thread::Builder::new()
@@ -313,7 +333,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             }
             let managed_extension_execution = authority_composition
                 .as_ref()
-                .map(|composition| Arc::clone(&composition.extension_execution));
+                .and_then(|composition| composition.extension_execution.clone());
             let managed_command_execution = authority_composition
                 .as_ref()
                 .map(|composition| Arc::clone(&composition.command_execution));
@@ -321,9 +341,14 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 Arc::clone(&composition.command_execution)
                     as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>
             });
-            let managed_plan_review_child_resources = authority_composition
-                .as_ref()
-                .map(|composition| composition.plan_review_child_resource_provisioner());
+            let managed_plan_review_child_resources = if root_config.composition.allows(
+                sigil_kernel::OptionalCapability::TaskOrchestration,
+            ) {
+                authority_composition.as_ref()
+                    .map(|composition| composition.plan_review_child_resource_provisioner())
+            } else {
+                None
+            };
             let extension_network_admission = ExtensionProcessNetworkAdmission::new(
                 options.permission_context.network_policy,
                 false,
@@ -467,7 +492,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             let terminal_control = surface.terminal_control.clone();
             let mut registry = surface.registry;
             let context_resolver = surface.context_resolver;
-            sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
+            if let Err(error) = sigil_runtime::attach_remote_mcp_activation_presenter_with_managed_extension_execution(
                 &mut registry,
                 &root_config,
                 &provider_capabilities,
@@ -476,8 +501,23 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 mcp_event_handler.clone(),
                 Arc::clone(&disclosure_presenter),
                 managed_extension_execution.clone(),
-            );
-            if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
+            ) {
+                tracing::debug!(%error, "optional tool presenter startup is unavailable");
+                send_worker_startup_recovery(
+                    &message_tx,
+                    sigil_kernel::PublicRouteRecoveryCode::ConnectionConfigInvalid,
+                    vec![
+                        sigil_kernel::PublicRouteRecoveryAction::RepairConnection,
+                        sigil_kernel::PublicRouteRecoveryAction::StartNewSession,
+                        sigil_kernel::PublicRouteRecoveryAction::BackToSessionLibrary,
+                    ],
+                    false,
+                );
+                return;
+            }
+            if root_config.task.enabled
+                && root_config.composition.allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+                && let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
                 &mut registry,
                 &root_config,
                 &workspace_root,
@@ -563,8 +603,8 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
             };
             let scratch_control = surface.scratch_control;
             let mut terminal_runtime =
-                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, Some(terminal_control));
-            terminal_runtime = terminal_runtime.with_scratch_control(scratch_control);
+                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, terminal_control);
+            terminal_runtime = terminal_runtime.with_scratch_control(scratch_control).with_stop_control(stop_control);
             run_worker_loop(
                 runtime,
                 agent,
@@ -601,6 +641,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
         command_tx,
         message_rx,
         join_handle,
+        projection_owner,
     })
 }
 
@@ -609,7 +650,12 @@ fn initialize_worker_session_route(
     session_log_path: &Path,
     directive: &WorkerSessionRouteDirective,
     attachment: &sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
-) -> Result<(String, ResolvedModelRoute, bool)> {
+) -> Result<(
+    String,
+    ResolvedModelRoute,
+    bool,
+    sigil_runtime::RuntimeSessionProjectionOwner,
+)> {
     let (_, fallback_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(root_config)
             .map_err(anyhow::Error::new)
@@ -635,10 +681,17 @@ fn initialize_worker_session_route(
             _ => None,
         });
     let store = JsonlSessionStore::new(session_log_path)?;
-    let session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+    let inspected = sigil_runtime::provider_connections::inspect_session_for_route_resume(
+        root_config,
+        &fallback_route,
+        store.clone(),
+    )
+    .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
+    sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
+    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
             root_config,
             &fallback_route,
-            store,
+            store.clone(),
             directive.recovery_confirmation.as_deref(),
             directive
                 .explicit_selection
@@ -646,6 +699,7 @@ fn initialize_worker_session_route(
                 .map(|(provider_name, route)| (provider_name.as_str(), route)),
             Some(attachment),
         )?;
+    sigil_runtime::bind_session_composition(&mut session, root_config)?;
     let route = session.resolved_model_route().cloned().ok_or_else(|| {
         anyhow::anyhow!(
             "session_route_missing: durable session has no frozen connection route; \
@@ -660,7 +714,8 @@ fn initialize_worker_session_route(
     let route_rebound = previous_route
         .as_ref()
         .is_some_and(|previous| previous != &route);
-    Ok((provider_name, route, route_rebound))
+    let projection_owner = sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store);
+    Ok((provider_name, route, route_rebound, projection_owner))
 }
 
 pub(super) fn load_session_entries_with_workspace_trust(

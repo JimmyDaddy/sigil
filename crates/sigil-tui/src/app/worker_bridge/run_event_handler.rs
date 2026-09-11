@@ -56,6 +56,7 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::ToolCallCompleted(call) => {
+                self.retire_live_tool_arguments(&call.id);
                 self.safe_tool_calls.insert(call.id.clone(), call.clone());
                 self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
@@ -266,6 +267,7 @@ impl EventHandler for AppState {
                 );
             }
             RunEvent::ToolResult(mut result) => {
+                self.retire_live_tool_slot(&result.call_id);
                 let refresh_workspace_git = result.tool_name == "bash"
                     || result.tool_name.starts_with("terminal_")
                     || !result.metadata.changed_files.is_empty();
@@ -435,6 +437,7 @@ impl EventHandler for AppState {
                 self.push_event("provider:recovery", label);
             }
             RunEvent::ProviderTurnPartialOutputDiscarded(view) => {
+                self.discard_live_attempt();
                 self.discard_provisional_provider_output();
                 let label = if view.tool_request_discarded {
                     "Discarded incomplete provider response before recovery".to_owned()
@@ -446,6 +449,7 @@ impl EventHandler for AppState {
                 self.push_event("provider:partial_discarded", label);
             }
             RunEvent::AssistantMessage(message) => {
+                self.replace_live_assistant_message(&message);
                 self.commit_provisional_provider_output();
                 for call in &message.tool_calls {
                     self.safe_tool_calls.insert(call.id.clone(), call.clone());

@@ -600,6 +600,7 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     app.sidebar_selected_card = SidebarCard::Agents;
     app.agent_panel.selected = 1;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     let focus_lines = app
         .transcript_lines(8)
         .into_iter()
@@ -823,6 +824,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     app.composer.input = "/agent thread_1".to_owned();
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.active_agent_label(), "kernel map");
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     let focus_lines = app
         .transcript_lines(8)
         .into_iter()

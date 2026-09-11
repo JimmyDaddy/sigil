@@ -1,5 +1,6 @@
+use super::super::queue_driver::conversation_prompt_hash;
 use super::*;
-use crate::runner::V2CompactionPreviewState;
+use crate::runner::{QueueOperation, QueueOperationFailure, V2CompactionPreviewState};
 
 pub(super) fn dispatch_queue_compaction_command<P>(
     context: WorkerCommandContext<'_, P>,
@@ -26,6 +27,38 @@ where
         managed_verification_execution: _,
         state,
     } = context;
+    let queue_operation = queue_operation_for_command(&command);
+    let unavailable = match &command {
+        QueueCompactionCommand::QueueConversationInput { kind, .. }
+            if *kind != ConversationInputKind::Chat && !root_config.task.enabled =>
+        {
+            Some("task orchestration is not selected for this session composition")
+        }
+        QueueCompactionCommand::StartV2Compaction
+        | QueueCompactionCommand::PreviewV2Compaction
+        | QueueCompactionCommand::ApplyV2Compaction { .. }
+        | QueueCompactionCommand::ApplyStandaloneToolOutputShrink { .. }
+            if !root_config.compaction.enabled =>
+        {
+            Some("compaction is not selected for this session composition")
+        }
+        _ => None,
+    };
+    if let Some(message) = unavailable {
+        if let Some(operation) = queue_operation {
+            send_queue_operation_result(
+                state,
+                message_tx,
+                operation,
+                Err(QueueOperationFailure::Unavailable {
+                    message: message.to_owned(),
+                }),
+            );
+        } else {
+            let _ = message_tx.send(WorkerMessage::RunFailed(message.to_owned()));
+        }
+        return WorkerCommandDispatchControl::Continue;
+    }
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
@@ -36,9 +69,7 @@ where
                 target,
                 reasoning_effort,
             } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
-                match queue_conversation_input_and_track_detached(
+                let result = queue_conversation_input_and_track_detached(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
@@ -47,43 +78,36 @@ where
                     kind,
                     target,
                     reasoning_effort,
-                ) {
-                    Ok(entries) => {
-                        send_conversation_queue_update(message_tx, &entries);
-                    }
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                )
+                .map_err(QueueOperationFailure::from);
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::CancelQueuedConversationInput { queue_id } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
-                match cancel_queued_conversation_input(
+                let result = cancel_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     &mut state.session.exact_prompts,
                     queue_id,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::EditQueuedConversationInput {
                 queue_id,
                 prompt,
                 reasoning_effort,
             } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
-                match edit_queued_conversation_input(
+                let result = edit_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
@@ -91,89 +115,76 @@ where
                     queue_id,
                     prompt,
                     reasoning_effort,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::MoveQueuedConversationInput {
                 queue_id,
                 direction,
             } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
-                match move_queued_conversation_input(
+                let result = move_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     queue_id,
                     direction,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::PromoteQueuedConversationInput { queue_id } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
-                match promote_queued_conversation_input(
+                let result = promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     queue_id,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
-                state.compaction.preparation_tasks.abort_all();
-                state.session.pending_queued_pre_turn_preparation = None;
                 // Non-destructive: the running turn is never cancelled. Promotion makes the
                 // item the queue head so the kernel's safe-point injection (or the next
                 // idle dispatch) delivers it without interrupting the current run.
-                match promote_queued_conversation_input(
+                let result = promote_queued_conversation_input(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     queue_id,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                state.session.task_guidance_dirty = true;
-                state.session.conversation_queue_dirty = true;
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::SetConversationQueuePaused { paused } => {
-                match set_conversation_queue_paused(
+                let result = set_conversation_queue_paused(
                     &state.session.log_path,
                     &mut state.session.current,
                     &mut state.session.detached_durable_controls,
                     paused,
-                ) {
-                    Ok(entries) => send_conversation_queue_update(message_tx, &entries),
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-                if !paused {
-                    state.session.task_guidance_dirty = true;
-                    state.session.conversation_queue_dirty = true;
-                }
+                );
+                send_queue_operation_result(
+                    state,
+                    message_tx,
+                    queue_operation.clone().expect("queue operation classified"),
+                    result,
+                );
             }
             QueueCompactionCommand::StartV2Compaction => {
                 state.compaction.local_preview = None;
@@ -802,4 +813,71 @@ where
         }
     }
     control
+}
+
+fn queue_operation_for_command(command: &QueueCompactionCommand) -> Option<QueueOperation> {
+    Some(match command {
+        QueueCompactionCommand::QueueConversationInput {
+            prompt,
+            kind,
+            target,
+            ..
+        } => QueueOperation::Enqueue {
+            prompt_hash: conversation_prompt_hash(&sigil_kernel::safe_persistence_text(prompt)),
+            kind: *kind,
+            target: target.clone(),
+        },
+        QueueCompactionCommand::CancelQueuedConversationInput { queue_id } => {
+            QueueOperation::Cancel {
+                queue_id: queue_id.clone(),
+            }
+        }
+        QueueCompactionCommand::EditQueuedConversationInput {
+            queue_id, prompt, ..
+        } => QueueOperation::Edit {
+            queue_id: queue_id.clone(),
+            prompt_hash: conversation_prompt_hash(&sigil_kernel::safe_persistence_text(prompt)),
+        },
+        QueueCompactionCommand::MoveQueuedConversationInput {
+            queue_id,
+            direction,
+        } => QueueOperation::Move {
+            queue_id: queue_id.clone(),
+            direction: *direction,
+        },
+        QueueCompactionCommand::PromoteQueuedConversationInput { queue_id } => {
+            QueueOperation::Promote {
+                queue_id: queue_id.clone(),
+            }
+        }
+        QueueCompactionCommand::SendQueuedConversationInputNow { queue_id } => {
+            QueueOperation::SendNow {
+                queue_id: queue_id.clone(),
+            }
+        }
+        QueueCompactionCommand::SetConversationQueuePaused { paused } => {
+            QueueOperation::SetPaused { paused: *paused }
+        }
+        _ => return None,
+    })
+}
+
+fn send_queue_operation_result(
+    state: &mut WorkerLoopState,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    operation: QueueOperation,
+    result: std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure>,
+) {
+    let result = result.map(|entries| {
+        state.compaction.preparation_tasks.abort_all();
+        state.session.pending_queued_pre_turn_preparation = None;
+        state.session.task_guidance_dirty = true;
+        state.session.conversation_queue_dirty = true;
+        send_conversation_queue_update(message_tx, &entries);
+    });
+    let _ = message_tx.send(WorkerMessage::ConversationQueueOperationCompleted {
+        session_log_path: state.session.log_path.clone(),
+        operation,
+        result,
+    });
 }

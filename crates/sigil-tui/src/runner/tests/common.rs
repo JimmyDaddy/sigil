@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -13,12 +13,10 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
     Agent, AgentConfig, CompactionConfig, ConnectionId, ControlEntry, McpServerConfig,
-    MemoryConfig, ModelRef, OrchestrationEvalReportManifestV1, OrchestrationEvalRouteGateV1,
-    OrchestrationEvalRouteIdentityV1, OrchestrationEvalRouteStatus, PermissionConfig, Provider,
-    ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig, SessionConfig,
-    SessionLogEntry, TaskConfig, TaskRoutingPolicy, Tool, ToolAccess, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
-    stable_event_hash,
+    MemoryConfig, ModelRef, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningStreamSupport, RootConfig, SessionConfig, SessionLogEntry, TaskConfig,
+    TaskRoutingPolicy, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::super::{
@@ -36,6 +34,7 @@ use super::super::{
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
@@ -140,11 +139,14 @@ pub(super) fn routed_session_identity(
     })
 }
 
-pub(super) fn submit_plan_draft_chunks(call_id: &str, args_json: &str) -> Vec<ProviderChunk> {
+pub(super) fn submit_plan_review_result_chunks(
+    call_id: &str,
+    args_json: &str,
+) -> Vec<ProviderChunk> {
     vec![
         ProviderChunk::ToolCallStart {
             id: call_id.to_owned(),
-            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
         },
         ProviderChunk::ToolCallArgsDelta {
             id: call_id.to_owned(),
@@ -152,7 +154,7 @@ pub(super) fn submit_plan_draft_chunks(call_id: &str, args_json: &str) -> Vec<Pr
         },
         ProviderChunk::ToolCallComplete(ToolCall {
             id: call_id.to_owned(),
-            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
             args_json: args_json.to_owned(),
         }),
         ProviderChunk::Done,
@@ -173,6 +175,10 @@ pub(super) struct TestWorker {
 }
 
 impl TestWorker {
+    pub(super) fn command_sender(&self) -> WorkerCommandSender {
+        self.command_tx.clone()
+    }
+
     pub(super) fn send(&self, command: WorkerCommand) -> Result<()> {
         self.command_tx
             .send(command)
@@ -296,94 +302,6 @@ impl Drop for TestWorker {
     }
 }
 
-/// Installs a release-qualified rollout manifest for the deterministic test route once per
-/// process and points `SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST` at it.
-///
-/// The manifest qualifies `deepseek` + `planned-model` with the standard Auto task config, which
-/// matches the routed test fixtures that exercise DirectTask handoffs. Tests that use other task
-/// configs or models keep the ReviewFirst baseline.
-pub(super) fn install_qualified_rollout_manifest() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
-        let task = TaskConfig {
-            routing_policy: TaskRoutingPolicy::Auto,
-            ..TaskConfig::default()
-        };
-        let task_config_digest = sigil_runtime::orchestration_task_config_digest(&task)
-            .expect("test task config digest");
-        let build = sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID;
-        let commit = build
-            .rsplit_once('+')
-            .expect("test build identity includes commit")
-            .1;
-        let digest = format!("sha256:{}", "a".repeat(64));
-        let identity = OrchestrationEvalRouteIdentityV1 {
-            provider_adapter: "deepseek".to_owned(),
-            provider_kind: "deepseek".to_owned(),
-            endpoint_family: "openai_chat_completions".to_owned(),
-            canonical_model_id: "planned-model".to_owned(),
-            canonical_model_version: "Planned-Model@fp-test".to_owned(),
-            route_fingerprint: digest.clone(),
-            routing_prompt_digest: digest.clone(),
-            planner_prompt_digest: digest.clone(),
-            system_prompt_digest: digest.clone(),
-            tool_profile_contract_digest: digest.clone(),
-            task_config_digest,
-            corpus_version: "rfc-0063-orchestration-v1".to_owned(),
-            corpus_digest: digest,
-            sigil_commit: commit.to_owned(),
-            sigil_build: build.to_owned(),
-        };
-        let identity_digest =
-            stable_event_hash(serde_json::to_vec(&identity).expect("serialize route identity"));
-        let gate = OrchestrationEvalRouteGateV1 {
-            identity,
-            identity_digest,
-            status: OrchestrationEvalRouteStatus::Qualified,
-            chat_cases: 20,
-            plan_review_cases: 15,
-            direct_task_cases: 15,
-            eligible_chat_cases: 20,
-            eligible_plan_review_cases: 15,
-            eligible_direct_task_cases: 15,
-            provider_admitted_repetitions: 150,
-            completed_repetitions: 150,
-            chat_to_task_false_positive_rate_ppm: Some(0),
-            plan_review_to_task_premature_rate_ppm: Some(0),
-            direct_task_miss_rate_ppm: Some(0),
-            chat_to_plan_review_overroute_rate_ppm: Some(0),
-            plan_review_miss_rate_ppm: Some(0),
-            cases_with_majority_misroute: 0,
-            cases_with_duplicate_repetition_identity: 0,
-            hard_invariant_violations: 0,
-            reasons: Vec::new(),
-        };
-        let report = OrchestrationEvalReportManifestV1 {
-            report_schema_version: 2,
-            campaign_id: "campaign-rfc-0063-tui-test".to_owned(),
-            started_at_unix_ms: 1,
-            ended_at_unix_ms: 2,
-            requested_repetitions: 150,
-            results_jsonl_path: "private/results.jsonl".into(),
-            summary_path: "private/summary.md".into(),
-            route_gates: vec![gate],
-        };
-        let manifest = sigil_runtime::build_orchestration_rollout_manifest(&report)
-            .expect("test manifest should build");
-        let path = std::env::temp_dir().join(format!(
-            "sigil-tui-rollout-test-{}.json",
-            std::process::id()
-        ));
-        let bytes = serde_json::to_vec(&manifest).expect("manifest should serialize");
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(&temporary, &bytes).expect("manifest temp write should succeed");
-        std::fs::rename(&temporary, &path).expect("manifest rename should succeed");
-        unsafe {
-            std::env::set_var("SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST", &path);
-        }
-    });
-}
-
 pub(super) fn spawn_test_worker<P>(
     root_config: RootConfig,
     session_log_path: PathBuf,
@@ -459,7 +377,6 @@ pub(super) fn spawn_test_worker_with_role_provider_builder<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
-    install_qualified_rollout_manifest();
     let (authority_composition, authority_root) = test_authority_composition(&workspace_root)?;
     spawn_test_worker_with_role_provider_builder_and_authority(
         root_config,
@@ -486,7 +403,6 @@ pub(super) fn spawn_test_worker_with_existing_authority_composition<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
-    install_qualified_rollout_manifest();
     spawn_test_worker_with_role_provider_builder_and_authority(
         root_config,
         session_log_path,
@@ -498,7 +414,7 @@ where
     )
 }
 
-fn spawn_test_worker_with_role_provider_builder_and_authority<P>(
+pub(super) fn spawn_test_worker_with_role_provider_builder_and_authority<P>(
     root_config: RootConfig,
     session_log_path: PathBuf,
     agent: Agent<P>,
@@ -515,6 +431,7 @@ where
     let (event_tx, event_rx) = mpsc::channel();
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
+    let stop_control = command_tx.stop_control();
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
         &root_config,
@@ -529,7 +446,7 @@ where
         WorkerMcpRuntimeEventSender::new(event_tx.clone()),
     ));
     let terminal_lifecycle_router = ChannelTerminalLifecycleRouter::new(event_tx.clone());
-    let managed_extension_execution = Some(Arc::clone(&authority_composition.extension_execution));
+    let managed_extension_execution = authority_composition.extension_execution.clone();
     let managed_verification_execution = Some(Arc::clone(&authority_composition.command_execution)
         as Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>);
     let managed_storage_writer = Arc::clone(&authority_composition.storage_writer);
@@ -549,7 +466,15 @@ where
                 .build()
                 .expect("test runtime should build");
             let context_resolver =
-                sigil_runtime::RequestContextResolver::request_local(workspace_root.clone());
+                sigil_runtime::RequestContextResolver::request_local(workspace_root.clone())
+                    .with_repository_context(root_config.composition.allows(
+                        sigil_kernel::OptionalCapability::RepositoryContext,
+                    ));
+            let managed_plan_review_child_resources = (root_config.task.enabled
+                && root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::TaskOrchestration))
+            .then(|| authority_composition.plan_review_child_resource_provisioner());
             let attachment_lease = sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
                 &session_log_path,
             )
@@ -572,11 +497,10 @@ where
                     context_resolver,
                     managed_extension_execution,
                     managed_verification_execution,
-                    managed_plan_review_child_resources: Some(
-                        authority_composition.plan_review_child_resource_provisioner(),
-                    ),
+                    managed_plan_review_child_resources,
                 },
-                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None),
+                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None)
+                    .with_stop_control(stop_control),
                 Some(managed_storage_writer),
                 Some(managed_artifact_store),
             );

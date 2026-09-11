@@ -937,6 +937,8 @@ allowed_tools = ["grep"]
         state
             .agent
             .supervisor
+            .as_ref()
+            .expect("standard composition selects the supervisor")
             .registry()
             .get(&profile_id)
             .expect("workspace profile should remain registered")
@@ -967,6 +969,8 @@ allowed_tools = ["grep"]
         state
             .agent
             .supervisor
+            .as_ref()
+            .expect("standard composition selects the supervisor")
             .registry()
             .get(&profile_id)
             .expect("workspace profile should remain registered")

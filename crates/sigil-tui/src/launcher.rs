@@ -47,7 +47,6 @@ use sigil_runtime::support::SupportBuildInfo;
 #[cfg(not(test))]
 use sigil_updater::BuildMetadata;
 
-#[cfg(not(test))]
 use crate::application_bridge;
 #[cfg(not(test))]
 use crate::host_effects::SystemHostEffects;
@@ -70,7 +69,18 @@ use crate::{
     surface_adapter::build_surface_model,
 };
 
+#[path = "launcher_projection_retry.rs"]
+mod projection_retry;
+#[cfg(not(test))]
+use projection_retry::{
+    ProjectionFailure, ProjectionRetry, projection_wake_deadline, reconcile_projection_owner,
+    should_replace_pending_ack,
+};
+
 const BACKGROUND_TASK_WAKE_INTERVAL: Duration = Duration::from_millis(250);
+const WORKER_MESSAGE_BATCH_LIMIT: usize = 64;
+const WORKER_MESSAGE_BATCH_BUDGET: Duration = Duration::from_millis(4);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(not(test))]
 const EVENT_BATCH_LIMIT: usize = 64;
 const SPINNER_FRAME_MILLIS: u128 = 120;
@@ -197,6 +207,8 @@ fn run_tui_with_initial_session(
         cleanup.mouse_capture_active = true;
     }
     let mut terminal = terminal_fullscreen(stdout)?;
+    let mut shutdown = TuiShutdownState::default();
+    let mut owned_event_runtime = None;
     let result = panic::catch_unwind(AssertUnwindSafe(
         || match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -208,6 +220,7 @@ fn run_tui_with_initial_session(
                         &mut mouse_capture_active,
                         &mut focus_change_active,
                         &mut background_panics,
+                        &mut shutdown,
                     ))
                 })
             }
@@ -215,38 +228,27 @@ fn run_tui_with_initial_session(
                 "the synchronous TUI launcher cannot run inside a current-thread Tokio runtime"
             ),
             Err(_) => {
-                let event_runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .context("failed to build TUI event runtime")?;
-                event_runtime.block_on(run_app(
-                    &mut terminal,
-                    &mut app,
-                    &mut worker,
-                    &mut mouse_capture_active,
-                    &mut focus_change_active,
-                    &mut background_panics,
-                ))
+                owned_event_runtime = Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()
+                        .context("failed to build TUI event runtime")?,
+                );
+                owned_event_runtime
+                    .as_ref()
+                    .expect("event runtime initialized")
+                    .block_on(run_app(
+                        &mut terminal,
+                        &mut app,
+                        &mut worker,
+                        &mut mouse_capture_active,
+                        &mut focus_change_active,
+                        &mut background_panics,
+                        &mut shutdown,
+                    ))
             }
         },
     ));
-    let background_panic_during_shutdown = if result.is_ok() {
-        shutdown_and_join_worker(&mut worker);
-        app.release_worker_session_attachment();
-        background_panics.try_recv().ok()
-    } else {
-        None
-    };
-    let result = match (result, background_panic_during_shutdown) {
-        (Ok(Ok(())), Some(report)) => Ok(Err(anyhow::anyhow!(report))),
-        (result, _) => result,
-    };
-    let clean_exit = matches!(&result, Ok(Ok(())));
-    if clean_exit {
-        let _ = app.discard_current_bootstrap_only_session();
-    }
-    cleanup.mouse_capture_active = mouse_capture_active;
-    cleanup.focus_change_active = focus_change_active;
     // The panic hook has already restored the primary screen before catch_unwind observes the
     // payload. Clearing through the stale Terminal in that case would erase the panic report from
     // the primary screen. Ordinary Result errors have not run the hook and still need finalizing.
@@ -255,7 +257,49 @@ fn run_tui_with_initial_session(
     } else {
         finalize_terminal_presentation(&mut terminal)
     };
-    let cleanup_result = cleanup.restore();
+    let deadline = *shutdown
+        .deadline
+        .get_or_insert_with(|| Instant::now() + WORKER_SHUTDOWN_TIMEOUT);
+    if let Some(runtime) = worker.as_ref() {
+        runtime.worker_tx.reserve_stop(true);
+    }
+    cleanup.mouse_capture_active = mouse_capture_active;
+    cleanup.focus_change_active = focus_change_active;
+    app.cancel_session_auxiliary();
+    abort_projection_observations(&shutdown.projection_observation_owners);
+    let (cleanup_result, shutdown_result) =
+        restore_terminal_then_join_worker(&mut worker, deadline, || {
+            restore_terminal_and_shutdown_event_runtime(&mut owned_event_runtime, || {
+                cleanup.restore()
+            })
+        });
+    let observer_shutdown_result = app.join_session_auxiliary_until(deadline);
+    let projection_shutdown_result =
+        drain_projection_observations_until(&mut shutdown.projection_observation_owners, deadline);
+    app.release_worker_session_attachment();
+    let background_panic_during_shutdown = background_panics.try_recv().ok();
+    let result = match (result, background_panic_during_shutdown) {
+        (Ok(Ok(())), Some(report)) => Ok(Err(anyhow::anyhow!(report))),
+        (result, _) => result,
+    };
+    let clean_exit = matches!(&result, Ok(Ok(())))
+        && shutdown_result.is_ok()
+        && observer_shutdown_result.is_ok()
+        && projection_shutdown_result.is_ok()
+        && cleanup_result.is_ok();
+    let bootstrap_cleanup_result = if clean_exit {
+        if Instant::now() >= deadline {
+            Err(anyhow::anyhow!(
+                "shutdown cleanup deadline exceeded; cleanup_complete=false"
+            ))
+        } else {
+            app.start_bootstrap_session_cleanup()
+                .map_err(anyhow::Error::new)
+                .and_then(|handle| wait_for_worker_thread(Some(handle), deadline))
+        }
+    } else {
+        Ok(())
+    };
     panic_hook.restore();
     let result = match result {
         Ok(result) => result,
@@ -263,6 +307,10 @@ fn run_tui_with_initial_session(
     };
     presentation_cleanup_result.context("failed to clear the TUI viewport before exit")?;
     cleanup_result?;
+    shutdown_result?;
+    observer_shutdown_result?;
+    projection_shutdown_result?;
+    bootstrap_cleanup_result?;
     result?;
     print!("{}", render_tui_exit_resume_hint(&app, config.as_deref()));
     Ok(())
@@ -516,7 +564,12 @@ async fn run_app(
     mouse_capture_active: &mut bool,
     focus_change_active: &mut bool,
     background_panics: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    shutdown: &mut TuiShutdownState,
 ) -> Result<()> {
+    let TuiShutdownState {
+        deadline: shutdown_deadline,
+        projection_observation_owners,
+    } = shutdown;
     // From this point onward the event stream is the sole reader of terminal input. Full-screen
     // rendering never queries the cursor and never writes transcript rows into native scrollback.
     let mut terminal_events = EventStream::new();
@@ -529,8 +582,14 @@ async fn run_app(
     let mut needs_render = true;
     let mut projection_refresh_requested = true;
     let mut projection_epoch = 1_u64;
+    let mut projection_owner = None;
+    let mut projection_refresh_retry = ProjectionRetry::new(projection_epoch);
+    let mut projection_ack_retry = ProjectionRetry::new(projection_epoch);
     let mut projection_refresh_task: Option<ProjectionRefreshTask> = None;
     let mut projection_ack_task: Option<ProjectionAckTask> = None;
+    let mut projection_delivery_task: Option<ProjectionDeliveryTask> = None;
+    let mut delivery_requested = false;
+    let mut delivery_retry = ProjectionRetry::new(projection_epoch);
     let mut pending_projection_ack: Option<PendingProjectionAck> = None;
     let mut last_spinner_tick = live_spinner_tick();
     let mut presentation = PresentationSession::new();
@@ -539,6 +598,15 @@ async fn run_app(
         AttentionController::from_current_process(app.terminal_notification_config());
 
     loop {
+        release_finished_projection_observations(projection_observation_owners);
+        if app.should_quit {
+            app.cancel_session_auxiliary();
+            shutdown_deadline.get_or_insert_with(|| Instant::now() + WORKER_SHUTDOWN_TIMEOUT);
+            if let Some(runtime) = worker.as_ref() {
+                runtime.worker_tx.reserve_stop(true);
+            }
+            break;
+        }
         attention.update_config(app.terminal_notification_config());
         let mut dirty = needs_render;
         let (worker_dirty, worker_projection_refresh) =
@@ -546,18 +614,51 @@ async fn run_app(
         dirty |= worker_dirty;
         projection_refresh_requested |= worker_projection_refresh;
         if restart_worker_after_session_transition(app, worker, spawn_worker)? {
-            projection_epoch = projection_epoch.wrapping_add(1).max(1);
+            dirty = true;
+        }
+        dirty |= app.poll_background_tasks();
+        let admission_changed = poll_application_admission(app, worker)?;
+        dirty |= admission_changed;
+        projection_refresh_requested |= admission_changed;
+        let commands_flushed = flush_pending_worker_commands(app, worker)?;
+        dirty |= commands_flushed;
+        projection_refresh_requested |= commands_flushed;
+        let current_projection_owner = worker
+            .as_ref()
+            .and_then(|runtime| runtime.application.as_ref())
+            .cloned();
+        if reconcile_projection_owner(
+            &mut projection_owner,
+            current_projection_owner,
+            &mut projection_epoch,
+            &mut projection_refresh_retry,
+            &mut projection_ack_retry,
+        ) {
             if let Some(task) = projection_refresh_task.take() {
                 task.handle.abort();
             }
             if let Some(task) = projection_ack_task.take() {
                 task.handle.abort();
             }
+            if let Some(task) = projection_delivery_task.take() {
+                task.handle.abort();
+            }
+            delivery_requested = false;
+            delivery_retry = ProjectionRetry::new(projection_epoch);
             pending_projection_ack = None;
-            projection_refresh_requested = true;
+            app.attach_session_query_reader(
+                projection_owner
+                    .as_ref()
+                    .map(|application| application.read_handle())
+                    .transpose()?,
+            );
+            projection_refresh_requested = projection_owner.is_some();
             dirty = true;
         }
-        if projection_refresh_requested && projection_refresh_task.is_none() {
+        if projection_refresh_requested
+            && projection_refresh_task.is_none()
+            && projection_refresh_retry.can_start(projection_epoch, Instant::now())
+        {
             if let Some(application) = worker
                 .as_ref()
                 .and_then(|runtime| runtime.application.as_ref())
@@ -565,41 +666,124 @@ async fn run_app(
             {
                 projection_refresh_requested = false;
                 let task_application = Arc::clone(&application);
+                let handle = tokio::spawn(async move {
+                    refresh_application_projection_task(task_application).await
+                });
+                retain_projection_observation(
+                    projection_observation_owners,
+                    Arc::clone(&application),
+                    handle.abort_handle(),
+                );
                 projection_refresh_task = Some(ProjectionRefreshTask {
                     epoch: projection_epoch,
                     application,
-                    handle: tokio::spawn(async move {
-                        refresh_application_projection_task(task_application)
-                            .await
-                            .map_err(|error| error.to_string())
-                    }),
+                    handle: handle.into(),
                 });
             } else {
                 projection_refresh_requested = false;
             }
         }
+        if projection_delivery_task
+            .as_ref()
+            .is_some_and(|task| task.handle.is_finished())
+        {
+            let task = projection_delivery_task
+                .take()
+                .expect("finished delivery task");
+            if task.epoch == projection_epoch {
+                match task
+                    .handle
+                    .await
+                    .map_err(|error| ProjectionFailure::Task(error.to_string()))
+                    .and_then(|result| result.map_err(ProjectionFailure::Application))
+                {
+                    Ok(batch) => {
+                        delivery_retry.succeeded(task.epoch);
+                        for notice in batch.notices {
+                            app.handle_worker_message(WorkerMessage::Notice(
+                                notice.as_str().to_owned(),
+                            ))?;
+                            dirty = true;
+                        }
+                        let event_ids = task.application.take_applied_delivery_event_ids()?;
+                        retain_pending_projection_ack(
+                            &mut pending_projection_ack,
+                            PendingProjectionAck {
+                                epoch: task.epoch,
+                                application: task.application,
+                                frontier: batch.frontier,
+                                event_ids,
+                            },
+                            projection_epoch,
+                        );
+                        delivery_requested = batch.has_more;
+                    }
+                    Err(error) => {
+                        if let Some(action) =
+                            delivery_retry.failed(task.epoch, Instant::now(), &error)
+                        {
+                            delivery_requested = action.retry;
+                            report_projection_failure(
+                                app,
+                                "Session notification delivery",
+                                &error,
+                                action.retry,
+                            )?;
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+        if delivery_requested
+            && projection_delivery_task.is_none()
+            && projection_ack_task.is_none()
+            && pending_projection_ack.is_none()
+            && delivery_retry.can_start(projection_epoch, Instant::now())
+            && let Some(application) = projection_owner.as_ref()
+            && application.current_projection()?.is_some()
+        {
+            let task_application = Arc::clone(application);
+            let handle = tokio::spawn(async move { task_application.refresh_delivery().await });
+            retain_projection_observation(
+                projection_observation_owners,
+                Arc::clone(application),
+                handle.abort_handle(),
+            );
+            projection_delivery_task = Some(ProjectionDeliveryTask {
+                epoch: projection_epoch,
+                application: Arc::clone(application),
+                handle: handle.into(),
+            });
+            delivery_requested = false;
+        }
         if projection_ack_task.is_none()
+            && projection_ack_retry.can_start(projection_epoch, Instant::now())
             && let Some(pending) = pending_projection_ack.take()
         {
             let task_pending = pending.clone();
             let application = Arc::clone(&task_pending.application);
+            let handle = tokio::spawn(async move {
+                application
+                    .acknowledge_public_events(
+                        task_pending.event_ids.clone(),
+                        &task_pending.frontier,
+                    )
+                    .await
+                    .map(|_| ())
+            });
+            retain_projection_observation(
+                projection_observation_owners,
+                Arc::clone(&pending.application),
+                handle.abort_handle(),
+            );
             projection_ack_task = Some(ProjectionAckTask {
                 epoch: pending.epoch,
-                handle: tokio::spawn(async move {
-                    application
-                        .acknowledge_public_events_through(&task_pending.projection)
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| format!("{error:#}"))
-                }),
+                handle: handle.into(),
                 pending,
             });
         }
         attention.emit_pending_nonfatal(terminal.backend_mut());
-        dirty |= app.poll_background_tasks();
-        let commands_flushed = flush_pending_worker_commands(app, worker)?;
-        dirty |= commands_flushed;
-        projection_refresh_requested |= commands_flushed;
         if let Some(enable) =
             next_mouse_capture_action(*mouse_capture_active, app.terminal_mouse_capture_enabled())
         {
@@ -650,13 +834,6 @@ async fn run_app(
             needs_render = false;
         }
 
-        if app.should_quit {
-            if let Some(runtime) = worker.as_ref() {
-                let _ = runtime.worker_tx.send(AppState::shutdown_command());
-            }
-            break;
-        }
-
         enum WakeEvent {
             Terminal(std::io::Result<CrosstermEvent>),
             Worker(Box<WorkerMessage>),
@@ -665,15 +842,52 @@ async fn run_app(
             Projection(
                 Box<
                     std::result::Result<
-                        std::result::Result<ProjectionRefreshOutcome, String>,
+                        std::result::Result<
+                            ProjectionRefreshOutcome,
+                            sigil_application::ApplicationError,
+                        >,
                         String,
                     >,
                 >,
             ),
-            ProjectionAck(std::result::Result<std::result::Result<(), String>, String>),
+            ProjectionAck(
+                std::result::Result<
+                    std::result::Result<(), sigil_application::ApplicationError>,
+                    String,
+                >,
+            ),
             Deadline,
         }
         let wake = {
+            let now = Instant::now();
+            let deadline = projection_wake_deadline(
+                next_wake_deadline(app)
+                    .or_else(|| {
+                        (projection_delivery_task.is_some() || delivery_requested)
+                            .then_some(BACKGROUND_TASK_WAKE_INTERVAL)
+                    })
+                    .or_else(|| {
+                        worker
+                            .as_ref()
+                            .filter(|runtime| {
+                                runtime
+                                    .pending_admission
+                                    .as_ref()
+                                    .is_some_and(|pending| pending.receiver.is_some())
+                                    || runtime
+                                        .pending_interactions
+                                        .iter()
+                                        .any(|pending| pending.receiver.is_some())
+                            })
+                            .map(|_| BACKGROUND_TASK_WAKE_INTERVAL)
+                    }),
+                (projection_refresh_requested && projection_refresh_task.is_none())
+                    .then(|| projection_refresh_retry.remaining(now))
+                    .flatten(),
+                (pending_projection_ack.is_some() && projection_ack_task.is_none())
+                    .then(|| projection_ack_retry.remaining(now))
+                    .flatten(),
+            );
             let worker_message = next_worker_message(worker);
             let projection_wake = async {
                 if let Some(task) = projection_refresh_task.as_mut() {
@@ -683,7 +897,10 @@ async fn run_app(
                 } else {
                     std::future::pending::<
                         std::result::Result<
-                            std::result::Result<ProjectionRefreshOutcome, String>,
+                            std::result::Result<
+                                ProjectionRefreshOutcome,
+                                sigil_application::ApplicationError,
+                            >,
                             String,
                         >,
                     >()
@@ -697,12 +914,15 @@ async fn run_app(
                         .map_err(|error| format!("projection ACK task failed: {error}"))
                 } else {
                     std::future::pending::<
-                        std::result::Result<std::result::Result<(), String>, String>,
+                        std::result::Result<
+                            std::result::Result<(), sigil_application::ApplicationError>,
+                            String,
+                        >,
                     >()
                     .await
                 }
             };
-            match next_wake_deadline(app) {
+            match deadline {
                 Some(deadline) => tokio::select! {
                     event = &mut terminal_event => WakeEvent::Terminal(event.unwrap_or_else(|| {
                         Err(std::io::Error::new(
@@ -780,15 +1000,9 @@ async fn run_app(
                     apply_received_worker_message(app, worker, &mut attention, *message)?;
             }
             WakeEvent::WorkerClosed => {
-                projection_epoch = projection_epoch.wrapping_add(1).max(1);
-                if let Some(task) = projection_refresh_task.take() {
-                    task.handle.abort();
-                }
-                if let Some(task) = projection_ack_task.take() {
-                    task.handle.abort();
-                }
-                pending_projection_ack = None;
-                *worker = None;
+                // The next loop reconciles the removed application owner before another
+                // projection or ACK can be scheduled or applied.
+                shutdown_and_join_worker(worker)?;
                 app.handle_worker_message(WorkerMessage::RunFailed(
                     "agent worker disconnected".to_owned(),
                 ))?;
@@ -799,29 +1013,55 @@ async fn run_app(
                 let task_owner = projection_refresh_task
                     .take()
                     .map(|task| (task.epoch, task.application));
-                match (task_owner, result) {
-                    (Some((epoch, application)), Ok(Ok(outcome))) if epoch == projection_epoch => {
+                let Some((epoch, _application)) = task_owner else {
+                    tracing::debug!("discarded TUI projection result without a task owner");
+                    continue;
+                };
+                if epoch != projection_epoch {
+                    tracing::debug!(
+                        epoch,
+                        current_epoch = projection_epoch,
+                        "discarded stale TUI application projection"
+                    );
+                    continue;
+                }
+                let result = result
+                    .map_err(ProjectionFailure::Task)
+                    .and_then(|result| result.map_err(ProjectionFailure::Application));
+                match result {
+                    Ok(outcome) => {
+                        if projection_refresh_retry.succeeded(epoch) {
+                            report_projection_recovered(app, "Session view update")?;
+                            needs_render = true;
+                        }
                         let projection_changed =
                             app.apply_application_projection(&outcome.projection);
-                        pending_projection_ack = Some(PendingProjectionAck {
-                            epoch,
-                            application,
-                            projection: outcome.projection,
-                        });
+                        delivery_requested = true;
                         needs_render |= projection_changed;
                     }
-                    (Some((epoch, _)), Ok(Ok(_))) => {
-                        tracing::debug!(
-                            epoch,
-                            current_epoch = projection_epoch,
-                            "discarded stale TUI application projection"
-                        );
-                    }
-                    (None, Ok(Ok(_))) => {
-                        tracing::debug!("discarded TUI projection result without a task owner");
-                    }
-                    (_, Ok(Err(error))) | (_, Err(error)) => {
-                        tracing::debug!(%error, "application projection refresh unavailable");
+                    Err(error) => {
+                        if let Some(action) =
+                            projection_refresh_retry.failed(epoch, Instant::now(), &error)
+                        {
+                            // Preserve the exact committed cursor, including on a terminal
+                            // refresh with no later worker message to request another attempt.
+                            projection_refresh_requested = action.retry;
+                            tracing::warn!(
+                                ?error,
+                                epoch,
+                                retry = action.retry,
+                                "TUI application projection refresh failed"
+                            );
+                            if action.notify {
+                                report_projection_failure(
+                                    app,
+                                    "Session view update",
+                                    &error,
+                                    action.retry,
+                                )?;
+                                needs_render = true;
+                            }
+                        }
                     }
                 }
             }
@@ -831,20 +1071,51 @@ async fn run_app(
                     continue;
                 };
                 let task_epoch = task.epoch;
-                if let Some(error) = match result {
-                    Ok(Ok(())) => None,
-                    Ok(Err(error)) | Err(error) => Some(error),
-                } {
-                    tracing::warn!(%error, "TUI public event delivery acknowledgement is pending replay");
-                    if task_epoch == projection_epoch {
-                        pending_projection_ack = Some(task.pending);
-                        if let Err(notice_error) = app.handle_worker_message(WorkerMessage::Notice(
-                            "event delivery acknowledgement is pending; it will replay safely"
-                                .to_owned(),
-                        )) {
-                            tracing::debug!(%notice_error, "failed to surface TUI delivery acknowledgement notice");
+                if task_epoch != projection_epoch {
+                    tracing::debug!(
+                        task_epoch,
+                        current_epoch = projection_epoch,
+                        "discarded stale TUI projection ACK outcome"
+                    );
+                    continue;
+                }
+                let result = result
+                    .map_err(ProjectionFailure::Task)
+                    .and_then(|result| result.map_err(ProjectionFailure::Application));
+                match result {
+                    Ok(()) => {
+                        if projection_ack_retry.succeeded(task_epoch) {
+                            report_projection_recovered(app, "Event delivery confirmation")?;
+                            needs_render = true;
                         }
-                        needs_render = true;
+                    }
+                    Err(error) => {
+                        if let Some(action) =
+                            projection_ack_retry.failed(task_epoch, Instant::now(), &error)
+                        {
+                            tracing::warn!(
+                                ?error,
+                                task_epoch,
+                                retry = action.retry,
+                                "TUI public event delivery acknowledgement failed"
+                            );
+                            if action.retry {
+                                retain_pending_projection_ack(
+                                    &mut pending_projection_ack,
+                                    task.pending,
+                                    projection_epoch,
+                                );
+                            }
+                            if action.notify {
+                                report_projection_failure(
+                                    app,
+                                    "Event delivery confirmation",
+                                    &error,
+                                    action.retry,
+                                )?;
+                                needs_render = true;
+                            }
+                        }
                     }
                 }
             }
@@ -853,6 +1124,15 @@ async fn run_app(
         }
     }
 
+    if let Some(task) = projection_refresh_task.take() {
+        task.handle.abort();
+    }
+    if let Some(task) = projection_ack_task.take() {
+        task.handle.abort();
+    }
+    if let Some(task) = projection_delivery_task.take() {
+        task.handle.abort();
+    }
     Ok(())
 }
 
@@ -1172,12 +1452,12 @@ fn install_published_boot_transaction(
     transaction: sigil_runtime::application_host::RuntimeCurrentBootTransactionV1,
     session_route: Option<sigil_kernel::ResolvedModelRoute>,
 ) -> Result<RootConfig> {
-    let persisted_config = transaction.config().clone();
+    let runtime_config = transaction.runtime_config().clone();
     let session_config = session_route
         .as_ref()
-        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .map(|route| app.runtime_config_for_session_route(runtime_config.clone(), route))
         .transpose()?
-        .unwrap_or_else(|| persisted_config.clone());
+        .unwrap_or(runtime_config);
     let (persisted_config, workspace_root, paths, boot_cutover, composition, _registration) =
         transaction.into_published_parts();
     app.set_frozen_boot_paths(workspace_root, paths);
@@ -1219,11 +1499,12 @@ fn install_current_boot_transaction(
         .persisted_config_snapshot()
         .cloned()
         .context("test boot requires persisted config")?;
+    let runtime_config = persisted_config.with_effective_composition()?;
     let session_config = session_route
         .as_ref()
-        .map(|route| app.runtime_config_for_session_route(persisted_config.clone(), route))
+        .map(|route| app.runtime_config_for_session_route(runtime_config.clone(), route))
         .transpose()?
-        .unwrap_or_else(|| persisted_config.clone());
+        .unwrap_or(runtime_config);
     app.apply_session_runtime_config(&session_config);
     Ok(session_config)
 }
@@ -1292,6 +1573,19 @@ where
     H: HostEffects,
 {
     match action {
+        AppAction::CancelRun => {
+            if let Some(runtime) = worker.as_ref() {
+                runtime.worker_tx.reserve_stop(false);
+                runtime
+                    .worker_tx
+                    .send(WorkerCommand::CancelRun)
+                    .map_err(anyhow::Error::new)?;
+            } else {
+                app.handle_worker_message(WorkerMessage::Notice(
+                    "no active run to stop".to_owned(),
+                ))?;
+            }
+        }
         AppAction::SetupCompleted {
             config_path,
             root_config,
@@ -1344,7 +1638,7 @@ where
                             Some(post_failure_draft),
                             startup_error,
                             recovery_code,
-                        );
+                        )?;
                     } else {
                         return_to_setup_after_boot_failure(
                             app,
@@ -1352,7 +1646,7 @@ where
                             config_path,
                             startup_error,
                             startup_recovery_code_from_error(&error),
-                        );
+                        )?;
                     }
                     return Ok(());
                 }
@@ -1381,7 +1675,7 @@ where
                 apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
                 return Ok(());
             }
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
                 report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
                 return Ok(());
@@ -1431,6 +1725,7 @@ where
                     .unwrap_or_else(|| request.next_base.clone());
                 #[cfg(test)]
                 let published_root_config = request.next_base.clone();
+                app.mark_config_draft_saved(&published_root_config);
                 app.apply_persisted_config_snapshot(&published_root_config);
                 if !request.root_only
                     && let Err(error) = app.apply_saved_provider_route_to_current_session(
@@ -1484,7 +1779,7 @@ where
             };
             let config_path = app.config_path.clone();
             let launch_cwd = std::env::current_dir()?;
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             #[cfg(not(test))]
             app.clear_boot_authority();
             let runtime_config = match install_current_boot_transaction(
@@ -1505,7 +1800,7 @@ where
                         config_path,
                         startup_error,
                         recovery_code,
-                    );
+                    )?;
                     return Ok(());
                 }
             };
@@ -1558,7 +1853,7 @@ where
                 .context("session route update requires the persisted runtime config")?;
             let runtime_config = app.runtime_config_for_session_route(persisted_config, &route)?;
             app.apply_session_runtime_config(&runtime_config);
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             match spawn_worker_fn(runtime_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1712,9 +2007,10 @@ where
                 return Ok(());
             }
             #[cfg(test)]
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             #[cfg(test)]
             app.handle_worker_message(WorkerMessage::NewSessionStarted {
+                session_id: session.session_scope_id().to_owned(),
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
@@ -1840,9 +2136,10 @@ where
                 return Ok(());
             }
             #[cfg(test)]
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             #[cfg(test)]
             app.handle_worker_message(WorkerMessage::SessionSwitched {
+                session_id: target.session_scope_id().to_owned(),
                 session_log_path: session_log_path.clone(),
                 provider_name,
                 model_name,
@@ -1911,17 +2208,24 @@ where
             app.start_update_apply(channel);
         }
         action => {
-            if let Some(command) = app.recovered_plan_review_research_resume_command(&action) {
-                // A recovered PlanReview child decision already owns the original application
+            if queue_plan_revision(app, worker, &action)? {
+                return Ok(());
+            }
+            if let Some(command) = app.recovered_user_input_resume_command(&action) {
+                // A recovered input decision already owns the original application
                 // command id. Its prior enqueue may therefore be durably `Uncertain` in the
                 // application reservation store. Replaying it through that store would only
                 // return the cached receipt and never reach the worker. This narrow private
                 // command contains no answer and is revalidated by the worker against the
-                // actual managed child receipt before the ordinary input dispatcher runs.
+                // actual owned receipt before the ordinary input dispatcher runs.
                 send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
+            } else if queue_application_interaction(app, worker, &action)? {
+                return Ok(());
             } else {
                 match try_execute_application_action(app, worker, &action) {
-                    Ok(Some(receipt)) => report_application_receipt(app, &receipt)?,
+                    Ok(Some(receipt)) => {
+                        report_application_action_receipt(app, &action, &receipt)?;
+                    }
                     Ok(None) => {
                         let command = app.into_worker_command(action);
                         send_worker_command_with_restart(
@@ -1932,10 +2236,7 @@ where
                         )?;
                     }
                     Err(error) => {
-                        report_worker_unavailable(
-                            app,
-                            &format!("application command was not admitted: {error}"),
-                        )?;
+                        report_application_admission_error(app, &action, &error)?;
                     }
                 }
             }
@@ -1943,6 +2244,522 @@ where
     }
     flush_pending_worker_commands(app, worker)?;
     Ok(())
+}
+
+struct PendingApplicationAdmission {
+    application: Arc<application_bridge::TuiApplicationSession>,
+    request: sigil_application::ApplicationCommandRequest,
+    action: AppAction,
+    receiver: Option<
+        std::sync::mpsc::Receiver<
+            Result<
+                sigil_application::ApplicationCommandReceipt,
+                sigil_application::ApplicationError,
+            >,
+        >,
+    >,
+    handle: Option<std::thread::JoinHandle<()>>,
+    retryable: bool,
+    domain_resolved: bool,
+}
+
+impl PendingApplicationAdmission {
+    fn domain_resolved_and_finished(&self) -> bool {
+        self.domain_resolved
+            && self
+                .handle
+                .as_ref()
+                .is_none_or(|handle| handle.is_finished())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        if self.receiver.is_some() || !self.retryable {
+            return Ok(());
+        }
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            return Ok(());
+        }
+        if let Some(handle) = self.handle.take() {
+            wait_for_worker_thread(Some(handle), Instant::now())?;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let application = Arc::clone(&self.application);
+        let request = self.request.clone();
+        self.handle = Some(
+            std::thread::Builder::new()
+                .name("sigil-tui-admission".to_owned())
+                .spawn(move || {
+                    let result = futures::executor::block_on(application.execute_prepared(request));
+                    let _ = sender.send(result);
+                })
+                .context("failed to start application admission")?,
+        );
+        self.receiver = Some(receiver);
+        Ok(())
+    }
+}
+
+fn queue_plan_revision(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<bool> {
+    let AppAction::RevisePlan {
+        plan_id,
+        expected_plan_hash,
+    } = action
+    else {
+        return Ok(false);
+    };
+    let Some(runtime) = worker.as_mut() else {
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!("plan revision requires an attached worker"),
+        )?;
+        return Ok(true);
+    };
+    let Some(application) = runtime.application.as_ref() else {
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!("plan revision requires an attached application projection"),
+        )?;
+        return Ok(true);
+    };
+    if runtime
+        .pending_admission
+        .as_ref()
+        .is_some_and(|pending| pending.domain_resolved)
+    {
+        if runtime.pending_interactions.len() >= MAX_PENDING_APPLICATION_INTERACTIONS {
+            report_application_admission_error(
+                app,
+                action,
+                &anyhow::anyhow!("previous plan operation is still finishing"),
+            )?;
+            return Ok(true);
+        }
+        if let Some(pending) = runtime.pending_admission.take() {
+            runtime.pending_interactions.push(pending);
+        }
+    }
+    if let Some(pending) = runtime.pending_admission.as_mut() {
+        if !same_application_interaction(&pending.action, action) {
+            report_application_admission_error(
+                app,
+                action,
+                &anyhow::anyhow!("another plan revision is awaiting its result"),
+            )?;
+            return Ok(true);
+        }
+        if let Err(error) = pending.start() {
+            report_application_admission_error(app, action, &error)?;
+            return Ok(true);
+        }
+        app.handle_worker_message(WorkerMessage::Notice(
+            "plan revision is pending; waiting for its durable outcome".to_owned(),
+        ))?;
+        return Ok(true);
+    }
+    let request =
+        match application.prepare_plan_revision(plan_id.clone(), expected_plan_hash.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                report_application_admission_error(app, action, &anyhow::Error::new(error))?;
+                return Ok(true);
+            }
+        };
+    let mut pending = PendingApplicationAdmission {
+        application: Arc::clone(application),
+        request,
+        action: action.clone(),
+        receiver: None,
+        handle: None,
+        retryable: true,
+        domain_resolved: false,
+    };
+    if let Err(error) = pending.start() {
+        report_application_admission_error(app, action, &error)?;
+        return Ok(true);
+    }
+    runtime.pending_admission = Some(pending);
+    app.handle_worker_message(WorkerMessage::Notice("opening plan revision".to_owned()))?;
+    Ok(true)
+}
+
+const MAX_PENDING_APPLICATION_INTERACTIONS: usize = 32;
+
+fn queue_application_interaction(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: &AppAction,
+) -> Result<bool> {
+    if !matches!(
+        action,
+        AppAction::CancelQueuedConversationInput { .. }
+            | AppAction::EditQueuedConversationInput { .. }
+            | AppAction::MoveQueuedConversationInput { .. }
+            | AppAction::PromoteQueuedConversationInput { .. }
+            | AppAction::SendQueuedConversationInputNow { .. }
+            | AppAction::SetConversationQueuePaused { .. }
+            | AppAction::SavePlan { .. }
+            | AppAction::RejectPlan { .. }
+            | AppAction::CreateTaskFromPlan { .. }
+            | AppAction::SubmitUserInputDecision { .. }
+    ) {
+        return Ok(false);
+    }
+    if let AppAction::SubmitUserInputDecision {
+        request_id,
+        generation,
+        expected_request_hash,
+        ..
+    } = action
+        && !app.pending_user_input().is_some_and(|form| {
+            form.request.as_ref().is_some_and(|request| {
+                request.identity.request_id.as_str() == request_id
+                    && request.identity.generation == *generation
+                    && request.request_hash == *expected_request_hash
+                    && matches!(
+                        request.source,
+                        sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+                    )
+            })
+        })
+    {
+        return Ok(false);
+    }
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let Some(application) = runtime.application.as_ref() else {
+        return Ok(false);
+    };
+    if let Some(pending) = runtime.pending_interactions.iter_mut().find(|pending| {
+        !pending.domain_resolved && same_application_interaction(&pending.action, action)
+    }) {
+        if let Err(error) = pending.start() {
+            report_application_admission_error(app, action, &error)?;
+        }
+        return Ok(true);
+    }
+    if runtime.pending_interactions.len() >= MAX_PENDING_APPLICATION_INTERACTIONS {
+        report_application_admission_error(
+            app,
+            action,
+            &anyhow::anyhow!("too many application operations are awaiting a result"),
+        )?;
+        return Ok(true);
+    }
+    // These actions prepare against the cached projection. Durable admission and dispatch run
+    // on the owned thread so pending feedback and urgent cancellation stay responsive.
+    let request = match application.prepare_action(
+        action,
+        app.active_conversation_queue_target().as_ref(),
+        None,
+    ) {
+        Ok(Some(request)) => request,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            report_application_admission_error(app, action, &anyhow::Error::new(error))?;
+            return Ok(true);
+        }
+    };
+    let mut pending = PendingApplicationAdmission {
+        application: Arc::clone(application),
+        request,
+        action: action.clone(),
+        receiver: None,
+        handle: None,
+        retryable: true,
+        domain_resolved: false,
+    };
+    if let Err(error) = pending.start() {
+        report_application_admission_error(app, action, &error)?;
+        return Ok(true);
+    }
+    runtime.pending_interactions.push(pending);
+    Ok(true)
+}
+
+fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
+    if let Some(operation) = AppState::queue_operation_for_action(left) {
+        return AppState::queue_operation_for_action(right).as_ref() == Some(&operation);
+    }
+    match (left, right) {
+        (
+            AppAction::SavePlan {
+                plan_id: left_id,
+                expected_plan_hash: left_hash,
+            },
+            AppAction::SavePlan {
+                plan_id: right_id,
+                expected_plan_hash: right_hash,
+            },
+        )
+        | (
+            AppAction::RevisePlan {
+                plan_id: left_id,
+                expected_plan_hash: left_hash,
+            },
+            AppAction::RevisePlan {
+                plan_id: right_id,
+                expected_plan_hash: right_hash,
+            },
+        )
+        | (
+            AppAction::RejectPlan {
+                plan_id: left_id,
+                expected_plan_hash: left_hash,
+            },
+            AppAction::RejectPlan {
+                plan_id: right_id,
+                expected_plan_hash: right_hash,
+            },
+        ) => left_id == right_id && left_hash == right_hash,
+        (
+            AppAction::CreateTaskFromPlan {
+                plan_id: left_id,
+                expected_plan_hash: left_hash,
+                start_mode: left_mode,
+                permission_grant: left_grant,
+            },
+            AppAction::CreateTaskFromPlan {
+                plan_id: right_id,
+                expected_plan_hash: right_hash,
+                start_mode: right_mode,
+                permission_grant: right_grant,
+            },
+        ) => {
+            left_id == right_id
+                && left_hash == right_hash
+                && left_mode == right_mode
+                && left_grant == right_grant
+        }
+        (
+            AppAction::SubmitUserInputDecision {
+                command_id: left_command,
+                request_id: left_id,
+                generation: left_generation,
+                expected_request_hash: left_hash,
+                decision: left_decision,
+            },
+            AppAction::SubmitUserInputDecision {
+                command_id: right_command,
+                request_id: right_id,
+                generation: right_generation,
+                expected_request_hash: right_hash,
+                decision: right_decision,
+            },
+        ) => {
+            left_command == right_command
+                && left_id == right_id
+                && left_generation == right_generation
+                && left_hash == right_hash
+                && left_decision == right_decision
+        }
+        _ => false,
+    }
+}
+
+fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerMessage) -> bool {
+    if let WorkerMessage::ConversationQueueOperationCompleted { operation, .. } = message {
+        return AppState::queue_operation_for_action(action).as_ref() == Some(operation);
+    }
+    match (action, message) {
+        (
+            AppAction::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::UserInputRequested { request, .. },
+        ) => matches!(
+            &request.source,
+            sigil_kernel::UserInputSourceV1::PlanRevision { base_plan_id, base_plan_hash }
+                if plan_id == base_plan_id.as_str() && expected_plan_hash == base_plan_hash
+        ),
+        (
+            AppAction::RevisePlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::PlanActionFailed {
+                action: sigil_kernel::PublicPlanAction::Revise,
+                plan_id: failed_id,
+                expected_plan_hash: failed_hash,
+                ..
+            },
+        ) => plan_id == failed_id && expected_plan_hash == failed_hash,
+        (
+            AppAction::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::PlanSaved { entry, .. },
+        )
+        | (
+            AppAction::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::PlanRejected { entry, .. },
+        ) => plan_id == entry.plan_id.as_str() && expected_plan_hash == &entry.plan_hash,
+        (
+            AppAction::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                ..
+            },
+            WorkerMessage::TaskCreatedFromPlan { entry, .. },
+        ) => plan_id == entry.plan_id.as_str() && expected_plan_hash == &entry.plan_hash,
+        (
+            AppAction::SavePlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::PlanActionFailed {
+                action: sigil_kernel::PublicPlanAction::Save,
+                plan_id: failed_id,
+                expected_plan_hash: failed_hash,
+                ..
+            },
+        )
+        | (
+            AppAction::RejectPlan {
+                plan_id,
+                expected_plan_hash,
+            },
+            WorkerMessage::PlanActionFailed {
+                action: sigil_kernel::PublicPlanAction::Reject,
+                plan_id: failed_id,
+                expected_plan_hash: failed_hash,
+                ..
+            },
+        )
+        | (
+            AppAction::CreateTaskFromPlan {
+                plan_id,
+                expected_plan_hash,
+                ..
+            },
+            WorkerMessage::PlanActionFailed {
+                action: sigil_kernel::PublicPlanAction::Run,
+                plan_id: failed_id,
+                expected_plan_hash: failed_hash,
+                ..
+            },
+        ) => plan_id == failed_id && expected_plan_hash == failed_hash,
+        (
+            AppAction::SubmitUserInputDecision {
+                request_id,
+                generation,
+                expected_request_hash,
+                ..
+            },
+            WorkerMessage::UserInputDecisionApplied { request, .. },
+        ) => {
+            request_id == request.identity.request_id.as_str()
+                && generation == &request.identity.generation
+                && expected_request_hash == &request.request_hash
+        }
+        (
+            AppAction::SubmitUserInputDecision {
+                request_id,
+                generation,
+                expected_request_hash,
+                ..
+            },
+            WorkerMessage::UserInputDecisionFailed {
+                request_id: failed_id,
+                generation: failed_generation,
+                expected_request_hash: failed_hash,
+                ..
+            },
+        ) => {
+            request_id == failed_id
+                && generation == failed_generation
+                && expected_request_hash == failed_hash
+        }
+        _ => false,
+    }
+}
+
+fn poll_application_admission(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> Result<bool> {
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    if let Some(pending) = runtime.pending_admission.as_mut() {
+        changed |= poll_pending_application_admission(app, pending)?;
+        if pending.domain_resolved_and_finished() {
+            wait_for_worker_thread(pending.handle.take(), Instant::now())?;
+            runtime.pending_admission = None;
+            changed = true;
+        }
+    }
+    let mut index = 0;
+    while index < runtime.pending_interactions.len() {
+        let pending = &mut runtime.pending_interactions[index];
+        changed |= poll_pending_application_admission(app, pending)?;
+        if pending.domain_resolved_and_finished() {
+            wait_for_worker_thread(pending.handle.take(), Instant::now())?;
+            runtime.pending_interactions.remove(index);
+            changed = true;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(changed)
+}
+
+fn poll_pending_application_admission(
+    app: &mut AppState,
+    pending: &mut PendingApplicationAdmission,
+) -> Result<bool> {
+    if pending.domain_resolved {
+        return Ok(false);
+    }
+    let Some(receiver) = pending.receiver.as_ref() else {
+        return Ok(false);
+    };
+    let result = match receiver.try_recv() {
+        Ok(result) => result,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(false),
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Err(sigil_application::ApplicationError::Unavailable)
+        }
+    };
+    pending.receiver = None;
+    match result {
+        Ok(receipt) => {
+            pending.retryable = false;
+            let resolved = matches!(
+                receipt,
+                sigil_application::ApplicationCommandReceipt::Settled(_)
+                    | sigil_application::ApplicationCommandReceipt::Replayed(_)
+                    | sigil_application::ApplicationCommandReceipt::Rejected(_)
+                    | sigil_application::ApplicationCommandReceipt::ConfirmedNoEffect(_)
+                    | sigil_application::ApplicationCommandReceipt::PayloadConflict(_)
+            );
+            report_application_action_receipt(app, &pending.action, &receipt)?;
+            if resolved {
+                pending.domain_resolved = true;
+            }
+        }
+        Err(error) => {
+            pending.retryable = true;
+            report_application_admission_error(app, &pending.action, &anyhow::Error::new(error))?;
+        }
+    }
+    Ok(true)
 }
 
 fn try_execute_application_action(
@@ -1989,6 +2806,55 @@ async fn refresh_application_projection_task(
     Ok(ProjectionRefreshOutcome { projection })
 }
 
+#[cfg(not(test))]
+fn report_projection_failure(
+    app: &mut AppState,
+    operation: &str,
+    error: &ProjectionFailure,
+    retrying: bool,
+) -> Result<()> {
+    let message = if retrying {
+        format!("{operation} is delayed; retrying safely. {error}")
+    } else {
+        format!("{operation} failed: {error}")
+    };
+    app.handle_worker_message(WorkerMessage::Notice(sigil_kernel::safe_persistence_text(
+        &message,
+    )))
+}
+
+#[cfg(not(test))]
+fn report_projection_recovered(app: &mut AppState, operation: &str) -> Result<()> {
+    app.handle_worker_message(WorkerMessage::Notice(format!("{operation} recovered")))
+}
+
+#[cfg(not(test))]
+fn retain_pending_projection_ack(
+    pending: &mut Option<PendingProjectionAck>,
+    candidate: PendingProjectionAck,
+    epoch: u64,
+) {
+    if should_replace_pending_ack(
+        epoch,
+        pending
+            .as_ref()
+            .map(|pending| (pending.epoch, &pending.frontier)),
+        candidate.epoch,
+        &candidate.frontier,
+    ) {
+        *pending = Some(candidate);
+    } else if let Some(existing) = pending.as_mut()
+        && existing.epoch == candidate.epoch
+        && existing.frontier == candidate.frontier
+    {
+        for event_id in candidate.event_ids {
+            if !existing.event_ids.contains(&event_id) {
+                existing.event_ids.push(event_id);
+            }
+        }
+    }
+}
+
 fn worker_message_requires_projection_refresh(message: &WorkerMessage) -> bool {
     match message {
         WorkerMessage::WorkerReady
@@ -2012,7 +2878,7 @@ fn worker_message_requires_projection_refresh(message: &WorkerMessage) -> bool {
         | WorkerMessage::PlanSaved { .. }
         | WorkerMessage::TaskCreatedFromPlan { .. }
         | WorkerMessage::TaskAdmissionBlocked { .. }
-        | WorkerMessage::PlanTaskCreationFailed { .. }
+        | WorkerMessage::PlanActionFailed { .. }
         | WorkerMessage::TaskRunFinished { .. }
         | WorkerMessage::TaskRunPaused { .. }
         | WorkerMessage::TaskRunStarted { .. }
@@ -2093,6 +2959,55 @@ fn report_application_receipt(
     app.handle_worker_message(WorkerMessage::Notice(notice.to_owned()))
 }
 
+fn report_application_action_receipt(
+    app: &mut AppState,
+    action: &AppAction,
+    receipt: &sigil_application::ApplicationCommandReceipt,
+) -> Result<()> {
+    use sigil_application::ApplicationCommandReceipt;
+
+    let failure = match receipt {
+        ApplicationCommandReceipt::Rejected(rejection) => Some(format!(
+            "application command rejected: {}",
+            rejection.reason
+        )),
+        ApplicationCommandReceipt::PayloadConflict(_) => {
+            Some("application command payload conflicts with its durable reservation".to_owned())
+        }
+        ApplicationCommandReceipt::ConfirmedNoEffect(_) => {
+            Some("application command was confirmed to have no effect".to_owned())
+        }
+        _ => None,
+    };
+    if let Some(failure) = failure {
+        fail_pending_application_action(app, action, &failure);
+    }
+    report_application_receipt(app, receipt)
+}
+
+fn fail_pending_application_action(app: &mut AppState, action: &AppAction, message: &str) {
+    let message = sigil_kernel::safe_persistence_text(message);
+    if app.fail_queue_action(action, message.clone())
+        || app.fail_plan_action(action, message.clone())
+    {
+        return;
+    }
+    if let AppAction::SubmitUserInputDecision {
+        request_id,
+        generation,
+        expected_request_hash,
+        ..
+    } = action
+    {
+        app.fail_pending_user_input_submission(
+            request_id,
+            *generation,
+            expected_request_hash,
+            message,
+        );
+    }
+}
+
 fn process_host_request<H: HostEffects>(
     app: &mut AppState,
     request: HostRequest,
@@ -2149,14 +3064,14 @@ fn return_to_setup_after_boot_failure(
     _config_path: PathBuf,
     startup_error: String,
     startup_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
-) {
+) -> Result<()> {
     return_to_setup_after_boot_failure_with_draft(
         app,
         worker,
         None,
         startup_error,
         startup_recovery_code,
-    );
+    )
 }
 
 fn return_to_setup_after_boot_failure_with_draft(
@@ -2165,11 +3080,11 @@ fn return_to_setup_after_boot_failure_with_draft(
     mut setup_draft: Option<crate::setup::SetupState>,
     startup_error: String,
     startup_recovery_code: Option<sigil_kernel::PublicRouteRecoveryCode>,
-) {
+) -> Result<()> {
     let support_build_info = app.support_build_info().clone();
     let update_build_info = app.update_build_info().clone();
     let workspace_root = app.workspace_root.clone();
-    shutdown_and_join_worker(worker);
+    shutdown_and_join_worker(worker)?;
     let config_path = setup_draft
         .as_ref()
         .map(|draft| draft.config_path.clone())
@@ -2192,6 +3107,7 @@ fn return_to_setup_after_boot_failure_with_draft(
     }
     app.set_support_build_info(support_build_info);
     app.set_update_build_info(update_build_info);
+    Ok(())
 }
 
 fn startup_recovery_code_from_error(
@@ -2275,15 +3191,23 @@ fn drain_worker_messages_inner(
     let mut dirty = false;
     let mut projection_refresh = false;
     let mut startup_failed = false;
+    let batch_started = Instant::now();
+    let mut processed_messages = 0usize;
     app.begin_timeline_render_batch();
     while let Some(message) = try_recv_worker_message(runtime) {
         projection_refresh |= worker_message_requires_projection_refresh(&message);
         startup_failed |= apply_worker_message_state(runtime, attention.as_deref_mut(), &message);
         app.handle_worker_message(message)?;
         dirty = true;
+        processed_messages = processed_messages.saturating_add(1);
+        if processed_messages >= WORKER_MESSAGE_BATCH_LIMIT
+            || batch_started.elapsed() >= WORKER_MESSAGE_BATCH_BUDGET
+        {
+            break;
+        }
     }
     if startup_failed {
-        shutdown_and_join_worker(worker);
+        shutdown_and_join_worker(worker)?;
     }
     Ok((
         dirty | app.flush_timeline_render_batch(),
@@ -2325,7 +3249,7 @@ fn apply_received_worker_message(
     app.handle_worker_message(message)?;
     app.flush_timeline_render_batch();
     if startup_failed {
-        shutdown_and_join_worker(worker);
+        shutdown_and_join_worker(worker)?;
     }
     Ok(true)
 }
@@ -2335,6 +3259,20 @@ fn apply_worker_message_state(
     attention: Option<&mut AttentionController>,
     message: &WorkerMessage,
 ) -> bool {
+    for pending in &mut runtime.pending_interactions {
+        if application_interaction_outcome_matches(&pending.action, message) {
+            pending.retryable = false;
+            pending.domain_resolved = true;
+        }
+    }
+    if let Some(pending) = runtime.pending_admission.as_mut()
+        && application_interaction_outcome_matches(&pending.action, message)
+    {
+        // The owner committed the matching question before publication. Retain a still
+        // running admission thread for shutdown accounting; its response is only transport.
+        pending.retryable = false;
+        pending.domain_resolved = true;
+    }
     let route_transition_recovery = matches!(
         message,
         WorkerMessage::SessionRouteRecoveryRequired {
@@ -2369,7 +3307,7 @@ where
         return Ok(false);
     }
     app.mark_worker_not_ready();
-    shutdown_and_join_worker(worker);
+    shutdown_and_join_worker(worker)?;
     let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
         report_worker_unavailable(
             app,
@@ -2416,7 +3354,7 @@ fn flush_pending_worker_commands(
             for remaining in commands {
                 app.enqueue_worker_command(remaining);
             }
-            shutdown_and_join_worker(worker);
+            shutdown_and_join_worker(worker)?;
             report_worker_unavailable(app, "agent worker stopped before accepting command")?;
             break;
         }
@@ -2442,7 +3380,7 @@ where
             Ok(()) => return Ok(()),
             Err(error) => {
                 let command = *error.0;
-                shutdown_and_join_worker(worker);
+                shutdown_and_join_worker(worker)?;
                 command
             }
         }
@@ -2477,8 +3415,44 @@ where
             Err(error) => app.enqueue_worker_command(*error.0),
         }
     }
-    shutdown_and_join_worker(worker);
+    shutdown_and_join_worker(worker)?;
     report_worker_unavailable(app, "agent worker stopped before accepting command")
+}
+
+fn report_application_admission_error(
+    app: &mut AppState,
+    action: &AppAction,
+    error: &anyhow::Error,
+) -> Result<()> {
+    fail_pending_application_action(
+        app,
+        action,
+        &format!("application command was not admitted: {error}"),
+    );
+    // Admission can reject an action while the worker is still waiting for its exact approval.
+    // Keep that pending request and its owner intact so the user can retry the action.
+    // A malformed new prompt, however, only owns an optimistic local Thinking state: it never
+    // reached the worker and therefore will not receive a terminal event to release that state.
+    if matches!(
+        action,
+        AppAction::SubmitPrompt(_)
+            | AppAction::SubmitPromptWithAttachments { .. }
+            | AppAction::SubmitPlanPrompt(_)
+            | AppAction::SubmitTask(_)
+            | AppAction::ContinueTask { .. }
+            | AppAction::InvokeInlineSkill { .. }
+            | AppAction::InvokeChildSessionSkill { .. }
+            | AppAction::InvokeAgentProfile { .. }
+    ) && matches!(
+        error.downcast_ref::<sigil_application::ApplicationError>(),
+        Some(sigil_application::ApplicationError::InvalidRequest(_))
+    ) && app.approval.pending.is_none()
+    {
+        app.clear_worker_run_state();
+    }
+    app.handle_worker_message(WorkerMessage::Notice(sigil_kernel::safe_persistence_text(
+        &format!("application command was not admitted: {error}"),
+    )))
 }
 
 fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
@@ -2502,18 +3476,219 @@ fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
     })
 }
 
-fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) {
-    let Some(runtime) = worker.take() else {
-        return;
-    };
-    let _ = runtime.worker_tx.send(AppState::shutdown_command());
-    #[cfg(not(test))]
+fn restore_terminal_and_shutdown_event_runtime(
+    runtime: &mut Option<tokio::runtime::Runtime>,
+    restore: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let restored = restore();
+    // Runtime Drop waits indefinitely for spawn_blocking. Cancel async observers only after
+    // restoring the terminal; their owner tracks actual background completion below.
+    if let Some(runtime) = runtime.take() {
+        runtime.shutdown_background();
+    }
+    restored
+}
+
+// Scope changes retire these observations, but do not release their owners while an aborted
+// async task or its already-running blocking read/ACK is still alive.
+#[cfg(not(test))]
+#[derive(Default)]
+struct TuiShutdownState {
+    deadline: Option<Instant>,
+    projection_observation_owners: Vec<ProjectionObservationOwner>,
+}
+
+struct ProjectionObservationOwner {
+    application: Arc<application_bridge::TuiApplicationSession>,
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+fn retain_projection_observation(
+    owners: &mut Vec<ProjectionObservationOwner>,
+    application: Arc<application_bridge::TuiApplicationSession>,
+    task: tokio::task::AbortHandle,
+) {
+    if let Some(owner) = owners
+        .iter_mut()
+        .find(|owner| Arc::ptr_eq(&owner.application, &application))
     {
-        let mut runtime = runtime;
-        if let Some(join_handle) = runtime.join_handle.take() {
-            let _ = join_handle.join();
+        owner.tasks.push(task);
+    } else {
+        owners.push(ProjectionObservationOwner {
+            application,
+            tasks: vec![task],
+        });
+    }
+}
+
+fn release_finished_projection_observations(owners: &mut Vec<ProjectionObservationOwner>) {
+    owners.retain_mut(|owner| {
+        owner.tasks.retain(|task| !task.is_finished());
+        !owner.tasks.is_empty() || owner.application.pending_observations() > 0
+    });
+}
+
+fn abort_projection_observations(owners: &[ProjectionObservationOwner]) {
+    for owner in owners {
+        for task in &owner.tasks {
+            task.abort();
         }
     }
+}
+
+fn drain_projection_observations_until(
+    owners: &mut Vec<ProjectionObservationOwner>,
+    deadline: Instant,
+) -> Result<()> {
+    abort_projection_observations(owners);
+    loop {
+        release_finished_projection_observations(owners);
+        if owners.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "session observations from current or retired scopes are still running; cleanup_complete=false"
+        );
+        std::thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+/// Requests worker shutdown and waits only within the shared UI shutdown budget.
+///
+/// A `JoinHandle::join` can block forever when a provider or OS call is stuck. Keep unfinished
+/// owners in `worker` on timeout, and report which owned thread and worker stage exhausted the
+/// budget. Terminal restoration always precedes any wait.
+fn restore_terminal_then_join_worker(
+    worker: &mut Option<WorkerRuntime>,
+    deadline: Instant,
+    restore: impl FnOnce() -> std::io::Result<()>,
+) -> (std::io::Result<()>, Result<()>) {
+    if let Some(runtime) = worker.as_ref() {
+        runtime.worker_tx.begin_shutdown_until(deadline);
+    }
+    let restored = restore();
+    let joined = shutdown_and_join_worker_until(worker, deadline);
+    (restored, joined)
+}
+
+fn shutdown_and_join_worker(worker: &mut Option<WorkerRuntime>) -> Result<()> {
+    shutdown_and_join_worker_until(worker, Instant::now() + WORKER_SHUTDOWN_TIMEOUT)
+}
+
+fn shutdown_and_join_worker_until(
+    worker: &mut Option<WorkerRuntime>,
+    deadline: Instant,
+) -> Result<()> {
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(());
+    };
+    runtime.worker_tx.begin_shutdown_until(deadline);
+    let _ = runtime.worker_tx.send(AppState::shutdown_command());
+    join_runtime_owned_thread(
+        &mut runtime.join_handle,
+        &runtime.worker_tx,
+        deadline,
+        "sigil-agent-worker",
+    )?;
+    if let Some(pending) = runtime.pending_admission.as_mut() {
+        join_runtime_owned_thread(
+            &mut pending.handle,
+            &runtime.worker_tx,
+            deadline,
+            "application-admission",
+        )?;
+    }
+    for pending in &mut runtime.pending_interactions {
+        join_runtime_owned_thread(
+            &mut pending.handle,
+            &runtime.worker_tx,
+            deadline,
+            "application-interaction",
+        )?;
+    }
+    #[cfg(not(test))]
+    if let Err(error) = runtime.worker_rx.shutdown_until(deadline) {
+        if runtime.worker_rx.handle.is_none() {
+            runtime.worker_tx.record_shutdown_join_panic();
+        }
+        return Err(error.context(
+            runtime
+                .worker_tx
+                .shutdown_diagnostic("sigil-tui-worker-events"),
+        ));
+    }
+    if let Some(application) = runtime.application.as_ref() {
+        while application.pending_observations() > 0 && Instant::now() < deadline {
+            std::thread::sleep(
+                Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        anyhow::ensure!(
+            application.pending_observations() == 0,
+            "{}",
+            runtime
+                .worker_tx
+                .shutdown_diagnostic("application-observation")
+        );
+    }
+    anyhow::ensure!(
+        runtime.worker_tx.cleanup_complete(),
+        "{}",
+        runtime.worker_tx.shutdown_diagnostic("sigil-agent-worker")
+    );
+    worker.take();
+    Ok(())
+}
+
+fn join_runtime_owned_thread(
+    handle: &mut Option<std::thread::JoinHandle<()>>,
+    worker_tx: &runner::WorkerCommandSender,
+    deadline: Instant,
+    component: &str,
+) -> Result<()> {
+    let result = wait_for_owned_thread(handle, deadline);
+    if result.is_err() && handle.is_none() {
+        worker_tx.record_shutdown_join_panic();
+    }
+    result.with_context(|| worker_tx.shutdown_diagnostic(component))
+}
+
+fn wait_for_worker_thread(
+    mut handle: Option<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> Result<()> {
+    wait_for_owned_thread(&mut handle, deadline)
+}
+
+fn wait_for_owned_thread(
+    owned: &mut Option<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> Result<()> {
+    let Some(handle) = owned.as_ref() else {
+        return Ok(());
+    };
+    let started = Instant::now();
+    let thread_name = handle
+        .thread()
+        .name()
+        .unwrap_or("unnamed-owned-thread")
+        .to_owned();
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(
+            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    anyhow::ensure!(
+        handle.is_finished(),
+        "shutdown deadline exceeded; owned_thread={thread_name}; stage=thread-join; elapsed_ms={}; cleanup_complete=false",
+        started.elapsed().as_millis()
+    );
+    owned.take().expect("finished owned thread remains present").join().map_err(|_| {
+        anyhow::anyhow!("owned_thread={thread_name}; stage=thread-join; elapsed_ms={}; worker panicked during shutdown; cleanup_complete=false", started.elapsed().as_millis())
+    })
 }
 
 #[cfg(test)]
@@ -2639,6 +3814,8 @@ fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
 fn next_wake_deadline(app: &AppState) -> Option<Duration> {
     if app.runtime.is_busy {
         Some(Duration::from_millis(SPINNER_FRAME_MILLIS as u64))
+    } else if app.has_live_preview_work() {
+        Some(Duration::from_millis(32))
     } else if app.has_pending_background_tasks() {
         Some(BACKGROUND_TASK_WAKE_INTERVAL)
     } else {
@@ -2678,11 +3855,46 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+struct AbortOnDropTask<T>(tokio::task::JoinHandle<T>);
+
+impl<T> From<tokio::task::JoinHandle<T>> for AbortOnDropTask<T> {
+    fn from(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(handle)
+    }
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+    fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDropTask<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.get_mut().0).poll(context)
+    }
+}
+
 #[cfg(not(test))]
 struct ProjectionRefreshTask {
     epoch: u64,
     application: Arc<application_bridge::TuiApplicationSession>,
-    handle: tokio::task::JoinHandle<std::result::Result<ProjectionRefreshOutcome, String>>,
+    handle: AbortOnDropTask<
+        std::result::Result<ProjectionRefreshOutcome, sigil_application::ApplicationError>,
+    >,
 }
 
 #[cfg(not(test))]
@@ -2695,25 +3907,35 @@ struct ProjectionRefreshOutcome {
 struct PendingProjectionAck {
     epoch: u64,
     application: Arc<application_bridge::TuiApplicationSession>,
-    projection: sigil_application::ApplicationProjection,
+    frontier: sigil_application::ApplicationFrontier,
+    event_ids: Vec<String>,
 }
 
 #[cfg(not(test))]
 struct ProjectionAckTask {
     epoch: u64,
     pending: PendingProjectionAck,
-    handle: tokio::task::JoinHandle<std::result::Result<(), String>>,
+    handle: AbortOnDropTask<std::result::Result<(), sigil_application::ApplicationError>>,
+}
+
+#[cfg(not(test))]
+struct ProjectionDeliveryTask {
+    epoch: u64,
+    application: Arc<application_bridge::TuiApplicationSession>,
+    handle: AbortOnDropTask<
+        Result<sigil_application::AppliedDeliveryBatch, sigil_application::ApplicationError>,
+    >,
 }
 
 struct WorkerRuntime {
     worker_tx: runner::WorkerCommandSender,
-    #[cfg(not(test))]
     application: Option<Arc<application_bridge::TuiApplicationSession>>,
+    pending_admission: Option<PendingApplicationAdmission>,
+    pending_interactions: Vec<PendingApplicationAdmission>,
     #[cfg(test)]
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
     #[cfg(not(test))]
     worker_rx: WorkerMessageInbox,
-    #[cfg(not(test))]
     join_handle: Option<std::thread::JoinHandle<()>>,
     ready: bool,
 }
@@ -2721,25 +3943,51 @@ struct WorkerRuntime {
 #[cfg(not(test))]
 struct WorkerMessageInbox {
     receiver: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(test))]
+impl Drop for WorkerMessageInbox {
+    fn drop(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(not(test))]
 impl WorkerMessageInbox {
     fn forward_from(receiver: std::sync::mpsc::Receiver<WorkerMessage>) -> Result<Self> {
         let (sender, forwarded) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::Builder::new()
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_stopped = Arc::clone(&stopped);
+        let handle = std::thread::Builder::new()
             .name("sigil-tui-worker-events".to_owned())
             .spawn(move || {
-                while let Ok(message) = receiver.recv() {
-                    if sender.send(message).is_err() {
-                        break;
+                while !task_stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    match receiver.recv_timeout(Duration::from_millis(25)) {
+                        Ok(message) => {
+                            if sender.send(message).is_err() {
+                                break;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
             })
             .context("failed to start TUI worker event forwarder")?;
         Ok(Self {
             receiver: forwarded,
+            stopped,
+            handle: Some(handle),
         })
+    }
+
+    fn shutdown_until(&mut self, deadline: Instant) -> Result<()> {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        wait_for_owned_thread(&mut self.handle, deadline)
     }
 
     fn try_recv(&mut self) -> Option<WorkerMessage> {
@@ -2774,11 +4022,15 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
             app,
             spawned.command_tx.clone(),
             app.runtime.reasoning_effort.clone(),
+            spawned.projection_owner,
         ) {
             Ok(application) => Arc::new(application),
             Err(error) => {
                 let _ = spawned.command_tx.send(WorkerCommand::Shutdown);
-                let _ = spawned.join_handle.join();
+                wait_for_worker_thread(
+                    Some(spawned.join_handle),
+                    Instant::now() + WORKER_SHUTDOWN_TIMEOUT,
+                )?;
                 return Err(error.context("failed to attach TUI application port"));
             }
         },
@@ -2786,6 +4038,8 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
     Ok(WorkerRuntime {
         worker_tx: spawned.command_tx,
         application,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
         worker_rx: WorkerMessageInbox::forward_from(spawned.message_rx)?,
         join_handle: Some(spawned.join_handle),
         ready: false,
@@ -2795,3 +4049,11 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/main_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/launcher_lifecycle_rfc0075_tests.rs"]
+mod lifecycle_rfc0075_tests;
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/launcher_user_input_recovery_tests.rs"]
+mod user_input_recovery_tests;

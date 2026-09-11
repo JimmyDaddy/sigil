@@ -66,7 +66,11 @@ pub(super) fn load_session(
     model_name: &str,
     session_log_path: &Path,
 ) -> Result<Session> {
-    let store = JsonlSessionStore::new(session_log_path)?;
+    let store = JsonlSessionStore::new(session_log_path).map_err(|error| {
+        anyhow::Error::new(
+            sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable(error),
+        )
+    })?;
     Session::load_from_store(provider_name.to_owned(), model_name.to_owned(), store)
 }
 
@@ -96,6 +100,13 @@ pub(super) fn load_routed_session_with_runtime_attachments(
         sigil_runtime::provider_connections::resolve_default_model_route(root_config)
             .map_err(anyhow::Error::new)?;
     let store = JsonlSessionStore::new(session_log_path)?;
+    let inspected = sigil_runtime::provider_connections::inspect_session_for_route_resume(
+        root_config,
+        &fallback_route,
+        store.clone(),
+    )
+    .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
+    sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
     let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
         root_config,
         &fallback_route,
@@ -104,6 +115,7 @@ pub(super) fn load_routed_session_with_runtime_attachments(
         None,
         Some(attachment),
     )?;
+    sigil_runtime::bind_session_composition(&mut session, root_config)?;
     attach_captured_runtime_attachments(&mut session, &runtime_attachments)?;
     Ok(session)
 }

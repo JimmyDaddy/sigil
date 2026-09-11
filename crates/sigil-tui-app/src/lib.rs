@@ -84,6 +84,19 @@ impl TuiApplicationAdapter {
         Ok(projection)
     }
 
+    /// Consumes one bounded notification batch independently of the current state projection.
+    pub async fn refresh_delivery(
+        &self,
+    ) -> Result<sigil_application::AppliedDeliveryBatch, ApplicationError> {
+        self.client.refresh_delivery().await
+    }
+
+    /// Returns public durable-event identities applied by the latest refresh.  A caller should
+    /// invoke this only after its own renderer/product state accepted that refresh.
+    pub fn take_applied_delivery_event_ids(&self) -> Result<Vec<String>, ApplicationError> {
+        self.client.take_applied_delivery_event_ids()
+    }
+
     pub fn current_projection(&self) -> Result<Option<ApplicationProjection>, ApplicationError> {
         self.projection
             .lock()
@@ -96,6 +109,23 @@ impl TuiApplicationAdapter {
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         self.client.execute(command).await
+    }
+
+    /// Freezes an application envelope for one UI interaction and its exact retries.
+    pub fn prepare_command(
+        &self,
+        command_id: ApplicationCommandId,
+        command: ApplicationCommand,
+    ) -> Result<sigil_application::ApplicationCommandRequest, ApplicationError> {
+        self.client.prepare_command(command_id, command)
+    }
+
+    /// Executes a prepared envelope owned by this attachment.
+    pub async fn execute_prepared(
+        &self,
+        request: sigil_application::ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.client.execute_prepared(request).await
     }
 
     pub async fn execute_with_id(
@@ -157,3 +187,7 @@ impl App for TuiApplicationAdapter {
 
 /// Compile-time assertion that the adapter's public constructor remains port-only.
 pub fn application_port_type_marker(_port: Arc<dyn ApplicationPort>) {}
+
+#[cfg(test)]
+#[path = "tests/adapter_tests.rs"]
+mod tests;

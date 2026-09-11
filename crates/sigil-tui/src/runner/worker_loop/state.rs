@@ -5,6 +5,7 @@ const MAX_APPROVAL_COMMAND_RECEIPTS: usize = 256;
 const MAX_ARTIFACT_GC_DEFERRED_NOTICES: usize = 32;
 
 pub(in crate::runner) struct WorkerLoopState {
+    pub(in crate::runner) stop_control: super::super::protocol::WorkerStopControl,
     pub(in crate::runner) event_tx: mpsc::Sender<WorkerEvent>,
     pub(in crate::runner) wake_coalescer: WorkerWakeCoalescer,
     pub(in crate::runner) terminal_lifecycle_router: ChannelTerminalLifecycleRouter,
@@ -64,7 +65,7 @@ impl WorkerLoopState {
             session_log_path,
             session,
             Some(attachment_lease),
-            agent_supervisor,
+            Some(agent_supervisor),
             background_agent_runs,
             event_tx,
             wake_coalescer,
@@ -83,7 +84,7 @@ impl WorkerLoopState {
         attachment_lease: Option<
             Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
         >,
-        agent_supervisor: sigil_runtime::AgentSupervisor,
+        agent_supervisor: Option<sigil_runtime::AgentSupervisor>,
         background_agent_runs: sigil_runtime::AgentToolBackgroundRuns,
         event_tx: mpsc::Sender<WorkerEvent>,
         wake_coalescer: WorkerWakeCoalescer,
@@ -119,6 +120,7 @@ impl WorkerLoopState {
             })
             .unwrap_or_default();
         Self {
+            stop_control: Default::default(),
             event_tx: event_tx.clone(),
             wake_coalescer,
             terminal_lifecycle_router,
@@ -163,6 +165,8 @@ impl WorkerLoopState {
             run: RunWorkerState {
                 result_tx: WorkerEventPayloadSender::run(event_tx.clone()),
                 active: None,
+                retired: Vec::new(),
+                task_panicked: false,
                 route_execution_owner: None,
                 discarded_ids: BTreeSet::new(),
                 next_id: 1,
@@ -198,6 +202,8 @@ impl WorkerLoopState {
             mcp_oauth: McpOAuthWorkerState {
                 result_tx: WorkerEventPayloadSender::mcp_oauth(event_tx),
                 active: BTreeMap::new(),
+                retired: Vec::new(),
+                task_panicked: false,
             },
             session_maintenance: SessionMaintenanceTaskManager::default(),
             approval_command_receipts: BTreeMap::new(),
@@ -241,6 +247,7 @@ impl WorkerLoopState {
         &mut self,
     ) -> std::result::Result<(), String> {
         let provider_execution_active = self.run.active.is_some()
+            || self.run.retired.iter().any(|handle| !handle.is_finished())
             || self.agent.background_runs.has_any()
             || !self.session.active_terminal_task_ids.is_empty();
         if !provider_execution_active {
@@ -297,8 +304,14 @@ impl WorkerLoopState {
         let mcp_deadline = (self.run.active.is_none()
             && !self.refresh.pending_mcp_servers.is_empty())
         .then_some(self.refresh.next_mcp_retry_at);
+        // A root can publish its result before its closure finishes dropping owned work.
+        // Keep the route owner until join completion and schedule reap only while such handles
+        // exist; otherwise an idle inbox would never observe the final owner release.
+        let retired_run_deadline =
+            (!self.run.retired.is_empty()).then(|| Instant::now() + Duration::from_millis(10));
         [
             mcp_deadline,
+            retired_run_deadline,
             self.session.projection_retry_at,
             self.session.task_guidance_retry_at,
             self.session.conversation_queue_retry_at,
@@ -312,15 +325,35 @@ impl WorkerLoopState {
 #[derive(Default)]
 pub(in crate::runner) struct SessionMaintenanceTaskManager {
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    task_panicked: bool,
 }
 
 impl SessionMaintenanceTaskManager {
+    pub(in crate::runner) fn request_stop(&self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+
+    pub(in crate::runner) fn shutdown_until(
+        &mut self,
+        runtime: &tokio::runtime::Runtime,
+        deadline: Instant,
+    ) -> Result<(), super::shutdown::OwnedTaskDrainFailure> {
+        super::shutdown::drain_owned_tasks_until(
+            &mut self.tasks,
+            &mut self.task_panicked,
+            runtime,
+            deadline,
+        )
+    }
+
     pub(in crate::runner) fn spawn(
         &mut self,
         runtime: &tokio::runtime::Runtime,
         maintenance: sigil_runtime::application_run::ApplicationPostRunMaintenance,
     ) {
-        self.tasks.retain(|task| !task.is_finished());
+        super::shutdown::reap_finished_owned_tasks(&mut self.tasks, &mut self.task_panicked);
         self.tasks.push(runtime.spawn(async move {
             if let Err(error) = maintenance.execute().await {
                 tracing::debug!(
@@ -366,6 +399,8 @@ pub(in crate::runner) fn register_worker_active_projection_observer(
 pub(in crate::runner) struct McpOAuthWorkerState {
     pub(in crate::runner) result_tx: WorkerEventPayloadSender<McpOAuthTaskResult>,
     pub(in crate::runner) active: BTreeMap<String, ActiveMcpOAuthFlow>,
+    pub(in crate::runner) retired: Vec<tokio::task::JoinHandle<()>>,
+    pub(in crate::runner) task_panicked: bool,
 }
 
 pub(in crate::runner) struct SessionWorkerState {
@@ -418,6 +453,8 @@ impl SessionWorkerState {
 }
 
 pub(in crate::runner) struct RunWorkerState {
+    pub(in crate::runner) retired: Vec<tokio::task::JoinHandle<()>>,
+    pub(in crate::runner) task_panicked: bool,
     pub(in crate::runner) result_tx: WorkerEventPayloadSender<RunTaskResult>,
     pub(in crate::runner) active: Option<ActiveRun>,
     pub(in crate::runner) route_execution_owner:
@@ -466,10 +503,43 @@ pub(in crate::runner) struct RefreshWorkerState {
 }
 
 pub(in crate::runner) struct AgentWorkerState {
-    pub(in crate::runner) supervisor: sigil_runtime::AgentSupervisor,
+    pub(in crate::runner) supervisor: Option<sigil_runtime::AgentSupervisor>,
     pub(in crate::runner) background_runs: sigil_runtime::AgentToolBackgroundRuns,
     pub(in crate::runner) last_task_provider_route_diagnostics:
         sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
     pub(in crate::runner) last_task_completion_progress:
         sigil_runtime::TaskCompletionProgressSnapshot,
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn finished_session_maintenance_panic_is_latched_after_reaping() {
+        let runtime =
+            tokio::runtime::Runtime::new().expect("build maintenance shutdown test runtime");
+        let handle = runtime.spawn(async { panic!("session maintenance fixture panic") });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(handle.is_finished());
+        let mut manager = SessionMaintenanceTaskManager {
+            tasks: vec![handle],
+            task_panicked: false,
+        };
+        super::super::shutdown::reap_finished_owned_tasks(
+            &mut manager.tasks,
+            &mut manager.task_panicked,
+        );
+        assert!(manager.tasks.is_empty());
+        for _ in 0..2 {
+            manager.request_stop();
+            assert!(matches!(
+                manager.shutdown_until(&runtime, deadline),
+                Err(super::super::shutdown::OwnedTaskDrainFailure::TaskPanicked)
+            ));
+        }
+    }
 }

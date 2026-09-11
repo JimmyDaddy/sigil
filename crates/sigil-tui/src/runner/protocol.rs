@@ -220,6 +220,97 @@ pub enum QueueMoveDirection {
     Down,
 }
 
+/// Identity of one local queue mutation; it never represents the foreground run outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueOperation {
+    Enqueue {
+        prompt_hash: String,
+        kind: ConversationInputKind,
+        target: ConversationInputTarget,
+    },
+    Cancel {
+        queue_id: ConversationInputQueueId,
+    },
+    Edit {
+        queue_id: ConversationInputQueueId,
+        prompt_hash: String,
+    },
+    Move {
+        queue_id: ConversationInputQueueId,
+        direction: QueueMoveDirection,
+    },
+    Promote {
+        queue_id: ConversationInputQueueId,
+    },
+    SendNow {
+        queue_id: ConversationInputQueueId,
+    },
+    SetPaused {
+        paused: bool,
+    },
+}
+
+impl QueueOperation {
+    pub(crate) fn queue_id(&self) -> Option<&ConversationInputQueueId> {
+        match self {
+            Self::Cancel { queue_id }
+            | Self::Edit { queue_id, .. }
+            | Self::Move { queue_id, .. }
+            | Self::Promote { queue_id }
+            | Self::SendNow { queue_id } => Some(queue_id),
+            Self::Enqueue { .. } | Self::SetPaused { .. } => None,
+        }
+    }
+
+    pub(crate) fn pending_label(&self) -> &'static str {
+        match self {
+            Self::Enqueue { .. } => "saving follow-up",
+            Self::Cancel { .. } => "removing follow-up",
+            Self::Edit { .. } => "saving follow-up edit",
+            Self::Move { .. } => "moving follow-up",
+            Self::Promote { .. } | Self::SendNow { .. } => "scheduling follow-up next",
+            Self::SetPaused { paused: true } => "pausing follow-ups",
+            Self::SetPaused { paused: false } => "resuming follow-ups",
+        }
+    }
+
+    pub(crate) fn success_label(&self) -> &'static str {
+        match self {
+            Self::Enqueue { .. } => "follow-up saved",
+            Self::Cancel { .. } => "follow-up removed",
+            Self::Edit { .. } => "follow-up edited",
+            Self::Move { .. } => "follow-up moved",
+            Self::Promote { .. } | Self::SendNow { .. } => "follow-up will run next",
+            Self::SetPaused { paused: true } => "queue paused",
+            Self::SetPaused { paused: false } => "queue resumed",
+        }
+    }
+}
+
+/// A local queue refusal, classified from durable status rather than error text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum QueueOperationFailure {
+    #[error("follow-up {} not found", .queue_id.as_str())]
+    UnknownItem { queue_id: ConversationInputQueueId },
+    #[error("follow-up {} is already {status:?}", .queue_id.as_str())]
+    ItemUnavailable {
+        queue_id: ConversationInputQueueId,
+        status: sigil_kernel::ConversationInputStatus,
+    },
+    #[error("{message}")]
+    InvalidInput { message: String },
+    #[error("{message}")]
+    Unavailable { message: String },
+    #[error("{message}")]
+    Storage { message: String },
+}
+
+impl From<String> for QueueOperationFailure {
+    fn from(message: String) -> Self {
+        Self::Storage { message }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum McpOAuthUserAction {
     Inspect,
@@ -311,12 +402,12 @@ pub enum WorkerCommand {
         expected_request_hash: String,
         decision: sigil_kernel::UserInputDecisionV1,
     },
-    /// Private TUI composition recovery for one already accepted PlanReview research input.
+    /// Private TUI composition recovery for one already accepted user input.
     ///
     /// This intentionally carries no decision payload. The worker re-reads the exact accepted
-    /// child receipt under its managed authority before feeding the existing user-input
+    /// receipt under its current session/child authority before feeding the existing user-input
     /// dispatcher. It is not an application command or transport DTO.
-    ResumeRecoveredPlanReviewResearch {
+    ResumeRecoveredUserInput {
         command_id: String,
         request_id: String,
         generation: u32,
@@ -518,6 +609,188 @@ pub(in crate::runner) fn is_urgent_worker_command(command: &WorkerCommand) -> bo
     )
 }
 
+/// In-memory bridge to capabilities issued by the actual run owners. No path or cached ID can
+/// create a stop target. Binding and closing share one lock, including runs admitted concurrently
+/// with shutdown, and no durable operation holds this lock.
+#[derive(Clone, Default)]
+pub(in crate::runner) struct WorkerStopControl(Arc<std::sync::Mutex<WorkerStopState>>);
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) enum WorkerShutdownStage {
+    #[default]
+    WorkerLoop,
+    OwnedThreadJoin,
+    CancellationRequest,
+    RunQuiescence,
+    CancellationFinalization,
+    SessionReload,
+    Compaction,
+    ArtifactGc,
+    McpOAuth,
+    ProviderStatus,
+    SessionMaintenance,
+    Runtime,
+}
+
+impl WorkerShutdownStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::WorkerLoop => "worker-loop",
+            Self::OwnedThreadJoin => "owned-thread-join",
+            Self::CancellationRequest => "cancellation-request-persist",
+            Self::RunQuiescence => "run-quiescence",
+            Self::CancellationFinalization => "cancellation-finalization-persist",
+            Self::SessionReload => "session-reload",
+            Self::Compaction => "compaction-drain",
+            Self::ArtifactGc => "artifact-gc-drain",
+            Self::McpOAuth => "mcp-oauth-drain",
+            Self::ProviderStatus => "provider-status-drain",
+            Self::SessionMaintenance => "session-maintenance-drain",
+            Self::Runtime => "runtime-drain",
+        }
+    }
+}
+
+struct ObservedRunStop {
+    capability: sigil_kernel::RunStopCapability,
+    counts: Box<dyn Fn() -> (usize, usize) + Send + Sync>,
+}
+
+#[derive(Default)]
+struct WorkerStopState {
+    closing: bool,
+    active: Option<ObservedRunStop>,
+    retired: Vec<ObservedRunStop>,
+    started: Option<std::time::Instant>,
+    deadline: Option<std::time::Instant>,
+    stage: WorkerShutdownStage,
+    failed_stage: Option<WorkerShutdownStage>,
+}
+
+impl WorkerStopControl {
+    pub(in crate::runner) fn bind(&self, owner: &sigil_kernel::RunCancellationOwner) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let capability = owner.stop_capability();
+        if state.closing {
+            capability.reserve();
+        }
+        // A later admission cannot erase an earlier owner's incomplete cleanup evidence.
+        state
+            .retired
+            .retain(|run| !run.capability.cleanup_complete());
+        if let Some(previous) = state.active.take()
+            && !previous.capability.cleanup_complete()
+        {
+            state.retired.push(previous);
+        }
+        let handle = owner.handle();
+        state.active = Some(ObservedRunStop {
+            capability,
+            counts: Box::new(move || (handle.active_effects(), handle.active_tasks())),
+        });
+    }
+
+    pub(in crate::runner) fn reserve(&self, closing: bool) {
+        if closing {
+            self.begin_shutdown_until(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            );
+            return;
+        }
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(run) = &state.active {
+            run.capability.reserve();
+        }
+    }
+
+    fn begin_shutdown_until(&self, deadline: std::time::Instant) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.closing = true;
+        state.started.get_or_insert_with(std::time::Instant::now);
+        state.deadline = Some(
+            state
+                .deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        for run in state.active.iter().chain(&state.retired) {
+            run.capability.reserve();
+        }
+    }
+
+    pub(in crate::runner) fn shutdown_deadline(&self) -> Option<std::time::Instant> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deadline
+    }
+
+    pub(in crate::runner) fn stage(&self, stage: WorkerShutdownStage) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stage = stage;
+    }
+
+    pub(in crate::runner) fn fail_stage(&self, stage: WorkerShutdownStage) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failed_stage
+            .get_or_insert(stage);
+    }
+
+    fn shutdown_diagnostic(&self, owned_thread: &str) -> String {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (effects, tasks) = state
+            .active
+            .iter()
+            .chain(&state.retired)
+            .map(|run| (run.counts)())
+            .fold((0, 0), |(effects, tasks), (next_effects, next_tasks)| {
+                (effects + next_effects, tasks + next_tasks)
+            });
+        let elapsed_ms = state
+            .started
+            .map_or(0, |started| started.elapsed().as_millis());
+        format!(
+            "owned_thread={owned_thread}; stage={}; elapsed_ms={elapsed_ms}; active_effects={effects}; active_tasks={tasks}; cleanup_complete=false",
+            state.failed_stage.unwrap_or(state.stage).label()
+        )
+    }
+
+    fn cleanup_complete(&self) -> bool {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.failed_stage.is_none()
+            && state
+                .active
+                .iter()
+                .chain(&state.retired)
+                .all(|run| run.capability.cleanup_complete())
+    }
+
+    pub(in crate::runner) fn is_closing(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closing
+    }
+}
+
 /// Cloneable public command handle backed by the worker's unified event inbox.
 #[derive(Clone)]
 pub struct WorkerCommandSender {
@@ -525,6 +798,7 @@ pub struct WorkerCommandSender {
 }
 
 struct WorkerCommandSenderInner {
+    stop_control: WorkerStopControl,
     sink: WorkerCommandSink,
 }
 
@@ -544,6 +818,7 @@ impl WorkerCommandSender {
     ) -> Self {
         Self {
             inner: Arc::new(WorkerCommandSenderInner {
+                stop_control: WorkerStopControl::default(),
                 sink: WorkerCommandSink::Event {
                     event_tx,
                     urgent_tx,
@@ -552,7 +827,41 @@ impl WorkerCommandSender {
         }
     }
 
+    pub(in crate::runner) fn stop_control(&self) -> WorkerStopControl {
+        self.inner.stop_control.clone()
+    }
+
+    pub(crate) fn cleanup_complete(&self) -> bool {
+        self.inner.stop_control.cleanup_complete()
+    }
+
+    pub(crate) fn reserve_stop(&self, closing: bool) {
+        self.inner.stop_control.reserve(closing);
+    }
+
+    pub(crate) fn begin_shutdown_until(&self, deadline: std::time::Instant) {
+        self.inner.stop_control.begin_shutdown_until(deadline);
+    }
+
+    pub(crate) fn shutdown_diagnostic(&self, owned_thread: &str) -> String {
+        self.inner.stop_control.shutdown_diagnostic(owned_thread)
+    }
+
+    pub(crate) fn record_shutdown_join_panic(&self) {
+        self.inner
+            .stop_control
+            .fail_stage(WorkerShutdownStage::OwnedThreadJoin);
+    }
+
     pub fn send(&self, command: WorkerCommand) -> Result<(), WorkerCommandSendError> {
+        if matches!(
+            command,
+            WorkerCommand::Shutdown | WorkerCommand::CancelRun | WorkerCommand::PauseTask { .. }
+        ) {
+            self.reserve_stop(matches!(command, WorkerCommand::Shutdown));
+        } else if !is_urgent_worker_command(&command) && self.inner.stop_control.is_closing() {
+            return Err(WorkerCommandSendError(Box::new(command)));
+        }
         match &self.inner.sink {
             WorkerCommandSink::Event {
                 event_tx,
@@ -588,6 +897,7 @@ impl WorkerCommandSender {
         (
             Self {
                 inner: Arc::new(WorkerCommandSenderInner {
+                    stop_control: WorkerStopControl::default(),
                     sink: WorkerCommandSink::Direct(command_tx),
                 }),
             },
@@ -633,6 +943,15 @@ impl std::error::Error for WorkerCommandSendError {}
 
 #[derive(Debug)]
 pub enum WorkerMessage {
+    /// One source attachment per run; provider deltas remain in its bounded latest slots.
+    LivePreviewSource {
+        source: sigil_runtime::RuntimeLivePreviewSource,
+    },
+    LivePreviewDurableFrontier {
+        session_id: String,
+        run_id: String,
+        sequence: u64,
+    },
     WorkerReady,
     SessionAttachmentTransferred {
         session_log_path: PathBuf,
@@ -671,6 +990,11 @@ pub enum WorkerMessage {
         items: Vec<ConversationQueueItemProjection>,
         paused: bool,
         entries: Vec<SessionLogEntry>,
+    },
+    ConversationQueueOperationCompleted {
+        session_log_path: PathBuf,
+        operation: QueueOperation,
+        result: Result<(), QueueOperationFailure>,
     },
     ConversationQueueDispatchStarted {
         queue_id: ConversationInputQueueId,
@@ -729,6 +1053,14 @@ pub enum WorkerMessage {
         continuation_started: bool,
         entries: Vec<SessionLogEntry>,
     },
+    UserInputDecisionFailed {
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
+        message: String,
+        /// Latest owner entries after a failed preparation may contain a durable resolution.
+        entries: Option<Vec<SessionLogEntry>>,
+    },
     PlanRejected {
         entry: PlanDecisionRecordedEntry,
         entries: Vec<SessionLogEntry>,
@@ -736,6 +1068,13 @@ pub enum WorkerMessage {
     PlanSaved {
         entry: PlanDecisionRecordedEntry,
         entries: Vec<SessionLogEntry>,
+    },
+    PlanActionFailed {
+        action: sigil_kernel::PublicPlanAction,
+        plan_id: String,
+        expected_plan_hash: String,
+        message: String,
+        entries: Option<Vec<SessionLogEntry>>,
     },
     TaskCreatedFromPlan {
         entry: TaskCreatedFromPlanEntry,
@@ -748,11 +1087,6 @@ pub enum WorkerMessage {
         blocker: sigil_kernel::TaskBlockerV1,
         entries: Vec<SessionLogEntry>,
     },
-    PlanTaskCreationFailed {
-        plan_id: String,
-        error: String,
-        entries: Vec<SessionLogEntry>,
-    },
     TaskRunFinished {
         task_id: String,
         status: TaskRunStatus,
@@ -763,6 +1097,7 @@ pub enum WorkerMessage {
         task_id: String,
     },
     TaskRunPaused {
+        session_id: String,
         task_id: String,
         session_log_path: PathBuf,
         provider_name: String,
@@ -770,12 +1105,14 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     RunCancelled {
+        session_id: String,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
         entries: Vec<SessionLogEntry>,
     },
     RunInterrupted {
+        session_id: String,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
@@ -796,12 +1133,14 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     SessionSwitched {
+        session_id: String,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
         entries: Vec<SessionLogEntry>,
     },
     NewSessionStarted {
+        session_id: String,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
@@ -875,6 +1214,7 @@ pub enum WorkerMessage {
         error: String,
     },
     ConversationForked {
+        session_id: String,
         request_id: u64,
         session_log_path: PathBuf,
         provider_name: String,
@@ -898,6 +1238,7 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     LocalSessionForked {
+        session_id: String,
         request_id: u64,
         session_log_path: PathBuf,
         provider_name: String,
@@ -1097,6 +1438,7 @@ impl LocalOperationStatus {
 
 #[derive(Debug, Clone)]
 pub struct WorkerRouteRecoverySessionTarget {
+    pub(crate) session_id: String,
     pub(crate) session_log_path: PathBuf,
     pub(crate) provider_name: String,
     pub(crate) model_name: String,

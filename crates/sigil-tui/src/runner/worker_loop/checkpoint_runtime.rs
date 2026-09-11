@@ -49,6 +49,15 @@ pub(in crate::runner) fn fork_current_conversation(
     request: &ControlledCheckpointRestoreRequest,
 ) -> Result<AttachedCheckpointForkOutput, String> {
     let session = current_session.ok_or_else(|| "session state is unavailable".to_owned())?;
+    let store = JsonlSessionStore::new(session_log_path)
+        .map_err(|error| format!("failed to open source session store: {error:#}"))?;
+    let records = JsonlSessionStore::read_event_records(session_log_path)
+        .map_err(|error| format!("failed to read conversation fork stream: {error:#}"))?;
+    sigil_runtime::session_lifecycle::validate_conversation_fork_source_composition(
+        &records,
+        root_config,
+    )
+    .map_err(|error| format!("failed to validate conversation fork composition: {error:#}"))?;
     let resolved_model_route = session.resolved_model_route().cloned().map_or_else(
         || {
             sigil_runtime::provider_connections::resolve_default_model_route(root_config)
@@ -79,10 +88,6 @@ pub(in crate::runner) fn fork_current_conversation(
         )
         .map_err(|error| format!("failed to attach conversation fork destination: {error}"))?,
     );
-    let store = JsonlSessionStore::new(session_log_path)
-        .map_err(|error| format!("failed to open source session store: {error:#}"))?;
-    let records = JsonlSessionStore::read_event_records(session_log_path)
-        .map_err(|error| format!("failed to read conversation fork stream: {error:#}"))?;
     let output = sigil_kernel::fork_conversation_at_checkpoint(
         &store,
         &records,

@@ -948,7 +948,7 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
     })?;
 
     assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))?
             .is_none()
     );
     assert!(

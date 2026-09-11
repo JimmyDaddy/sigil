@@ -58,7 +58,6 @@ use super::{
     },
 };
 
-#[cfg(test)]
 use crate::config_panel::ConfigDraft;
 #[cfg(test)]
 use sigil_runtime::provider_connections::ConfigPublishOutcome;
@@ -1413,6 +1412,13 @@ impl AppState {
         &self,
         root_config: &RootConfig,
     ) -> (Vec<SkillDescriptor>, Vec<String>) {
+        if !root_config.skills.enabled
+            || !root_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Skills)
+        {
+            return (Vec::new(), Vec::new());
+        }
         let user_config_dir = default_user_config_dir().ok();
         match sigil_runtime::discover_skill_index_with_user_dir(
             &self.workspace_root,
@@ -1435,6 +1441,13 @@ impl AppState {
         &self,
         root_config: &RootConfig,
     ) -> (Vec<ResolvedAgentProfile>, Vec<String>) {
+        if !root_config.task.enabled
+            || !root_config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+        {
+            return (Vec::new(), Vec::new());
+        }
         match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             root_config,
             &self.workspace_root,
@@ -1446,6 +1459,19 @@ impl AppState {
     }
 
     fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
+        let selected = self.config_snapshot.as_ref().is_some_and(|config| {
+            config.selected_capabilities().iter().any(|capability| {
+                matches!(
+                    capability,
+                    sigil_kernel::OptionalCapability::Skills
+                        | sigil_kernel::OptionalCapability::TaskOrchestration
+                        | sigil_kernel::OptionalCapability::Mcp
+                )
+            })
+        });
+        if !selected {
+            return (Vec::new(), Vec::new());
+        }
         let projection = PluginStateProjection::from_entries(&self.session_browser.current_entries);
         let trust_entries = projection
             .trust_entries
@@ -1678,6 +1704,14 @@ impl AppState {
             self.last_notice = Some("config is unavailable in setup mode".to_owned());
             return None;
         };
+        if !root_config
+            .selected_capabilities()
+            .contains(&sigil_kernel::OptionalCapability::TaskOrchestration)
+        {
+            self.last_notice =
+                Some("task orchestration is unavailable in this composition".to_owned());
+            return None;
+        }
         let profile_id = cached.profile.id.clone();
         let registry = match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
@@ -1725,6 +1759,12 @@ impl AppState {
         let Some(root_config) = self.config_snapshot.clone() else {
             return;
         };
+        if !root_config
+            .selected_capabilities()
+            .contains(&sigil_kernel::OptionalCapability::TaskOrchestration)
+        {
+            return;
+        }
         let Ok(registry) = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
             &root_config,
             &self.workspace_root,
@@ -2027,12 +2067,7 @@ impl AppState {
                 old_credential_cleanup_warning,
                 ..
             } = save_outcome;
-            config_state.dirty = false;
-            config_state.save_error = None;
-            config_state.close_guard_armed = false;
-            config_state.draft = ConfigDraft::from_root_config(&root_config);
-            config_state.draft_revision = config_state.draft_revision.saturating_add(1);
-            config_state.sync_mcp_selection();
+            self.mark_config_draft_saved(&root_config);
             let mut compatible_catalog_views =
                 std::mem::take(&mut self.runtime.connection_model_catalog_views);
             let current_connections = load_provider_connections(&root_config).connections;
@@ -2204,6 +2239,13 @@ impl AppState {
             self.last_notice = Some("config is unavailable".to_owned());
             return Ok(None);
         };
+        if !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Mcp)
+        {
+            self.last_notice = Some("MCP is unavailable in this composition".to_owned());
+            return Ok(None);
+        }
         let Some(server) = root_config
             .mcp_servers
             .get(config_state.selected_mcp_server_index)
@@ -2259,7 +2301,27 @@ impl AppState {
         Ok(Some(AppAction::RefreshMcpServer { server_name }))
     }
 
+    pub(crate) fn mark_config_draft_saved(&mut self, root_config: &RootConfig) {
+        if let Some(state) = self.config_state.as_mut() {
+            state.dirty = false;
+            state.save_error = None;
+            state.close_guard_armed = false;
+            state.draft = ConfigDraft::from_root_config(root_config);
+            state.draft_revision = state.draft_revision.saturating_add(1);
+            state.sync_mcp_selection();
+        }
+    }
+
     pub(crate) fn apply_persisted_config_snapshot(&mut self, root_config: &RootConfig) {
+        let effective_config = match root_config.with_effective_composition() {
+            Ok(config) => config,
+            Err(error) => {
+                self.config_snapshot = Some(root_config.clone());
+                self.session_runtime_config = None;
+                self.last_notice = Some(format!("runtime configuration is unavailable: {error:#}"));
+                return;
+            }
+        };
         let info_rail_default_changed = self.config_snapshot.as_ref().is_none_or(|snapshot| {
             snapshot.appearance.info_rail != root_config.appearance.info_rail
         });
@@ -2276,10 +2338,10 @@ impl AppState {
         self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
         let session_config = self
-            .runtime_config_for_current_session(root_config.clone())
+            .runtime_config_for_current_session(effective_config.clone())
             .ok()
             .flatten()
-            .unwrap_or_else(|| root_config.clone());
+            .unwrap_or_else(|| effective_config.clone());
         self.apply_session_runtime_config(&session_config);
         self.runtime.connection_model_catalog_views.clear();
         self.schedule_connection_inventory_refresh(root_config);
@@ -2288,15 +2350,15 @@ impl AppState {
         }
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
         self.runtime.permission_mode = root_config.permission.mode.as_str().to_owned();
-        self.memory_config = root_config.memory.clone();
-        self.compaction_config = root_config.compaction.clone();
+        self.memory_config = effective_config.memory.clone();
+        self.compaction_config = effective_config.compaction.clone();
         self.refresh_session_view_cache();
         self.runtime.code_intelligence_status =
-            code_intelligence_config_status(&root_config.code_intelligence);
+            code_intelligence_config_status(&effective_config.code_intelligence);
         self.runtime.code_intelligence_server_lines.clear();
         self.runtime.code_intelligence_diagnostics_line = None;
         self.runtime.code_intelligence_diagnostics_by_path.clear();
-        self.runtime.mcp_server_statuses = initial_mcp_server_statuses(root_config);
+        self.runtime.mcp_server_statuses = initial_mcp_server_statuses(&effective_config);
         self.refresh_memory_summary();
         self.load_input_history();
         self.recompute_compaction_status(false);
@@ -2328,6 +2390,12 @@ impl AppState {
         let Some(root_config) = self.config_snapshot.as_ref() else {
             return Vec::new();
         };
+        if !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::Mcp)
+        {
+            return Vec::new();
+        }
 
         root_config
             .mcp_servers
@@ -2337,6 +2405,13 @@ impl AppState {
     }
 
     fn mcp_runtime_status_label(&self, server: &McpServerConfig) -> String {
+        if !self.config_snapshot.as_ref().is_some_and(|config| {
+            config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Mcp)
+        }) {
+            return "not selected".to_owned();
+        }
         self.runtime
             .mcp_server_statuses
             .get(&server.name)
@@ -2374,6 +2449,12 @@ impl AppState {
         config_state: &ConfigState,
     ) -> Vec<String> {
         let root_config = config_state.draft.code_intelligence_preview_root_config();
+        if !root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::CodeIntelligence)
+        {
+            return vec![render_config_readonly_row("Saved runtime", "not selected")];
+        }
         let checks = build_code_intelligence_checks(&root_config, &self.workspace_root);
         let mut lines = vec![
             render_config_readonly_row("Saved runtime", &self.runtime.code_intelligence_status),

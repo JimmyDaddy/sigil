@@ -16,6 +16,7 @@ impl AppState {
     }
 
     pub(crate) fn clear_worker_run_state(&mut self) {
+        self.clear_live_preview();
         self.runtime.is_busy = false;
         self.runtime.allow_projection_run_recovery = false;
         self.runtime.run_phase = RunPhase::Idle;

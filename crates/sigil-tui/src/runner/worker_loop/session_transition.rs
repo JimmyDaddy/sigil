@@ -72,15 +72,15 @@ impl SessionTransitionKind {
 }
 
 pub(in crate::runner) struct SessionTransitionOutcome {
+    pub(in crate::runner) session_id: String,
     pub(in crate::runner) session_log_path: PathBuf,
     pub(in crate::runner) provider_name: String,
     pub(in crate::runner) model_name: String,
     pub(in crate::runner) entries: Vec<SessionLogEntry>,
-    /// Private worker-owned recovery command for a durable PlanReview child receipt.  This never
+    /// Private worker-owned recovery command for a durable accepted input receipt.  This never
     /// crosses the application boundary; the dispatcher forwards it only after the target
     /// session has become current so the App can reuse its existing Resume form.
-    pub(in crate::runner) recovered_plan_review_input:
-        Option<sigil_kernel::UserInputDecisionCommandV1>,
+    pub(in crate::runner) recovered_user_input: Option<sigil_kernel::UserInputDecisionCommandV1>,
     pub(in crate::runner) session_attachment:
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
 }
@@ -315,6 +315,7 @@ where
                     recovery_binding,
                     retryable,
                     target_session: crate::runner::WorkerRouteRecoverySessionTarget {
+                        session_id: target.session_scope_id().to_owned(),
                         session_log_path,
                         provider_name: target.provider_name().to_owned(),
                         model_name: target.model_name().to_owned(),
@@ -327,6 +328,21 @@ where
             return Err(source);
         }
     };
+    // Load the target through the normal existing-session writer first. That path can repair a
+    // recoverable log tail; only then inspect managed child resources against the in-memory parent
+    // so a malformed tail cannot bypass the public session-route recovery boundary.
+    if let Some(provisioner) = state.managed_plan_review_child_resources.as_deref() {
+        sigil_runtime::PlanReviewCoordinator::recover_managed_plan_review_drafts(
+            &mut session,
+            provisioner,
+            current_unix_time_ms(),
+        )
+        .map_err(|error| {
+            anyhow::anyhow!("failed to recover managed plan-review drafts: {error:#}")
+        })?;
+    }
+    sigil_runtime::bind_session_composition(&mut session, root_config)?;
+    let task_orchestration_enabled = super::agent_runtime::task_orchestration_enabled(root_config);
     let same_managed_artifact_session =
         state.managed_artifact_store.is_some() && state.session.log_path == session_log_path;
     let target_managed_artifact_store = if let Some(current) = state.managed_artifact_store.as_ref()
@@ -352,37 +368,38 @@ where
     if let Some(artifact_store) = target_managed_artifact_store.as_ref() {
         session.attach_tool_artifact_store_override(artifact_store.store());
     }
-    let cleanup_report = runtime
-        .block_on(
-            sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
-                &mut session,
-                workspace_root,
-            ),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!("failed to reconcile isolated task workspaces: {error:#}")
-        })?;
-    if cleanup_report.inspected > 0 {
-        let _ = message_tx.send(WorkerMessage::Notice(format!(
+    if task_orchestration_enabled {
+        let cleanup_report = runtime
+            .block_on(
+                sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                    &mut session,
+                    workspace_root,
+                ),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("failed to reconcile isolated task workspaces: {error:#}")
+            })?;
+        if cleanup_report.inspected > 0 {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
             "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
             cleanup_report.inspected,
             cleanup_report.removed,
             cleanup_report.already_missing,
             cleanup_report.failed
         )));
-    }
-    let promotion_report = runtime
-        .block_on(
-            sigil_runtime::integration_lanes::reconcile_integration_promotions(
-                &mut session,
-                workspace_root,
-            ),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!("failed to reconcile integration promotions: {error:#}")
-        })?;
-    if promotion_report.inspected > 0 {
-        let _ = message_tx.send(WorkerMessage::Notice(format!(
+        }
+        let promotion_report = runtime
+            .block_on(
+                sigil_runtime::integration_lanes::reconcile_integration_promotions(
+                    &mut session,
+                    workspace_root,
+                ),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("failed to reconcile integration promotions: {error:#}")
+            })?;
+        if promotion_report.inspected > 0 {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
             "reconciled {} interrupted integration promotion(s): {} promoted, {} cancelled, {} failed, {} require review",
             promotion_report.inspected,
             promotion_report.promoted,
@@ -390,6 +407,7 @@ where
             promotion_report.failed,
             promotion_report.needs_review
         )));
+        }
     }
     let same_logical_session = state
         .session
@@ -414,49 +432,67 @@ where
             .map_err(anyhow::Error::msg)?;
     }
 
-    let parent_session_ref =
-        session_ref_for_log_path(&session_log_path).map_err(anyhow::Error::msg)?;
-    let pending_task_handoffs =
-        ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
-            .reconcile(&mut session, &parent_session_ref, current_unix_time_ms())
-            .map_err(|error| {
-                anyhow::anyhow!("failed to reconcile durable task handoffs: {error:#}")
-            })?;
-    let effective_root_config =
-        super::agent_runtime::effective_orchestration_root_config(root_config, &session);
+    let mut target_tool_registry = agent.tool_registry().clone();
+    let (pending_task_handoffs, target_agent_supervisor) = if task_orchestration_enabled {
+        let parent_session_ref =
+            session_ref_for_log_path(&session_log_path).map_err(anyhow::Error::msg)?;
+        let pending_task_handoffs =
+            ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
+                .reconcile(&mut session, &parent_session_ref, current_unix_time_ms())
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to reconcile durable task handoffs: {error:#}")
+                })?;
+        let effective_root_config =
+            super::agent_runtime::effective_orchestration_root_config(root_config, &session);
 
-    let target_agent_registry =
-        sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &effective_root_config,
-            workspace_root,
-            session.entries(),
+        let target_agent_registry =
+            sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+                &effective_root_config,
+                workspace_root,
+                session.entries(),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("failed to rebuild agent profiles for target session: {error:#}")
+            })?;
+        let target_agent_budget =
+            sigil_runtime::AgentBudgetPolicy::from_root_config(&effective_root_config);
+        let target_agent_supervisor = sigil_runtime::AgentSupervisor::new(
+            target_agent_registry.clone(),
+            target_agent_budget.clone(),
+            provider_capabilities.clone(),
+        )
+        .with_event_sink(Arc::new(WorkerSupervisorEventSink {
+            wake_coalescer: state.wake_coalescer.clone(),
+        }));
+        sigil_runtime::agent_tools::register_agent_tools_with_registry_and_mode(
+            &mut target_tool_registry,
+            target_agent_registry,
+            target_agent_budget,
+            effective_root_config.task.multi_agent_mode,
         )
         .map_err(|error| {
-            anyhow::anyhow!("failed to rebuild agent profiles for target session: {error:#}")
+            anyhow::anyhow!("failed to rebuild agent tools for target session: {error:#}")
         })?;
-    let target_agent_budget =
-        sigil_runtime::AgentBudgetPolicy::from_root_config(&effective_root_config);
-    let target_agent_supervisor = sigil_runtime::AgentSupervisor::new(
-        target_agent_registry.clone(),
-        target_agent_budget.clone(),
-        provider_capabilities.clone(),
-    )
-    .with_event_sink(Arc::new(WorkerSupervisorEventSink {
-        wake_coalescer: state.wake_coalescer.clone(),
-    }));
-    let mut target_tool_registry = agent.tool_registry().clone();
-    sigil_runtime::agent_tools::register_agent_tools_with_registry_and_mode(
-        &mut target_tool_registry,
-        target_agent_registry,
-        target_agent_budget,
-        effective_root_config.task.multi_agent_mode,
-    )
-    .map_err(|error| {
-        anyhow::anyhow!("failed to rebuild agent tools for target session: {error:#}")
-    })?;
+
+        (pending_task_handoffs, Some(target_agent_supervisor))
+    } else {
+        (Vec::new(), None)
+    };
+
+    // The transition gate excluded active local work and the target attachment remains held.
+    // Reuse the same append-only crash recovery owner as application run preparation before
+    // publishing the target projection; never leave its old public run looking active.
+    anyhow::ensure!(
+        session.store_path() == Some(route_attachment.session_path()),
+        "public run recovery attachment belongs to another session"
+    );
+    session
+        .conversation_run_lifecycle_recorder()?
+        .reconcile_unfinished(current_unix_time_ms())?;
 
     let pending_agent_result_continuations =
         pending_agent_result_continuations_from_session(Some(&session));
+    let session_id = session.session_scope_id().to_owned();
     let provider_name = session.provider_name().to_owned();
     let model_name = session.model_name().to_owned();
     let entries = session.entries().to_vec();
@@ -526,23 +562,23 @@ where
     state.agent.supervisor = target_agent_supervisor;
     state.run.pending_task_handoffs = pending_task_handoffs;
     register_worker_active_projection_observer(state).map_err(anyhow::Error::msg)?;
-    let recovered_plan_review_input =
-        match super::recover_managed_plan_review_research_attention(state) {
-            Ok(command) => command,
-            Err(error) => {
-                let _ = message_tx.send(WorkerMessage::Notice(format!(
-                    "accepted plan-review input recovery is unavailable: {error:#}"
-                )));
-                None
-            }
-        };
+    let recovered_user_input = match super::recover_owned_user_input_attention(state) {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "accepted input recovery is unavailable: {error:#}"
+            )));
+            None
+        }
+    };
 
     Ok(SessionTransitionOutcome {
+        session_id,
         session_log_path,
         provider_name,
         model_name,
         entries,
-        recovered_plan_review_input,
+        recovered_user_input,
         session_attachment: Arc::clone(
             state
                 .session

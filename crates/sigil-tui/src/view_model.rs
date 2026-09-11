@@ -510,6 +510,7 @@ pub(crate) struct QueueActionButtonViewModel {
     pub detail: String,
     pub selected: bool,
     pub destructive: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -982,17 +983,30 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Ctrl-C copy selection · Esc clear selection");
     }
     if let Some(form) = app.pending_user_input() {
-        if form.open {
-            if form.request.as_ref().is_some_and(|request| {
-                matches!(
-                    &request.source,
-                    sigil_kernel::UserInputSourceV1::PlanRevision { .. }
-                )
-            }) {
+        if form.is_plan_revision_editor() {
+            if !form.open {
+                let state = if form.plan_revision_editor.submitting {
+                    "revision submitting"
+                } else {
+                    "revision draft kept"
+                };
+                return format!("{agent} · {state} · Shift-Tab reopen");
+            }
+            if form.plan_revision_editor.submitting {
                 return format!(
-                    "{agent} · Plan revision · describe the change · Ctrl-Enter actions · Esc close"
+                    "{agent} · Plan revision submitting · waiting for confirmation · Esc back"
                 );
             }
+            let submit = if form.plan_revision_editor.error.is_some() {
+                "submission failed · Enter retry revision"
+            } else {
+                "Enter submit revision"
+            };
+            return format!(
+                "{agent} · Plan revision · {submit} · Shift-Enter/Ctrl-J new line · Esc back"
+            );
+        }
+        if form.open {
             return format!(
                 "{agent} · Input required · Tab fields/actions · ↑↓ choose · Enter continue · Esc close"
             );
@@ -1004,15 +1018,20 @@ fn footer_hints(app: &AppState) -> String {
             .pending_plan_approval()
             .is_some_and(|pending| pending.workbench_open)
         {
+            let pending = app
+                .pending_plan_approval()
+                .expect("pending Plan was checked");
             return format!(
-                "{agent} · Plan review · ↑↓/Pg scroll · Tab action · R/S/V/X act · Enter confirm · Esc close"
+                "{agent} · Plan {} · {}",
+                pending.status_label(),
+                pending.workbench_key_hint()
             );
         }
         if app
             .pending_plan_approval()
             .is_some_and(|pending| pending.stale)
         {
-            return format!("{agent} · plan stale · Enter review · Shift-Tab reopen");
+            return format!("{agent} · workspace notice · Enter review · Shift-Tab reopen");
         }
         return format!("{agent} · Enter review · Shift-Tab reopen");
     }
@@ -1046,6 +1065,9 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Verification {action}I inspect · Esc input");
     }
     if app.is_composer_queue_panel_focused() {
+        if let Some(pending) = app.composer_queue_pending_operation_label() {
+            return format!("{agent} · {pending} · ↑↓ item · Tab/Esc input");
+        }
         return format!(
             "{agent} · Follow-ups ↑↓ item · ←/→ action · Enter selected · Tab/Esc input"
         );
@@ -1120,7 +1142,10 @@ impl LivePanelViewModel {
             queue_rows: app.composer_queue_rows(),
             queue_paused: app.composer_queue_paused(),
             queue_panel_focused: app.is_composer_queue_panel_focused(),
-            queue_action_buttons: queue_action_buttons(app.selected_composer_queue_action()),
+            queue_action_buttons: queue_action_buttons(
+                app.selected_composer_queue_action(),
+                app.composer_queue_actions_enabled(),
+            ),
             progress: app
                 .live_activity_summary()
                 .map(|summary| LiveProgressViewModel::from_parts(&summary.label, &summary.detail)),
@@ -1149,7 +1174,10 @@ impl LivePanelViewModel {
     }
 }
 
-fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonViewModel> {
+fn queue_action_buttons(
+    selected: ComposerQueueAction,
+    enabled: bool,
+) -> Vec<QueueActionButtonViewModel> {
     ComposerQueueAction::ORDER
         .iter()
         .map(|action| QueueActionButtonViewModel {
@@ -1157,6 +1185,7 @@ fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonV
             detail: action.detail().to_owned(),
             selected: *action == selected,
             destructive: action.is_destructive(),
+            enabled,
         })
         .collect()
 }
@@ -1169,6 +1198,9 @@ pub(crate) struct PlanApprovalViewModel {
     pub suggested_check_count: usize,
     pub stale: bool,
     pub stale_reason: Option<String>,
+    pub status_label: String,
+    pub revision_detail: Option<String>,
+    pub action_feedback: Option<crate::app::PlanActionFeedback>,
 }
 
 impl PlanApprovalViewModel {
@@ -1180,6 +1212,9 @@ impl PlanApprovalViewModel {
             suggested_check_count: pending.suggested_check_count,
             stale: pending.stale,
             stale_reason: pending.stale_reason.clone(),
+            status_label: pending.status_label().to_owned(),
+            revision_detail: pending.revision_detail().map(str::to_owned),
+            action_feedback: pending.action_feedback.clone(),
         }
     }
 }

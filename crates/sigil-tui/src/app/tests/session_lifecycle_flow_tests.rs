@@ -65,6 +65,7 @@ fn app_with_resume_target() -> Result<(tempfile::TempDir, AppState, PathBuf)> {
     write_session_log(&target, &restored_entries("deepseek", "deepseek-v4-flash"))?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.composer.input = "/resume".to_owned();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     Ok((temp, app, target))
 }
 

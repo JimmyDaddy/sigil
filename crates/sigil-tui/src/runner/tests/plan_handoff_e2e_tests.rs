@@ -24,8 +24,8 @@ use super::{
         planned_role_provider_builder, planned_role_provider_builder_with_stream_start_signal,
         routed_session_identity, routed_test_root_config, routed_unauthenticated_test_root_config,
         spawn_test_worker, spawn_test_worker_with_existing_authority_composition,
-        spawn_test_worker_with_role_provider_builder, submit_plan_draft_chunks, test_root_config,
-        wait_for_session_entry,
+        spawn_test_worker_with_role_provider_builder, submit_plan_review_result_chunks,
+        test_root_config, wait_for_session_entry,
     },
 };
 
@@ -70,6 +70,110 @@ fn task_workspace_read_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(PlannerDiscoveryReadTool));
     registry
+}
+
+fn assert_finished_public_root(
+    session_log_path: &std::path::Path,
+    workspace_root: &std::path::Path,
+    root_config: &sigil_kernel::RootConfig,
+) -> Result<()> {
+    use sigil_runtime::RuntimeApplicationProjectionSource;
+
+    let records = JsonlSessionStore::read_event_records(session_log_path)?;
+    let lifecycle = records
+        .iter()
+        .map(sigil_kernel::conversation_run_lifecycle_record_from_stream)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let [
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started),
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+    ] = lifecycle.as_slice()
+    else {
+        panic!("the completed handoff must close its one public foreground root");
+    };
+    assert_eq!(started.run_id(), finalized.run_id());
+    assert_eq!(
+        finalized.status(),
+        sigil_kernel::ConversationRunTerminalStatusV1::Succeeded
+    );
+    let final_message_id = finalized
+        .final_message_id()
+        .expect("a successful root must bind a durable assistant message");
+    assert!(
+        JsonlSessionStore::read_entries(session_log_path)?
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Assistant(message) if message.id == final_message_id))
+    );
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let root_events = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == started.run_id())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        root_events
+            .iter()
+            .filter(|entry| matches!(
+                entry.event.event,
+                sigil_kernel::PublicRunEventKind::RunStarted { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        root_events
+            .iter()
+            .filter(|entry| matches!(
+                entry.event.event,
+                sigil_kernel::PublicRunEventKind::RunFinished { .. }
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        root_events.last().map(|entry| &entry.event.event),
+        Some(sigil_kernel::PublicRunEventKind::RunFinished { .. })
+    ));
+
+    let config_path = workspace_root.join("sigil.toml");
+    fs::write(&config_path, toml::to_string(root_config)?)?;
+    let binding = sigil_runtime::RuntimeSessionProjectionBinding::new(
+        config_path,
+        workspace_root.to_path_buf(),
+        session_log_path.to_path_buf(),
+        records[0].session_id().to_owned(),
+        sigil_application::ApplicationInstanceId::new("handoff-public-root-test")?,
+        sigil_application::AuthenticatedSubject::new("local-user")?,
+        Some(sigil_application::WorkspaceScopeId::new(
+            "fixture-workspace",
+        )?),
+        1,
+        1,
+        1,
+        1,
+    )?
+    .with_owner(sigil_runtime::RuntimeSessionProjectionOwner::from_store(
+        &JsonlSessionStore::new(session_log_path)?,
+    ));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let snapshot = runtime.block_on(binding.open_projection(
+        sigil_application::OpenProjectionRequest {
+            scope: binding.scope().clone(),
+            observer_generation: 1,
+            resume_from: None,
+        },
+    ))?;
+    assert_eq!(snapshot.envelope.projection.run.status.as_str(), "finished");
+    assert!(
+        snapshot.envelope.projection.run.active_binding.is_none(),
+        "the real application projection must release the completed handoff's root run"
+    );
+    Ok(())
 }
 
 /// Initializes a fresh test session through the real route-bound `Session` API before any worker
@@ -424,7 +528,7 @@ fn plan_review_research_private_resume_replays_the_exact_managed_child_cancel() 
     // This is the private worker ingress used after the application service has cached the
     // original command as Uncertain.  It carries only public matching fields; the worker must
     // re-read the authoritative child receipt above before it can re-enter the normal dispatcher.
-    worker.send(WorkerCommand::ResumeRecoveredPlanReviewResearch {
+    worker.send(WorkerCommand::ResumeRecoveredUserInput {
         command_id: command.command_id.as_str().to_owned(),
         request_id: request.identity.request_id.as_str().to_owned(),
         generation: request.identity.generation,
@@ -477,7 +581,7 @@ fn plan_review_research_private_resume_rejects_a_mismatched_managed_child_receip
         "private-managed-research-mismatch",
     )?;
 
-    worker.send(WorkerCommand::ResumeRecoveredPlanReviewResearch {
+    worker.send(WorkerCommand::ResumeRecoveredUserInput {
         command_id: command.command_id.as_str().to_owned(),
         request_id: request.identity.request_id.as_str().to_owned(),
         generation: request.identity.generation,
@@ -486,11 +590,15 @@ fn plan_review_research_private_resume_rejects_a_mismatched_managed_child_receip
     let notice = worker.recv_until_with_timeout_diagnostic(
         "private plan-review mismatch rejection",
         Duration::from_secs(10),
-        |message| matches!(message, WorkerMessage::Notice(text) if text.contains("no longer matches")),
+        |message| matches!(message, WorkerMessage::UserInputDecisionFailed { message, .. } if message.contains("no longer matches")),
     )?;
     assert!(matches!(
         notice,
-        WorkerMessage::Notice(ref text) if text == "recovered plan-review input no longer matches the selected request"
+        WorkerMessage::UserInputDecisionFailed { ref request_id, generation, ref expected_request_hash, ref message, .. }
+            if request_id == request.identity.request_id.as_str()
+                && generation == request.identity.generation
+                && expected_request_hash == &format!("{}-mismatch", request.request_hash)
+                && message == "recovered input no longer matches the selected request"
     ));
     let durable_entries = JsonlSessionStore::read_entries(&session_log_path)?;
     assert!(
@@ -630,6 +738,120 @@ fn switch_recovers_managed_plan_review_research_attention_after_session_switched
 }
 
 #[test]
+fn explicit_plan_persists_public_start_before_immediate_cancel() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/explicit-plan-early-cancel.jsonl");
+    let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
+    initialize_routed_plan_review_session(&root_config, &session_log_path, "planned-model")?;
+    let provider = PlannedProvider::new(vec![StreamPlan::GatedChunks {
+        gate: Arc::new(tokio::sync::Notify::new()),
+        chunks: vec![
+            ProviderChunk::TextDelta("must not finish".to_owned()),
+            ProviderChunk::Done,
+        ],
+    }]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "cancel this plan immediately after admission".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let mut observed_started = false;
+    loop {
+        match worker.recv_with_timeout(Duration::from_secs(10))? {
+            WorkerMessage::PlanRunStarted { .. } => {
+                // Cancel at admission without waiting for the Plan coordinator or provider.
+                // Before this message the urgent command could overtake SubmitPlanPrompt.
+                worker.send(WorkerCommand::CancelRun)?;
+                let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+                assert!(records.iter().any(|record| matches!(
+                    sigil_kernel::conversation_run_lifecycle_record_from_stream(record),
+                    Ok(Some(sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunStartedV1(_)))
+                )), "native PlanRunStarted must follow durable foreground admission");
+                observed_started = true;
+            }
+            WorkerMessage::RunCancelled { .. } => break,
+            WorkerMessage::RunFailed(error) => {
+                return Err(anyhow!("early Plan cancellation failed: {error}"));
+            }
+            WorkerMessage::RunInterrupted { .. } => {
+                return Err(anyhow!("early Plan cancellation was not quiescent"));
+            }
+            WorkerMessage::PlanRunFinished { .. } => {
+                return Err(anyhow!("the gated Plan finished before cancellation"));
+            }
+            _ => {}
+        }
+    }
+    assert!(observed_started);
+    worker.shutdown()?;
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let lifecycle = records
+        .iter()
+        .map(sigil_kernel::conversation_run_lifecycle_record_from_stream)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let [
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunStartedV1(started),
+        sigil_kernel::ConversationRunLifecycleRecordV1::ConversationRunFinalizedV1(finalized),
+    ] = lifecycle.as_slice()
+    else {
+        return Err(anyhow!(
+            "early Plan cancellation must close exactly one admitted foreground run"
+        ));
+    };
+    assert_eq!(started.run_id(), finalized.run_id());
+    assert_eq!(
+        finalized.status(),
+        sigil_kernel::ConversationRunTerminalStatusV1::Cancelled
+    );
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+    let root_events = outbox
+        .events_in_order()
+        .into_iter()
+        .filter(|entry| entry.run_id == started.run_id())
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        root_events.first().map(|entry| &entry.event.event),
+        Some(sigil_kernel::PublicRunEventKind::RunStarted { .. })
+    ));
+    assert!(matches!(
+        root_events.last().map(|entry| &entry.event.event),
+        Some(sigil_kernel::PublicRunEventKind::RunCancelled)
+    ));
+    assert_eq!(
+        root_events
+            .iter()
+            .filter(|entry| matches!(
+                entry.event.event,
+                sigil_kernel::PublicRunEventKind::RunStarted { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        root_events
+            .iter()
+            .filter(|entry| matches!(
+                entry.event.event,
+                sigil_kernel::PublicRunEventKind::RunCancelled
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -638,6 +860,7 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
         .join(".sigil/sessions/session-auto-task-handoff-e2e.jsonl");
     let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    initialize_routed_plan_review_session(&root_config, &session_log_path, "planned-model")?;
     let handoff_args = r#"{"reason_codes":["cross_layer","long_verification"]}"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![
         ProviderChunk::ToolCallStart {
@@ -693,10 +916,10 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
         ]),
     ]);
     let worker = spawn_test_worker_with_role_provider_builder(
-        root_config,
+        root_config.clone(),
         session_log_path.clone(),
         Agent::new(provider, task_workspace_read_registry()),
-        workspace_root,
+        workspace_root.clone(),
         role_provider_builder,
     )?;
 
@@ -759,12 +982,42 @@ fn ordinary_chat_auto_handoff_runs_durable_task_under_the_same_worker_run() -> R
         1,
         "automatic handoff must bind the task to its inherited root cancellation scope"
     );
+    assert_finished_public_root(&session_log_path, &workspace_root, &root_config)?;
     worker.shutdown()?;
     Ok(())
 }
 
 #[test]
 fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<()> {
+    fn apply_until<T>(
+        worker: &TestWorker,
+        app: &mut crate::app::AppState,
+        attention_dismissed: bool,
+        mut select: impl FnMut(&WorkerMessage) -> Option<T>,
+    ) -> Result<T> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let message = worker
+                .recv_with_timeout(deadline.saturating_duration_since(std::time::Instant::now()))?;
+            let selected = select(&message);
+            let debug = format!("{message:?}");
+            app.handle_worker_message(message)?;
+            if attention_dismissed {
+                assert!(
+                    app.pending_user_input().is_none(),
+                    "input attention reopened after {debug}"
+                );
+                assert!(
+                    app.composer.pending_user_input_queue.is_empty(),
+                    "old input queued after {debug}"
+                );
+            }
+            if let Some(selected) = selected {
+                return Ok(selected);
+            }
+        }
+    }
+
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -803,7 +1056,7 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             }
         }]
     }"#;
-    let plan_args = r#"{
+    let plan_args = r##"{
         "plan_version": 1,
         "status": "accepted",
         "steps": [{
@@ -813,7 +1066,8 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             "mode": "read",
             "isolation": "shared_read_only"
         }]
-    }"#;
+    }"##;
+    let continuation_gate = Arc::new(tokio::sync::Notify::new());
     let role_provider_builder = planned_role_provider_builder(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
@@ -831,19 +1085,38 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             }),
             ProviderChunk::Done,
         ]),
+        StreamPlan::GatedChunks {
+            gate: Arc::clone(&continuation_gate),
+            chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "task-plan-after-answer".to_owned(),
+                    name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "task-plan-after-answer".to_owned(),
+                    delta: plan_args.to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "task-plan-after-answer".to_owned(),
+                    name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                    args_json: plan_args.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+        },
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
-                id: "task-plan-after-answer".to_owned(),
-                name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                id: "readonly-bash-after-answer".to_owned(),
+                name: "bash".to_owned(),
             },
             ProviderChunk::ToolCallArgsDelta {
-                id: "task-plan-after-answer".to_owned(),
-                delta: plan_args.to_owned(),
+                id: "readonly-bash-after-answer".to_owned(),
+                delta: r#"{"command":"echo hello"}"#.to_owned(),
             },
             ProviderChunk::ToolCallComplete(ToolCall {
-                id: "task-plan-after-answer".to_owned(),
-                name: sigil_kernel::TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                args_json: plan_args.to_owned(),
+                id: "readonly-bash-after-answer".to_owned(),
+                name: "bash".to_owned(),
+                args_json: r#"{"command":"echo hello"}"#.to_owned(),
             }),
             ProviderChunk::Done,
         ]),
@@ -856,32 +1129,45 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             ProviderChunk::Done,
         ]),
     ]);
-    let worker = spawn_test_worker_with_role_provider_builder(
+    let mut app =
+        crate::app::AppState::from_root_config(&workspace_root.join("sigil.toml"), &root_config);
+    let (composition, authority_root) = super::common::test_authority_composition(&workspace_root)?;
+    let paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools_with_managed_execution_and_terminal_config(
+        &mut registry,
+        sigil_tools_builtin::BuiltinToolPaths::workspace_defaults(&workspace_root),
+        composition.command_execution.clone(),
+        sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(&root_config.execution),
+        None,
+        Some(sigil_runtime::authority_scratch_control(paths.scratch_root)),
+    );
+    let worker = super::common::spawn_test_worker_with_role_provider_builder_and_authority(
         root_config,
         session_log_path.clone(),
-        Agent::new(provider, task_workspace_read_registry()),
+        Agent::new(provider, registry),
         workspace_root,
         role_provider_builder,
+        composition,
+        Some(authority_root),
     )?;
 
     worker.send(WorkerCommand::SubmitPrompt {
         prompt: "inspect the selected subsystem and verify the handoff".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
-    let paused = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(
-            message,
-            WorkerMessage::TaskRunFinished {
-                status: TaskRunStatus::Paused,
-                ..
-            }
-        )
+    let entries = apply_until(&worker, &mut app, false, |message| match message {
+        WorkerMessage::TaskRunFinished {
+            status: TaskRunStatus::Paused,
+            entries,
+            ..
+        } => Some(entries.clone()),
+        _ => None,
     })?;
-    let WorkerMessage::TaskRunFinished { entries, .. } = paused else {
-        unreachable!("recv_until only returns paused TaskRunFinished");
-    };
     let task_id = entries
         .iter()
         .rev()
@@ -902,12 +1188,11 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             _ => None,
         })
         .expect("paused planner task must retain its exact attention route");
-    let requested = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::UserInputRequested { .. })
+    let request = apply_until(&worker, &mut app, false, |message| match message {
+        WorkerMessage::UserInputRequested { request, .. } => Some(request.clone()),
+        _ => None,
     })?;
-    let WorkerMessage::UserInputRequested { request, .. } = requested else {
-        unreachable!("recv_until only returns UserInputRequested");
-    };
+    assert!(app.pending_user_input().is_some_and(|form| form.open));
     assert!(matches!(
         request.source,
         sigil_kernel::UserInputSourceV1::Planner { .. }
@@ -927,25 +1212,77 @@ fn task_planner_question_resumes_under_the_same_supervised_tui_task() -> Result<
             }],
         },
     })?;
-    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
-        matches!(message, WorkerMessage::TaskRunStarted { .. })
+    apply_until(&worker, &mut app, false, |message| match message {
+        WorkerMessage::UserInputDecisionApplied {
+            request: applied,
+            continuation_started,
+            ..
+        } if applied.identity == request.identity => {
+            assert!(*continuation_started);
+            Some(())
+        }
+        _ => None,
     })?;
-    let completed = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+    assert!(
+        app.pending_user_input().is_none(),
+        "the accepted answer must close Input required and Resume"
+    );
+    assert!(app.composer.pending_user_input_queue.is_empty());
+    let resumed_task = apply_until(&worker, &mut app, true, |message| match message {
+        WorkerMessage::TaskRunStarted { task_id, .. } => Some(task_id.clone()),
+        _ => None,
+    })?;
+    assert_eq!(resumed_task, task_id.as_str());
+    assert!(
+        app.runtime.is_busy,
+        "the continued planner must be running while its stream is gated"
+    );
+    app.composer.input = "follow-up after the accepted answer".to_owned();
+    assert!(
         matches!(
-            message,
-            WorkerMessage::TaskRunFinished {
-                status: TaskRunStatus::Completed,
-                ..
+            app.submit_input()?,
+            Some(crate::app::AppAction::QueueConversationInput { prompt, .. })
+                if prompt == "follow-up after the accepted answer"
+        ),
+        "the retired input form must not block follow-up admission"
+    );
+    assert!(app.composer.input.is_empty());
+    continuation_gate.notify_one();
+
+    let mut saw_bash_result = false;
+    let entries = apply_until(&worker, &mut app, true, |message| {
+        let event = match message {
+            WorkerMessage::Event(event) | WorkerMessage::AgentThreadEvent { event, .. } => {
+                Some(event.as_ref())
             }
-        )
+            _ => None,
+        };
+        if let Some(sigil_kernel::RunEvent::ToolResult(result)) = event
+            && result.call_id == "readonly-bash-after-answer"
+        {
+            assert_eq!(result.tool_name, "bash");
+            assert!(!result.is_error(), "builtin bash must succeed: {result:?}");
+            assert!(result.content.contains("hello"));
+            saw_bash_result = true;
+        }
+        match message {
+            WorkerMessage::TaskRunFinished {
+                status, entries, ..
+            } => {
+                assert_eq!(
+                    *status,
+                    TaskRunStatus::Completed,
+                    "continued task failed: {entries:#?}"
+                );
+                Some(entries.clone())
+            }
+            _ => None,
+        }
     })?;
-    let WorkerMessage::TaskRunFinished {
-        status, entries, ..
-    } = completed
-    else {
-        unreachable!("recv_until only returns completed TaskRunFinished");
-    };
-    assert_eq!(status, TaskRunStatus::Completed);
+    assert!(
+        saw_bash_result,
+        "the read-only step must execute real builtin bash echo hello"
+    );
     let projection = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(&entries)?;
     assert_eq!(projection.pending().count(), 0);
     assert_eq!(
@@ -1202,8 +1539,10 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-task-guidance-e2e.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new("task_guidance_e2e")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -1253,7 +1592,6 @@ fn queued_task_guidance_promotes_at_idle_safe_point_and_continues_exact_task() -
     ))?;
     drop(session);
 
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let role_provider_builder = planned_role_provider_builder(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
@@ -1359,8 +1697,11 @@ fn run_typed_task_continuation_from_conversation(
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-typed-task-continuation-e2e.jsonl");
+    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new("typed_task_continuation_e2e")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -1440,8 +1781,6 @@ fn run_typed_task_continuation_from_conversation(
             ProviderChunk::Done,
         ]),
     ]);
-    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
-    root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path.clone(),
@@ -1614,8 +1953,10 @@ fn run_explicit_task_continuation_after_user_clear(
     let session_log_path = temp.path().join(format!(
         ".sigil/sessions/session-explicit-continue-{suffix}.jsonl"
     ));
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new(format!("explicit_continue_{suffix}"))?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -1697,7 +2038,7 @@ fn run_explicit_task_continuation_after_user_clear(
         ]),
     ]);
     let worker = spawn_test_worker_with_role_provider_builder(
-        test_root_config(&workspace_root, "planned", "planned-model"),
+        root_config,
         session_log_path,
         Agent::new(
             PlannedProvider::new(Vec::new()),
@@ -1792,8 +2133,10 @@ fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-paused-task-guidance-run-next.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
+    sigil_runtime::bind_session_composition(&mut session, &root_config)?;
     let task_id = TaskId::new("paused_task_guidance_run_next")?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
@@ -1850,7 +2193,6 @@ fn run_next_resumes_paused_task_guidance_after_its_initial_wake_was_consumed() -
     ))?;
     drop(session);
 
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let worker = spawn_test_worker_with_role_provider_builder(
         root_config,
         session_log_path,
@@ -2018,7 +2360,7 @@ fn startup_reconciles_requested_handoff_and_resumes_task_without_replaying_chat_
     let bound = sigil_runtime::ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         })
         .bind_conversation_input(
             &session,
@@ -2256,12 +2598,48 @@ fn explicit_task_command_uses_typed_handoff_admission_before_planning() -> Resul
 
 #[test]
 fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Result<()> {
+    assert_task_discovery_on_default_worker_stack(false, false)
+}
+
+#[test]
+fn ordinary_chat_task_discovery_completes_on_default_worker_stack() -> Result<()> {
+    assert_task_discovery_on_default_worker_stack(true, false)
+}
+
+#[test]
+fn ordinary_chat_task_discovery_cancellation_settles_children_on_default_worker_stack() -> Result<()>
+{
+    assert_task_discovery_on_default_worker_stack(true, true)
+}
+
+fn assert_task_discovery_on_default_worker_stack(
+    ordinary_chat: bool,
+    cancel_during_discovery: bool,
+) -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-planner-discovery-e2e.jsonl");
-    let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
+    let mut root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
+    if ordinary_chat {
+        root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+        initialize_routed_plan_review_session(&root_config, &session_log_path, "planned-model")?;
+    }
+    let coordinator_plans = if ordinary_chat {
+        vec![StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "discovery-handoff".to_owned(),
+                name: "request_task_planning".to_owned(),
+                args_json: r#"{"reason_codes":["cross_layer","long_verification"]}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ])]
+    } else {
+        Vec::new()
+    };
+    let (provider, coordinator_streams) =
+        PlannedProvider::new_with_stream_start_signal(coordinator_plans);
     root_config.task.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
     root_config.task.max_planning_research_agents = 2;
     root_config.task.max_subagents = 4;
@@ -2292,53 +2670,177 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
             "isolation": "shared_read_only"
         }]
     }"#;
-    let role_provider_builder = planned_role_provider_builder(vec![
-        StreamPlan::Chunks(vec![
-            ProviderChunk::ToolCallComplete(ToolCall {
-                id: "planner-discovery-call".to_owned(),
-                name: sigil_runtime::REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
-                args_json: discovery_args.to_owned(),
-            }),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta("kernel discovery complete".to_owned()),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta("runtime discovery complete".to_owned()),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::ToolCallComplete(ToolCall {
-                id: "task-plan-after-discovery".to_owned(),
-                name: "task_plan_update".to_owned(),
-                args_json: task_plan_args.to_owned(),
-            }),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta("discovery-backed task completed".to_owned()),
-            ProviderChunk::Done,
-        ]),
-        StreamPlan::Chunks(vec![
-            ProviderChunk::TextDelta("discovery-backed synthesis completed".to_owned()),
-            ProviderChunk::Done,
-        ]),
-    ]);
+    let (role_provider_builder, role_streams) =
+        planned_role_provider_builder_with_stream_start_signal(vec![
+            StreamPlan::Chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "planner-discovery-call".to_owned(),
+                    name: sigil_runtime::REQUEST_TASK_DISCOVERY_TOOL_NAME.to_owned(),
+                    args_json: discovery_args.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ]),
+            if cancel_during_discovery {
+                StreamPlan::Pending
+            } else {
+                StreamPlan::Chunks(vec![
+                    ProviderChunk::TextDelta("kernel discovery complete".to_owned()),
+                    ProviderChunk::Done,
+                ])
+            },
+            if cancel_during_discovery {
+                StreamPlan::Pending
+            } else {
+                StreamPlan::Chunks(vec![
+                    ProviderChunk::TextDelta("runtime discovery complete".to_owned()),
+                    ProviderChunk::Done,
+                ])
+            },
+            StreamPlan::Chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "task-plan-after-discovery".to_owned(),
+                    name: "task_plan_update".to_owned(),
+                    args_json: task_plan_args.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ]),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("discovery-backed task completed".to_owned()),
+                ProviderChunk::Done,
+            ]),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("discovery-backed synthesis completed".to_owned()),
+                ProviderChunk::Done,
+            ]),
+        ]);
     let registry = task_workspace_read_registry();
     let worker = spawn_test_worker_with_role_provider_builder(
-        root_config,
-        session_log_path,
-        Agent::new(PlannedProvider::new(Vec::new()), registry),
-        workspace_root,
+        root_config.clone(),
+        session_log_path.clone(),
+        Agent::new(provider, registry),
+        workspace_root.clone(),
         role_provider_builder,
     )?;
 
-    worker.send(WorkerCommand::SubmitTask {
-        prompt: "inspect kernel and runtime before implementing".to_owned(),
-    })?;
+    // Exercise the production worker runtime without a test-only thread stack override. Ordinary
+    // SubmitPrompt retains the outer coordinator frame while Planner polls both Explore children.
+    let prompt = "inspect kernel and runtime before implementing".to_owned();
+    if ordinary_chat {
+        worker.send(WorkerCommand::SubmitPrompt {
+            prompt,
+            reasoning_effort: ReasoningEffort::Max,
+        })?;
+        let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    } else {
+        worker.send(WorkerCommand::SubmitTask { prompt })?;
+    }
     let _ = worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
+    if cancel_during_discovery {
+        for _ in 0..3 {
+            role_streams
+                .recv_timeout(Duration::from_secs(20))
+                .context("waiting for Planner and both Explore provider streams")?;
+        }
+        worker.send(WorkerCommand::CancelRun)?;
+        let cancelled = worker.recv_until_with_timeout(Duration::from_secs(20), |message| {
+            matches!(
+                message,
+                WorkerMessage::RunCancelled { .. } | WorkerMessage::RunFailed(_)
+            )
+        })?;
+        assert!(
+            matches!(cancelled, WorkerMessage::RunCancelled { .. }),
+            "discovery stop must close its foreground run: {cancelled:?}"
+        );
+        worker.shutdown()?;
+        assert_eq!(coordinator_streams.try_iter().count(), 1);
+        assert_eq!(
+            role_streams.try_iter().count(),
+            0,
+            "cancellation must not dispatch another planner or executor request"
+        );
+        let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+        assert!(
+            entries.iter().any(|entry| matches!(entry,
+                SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                    if run.status == TaskRunStatus::Interrupted
+            )),
+            "unexpected stopped Task entries: {entries:#?}"
+        );
+        assert!(!entries.iter().any(|entry| matches!(entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Completed
+        )));
+        assert!(!entries.iter().any(|entry| matches!(entry,
+            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                if plan.status == TaskPlanStatus::Accepted
+        )));
+        let projection = sigil_kernel::AgentThreadStateProjection::from_entries(&entries);
+        let explore_threads = projection
+            .threads
+            .values()
+            .filter(|thread| {
+                thread
+                    .profile_id
+                    .as_ref()
+                    .is_some_and(|profile| profile.as_str() == sigil_runtime::EXPLORE_PROFILE_ID)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(explore_threads.len(), 2);
+        for thread in explore_threads {
+            assert!(
+                matches!(
+                    thread.status,
+                    sigil_kernel::AgentThreadStatus::Cancelled
+                        | sigil_kernel::AgentThreadStatus::Interrupted
+                ),
+                "discovery child must be terminal after stop: {thread:?}"
+            );
+            assert_eq!(
+                thread.duplicate_terminal_entries, 0,
+                "discovery completion and foreground cancellation must not both close the child"
+            );
+            assert_eq!(thread.attempts.len(), 1);
+            let attempt = thread
+                .attempts
+                .values()
+                .next()
+                .expect("one Explore attempt");
+            assert!(
+                attempt.interrupted.is_some(),
+                "the stopped child must retain its attempt interruption audit"
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| matches!(entry,
+                        SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interrupted))
+                            if interrupted.thread_id == thread.thread_id
+                                && interrupted.attempt_id == attempt.attempt_id
+                    ))
+                    .count(),
+                1,
+                "each started Explore attempt must receive exactly one interruption audit"
+            );
+        }
+        let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+        let finalized = records
+            .iter()
+            .map(sigil_kernel::SessionStreamRecord::stored_event)
+            .find(|event| {
+                event
+                    .payload
+                    .get("record")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("finalized")
+            })
+            .context("discovery cancellation must durably record owner quiescence")?;
+        assert_eq!(finalized.payload["outcome"], "cancelled");
+        assert_eq!(finalized.payload["cleanup_complete"], true);
+        assert_eq!(finalized.payload["active_effects"], 0);
+        assert_eq!(finalized.payload["active_tasks"], 0);
+        return Ok(());
+    }
     let finished = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
         matches!(message, WorkerMessage::TaskRunFinished { .. })
     })?;
@@ -2349,7 +2851,50 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
         unreachable!("recv_until only returns TaskRunFinished");
     };
 
-    assert_eq!(status, TaskRunStatus::Completed);
+    assert_eq!(
+        status,
+        TaskRunStatus::Completed,
+        "unexpected entries: {entries:#?}"
+    );
+    if ordinary_chat {
+        assert_finished_public_root(&session_log_path, &workspace_root, &root_config)?;
+    }
+    worker.shutdown()?;
+    assert_eq!(
+        coordinator_streams.try_iter().count(),
+        usize::from(ordinary_chat)
+    );
+    assert_eq!(
+        role_streams.try_iter().count(),
+        6,
+        "unexpected planning or execution dispatch"
+    );
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry,
+                SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                    if plan.status == TaskPlanStatus::Accepted
+            ))
+            .count(),
+        1,
+        "discovery must commit one plan without replanning"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
+            ))
+            .count(),
+        1
+    );
+    assert!(entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::TaskRun(run))
+            if run.status == TaskRunStatus::Completed
+    )));
     let explore_threads = entries
         .iter()
         .filter_map(|entry| match entry {
@@ -2375,7 +2920,6 @@ fn explicit_task_planner_uses_configured_discovery_fanout_in_tui_runtime() -> Re
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(completed_explore_threads, explore_threads);
-    worker.shutdown()?;
     Ok(())
 }
 
@@ -2387,36 +2931,14 @@ fn plan_handoff_run_now_uses_host_direct_execution_without_replanning() -> Resul
         .path()
         .join(".sigil/sessions/session-plan-handoff-e2e.jsonl");
     let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
-    let draft_args = r#"{
-  "schema_version": 2,
-  "summary": "Inspect approved README plan",
-  "steps": [
-    {
-      "step_id": "inspect-approved-plan",
-      "title": "Inspect README.md",
-      "role": "executor",
-      "depends_on": [],
-      "mode": "read",
-      "isolation": "shared_read_only",
-      "target_paths": ["README.md"]
-    },
-    {
-      "step_id": "report-typo-status",
-      "title": "Report whether the approved typo fix is needed",
-      "role": "executor",
-      "depends_on": ["inspect-approved-plan"],
-      "mode": "read",
-      "isolation": "shared_read_only",
-      "target_paths": ["README.md"]
-    }
-  ],
-  "target_paths": ["README.md"],
-  "suggested_checks": ["cargo test -p sigil-tui plan_handoff"]
-}"#;
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
-        "approved-plan-draft",
-        draft_args,
-    ))]);
+    let draft_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Inspect approved README plan\n\n1. Inspect README.md\n2. Report whether the approved typo fix is needed\n\nPaths: README.md\n\nChecks: cargo test -p sigil-tui plan_handoff"
+}"##;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(
+        submit_plan_review_result_chunks("approved-plan-draft", draft_args),
+    )]);
     let role_provider_builder = planned_role_provider_builder(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::TextDelta("approved plan inspection complete".to_owned()),
@@ -2620,25 +3142,14 @@ fn approved_plan_direct_execution_can_pause_and_resume_without_a_task_plan() -> 
         .path()
         .join(".sigil/sessions/session-plan-direct-pause-resume.jsonl");
     let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
-    let draft_args = r#"{
-      "schema_version": 2,
-      "summary": "Pause and resume direct execution",
-      "steps": [{
-        "step_id": "inspect",
-        "title": "Inspect the approved objective",
-        "role": "executor",
-        "depends_on": [],
-        "mode": "read",
-        "isolation": "shared_read_only",
-        "target_paths": []
-      }],
-      "target_paths": [],
-      "suggested_checks": []
-    }"#;
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(submit_plan_draft_chunks(
-        "direct-pause-plan",
-        draft_args,
-    ))]);
+    let draft_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Pause and resume direct execution\n\n1. Inspect the approved objective"
+}"##;
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(
+        submit_plan_review_result_chunks("direct-pause-plan", draft_args),
+    )]);
     let (role_provider_builder, role_stream_started_rx) =
         planned_role_provider_builder_with_stream_start_signal(vec![
             StreamPlan::Pending,
@@ -2806,21 +3317,13 @@ fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready()
         .join(".sigil/sessions/session-auto-plan-review-e2e.jsonl");
     let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
+    initialize_routed_plan_review_session(&root_config, &session_log_path, "planned-model")?;
     let review_args = r#"{"reason_codes":["architectural_tradeoff","scope_uncertain"]}"#;
-    let draft_args = r#"{
-        "schema_version": 2,
-        "summary": "Migrate the coordinator",
-        "steps": [{
-            "step_id": "migrate_1",
-            "title": "Migrate coordinator",
-            "role": "executor",
-            "mode": "write",
-            "isolation": "sequential_workspace_write",
-            "target_paths": ["src/coordinator.rs"]
-        }],
-        "target_paths": ["src/coordinator.rs"],
-        "suggested_checks": ["cargo test"]
-    }"#;
+    let draft_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Migrate the coordinator\n\n1. Migrate coordinator\n\nPaths: src/coordinator.rs\n\nChecks: cargo test"
+}"##;
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
@@ -2841,7 +3344,7 @@ fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready()
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
                 id: "draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
             },
             ProviderChunk::ToolCallArgsDelta {
                 id: "draft-call".to_owned(),
@@ -2849,17 +3352,17 @@ fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready()
             },
             ProviderChunk::ToolCallComplete(ToolCall {
                 id: "draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
                 args_json: draft_args.to_owned(),
             }),
             ProviderChunk::Done,
         ]),
     ]);
     let worker = spawn_test_worker(
-        root_config,
+        root_config.clone(),
         session_log_path.clone(),
         Agent::new(provider, ToolRegistry::new()),
-        workspace_root,
+        workspace_root.clone(),
     )?;
 
     worker.send(WorkerCommand::SubmitPrompt {
@@ -2924,6 +3427,7 @@ fn ordinary_chat_plan_review_route_commits_typed_draft_and_surfaces_plan_ready()
         )),
         "plan review must not create a task handoff"
     );
+    assert_finished_public_root(&session_log_path, &workspace_root, &root_config)?;
     worker.shutdown()?;
     Ok(())
 }
@@ -2942,20 +3446,11 @@ fn real_plan_review_managed_file_artifact_e2e() -> Result<()> {
     let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let review_args = r#"{"reason_codes":["architectural_tradeoff","scope_uncertain"]}"#;
-    let draft_args = r#"{
-        "schema_version": 2,
-        "summary": "Review the managed workspace evidence",
-        "steps": [{
-            "step_id": "review_1",
-            "title": "Review managed evidence",
-            "role": "executor",
-            "mode": "read",
-            "isolation": "shared_read_only",
-            "target_paths": ["README.md"]
-        }],
-        "target_paths": ["README.md"],
-        "suggested_checks": ["inspect durable artifact refs"]
-    }"#;
+    let draft_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Review the managed workspace evidence\n\n1. Review managed evidence\n\nPaths: README.md\n\nChecks: inspect durable artifact refs"
+}"##;
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
@@ -3021,7 +3516,7 @@ fn real_plan_review_managed_file_artifact_e2e() -> Result<()> {
             }),
             ProviderChunk::Done,
         ]),
-        StreamPlan::Chunks(submit_plan_draft_chunks("draft-call", draft_args)),
+        StreamPlan::Chunks(submit_plan_review_result_chunks("draft-call", draft_args)),
     ]);
     let mut registry = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut registry);
@@ -3141,34 +3636,16 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
     let mut root_config = routed_test_root_config(&workspace_root, "planned-model");
     root_config.task.routing_policy = TaskRoutingPolicy::Auto;
     let review_args = r#"{"reason_codes":["architectural_tradeoff"]}"#;
-    let draft_1_args = r#"{
-        "schema_version": 2,
-        "summary": "Migrate the coordinator",
-        "steps": [{
-            "step_id": "migrate_1",
-            "title": "Migrate coordinator",
-            "role": "executor",
-            "mode": "write",
-            "isolation": "sequential_workspace_write",
-            "target_paths": ["src/coordinator.rs"]
-        }],
-        "target_paths": ["src/coordinator.rs"],
-        "suggested_checks": ["cargo test"]
-    }"#;
-    let draft_2_args = r#"{
-        "schema_version": 2,
-        "summary": "Revised coordinator migration",
-        "steps": [{
-            "step_id": "migrate_2",
-            "title": "Revise migration",
-            "role": "executor",
-            "mode": "write",
-            "isolation": "sequential_workspace_write",
-            "target_paths": ["src/coordinator.rs"]
-        }],
-        "target_paths": ["src/coordinator.rs"],
-        "suggested_checks": ["cargo test"]
-    }"#;
+    let draft_1_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Migrate the coordinator\n\n1. Migrate coordinator\n\nPaths: src/coordinator.rs"
+}"##;
+    let draft_2_args = r##"{
+  "schema_version": 1,
+  "outcome": "draft",
+  "content": "# Revised coordinator migration\n\n1. Revise migration\n\nPaths: src/coordinator.rs"
+}"##;
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
@@ -3189,7 +3666,7 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
                 id: "draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
             },
             ProviderChunk::ToolCallArgsDelta {
                 id: "draft-call".to_owned(),
@@ -3197,7 +3674,7 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
             },
             ProviderChunk::ToolCallComplete(ToolCall {
                 id: "draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
                 args_json: draft_1_args.to_owned(),
             }),
             ProviderChunk::Done,
@@ -3205,7 +3682,7 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
         StreamPlan::Chunks(vec![
             ProviderChunk::ToolCallStart {
                 id: "revision-draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
             },
             ProviderChunk::ToolCallArgsDelta {
                 id: "revision-draft-call".to_owned(),
@@ -3213,7 +3690,7 @@ fn plan_revision_runs_supervised_review_returns_session_and_surfaces_new_draft()
             },
             ProviderChunk::ToolCallComplete(ToolCall {
                 id: "revision-draft-call".to_owned(),
-                name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+                name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
                 args_json: draft_2_args.to_owned(),
             }),
             ProviderChunk::Done,

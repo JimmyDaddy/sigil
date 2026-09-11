@@ -1344,23 +1344,6 @@ impl AppState {
                             Some("no listed model; press M to enter a model id".to_owned());
                         return ModalOutcome::None;
                     };
-                    if matches!(
-                            state.target,
-                            ModelPickerTarget::Setup | ModelPickerTarget::Provider
-                        ) && state.catalog_entries.iter().any(|entry| {
-                            identity.connection_id.as_ref().is_some_and(|connection_id| {
-                            entry.model_ref.connection_id == *connection_id
-                            })
-                            && entry.model_ref.model_id == identity.model_id
-                            && entry.availability
-                                == sigil_runtime::provider_connections::ModelAvailability::ConfiguredUnavailable
-                        }) {
-                            self.last_notice = Some(
-                                "that configured model was not returned; press M to keep it explicitly"
-                                    .to_owned(),
-                            );
-                            return ModalOutcome::None;
-                        }
                     let target = state.target;
                     self.cancel_model_picker_refresh();
                     self.modal_state = None;
@@ -1564,26 +1547,6 @@ impl AppState {
                 let Some(identity) = state.options.get(state.selected).cloned() else {
                     self.last_notice =
                         Some("no listed model; press M to enter a model id".to_owned());
-                    return ModalOutcome::None;
-                };
-                if matches!(
-                    state.target,
-                    ModelPickerTarget::Setup | ModelPickerTarget::Provider
-                ) && state.catalog_entries.iter().any(|entry| {
-                    identity
-                        .connection_id
-                        .as_ref()
-                        .is_some_and(|connection_id| {
-                            entry.model_ref.connection_id == *connection_id
-                        })
-                        && entry.model_ref.model_id == identity.model_id
-                        && entry.availability
-                            == sigil_runtime::provider_connections::ModelAvailability::ConfiguredUnavailable
-                }) {
-                    self.last_notice = Some(
-                        "that configured model was not returned; press M to keep it explicitly"
-                            .to_owned(),
-                    );
                     return ModalOutcome::None;
                 };
                 let target = state.target;

@@ -27,13 +27,16 @@ mod input_flow;
 mod input_history;
 mod intent_stack_flow;
 mod key_router;
+mod live_preview_flow;
 mod mcp_oauth_flow;
 mod modal_flow;
 mod mouse_flow;
 mod pending_plan_flow;
+mod plan_revision_editor;
 mod runtime_command_flow;
 mod runtime_status;
 mod runtime_view_flow;
+mod session_auxiliary;
 mod session_flow;
 pub(crate) mod session_lifecycle_flow;
 mod session_review;
@@ -115,6 +118,7 @@ use self::timeline_render_store::TimelineRenderStore;
 #[cfg(test)]
 pub(crate) use self::usage_sidebar_flow::context_window_source_label;
 
+#[cfg(test)]
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 pub(crate) const SCRATCH_DIR_LABEL: &str = "cache/tmp";
 
@@ -291,7 +295,10 @@ pub(crate) struct PendingPlanApproval {
     /// This workbench is resuming the existing approved Task shell, not approving a new Plan.
     pub(crate) retrying_materialization: bool,
     pub(crate) allowed_actions: Vec<sigil_kernel::PublicPlanAction>,
+    pub(crate) status: Option<sigil_kernel::PublicPlanReviewStatus>,
     pub(crate) revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
+    pub(crate) saved_for_later: bool,
+    pub(crate) action_feedback: Option<PlanActionFeedback>,
     pub(crate) detail: sigil_kernel::PlanReviewDetailV1,
     pub(crate) workbench_open: bool,
     pub(crate) workbench_scroll: usize,
@@ -310,6 +317,19 @@ pub(crate) enum PlanWorkbenchAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanActionFeedback {
+    Pending(PlanWorkbenchAction),
+    Succeeded {
+        action: PlanWorkbenchAction,
+        message: String,
+    },
+    Failed {
+        action: PlanWorkbenchAction,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingUserInputForm {
     pub(crate) view: UserInputFormViewModel,
     pub(crate) request: Option<sigil_kernel::PublicUserInputRequestV1>,
@@ -322,6 +342,7 @@ pub(crate) struct PendingUserInputForm {
     pub(crate) focus_actions: bool,
     pub(crate) selected_action: UserInputFormAction,
     pub(crate) drafts: Vec<UserInputDraftValue>,
+    pub(crate) plan_revision_editor: plan_revision_editor::PlanRevisionEditorState,
     pub(crate) scroll: usize,
     pub(crate) scroll_extent: ViewportScrollExtent,
 }
@@ -419,7 +440,7 @@ impl PlanWorkbenchAction {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Run => "Run",
-            Self::Save => "Save",
+            Self::Save => "Save for later",
             Self::Revise => "Revise",
             Self::Reject => "Reject",
             Self::AdoptCandidate => "Adopt",
@@ -491,7 +512,10 @@ impl PendingPlanApproval {
                 sigil_kernel::PublicPlanAction::Revise,
                 sigil_kernel::PublicPlanAction::Reject,
             ],
+            status: Some(sigil_kernel::PublicPlanReviewStatus::DraftReady),
             revision: None,
+            saved_for_later: false,
+            action_feedback: None,
             detail: sigil_kernel::PlanReviewDetailV1 {
                 plan_id: sigil_kernel::PlanId::new(plan_id).expect("test plan id"),
                 plan_hash: plan_hash.to_owned(),
@@ -566,6 +590,8 @@ pub(crate) enum MutationArtifactRetentionPreview {
 
 #[derive(Debug)]
 pub struct AppState {
+    session_auxiliary: session_auxiliary::SessionAuxiliaryState,
+    live_preview: live_preview_flow::LivePreviewState,
     pub config_path: PathBuf,
     pub workspace_root: PathBuf,
     workspace_git_status: Option<WorkspaceGitStatus>,
@@ -1181,6 +1207,16 @@ impl AppState {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root =
             resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
+        let runtime_config = match root_config.with_effective_composition() {
+            Ok(runtime_config) => runtime_config,
+            Err(error) => {
+                return Self::from_setup(
+                    config_path.to_path_buf(),
+                    workspace_root,
+                    Some(format!("runtime configuration is unavailable: {error:#}")),
+                );
+            }
+        };
         let sigil_paths =
             resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
         let recent_model_refs = sigil_runtime::provider_connections::load_recent_model_refs(
@@ -1200,15 +1236,15 @@ impl AppState {
             &configured_provider_name,
             &configured_model_name,
             initial_model_context_window_tokens,
-            &root_config.compaction,
+            &runtime_config.compaction,
         )
         .threshold_status(0)
         .as_str()
         .to_owned();
         let initial_code_intelligence_status =
-            code_intelligence_config_status(&root_config.code_intelligence);
+            code_intelligence_config_status(&runtime_config.code_intelligence);
         let initial_reasoning_effort = build_run_options(
-            root_config,
+            &runtime_config,
             workspace_root.clone(),
             InteractionMode::Interactive,
             None,
@@ -1222,6 +1258,8 @@ impl AppState {
             workspace_root,
             workspace_git_status,
             sigil_paths,
+            session_auxiliary: Default::default(),
+            live_preview: Default::default(),
             managed_history_writer: None,
             authority_composition: None,
             boot_cutover: None,
@@ -1236,7 +1274,7 @@ impl AppState {
                 model_name: configured_model_name,
                 model_route: configured_model_route,
                 permission_mode,
-                memory_enabled: root_config.memory.enabled,
+                memory_enabled: runtime_config.memory.enabled,
                 memory_document_count: 0,
                 memory_last_status: "pending".to_owned(),
                 mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
@@ -1246,7 +1284,7 @@ impl AppState {
                 code_intelligence_server_lines: BTreeMap::new(),
                 code_intelligence_diagnostics_line: None,
                 code_intelligence_diagnostics_by_path: BTreeMap::new(),
-                mcp_server_statuses: initial_mcp_server_statuses(root_config),
+                mcp_server_statuses: initial_mcp_server_statuses(&runtime_config),
                 stats: SessionStats::default(),
                 session_delta_stats: SessionStats::default(),
                 is_busy: false,
@@ -1295,7 +1333,7 @@ impl AppState {
             info_rail_detail: false,
             review: ReviewState::default(),
             config_snapshot: Some(root_config.clone()),
-            session_runtime_config: Some(root_config.clone()),
+            session_runtime_config: Some(runtime_config.clone()),
             recent_model_refs,
             terminal_keyboard_enhancement_enabled: false,
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
@@ -1309,8 +1347,8 @@ impl AppState {
             safe_tool_calls: HashMap::new(),
             tool_progress_execution_ids: HashMap::new(),
             tool_progress_entry_indices: HashMap::new(),
-            compaction_config: root_config.compaction.clone(),
-            memory_config: root_config.memory.clone(),
+            compaction_config: runtime_config.compaction.clone(),
+            memory_config: runtime_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             timeline_state: TimelineState::default(),
             pending_terminal_cancel_confirmation: None,
@@ -1376,6 +1414,8 @@ impl AppState {
             workspace_root: workspace_root.clone(),
             workspace_git_status,
             sigil_paths,
+            session_auxiliary: Default::default(),
+            live_preview: Default::default(),
             managed_history_writer: None,
             authority_composition: None,
             boot_cutover: None,

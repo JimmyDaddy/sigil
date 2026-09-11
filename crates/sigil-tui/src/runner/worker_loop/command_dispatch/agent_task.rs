@@ -29,6 +29,28 @@ where
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(command_result) = command_result.take() {
+        let agent_supervisor = state.agent.supervisor.clone();
+        if !matches!(&command_result, AgentTaskCommand::CancelTerminalTask { .. })
+            && agent_supervisor.is_none()
+        {
+            let message = "task orchestration is unavailable in this composition".to_owned();
+            let rejection = match &command_result {
+                AgentTaskCommand::CreateTaskFromPlan {
+                    plan_id,
+                    expected_plan_hash,
+                    ..
+                } => WorkerMessage::PlanActionFailed {
+                    action: sigil_kernel::PublicPlanAction::Run,
+                    plan_id: plan_id.clone(),
+                    expected_plan_hash: expected_plan_hash.clone(),
+                    message,
+                    entries: None,
+                },
+                _ => WorkerMessage::RunFailed(message),
+            };
+            let _ = message_tx.send(rejection);
+            continue;
+        }
         match command_result {
             AgentTaskCommand::InvokeAgentProfile {
                 profile_id,
@@ -76,7 +98,10 @@ where
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
                 let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-                    state.agent.supervisor.clone(),
+                    agent_supervisor
+                        .as_ref()
+                        .expect("orchestration command checked its owner")
+                        .clone(),
                     effective_root_config,
                     agent.tool_registry().clone(),
                 )
@@ -94,6 +119,13 @@ where
                         continue;
                     }
                 };
+                if let Err(error) =
+                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+                {
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
                 let cancellation_owner = RunCancellationOwner::new();
                 let cancellation_handle = cancellation_owner.handle();
                 let run_task_guard = cancellation_handle
@@ -114,13 +146,7 @@ where
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
-                if let Err(error) =
-                    state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
-                {
-                    state.session.current = Some(run_session);
-                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    continue;
-                }
+                state.stop_control.bind(&cancellation_owner);
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let profile_id_for_summary = profile_id.clone();
@@ -178,6 +204,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: None,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -290,6 +317,7 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                state.stop_control.bind(&cancellation_owner);
                 let handle = spawn_skill_child_run(
                     runtime,
                     SkillChildRunSpawn {
@@ -305,7 +333,10 @@ where
                         root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: state.agent.supervisor.clone(),
+                        agent_supervisor: agent_supervisor
+                            .as_ref()
+                            .expect("orchestration command checked its owner")
+                            .clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
                         managed_verification_execution: managed_verification_execution
                             .as_ref()
@@ -322,6 +353,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: None,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -407,12 +439,8 @@ where
                     continue;
                 }
                 let task_id_value = task_id.as_str().to_owned();
-                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                    task_id: task_id_value.clone(),
-                    objective: sigil_kernel::safe_persistence_text(&prompt),
-                });
 
-                let handler = ChannelEventHandler::new(message_tx.clone());
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -433,6 +461,24 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                if let Err(error) = handler.start_public_run(
+                    &run_session,
+                    &public_run_id,
+                    &sigil_kernel::safe_persistence_text(&prompt),
+                ) {
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist task foreground run admission: {error:#}"
+                    )));
+                    continue;
+                }
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&prompt),
+                });
+                state.stop_control.bind(&cancellation_owner);
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -445,7 +491,10 @@ where
                         root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: state.agent.supervisor.clone(),
+                        agent_supervisor: agent_supervisor
+                            .as_ref()
+                            .expect("orchestration command checked its owner")
+                            .clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
                         managed_verification_execution: managed_verification_execution
                             .as_ref()
@@ -462,6 +511,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: Some(public_run_id),
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -520,12 +570,8 @@ where
                         continue;
                     }
                 };
-                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                    task_id: task_id_value.clone(),
-                    objective: sigil_kernel::safe_persistence_text(&objective),
-                });
 
-                let handler = ChannelEventHandler::new(message_tx.clone());
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -560,6 +606,24 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                if let Err(error) = handler.start_public_run(
+                    &run_session,
+                    &public_run_id,
+                    &sigil_kernel::safe_persistence_text(&objective),
+                ) {
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist task foreground run admission: {error:#}"
+                    )));
+                    continue;
+                }
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&objective),
+                });
+                state.stop_control.bind(&cancellation_owner);
                 let handle = spawn_task_continue(
                     runtime,
                     TaskContinueSpawn {
@@ -574,7 +638,10 @@ where
                         root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: state.agent.supervisor.clone(),
+                        agent_supervisor: agent_supervisor
+                            .as_ref()
+                            .expect("orchestration command checked its owner")
+                            .clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
                         managed_verification_execution: managed_verification_execution
                             .as_ref()
@@ -591,6 +658,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: Some(public_run_id),
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -609,7 +677,11 @@ where
                     ));
                     continue;
                 }
-                match state.agent.supervisor.request_foreground_background() {
+                match agent_supervisor
+                    .as_ref()
+                    .expect("orchestration command checked its owner")
+                    .request_foreground_background()
+                {
                     Ok(thread_id) => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
                             "agent {} background requested",
@@ -700,23 +772,30 @@ where
                 start_mode,
                 permission_grant,
             } => {
-                let requested_plan_id = plan_id.clone();
+                let failure = |message: String, entries| WorkerMessage::PlanActionFailed {
+                    action: sigil_kernel::PublicPlanAction::Run,
+                    plan_id: plan_id.clone(),
+                    expected_plan_hash: expected_plan_hash.clone(),
+                    message,
+                    entries,
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before creating a task from a plan".to_owned(),
+                        None,
                     ));
                     continue;
                 }
                 if !root_config.task.enabled {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                    let _ = message_tx.send(failure(
                         "task planning is disabled in config".to_owned(),
+                        None,
                     ));
                     continue;
                 }
                 let Some(mut run_session) = state.session.current.take() else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "session state is unavailable".to_owned(),
-                    ));
+                    let _ =
+                        message_tx.send(failure("session state is unavailable".to_owned(), None));
                     continue;
                 };
                 let adopted = match adopt_plan_run(
@@ -724,8 +803,8 @@ where
                     workspace_root,
                     &state.session.log_path,
                     &mut run_session,
-                    plan_id,
-                    expected_plan_hash,
+                    plan_id.clone(),
+                    expected_plan_hash.clone(),
                     start_mode,
                     permission_grant,
                     sigil_kernel::PlanRunCommandSource::TuiKeyboard,
@@ -735,11 +814,7 @@ where
                     Err(error) => {
                         let entries = run_session.entries().to_vec();
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::PlanTaskCreationFailed {
-                            plan_id: requested_plan_id,
-                            error,
-                            entries,
-                        });
+                        let _ = message_tx.send(failure(error, Some(entries)));
                         continue;
                     }
                 };
@@ -785,11 +860,7 @@ where
                         continue;
                     }
                 };
-                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                    task_id: task_id_value.clone(),
-                    objective: sigil_kernel::safe_persistence_text(&objective),
-                });
-                let handler = ChannelEventHandler::new(message_tx.clone());
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -823,6 +894,24 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                if let Err(error) = handler.start_public_run(
+                    &run_session,
+                    &public_run_id,
+                    &sigil_kernel::safe_persistence_text(&objective),
+                ) {
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist task foreground run admission: {error:#}"
+                    )));
+                    continue;
+                }
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: sigil_kernel::safe_persistence_text(&objective),
+                });
+                state.stop_control.bind(&cancellation_owner);
                 let handle = spawn_task_run(
                     runtime,
                     TaskRunSpawn {
@@ -835,7 +924,10 @@ where
                         root_config: effective_root_config,
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
-                        agent_supervisor: state.agent.supervisor.clone(),
+                        agent_supervisor: agent_supervisor
+                            .as_ref()
+                            .expect("orchestration command checked its owner")
+                            .clone(),
                         role_provider_builder: Arc::clone(role_provider_builder),
                         managed_verification_execution: managed_verification_execution
                             .as_ref()
@@ -851,6 +943,7 @@ where
                 );
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: Some(public_run_id),
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -895,7 +988,9 @@ where
                 match cancel_agent_thread(
                     runtime,
                     &state.agent.background_runs,
-                    &state.agent.supervisor,
+                    agent_supervisor
+                        .as_ref()
+                        .expect("orchestration command checked its owner"),
                     root_config,
                     agent.tool_registry(),
                     options,
@@ -922,7 +1017,9 @@ where
                 match message_agent_thread(
                     runtime,
                     &state.agent.background_runs,
-                    &state.agent.supervisor,
+                    agent_supervisor
+                        .as_ref()
+                        .expect("orchestration command checked its owner"),
                     root_config,
                     agent.tool_registry(),
                     options,

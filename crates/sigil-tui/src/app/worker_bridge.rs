@@ -109,14 +109,18 @@ impl AppState {
     }
 
     pub fn poll_background_tasks(&mut self) -> bool {
-        self.poll_setup_model_catalog()
+        self.poll_live_preview()
+            | self.poll_session_auxiliary()
+            | self.poll_setup_model_catalog()
             | self.poll_connection_inventory()
             | self.reload_active_agent_child_transcript()
             | self.poll_update_task()
     }
 
     pub fn has_pending_background_tasks(&self) -> bool {
-        self.runtime.setup_model_catalog_rx.is_some()
+        self.has_live_preview_work()
+            || self.has_session_auxiliary_work()
+            || self.runtime.setup_model_catalog_rx.is_some()
             || self.runtime.connection_inventory_rx.is_some()
             || self.active_agent_child_entry().is_some()
             || self.has_pending_update_task()
@@ -150,6 +154,12 @@ impl AppState {
 
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
         match message {
+            WorkerMessage::LivePreviewSource { source } => self.attach_live_preview(source),
+            WorkerMessage::LivePreviewDurableFrontier {
+                session_id,
+                run_id,
+                sequence,
+            } => self.accept_live_durable_frontier(&session_id, &run_id, sequence),
             WorkerMessage::WorkerReady => {
                 self.worker_ready = true;
                 if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {
@@ -182,6 +192,7 @@ impl AppState {
                 self.worker_ready = false;
                 if let Some(target) = target_session {
                     self.restore_session_view(
+                        target.session_id,
                         target.session_log_path,
                         target.provider_name,
                         target.model_name,
@@ -381,6 +392,15 @@ impl AppState {
                 self.last_notice = Some(summary.clone());
                 self.push_event("follow-up:update", summary);
             }
+            WorkerMessage::ConversationQueueOperationCompleted {
+                session_log_path,
+                operation,
+                result,
+            } => {
+                if session_log_path == self.session_log_path {
+                    self.complete_queue_operation(operation, result);
+                }
+            }
             WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
@@ -491,19 +511,19 @@ impl AppState {
                 let plan_projection = sigil_kernel::PlanArtifactProjection::from_entries(
                     &self.session_browser.current_entries,
                 );
-                let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
-                    sigil_runtime::plan_handoff_workspace_snapshot_id(
-                        root_config,
-                        &self.workspace_root,
-                    )
-                    .ok()
-                    .flatten()
-                });
+                let current_snapshot = self.session_auxiliary.workspace_snapshot.clone();
                 let public_review =
-                    sigil_runtime::conversation_display::public_plan_review_from_entries(
+                    match sigil_runtime::conversation_display::public_plan_review_from_entries(
                         &self.session_browser.current_entries,
                         current_snapshot.as_deref(),
-                    );
+                    ) {
+                        Ok(review) => review,
+                        Err(error) => {
+                            self.clear_pending_plan_approval();
+                            self.last_notice = Some(format!("plan review unavailable: {error}"));
+                            return Ok(());
+                        }
+                    };
                 if let Some(draft) = plan_projection.latest_pending_plan() {
                     match sigil_kernel::plan_review_detail_from_entries(
                         &self.session_browser.current_entries,
@@ -532,15 +552,22 @@ impl AppState {
                 } else if let Some(review) = public_review.as_ref() {
                     if review.candidate.is_some() {
                         self.set_pending_plan_candidate(review, current_snapshot.as_deref());
-                    } else {
+                    } else if review
+                        .allowed_actions
+                        .contains(&sigil_kernel::PublicPlanAction::RetryReview)
+                    {
                         self.set_pending_plan_retry(review, current_snapshot.as_deref());
+                    } else {
+                        self.clear_pending_plan_approval();
                     }
-                }
-                self.last_notice = if self.pending_plan_approval().is_some() {
-                    Some("plan ready".to_owned())
                 } else {
-                    Some("plan finished".to_owned())
-                };
+                    self.clear_pending_plan_approval();
+                }
+                self.last_notice = Some(
+                    self.pending_plan_approval()
+                        .map(|pending| format!("plan {}", pending.status_label()))
+                        .unwrap_or_else(|| "plan finished".to_owned()),
+                );
                 self.push_event(
                     "plan:finish",
                     format!(
@@ -573,9 +600,17 @@ impl AppState {
                 );
             }
             WorkerMessage::UserInputRequested { request, entries } => {
+                if self.user_input_attention_is_submitted(&request.identity, &request.request_hash)
+                    || self.user_input_has_advanced_past_attention(
+                        &request.identity,
+                        &request.request_hash,
+                    )
+                {
+                    return Ok(());
+                }
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
-                self.sync_current_session_state(entries);
+                self.sync_current_session_state_from_delivered_entries(entries);
                 // Reproject the plan workbench before exposing the form. A pending revision
                 // guidance request removes all plan action authority until it is resolved.
                 self.restore_durable_attention_surfaces();
@@ -592,18 +627,80 @@ impl AppState {
                 );
             }
             WorkerMessage::RecoveredUserInputAttention { command, entries } => {
+                if self.runtime.is_busy
+                    || self
+                        .user_input_attention_is_resolved(&command.identity, &command.request_hash)
+                {
+                    return Ok(());
+                }
+                let already_registered = self.user_input_has_advanced_past_attention(
+                    &command.identity,
+                    &command.request_hash,
+                );
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
-                self.sync_current_session_state(entries);
-                self.restore_durable_attention_surfaces_with_recovery_command(command);
+                if !already_registered {
+                    self.sync_current_session_state_from_delivered_entries(entries);
+                }
+                self.restore_worker_recovered_user_input_attention(command);
                 self.refresh_session_history();
+            }
+            WorkerMessage::UserInputDecisionFailed {
+                request_id,
+                generation,
+                expected_request_hash,
+                message,
+                entries,
+            } => {
+                let matches_request = |request: &sigil_kernel::PublicUserInputRequestV1| {
+                    request.identity.request_id.as_str() == request_id
+                        && request.identity.generation == generation
+                        && request.request_hash == expected_request_hash
+                };
+                let visible = self
+                    .composer
+                    .pending_user_input
+                    .iter()
+                    .chain(self.composer.pending_user_input_queue.iter())
+                    .any(|form| form.request.as_ref().is_some_and(&matches_request));
+                let current = self
+                    .public_user_input_attention_requests()
+                    .ok()
+                    .is_some_and(|requests| requests.iter().any(&matches_request));
+                if !visible && !current {
+                    return Ok(());
+                }
+                if let Some(entries) = entries {
+                    self.sync_current_session_state_from_delivered_entries(entries);
+                    self.restore_durable_attention_surfaces();
+                    self.refresh_session_history();
+                }
+                self.fail_pending_user_input_submission(
+                    &request_id,
+                    generation,
+                    &expected_request_hash,
+                    message.clone(),
+                );
+                self.last_notice = Some(sigil_kernel::safe_persistence_text(&message));
             }
             WorkerMessage::UserInputDecisionApplied {
                 request,
                 continuation_started,
                 entries,
             } => {
-                self.sync_current_session_state(entries);
+                if self.user_input_attention_is_resolved(&request.identity, &request.request_hash) {
+                    return Ok(());
+                }
+                let already_registered = self.user_input_has_advanced_past_attention(
+                    &request.identity,
+                    &request.request_hash,
+                );
+                self.dismiss_submitted_user_input(&request);
+                if !already_registered {
+                    self.sync_current_session_state(entries);
+                } else {
+                    self.reconcile_pending_user_input_attention();
+                }
                 self.refresh_session_history();
                 self.restore_durable_attention_surfaces();
                 if continuation_started {
@@ -634,37 +731,45 @@ impl AppState {
                 self.last_notice = Some(format!("plan {} rejected", entry.plan_id.as_str()));
                 self.push_event("plan:rejected", entry.plan_id.as_str().to_owned());
             }
+            WorkerMessage::PlanActionFailed {
+                action,
+                plan_id,
+                expected_plan_hash,
+                message,
+                entries,
+            } => {
+                if self.fail_pending_plan_action(
+                    action,
+                    &plan_id,
+                    &expected_plan_hash,
+                    message.clone(),
+                ) && let Some(entries) = entries
+                {
+                    self.sync_current_session_state(entries);
+                    self.restore_durable_attention_surfaces();
+                    self.refresh_session_history();
+                    self.fail_pending_plan_action(action, &plan_id, &expected_plan_hash, message);
+                }
+            }
             WorkerMessage::PlanSaved { entry, entries } => {
-                self.runtime.is_busy = false;
-                self.runtime.allow_projection_run_recovery = false;
-                self.approval.pending = None;
                 self.sync_current_session_state(entries);
                 self.restore_durable_attention_surfaces();
+                self.complete_pending_plan_save(entry.plan_id.as_str(), &entry.plan_hash);
                 self.refresh_session_history();
                 self.last_notice = Some(format!("plan {} saved", entry.plan_id.as_str()));
                 self.push_event("plan:saved", entry.plan_id.as_str().to_owned());
             }
             WorkerMessage::TaskCreatedFromPlan {
                 entry,
-                start_mode,
+                start_mode: _,
                 entries,
             } => {
                 self.clear_pending_plan_approval();
                 self.composer.mode = ComposerMode::Build;
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
-                self.last_notice = Some(if entry.stale_reason.is_some() {
-                    format!("task {} created from stale plan", entry.task_id.as_str())
-                } else {
-                    match start_mode {
-                        sigil_kernel::PlanTaskStartMode::CreatePaused => {
-                            format!("task {} created from plan", entry.task_id.as_str())
-                        }
-                        sigil_kernel::PlanTaskStartMode::CreateAndRun => {
-                            format!("task {} created from plan", entry.task_id.as_str())
-                        }
-                    }
-                });
+                self.last_notice =
+                    Some(format!("task {} created from plan", entry.task_id.as_str()));
                 self.push_event(
                     "plan:task",
                     format!("{} -> {}", entry.plan_id.as_str(), entry.task_id.as_str()),
@@ -704,27 +809,6 @@ impl AppState {
                     format!("{task_id}:{}", blocker.reason_code.as_str()),
                 );
             }
-            WorkerMessage::PlanTaskCreationFailed {
-                plan_id,
-                error,
-                entries,
-            } => {
-                self.runtime.is_busy = false;
-                self.runtime.allow_projection_run_recovery = false;
-                self.sync_current_session_state(entries);
-                self.restore_durable_attention_surfaces();
-                if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
-                    pending.workbench_open = true;
-                }
-                self.refresh_session_history();
-                let summary = summarize_error(&error);
-                self.last_notice = Some(format!("plan could not start: {summary}"));
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    format!("Plan could not start: {summary}. The plan remains available."),
-                );
-                self.push_event("plan:task_error", format!("{plan_id}: {error}"));
-            }
             WorkerMessage::TaskRunFinished {
                 task_id,
                 status,
@@ -759,6 +843,7 @@ impl AppState {
                 self.push_event("task:pause", format!("task {task_id} pause requested"));
             }
             WorkerMessage::TaskRunPaused {
+                session_id,
                 task_id,
                 session_log_path,
                 provider_name,
@@ -768,6 +853,7 @@ impl AppState {
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -780,6 +866,7 @@ impl AppState {
                 self.schedule_balance_refresh();
             }
             WorkerMessage::RunCancelled {
+                session_id,
                 session_log_path,
                 provider_name,
                 model_name,
@@ -788,6 +875,7 @@ impl AppState {
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -797,6 +885,7 @@ impl AppState {
                 self.schedule_balance_refresh();
             }
             WorkerMessage::RunInterrupted {
+                session_id,
                 session_log_path,
                 provider_name,
                 model_name,
@@ -806,6 +895,7 @@ impl AppState {
                 self.clear_worker_run_state();
                 self.finish_worker_streams();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -854,6 +944,7 @@ impl AppState {
                 self.apply_agent_thread_cancelled(thread_id, entries);
             }
             WorkerMessage::SessionSwitched {
+                session_id,
                 session_log_path,
                 provider_name,
                 model_name,
@@ -863,6 +954,7 @@ impl AppState {
                 self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -873,6 +965,7 @@ impl AppState {
                 self.schedule_balance_refresh();
             }
             WorkerMessage::NewSessionStarted {
+                session_id,
                 session_log_path,
                 provider_name,
                 model_name,
@@ -882,6 +975,7 @@ impl AppState {
                 self.finish_worker_streams();
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -1126,6 +1220,7 @@ impl AppState {
                 }
             }
             WorkerMessage::ConversationForked {
+                session_id,
                 request_id,
                 session_log_path,
                 provider_name,
@@ -1145,6 +1240,7 @@ impl AppState {
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.clear_checkpoint_interaction();
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,
@@ -1207,6 +1303,7 @@ impl AppState {
                 );
             }
             WorkerMessage::LocalSessionForked {
+                session_id,
                 request_id,
                 session_log_path,
                 provider_name,
@@ -1226,6 +1323,7 @@ impl AppState {
                 self.runtime.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.modal_state = None;
                 self.restore_session_view(
+                    session_id,
                     session_log_path,
                     provider_name,
                     model_name,

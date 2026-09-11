@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use super::*;
 
 pub(in crate::runner) struct TaskRunSpawn {
@@ -156,7 +158,15 @@ pub(in crate::runner) fn spawn_task_run(
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+        send_task_result(
+            run_id,
+            session,
+            task_id_value,
+            result,
+            task_result_tx,
+            &mut handler,
+            terminal_cancellation.is_cancel_requested(),
+        );
     })
 }
 
@@ -197,6 +207,7 @@ pub(in crate::runner) fn spawn_task_continue(
         let result = continue_task_orchestration(
             &mut session,
             TaskContinueOrchestration {
+                run_id: run_id.to_string(),
                 task_id,
                 guidance,
                 guidance_promotion,
@@ -226,7 +237,15 @@ pub(in crate::runner) fn spawn_task_continue(
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+        send_task_result(
+            run_id,
+            session,
+            task_id_value,
+            result,
+            task_result_tx,
+            &mut handler,
+            terminal_cancellation.is_cancel_requested(),
+        );
     })
 }
 
@@ -299,7 +318,15 @@ pub(in crate::runner) fn spawn_task_planner_input(
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+        send_task_result(
+            run_id,
+            session,
+            task_id_value,
+            result,
+            task_result_tx,
+            &mut handler,
+            terminal_cancellation.is_cancel_requested(),
+        );
     })
 }
 
@@ -367,7 +394,15 @@ pub(in crate::runner) fn spawn_skill_child_run(
             Ok(()) => result,
             Err(error) => Err(error),
         };
-        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+        send_task_result(
+            run_id,
+            session,
+            task_id_value,
+            result,
+            task_result_tx,
+            &mut handler,
+            terminal_cancellation.is_cancel_requested(),
+        );
     })
 }
 
@@ -447,6 +482,7 @@ pub(in crate::runner) struct SkillChildRunOrchestration<'a> {
 }
 
 pub(in crate::runner) struct TaskContinueOrchestration<'a> {
+    run_id: String,
     task_id: TaskId,
     guidance: Option<String>,
     guidance_promotion: Option<TaskGuidancePromotedEntry>,
@@ -504,31 +540,18 @@ pub(in crate::runner) async fn run_task_orchestration(
     .await
 }
 
-pub(in crate::runner) async fn run_admitted_task_orchestration<A>(
-    session: &mut Session,
-    request: AdmittedTaskRunOrchestration<'_>,
-    approval_handler: &mut A,
-) -> anyhow::Result<TaskRunStatus>
+// Construct the orchestration future outside the caller's poll frame. Task handoff and
+// planner discovery share a root call stack, so nested by-value futures exhaust its budget.
+pub(in crate::runner) fn run_admitted_task_orchestration<'a, A>(
+    session: &'a mut Session,
+    request: AdmittedTaskRunOrchestration<'a>,
+    approval_handler: &'a mut A,
+) -> BoxFuture<'a, anyhow::Result<TaskRunStatus>>
 where
-    A: ApprovalHandler + Send,
+    A: ApprovalHandler + Send + 'a,
 {
-    let AdmittedTaskRunOrchestration {
-        task_id,
-        parent_session_ref,
-        objective,
-        root_config,
-        options,
-        base_registry,
-        agent_supervisor,
-        role_provider_builder,
-        managed_verification_execution,
-        handler,
-        cancellation_handle,
-        tool_artifact_read_budget,
-    } = request;
-    sigil_runtime::agent_supervisor::task_execution::run_admitted_task_execution(
-        session,
-        sigil_runtime::agent_supervisor::task_execution::AdmittedTaskExecution {
+    Box::pin(async move {
+        let AdmittedTaskRunOrchestration {
             task_id,
             parent_session_ref,
             objective,
@@ -537,16 +560,33 @@ where
             base_registry,
             agent_supervisor,
             role_provider_builder,
-            verification_execution_port: managed_verification_execution.ok_or_else(|| {
-                anyhow::anyhow!("task execution requires the managed verification route")
-            })?,
+            managed_verification_execution,
             handler,
             cancellation_handle,
-            tool_artifact_read_budget: Some(tool_artifact_read_budget),
-        },
-        approval_handler,
-    )
-    .await
+            tool_artifact_read_budget,
+        } = request;
+        sigil_runtime::agent_supervisor::task_execution::run_admitted_task_execution(
+            session,
+            sigil_runtime::agent_supervisor::task_execution::AdmittedTaskExecution {
+                task_id,
+                parent_session_ref,
+                objective,
+                root_config,
+                options,
+                base_registry,
+                agent_supervisor,
+                role_provider_builder,
+                verification_execution_port: managed_verification_execution.ok_or_else(|| {
+                    anyhow::anyhow!("task execution requires the managed verification route")
+                })?,
+                handler,
+                cancellation_handle,
+                tool_artifact_read_budget: Some(tool_artifact_read_budget),
+            },
+            approval_handler,
+        )
+        .await
+    })
 }
 
 /// Runs an admitted handoff task and atomically claims the shared root cancellation terminal.
@@ -554,27 +594,30 @@ where
 /// Unlike ordinary `/task` spawning, conversation handoff reuses the already-open chat root. The
 /// chat agent deliberately yields terminal authority when it returns `StartDurableTask`, so this
 /// wrapper is the single place where direct and queued handoffs close that root after orchestration.
-pub(in crate::runner) async fn run_admitted_task_to_root_terminal<A>(
-    session: &mut Session,
-    request: AdmittedTaskRunOrchestration<'_>,
-    approval_handler: &mut A,
-) -> std::result::Result<TaskRunStatus, String>
+/// The boxed constructor keeps its future construction off the foreground run's poll frame.
+pub(in crate::runner) fn run_admitted_task_to_root_terminal<'a, A>(
+    session: &'a mut Session,
+    request: AdmittedTaskRunOrchestration<'a>,
+    approval_handler: &'a mut A,
+) -> BoxFuture<'a, std::result::Result<TaskRunStatus, String>>
 where
-    A: ApprovalHandler + Send,
+    A: ApprovalHandler + Send + 'a,
 {
-    let terminal_cancellation = request.cancellation_handle.clone();
-    let terminal_task_id = request.task_id.clone();
-    let terminal_parent_session_ref = request.parent_session_ref.clone();
-    let terminal_objective = request.objective.clone();
-    let result = run_admitted_task_orchestration(session, request, approval_handler).await;
-    finalize_task_root(
-        session,
-        &terminal_task_id,
-        &terminal_parent_session_ref,
-        &terminal_objective,
-        &terminal_cancellation,
-        result,
-    )
+    Box::pin(async move {
+        let terminal_cancellation = request.cancellation_handle.clone();
+        let terminal_task_id = request.task_id.clone();
+        let terminal_parent_session_ref = request.parent_session_ref.clone();
+        let terminal_objective = request.objective.clone();
+        let result = run_admitted_task_orchestration(session, request, approval_handler).await;
+        finalize_task_root(
+            session,
+            &terminal_task_id,
+            &terminal_parent_session_ref,
+            &terminal_objective,
+            &terminal_cancellation,
+            result,
+        )
+    })
 }
 
 /// Continues the exact Task selected by a typed conversation route and closes the shared root.
@@ -617,6 +660,7 @@ where
                         guidance: Some(guidance.expose_secret().to_owned()),
                         guidance_promotion: None,
                         continuation_guidance_receipt: Some(guidance_receipt),
+                        explicit_guidance_run_id: None,
                         root_config,
                         options,
                         base_registry,
@@ -693,6 +737,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
     request: TaskContinueOrchestration<'_>,
 ) -> anyhow::Result<TaskRunStatus> {
     let TaskContinueOrchestration {
+        run_id,
         task_id,
         guidance,
         guidance_promotion,
@@ -715,6 +760,7 @@ pub(in crate::runner) async fn continue_task_orchestration(
             guidance,
             guidance_promotion,
             continuation_guidance_receipt: None,
+            explicit_guidance_run_id: Some(run_id),
             root_config,
             options,
             base_registry,
@@ -1300,19 +1346,32 @@ pub(in crate::runner) fn skill_child_session_objective(skill_id: &str, arguments
 
 pub(in crate::runner) fn send_task_result(
     run_id: u64,
-    session: Session,
+    mut session: Session,
     task_id: String,
     result: std::result::Result<TaskRunStatus, String>,
     task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
+    handler: &mut ChannelEventHandler,
+    public_cancel_requested: bool,
 ) {
+    let mut payload = RunTaskPayload::Task {
+        task_id,
+        queue_id: None,
+        result,
+    };
+    // The cancellation owner publishes its terminal after quiescence. Natural completion
+    // closes the same recorder that admitted this independent Task run or continuation.
+    if !public_cancel_requested
+        && let Err(error) = handler.finish_public_payload(&mut session, &mut payload)
+        && let RunTaskPayload::Task { result, .. } = &mut payload
+    {
+        *result = Err(format!(
+            "failed to persist task foreground terminal: {error:#}"
+        ));
+    }
     let _ = task_result_tx.send(RunTaskResult {
         run_id,
         session,
-        payload: RunTaskPayload::Task {
-            task_id,
-            queue_id: None,
-            result,
-        },
+        payload,
         post_run_maintenance: None,
     });
 }
@@ -1487,13 +1546,11 @@ pub(in crate::runner) fn reject_plan(
     current_session: &mut Option<Session>,
     request: RejectPlanRequest,
 ) -> std::result::Result<(PlanDecisionRecordedEntry, Vec<SessionLogEntry>), String> {
-    let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.runtime_provider,
-        &root_config.agent.model,
-        current_session_log_path,
-        current_session.as_ref(),
-    )
-    .map_err(|error| format!("failed to load session before rejecting plan: {error:#}"))?;
+    let mut session =
+        take_active_session_or_load(root_config, current_session_log_path, current_session)
+            .map_err(|error| {
+                format!("failed to prepare session before rejecting plan: {error:#}")
+            })?;
     let rejected = match sigil_runtime::PlanReviewCoordinator::reject_plan(&mut session, &request) {
         Ok(rejected) => rejected,
         Err(error) => {
@@ -1518,13 +1575,11 @@ pub(in crate::runner) fn revise_plan(
 ) -> std::result::Result<RequestedPlanRevisionGuidance, String> {
     let plan_id = PlanId::new(request.plan_id.clone())
         .map_err(|error| format!("invalid plan id for revision: {error}"))?;
-    let mut session = load_session_with_runtime_attachments(
-        &root_config.agent.runtime_provider,
-        &root_config.agent.model,
-        current_session_log_path,
-        current_session.as_ref(),
-    )
-    .map_err(|error| format!("failed to load session before revising plan: {error:#}"))?;
+    let mut session =
+        take_active_session_or_load(root_config, current_session_log_path, current_session)
+            .map_err(|error| {
+                format!("failed to prepare session before revising plan: {error:#}")
+            })?;
     let revision_request =
         match sigil_runtime::PlanReviewCoordinator::request_plan_revision_guidance(
             &mut session,
@@ -1551,6 +1606,28 @@ pub(in crate::runner) fn revise_plan(
         request: public,
         entries,
     })
+}
+
+/// Uses the already attached worker Session for ordinary plan actions. A disk load is reserved
+/// for a missing attachment or an explicit session switch; the active owner remains the only
+/// authority for the revision frontier and plan hash.
+fn take_active_session_or_load(
+    root_config: &RootConfig,
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+) -> anyhow::Result<Session> {
+    if let Some(session) = current_session.take() {
+        if session.store_path() == Some(session_log_path) {
+            return Ok(session);
+        }
+        *current_session = Some(session);
+    }
+    load_session_with_runtime_attachments(
+        &root_config.agent.runtime_provider,
+        &root_config.agent.model,
+        session_log_path,
+        current_session.as_ref(),
+    )
 }
 
 pub(in crate::runner) fn append_paused_task_state(

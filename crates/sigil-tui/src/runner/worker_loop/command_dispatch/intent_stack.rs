@@ -25,6 +25,19 @@ where
         managed_verification_execution: _,
         state,
     } = context;
+    if !root_config.task.enabled {
+        let request_id = match &command {
+            IntentStackCommand::Load { request_id }
+            | IntentStackCommand::PreviewDrop { request_id, .. }
+            | IntentStackCommand::ExecuteDrop { request_id, .. } => *request_id,
+        };
+        send_intent_failure(
+            message_tx,
+            request_id,
+            "task orchestration is not selected for this session composition".to_owned(),
+        );
+        return WorkerCommandDispatchControl::Continue;
+    }
     match command {
         IntentStackCommand::Load { request_id } => {
             let result = state

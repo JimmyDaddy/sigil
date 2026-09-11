@@ -46,7 +46,10 @@ impl AppState {
     }
 
     pub(crate) fn maybe_start_automatic_update_check(&mut self) -> bool {
-        if self.is_setup_mode() || self.update_state.startup_check_considered {
+        if !self.updater_selected()
+            || self.is_setup_mode()
+            || self.update_state.startup_check_considered
+        {
             return false;
         }
         self.update_state.startup_check_considered = true;
@@ -70,6 +73,12 @@ impl AppState {
         explicit: bool,
         channel: UpdateChannel,
     ) -> bool {
+        if !self.updater_selected() {
+            if explicit {
+                self.record_update_notice("updates are disabled in this configuration");
+            }
+            return explicit;
+        }
         if self.update_state.task_rx.is_some() {
             if explicit {
                 self.record_update_notice("an update operation is already running");
@@ -118,6 +127,10 @@ impl AppState {
     }
 
     pub(crate) fn start_update_apply(&mut self, channel: UpdateChannel) -> bool {
+        if !self.updater_selected() {
+            self.record_update_notice("updates are disabled in this configuration");
+            return true;
+        }
         if self.update_state.task_rx.is_some() {
             self.record_update_notice("an update operation is already running");
             return true;
@@ -153,6 +166,14 @@ impl AppState {
         self.update_state.task_rx = Some(receiver);
         self.record_update_notice("checking and verifying the Sigil update…");
         true
+    }
+
+    fn updater_selected(&self) -> bool {
+        self.config_snapshot.as_ref().is_some_and(|config| {
+            config
+                .composition
+                .allows(sigil_kernel::OptionalCapability::Updater)
+        })
     }
 
     pub(crate) fn poll_update_task(&mut self) -> bool {

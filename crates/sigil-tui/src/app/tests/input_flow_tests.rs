@@ -1,6 +1,31 @@
 use super::*;
 use crate::{app::ComposerQueueAction, runner::QueueMoveDirection};
 
+fn complete_queue_action_for_test(app: &mut AppState, action: &Option<AppAction>) -> Result<()> {
+    use crate::runner::QueueOperation;
+    let operation = match action.as_ref().expect("queue action") {
+        AppAction::SetConversationQueuePaused { paused } => {
+            QueueOperation::SetPaused { paused: *paused }
+        }
+        AppAction::CancelQueuedConversationInput { queue_id }
+        | AppAction::EditQueuedConversationInput { queue_id, .. }
+        | AppAction::MoveQueuedConversationInput { queue_id, .. }
+        | AppAction::PromoteQueuedConversationInput { queue_id }
+        | AppAction::SendQueuedConversationInputNow { queue_id } => app
+            .composer
+            .pending_queue_operations
+            .get(queue_id)
+            .cloned()
+            .expect("pending queue operation"),
+        _ => panic!("expected queue mutation"),
+    };
+    app.handle_worker_message(WorkerMessage::ConversationQueueOperationCompleted {
+        session_log_path: app.session_log_path.clone(),
+        operation,
+        result: Ok(()),
+    })
+}
+
 fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry> {
     Ok(SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {
@@ -898,7 +923,7 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
         }) if prompt == "follow up after this finishes"
     ));
     assert!(app.composer.input.is_empty());
-    assert_eq!(app.last_notice(), Some("follow-up will run next"));
+    assert_eq!(app.last_notice(), Some("saving follow-up"));
     let rows = app.composer_queue_rows();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "follow up after this finishes");
@@ -944,8 +969,20 @@ fn busy_plain_prompt_adds_visible_follow_up() -> Result<()> {
     assert_eq!(rows[0].label, "follow up after this finishes");
     let confirmed_action =
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        confirmed_action.is_none(),
+        "the deferred promotion still awaits its operation receipt after queue confirmation"
+    );
+    assert!(app.drain_pending_worker_commands().is_empty());
+    complete_queue_action_for_test(
+        &mut app,
+        &Some(AppAction::PromoteQueuedConversationInput {
+            queue_id: sigil_kernel::ConversationInputQueueId::new("queue_1")?,
+        }),
+    )?;
+    let settled_action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
-        confirmed_action,
+        settled_action,
         Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
             if queue_id.as_str() == "queue_1"
     ));
@@ -1030,7 +1067,7 @@ fn composer_tab_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Res
         Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
             if queue_id.as_str() == "queue_2"
     ));
-    assert_eq!(app.last_notice(), Some("follow-up will run next"));
+    assert_eq!(app.last_notice(), Some("scheduling follow-up next"));
 
     let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert!(tab.is_none());
@@ -1174,6 +1211,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
             direction: QueueMoveDirection::Up,
         }) if queue_id.as_str() == "queue_1"
     ));
+    complete_queue_action_for_test(&mut app, &move_first_up)?;
     let move_first_down = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))?;
     assert!(matches!(
         move_first_down,
@@ -1183,6 +1221,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
         }) if queue_id.as_str() == "queue_1"
     ));
 
+    complete_queue_action_for_test(&mut app, &move_first_down)?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let move_last_down = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))?;
     assert!(matches!(
@@ -1192,6 +1231,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
             direction: QueueMoveDirection::Down,
         }) if queue_id.as_str() == "queue_2"
     ));
+    complete_queue_action_for_test(&mut app, &move_last_down)?;
     let move_last_up = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))?;
     assert!(matches!(
         move_last_up,
@@ -1200,6 +1240,7 @@ fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() ->
             direction: QueueMoveDirection::Up,
         }) if queue_id.as_str() == "queue_2"
     ));
+    complete_queue_action_for_test(&mut app, &move_last_up)?;
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert!(app.composer_queue_rows()[0].selected);
     let delete = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
@@ -1315,6 +1356,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         Some(AppAction::SetConversationQueuePaused { paused: true })
     ));
 
+    complete_queue_action_for_test(&mut app, &pause)?;
+
     app.composer.input = "/queue show".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     assert!(app.submit_input()?.is_none());
@@ -1329,6 +1372,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2"
     ));
 
+    complete_queue_action_for_test(&mut app, &next)?;
+
     app.composer.input = "/queue delete second".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
     let delete = app.submit_input()?;
@@ -1337,6 +1382,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
         Some(AppAction::CancelQueuedConversationInput { ref queue_id })
             if queue_id.as_str() == "queue_2"
     ));
+
+    complete_queue_action_for_test(&mut app, &delete)?;
 
     app.composer.input = "/queue edit 2".to_owned();
     app.composer.input_cursor = app.composer.input.chars().count();
@@ -1352,6 +1399,8 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
             if queue_id.as_str() == "queue_2" && prompt == "updated queued prompt"
     ));
 
+    complete_queue_action_for_test(&mut app, &edit)?;
+
     app.sync_current_session_state(vec![
         queued_conversation_input_entry("queue_1", "first queued prompt")?,
         queued_conversation_input_entry("queue_2", "second queued prompt")?,
@@ -1359,7 +1408,9 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     for command in ["/queue resume", "/queue next", "/queue send 1"] {
         app.composer.input = command.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
-        assert!(app.submit_input()?.is_some());
+        let action = app.submit_input()?;
+        assert!(action.is_some());
+        complete_queue_action_for_test(&mut app, &action)?;
     }
     for command in [
         "/queue cancel 2",
@@ -1369,7 +1420,9 @@ fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
     ] {
         app.composer.input = command.to_owned();
         app.composer.input_cursor = app.composer.input.chars().count();
-        assert!(app.submit_input()?.is_some());
+        let action = app.submit_input()?;
+        assert!(action.is_some());
+        complete_queue_action_for_test(&mut app, &action)?;
     }
     for removed_alias in ["/queue now 1", "/queue send-now 1"] {
         app.composer.input = removed_alias.to_owned();

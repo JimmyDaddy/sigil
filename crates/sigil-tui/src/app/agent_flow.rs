@@ -743,84 +743,64 @@ impl AppState {
     }
 
     pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
-        let history_anchor = self.capture_timeline_history_anchor();
-        let (child_task_id, child_session_ref) = match self.agent_panel.active_view.clone() {
-            AgentView::Child {
-                child_task_id,
-                child_session_ref,
-            } => (child_task_id, child_session_ref),
-            AgentView::Main => {
-                let changed = self.agent_panel.active_child_transcript.is_some();
-                self.agent_panel.active_child_transcript = None;
-                self.agent_panel.safe_child_tool_calls.clear();
-                self.agent_panel.child_tool_progress_execution_ids.clear();
-                self.agent_panel.child_tool_card_entry_indices.clear();
-                self.restore_timeline_history_anchor(history_anchor);
-                return changed;
-            }
-        };
-        let parent_dir = self
-            .session_log_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."));
-        let path = child_session_ref.resolve(parent_dir);
-        let child_scope = child_tool_event_scope(&child_task_id, &child_session_ref);
-        if self
-            .agent_panel
-            .active_child_transcript
-            .as_ref()
-            .is_none_or(|transcript| transcript.path != path)
-        {
+        if self.agent_panel.active_view == AgentView::Main {
+            let changed = self.agent_panel.active_child_transcript.take().is_some();
             self.agent_panel.safe_child_tool_calls.clear();
             self.agent_panel.child_tool_progress_execution_ids.clear();
             self.agent_panel.child_tool_card_entry_indices.clear();
+            return changed;
         }
-        let file_signature = match child_transcript_file_signature(&path) {
-            Ok(file_signature) => file_signature,
-            Err(error) => {
-                self.clear_child_tool_state_for_scope(child_scope.as_str());
-                let error = error.to_string();
-                let changed = !self
-                    .agent_panel
-                    .active_child_transcript
-                    .as_ref()
-                    .is_some_and(|transcript| {
-                        transcript.path == path
-                            && transcript.file_signature == ChildTranscriptFileSignature::empty()
-                            && transcript.load_error.as_deref() == Some(error.as_str())
-                            && transcript.timeline_entries.is_empty()
-                            && transcript.rendered_body_lines.is_empty()
-                    });
-                self.agent_panel.active_child_transcript = Some(ActiveAgentChildTranscript {
-                    path: path.clone(),
-                    file_signature: ChildTranscriptFileSignature::empty(),
-                    timeline_entries: Vec::new(),
-                    rendered_body_lines: Vec::new(),
-                    total_timeline_entries: 0,
-                    transcript_truncated: false,
-                    load_error: Some(error),
-                });
-                self.restore_timeline_history_anchor(history_anchor);
-                return changed;
-            }
+        let AgentView::Child {
+            child_session_ref, ..
+        } = &self.agent_panel.active_view
+        else {
+            return false;
         };
-        if self
+        let path = child_session_ref.resolve(
+            self.session_log_path
+                .parent()
+                .unwrap_or_else(|| Path::new(".")),
+        );
+        let changed = self
             .agent_panel
             .active_child_transcript
             .as_ref()
-            .is_some_and(|transcript| {
-                transcript.path == path && transcript.file_signature == file_signature
-            })
-        {
+            .is_none_or(|transcript| transcript.path != path);
+        if changed {
+            self.agent_panel.safe_child_tool_calls.clear();
+            self.agent_panel.child_tool_progress_execution_ids.clear();
+            self.agent_panel.child_tool_card_entry_indices.clear();
+            self.agent_panel.active_child_transcript = Some(ActiveAgentChildTranscript {
+                path,
+                file_signature: ChildTranscriptFileSignature::empty(),
+                timeline_entries: Vec::new(),
+                rendered_body_lines: Vec::new(),
+                total_timeline_entries: 0,
+                transcript_truncated: false,
+                load_error: None,
+            });
+        }
+        self.request_child_transcript_refresh();
+        changed
+    }
+
+    pub(super) fn apply_child_transcript_query(&mut self, query: ChildTranscriptQuery) -> bool {
+        if self.agent_panel.active_view != query.view {
             return false;
         }
-        let load_result = read_recent_session_entries(
-            &path,
-            CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT,
-            file_signature.clone(),
-        );
-        self.agent_panel.active_child_transcript = Some(match load_result {
-            Ok(recent) => {
+        let AgentView::Child {
+            child_task_id,
+            child_session_ref,
+        } = query.view
+        else {
+            return false;
+        };
+        let child_scope = child_tool_event_scope(&child_task_id, &child_session_ref);
+        let history_anchor = self.capture_timeline_history_anchor();
+        let path = query.path;
+        match query.result {
+            Ok(None) => return false,
+            Ok(Some(recent)) => {
                 let pending_calls = pending_child_tool_calls(&recent.entries);
                 let (timeline_entries, total_timeline_entries) =
                     self.bounded_child_timeline_entries(&recent.entries, &pending_calls);
@@ -830,7 +810,7 @@ impl AppState {
                     &timeline_entries,
                 );
                 let rendered_body_lines = self.render_child_timeline_body_lines(&timeline_entries);
-                ActiveAgentChildTranscript {
+                self.agent_panel.active_child_transcript = Some(ActiveAgentChildTranscript {
                     path,
                     file_signature: recent.file_signature,
                     timeline_entries,
@@ -838,21 +818,21 @@ impl AppState {
                     total_timeline_entries,
                     transcript_truncated: recent.truncated,
                     load_error: None,
-                }
+                });
             }
             Err(error) => {
                 self.clear_child_tool_state_for_scope(child_scope.as_str());
-                ActiveAgentChildTranscript {
+                self.agent_panel.active_child_transcript = Some(ActiveAgentChildTranscript {
                     path,
-                    file_signature,
+                    file_signature: ChildTranscriptFileSignature::empty(),
                     timeline_entries: Vec::new(),
                     rendered_body_lines: Vec::new(),
                     total_timeline_entries: 0,
                     transcript_truncated: false,
                     load_error: Some(error.to_string()),
-                }
+                });
             }
-        });
+        }
         self.restore_timeline_history_anchor(history_anchor);
         true
     }
@@ -972,6 +952,41 @@ impl AppState {
             .child_tool_card_entry_indices
             .retain(|(scope, _), _| scope != child_scope);
     }
+}
+
+#[derive(Debug)]
+pub(super) struct ChildTranscriptQuery {
+    view: AgentView,
+    path: std::path::PathBuf,
+    result: anyhow::Result<Option<RecentSessionEntries>>,
+}
+
+pub(super) fn query_child_transcript(
+    view: AgentView,
+    parent_path: &Path,
+    previous: Option<(std::path::PathBuf, ChildTranscriptFileSignature)>,
+) -> Option<ChildTranscriptQuery> {
+    let AgentView::Child {
+        child_session_ref, ..
+    } = &view
+    else {
+        return None;
+    };
+    let path = child_session_ref.resolve(parent_path.parent().unwrap_or_else(|| Path::new(".")));
+    let result = (|| {
+        let signature = child_transcript_file_signature(&path)?;
+        if previous
+            .as_ref()
+            .is_some_and(|(previous_path, previous_signature)| {
+                previous_path == &path && previous_signature == &signature
+            })
+        {
+            return Ok(None);
+        }
+        read_recent_session_entries(&path, CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT, signature)
+            .map(Some)
+    })();
+    Some(ChildTranscriptQuery { view, path, result })
 }
 
 #[derive(Debug)]

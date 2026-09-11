@@ -1486,7 +1486,10 @@ fn config_provider_selection_switches_route_without_replacing_the_session() -> R
 
 #[test]
 fn config_permissions_step_uses_policy_summary_and_details() {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let fixture = tempfile::tempdir().expect("isolated workspace");
+    let mut config = test_config();
+    config.workspace.root = fixture.path().display().to_string();
+    let mut app = AppState::from_root_config(&fixture.path().join("sigil.toml"), &config);
     app.open_config_panel();
     app.config_state
         .as_mut()
@@ -3999,6 +4002,52 @@ fn config_mcp_server_creation_points_to_external_management() -> Result<()> {
     assert!(!detail.contains("Command"));
     assert!(!detail.contains("Arguments"));
     assert!(!detail.contains("args_csv:"));
+    Ok(())
+}
+
+#[test]
+fn published_model_save_updates_the_open_draft_for_a_second_save() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = config_for_workspace(temp.path());
+    config.save(&config_path)?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.open_config_panel();
+    {
+        let state = app.config_state.as_mut().expect("open config");
+        state.draft.provider_model = "deepseek-v4-pro".to_owned();
+        state.mark_edited();
+    }
+
+    // The application publisher has committed this snapshot before delivering its receipt.
+    let mut published = config.clone();
+    published.agent.model = "deepseek-v4-pro".to_owned();
+    published.save(&config_path)?;
+    app.mark_config_draft_saved(&published);
+    app.apply_persisted_config_snapshot(&published);
+    assert!(!app.config_is_dirty());
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config stays open after save");
+        state.draft.provider_model = "deepseek-v4-flash".to_owned();
+        state.mark_edited();
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    assert!(matches!(action, Some(AppAction::ConfigSaved { .. })));
+    assert!(app.config_save_error().is_none());
+    assert!(!app.config_is_dirty());
+    assert_eq!(
+        RootConfig::load(&config_path)?.agent.model,
+        "deepseek-v4-flash"
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(
+        app.config_state.is_none(),
+        "saved draft closes without a discard guard"
+    );
     Ok(())
 }
 

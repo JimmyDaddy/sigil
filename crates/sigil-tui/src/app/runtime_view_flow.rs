@@ -92,7 +92,13 @@ impl AppState {
     }
 
     pub(crate) fn apply_session_runtime_config(&mut self, root_config: &RootConfig) {
-        self.session_runtime_config = Some(root_config.clone());
+        match root_config.with_effective_composition() {
+            Ok(runtime_config) => self.session_runtime_config = Some(runtime_config),
+            Err(error) => {
+                self.session_runtime_config = None;
+                self.last_notice = Some(format!("runtime configuration is unavailable: {error:#}"));
+            }
+        }
     }
 
     pub(crate) fn pending_session_route_recovery_binding(&self) -> Option<&str> {
@@ -198,7 +204,7 @@ impl AppState {
         persisted_config.agent.runtime_provider.clear();
         persisted_config.agent.connection = Some(route.model_ref.connection_id.clone());
         persisted_config.agent.model = route.model_ref.model_id.clone();
-        Ok(persisted_config)
+        persisted_config.with_effective_composition()
     }
 
     pub(crate) fn record_started_model_route(&mut self) {

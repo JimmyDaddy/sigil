@@ -1,17 +1,120 @@
 use super::*;
+use anyhow::Context;
+
+pub(in crate::runner) fn task_orchestration_enabled(root_config: &RootConfig) -> bool {
+    root_config.task.enabled
+        && root_config
+            .composition
+            .allows(sigil_kernel::OptionalCapability::TaskOrchestration)
+}
 
 pub(in crate::runner) fn effective_orchestration_root_config(
     root_config: &RootConfig,
     session: &Session,
 ) -> RootConfig {
     let mut effective = root_config.clone();
-    sigil_runtime::OrchestrationRouteGuard::new(
-        session.provider_name(),
-        session.model_name(),
-        sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
-    )
-    .apply_effective_task_config(session, &mut effective.task);
+    if task_orchestration_enabled(root_config) {
+        sigil_runtime::OrchestrationRouteGuard::new(
+            session.provider_name(),
+            session.model_name(),
+            sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+        )
+        .apply_effective_task_config(session, &mut effective.task);
+    }
     effective
+}
+
+pub(in crate::runner) fn optional_agent_tool_runtime(
+    supervisor: Option<&sigil_runtime::AgentSupervisor>,
+    root_config: &RootConfig,
+    session: &Session,
+    base_registry: &ToolRegistry,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+) -> Option<sigil_runtime::AgentToolRuntime> {
+    supervisor.map(|supervisor| {
+        sigil_runtime::AgentToolRuntime::new(
+            supervisor.clone(),
+            effective_orchestration_root_config(root_config, session),
+            base_registry.clone(),
+        )
+        .with_background_runs(background_runs.clone())
+    })
+}
+
+pub(in crate::runner) async fn run_with_optional_agent_delegate<P>(
+    agent: &Agent<P>,
+    session: &mut Session,
+    input: AgentRunInput,
+    options: AgentRunOptions,
+    handler: &mut ChannelEventHandler,
+    approval_handler: &mut ChannelApprovalHandler,
+    delegate: &mut Option<sigil_runtime::AgentToolRuntime>,
+) -> anyhow::Result<sigil_kernel::AgentRunOutput>
+where
+    P: sigil_kernel::Provider,
+{
+    let logical_run_id = input
+        .logical_run_id()
+        .context("foreground input is missing its logical run identity")?
+        .to_owned();
+    let cancellation = input.cancellation_handle();
+    handler.start_public_run(
+        session,
+        &logical_run_id,
+        input.persisted_user_message.as_deref().unwrap_or_default(),
+    )?;
+    let output = match delegate.as_mut() {
+        Some(delegate) => {
+            agent
+                .run_with_approval_input_and_agent_delegate(
+                    session,
+                    input,
+                    options,
+                    handler,
+                    approval_handler,
+                    delegate,
+                )
+                .await
+        }
+        None => {
+            agent
+                .run_with_approval_input(session, input, options, handler, approval_handler)
+                .await
+        }
+    };
+    if !cancellation
+        .as_ref()
+        .is_some_and(|handle| handle.is_cancel_requested())
+    {
+        handler.finish_public_run(&output)?;
+    }
+    output
+}
+
+pub(in crate::runner) fn unorchestrated_run_payload(
+    output: sigil_kernel::AgentRunOutput,
+    queue_id: Option<ConversationInputQueueId>,
+    provider_logical_run_id: Option<String>,
+) -> RunTaskPayload {
+    let result = match output.disposition {
+        AgentRunDisposition::FinalAnswer => Ok(output.result),
+        AgentRunDisposition::AwaitingUserInput(request) => {
+            return RunTaskPayload::AwaitingUserInput { request };
+        }
+        AgentRunDisposition::Interrupted => {
+            Err("run was interrupted before a final answer".to_owned())
+        }
+        AgentRunDisposition::Blocked => Err("run was blocked before a final answer".to_owned()),
+        _ => Err("task orchestration is unavailable in this composition".to_owned()),
+    };
+    RunTaskPayload::Chat {
+        result,
+        plan_mode: false,
+        plan_review: false,
+        queue_id,
+        provider_logical_run_id,
+        agent_result_continuation_thread_ids: Vec::new(),
+    }
 }
 
 pub(in crate::runner) struct WorkerAgentEventSink {
@@ -230,6 +333,7 @@ pub(in crate::runner) fn extend_agent_thread_ids_unique(
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn start_agent_result_continuation_run<P>(
+    stop_control: &crate::runner::protocol::WorkerStopControl,
     runtime: &tokio::runtime::Runtime,
     agent: Arc<Agent<P>>,
     agent_supervisor: &sigil_runtime::AgentSupervisor,
@@ -300,6 +404,7 @@ where
 
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
+    stop_control.bind(&cancellation_owner);
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
         let mut run_session = run_session;
@@ -344,6 +449,7 @@ where
 
     Some(ActiveRun {
         run_id,
+        public_run_id: None,
         handle,
         approval_tx,
         elicitation_audit_buffer,
@@ -358,9 +464,10 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn apply_user_input_decision<P>(
+    stop_control: &crate::runner::protocol::WorkerStopControl,
     runtime: &tokio::runtime::Runtime,
     agent: Arc<Agent<P>>,
-    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    agent_supervisor: Option<&sigil_runtime::AgentSupervisor>,
     root_config: &RootConfig,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
@@ -403,6 +510,12 @@ where
     )
     .map_err(|error| format!("user input decision failed: {error:#}"))?;
     if !continuation_requested {
+        sigil_runtime::ApplicationRunEventRecorder::resume(
+            session,
+            identity.root_logical_run_id.as_str(),
+        )
+        .and_then(|recorder| recorder.record_user_input_state(session, &identity))
+        .map_err(|error| format!("failed to publish durable user input decision: {error:#}"))?;
         let projection = session
             .user_input_projection()
             .map_err(|error| format!("user input projection failed: {error:#}"))?;
@@ -433,9 +546,16 @@ where
         return Err("user input continuation is already owned by another physical run".to_owned());
     }
     let continuation_logical_run_id = preparation.continuation.continuation_logical_run_id.clone();
+    let public_run_id = Some(continuation_logical_run_id.as_str().to_owned());
     let source_thread_id = identity.source_thread_id.clone();
     let root_logical_run_id = identity.root_logical_run_id.as_str().to_owned();
     let request = preparation.request;
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    handler
+        .start_public_run(session, continuation_logical_run_id.as_str(), "")
+        .map_err(|error| {
+            format!("failed to persist user input continuation admission: {error:#}")
+        })?;
     let entries = session.entries().to_vec();
     let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
         request,
@@ -447,41 +567,43 @@ where
         .ok_or_else(|| "session state disappeared before user input continuation".to_owned())?;
     let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
         prepared_cancellation.expect("submitted input prepares cancellation");
-    let mut handler = ChannelEventHandler::new(message_tx.clone());
     let (approval_tx, approval_rx) = mpsc::channel();
     let elicitation_audit_buffer: McpElicitationAuditBuffer =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-        agent_supervisor.clone(),
-        effective_orchestration_root_config(root_config, &run_session),
-        base_registry.clone(),
-    )
-    .with_background_runs(background_runs.clone());
+    let mut agent_delegate = optional_agent_tool_runtime(
+        agent_supervisor,
+        root_config,
+        &run_session,
+        base_registry,
+        background_runs,
+    );
     let options = options.clone();
     let task_result_tx = task_result_tx.clone();
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
+    stop_control.bind(&cancellation_owner);
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
+        let public_cancellation = cancellation_handle.clone();
         let mut run_session = run_session;
         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-        let output = agent
-            .run_with_approval_input_and_agent_delegate(
-                &mut run_session,
-                AgentRunInput::without_persisted_user_message(Vec::new())
-                    .with_logical_run_id(continuation_logical_run_id.as_str())
-                    .with_user_input_continuation_context(root_logical_run_id, source_thread_id)
-                    .with_initial_provider_physical_attempt_id(physical_attempt_id)
-                    .with_tool_artifact_read_budget(tool_artifact_read_budget)
-                    .with_cancellation(cancellation_handle),
-                options,
-                &mut handler,
-                &mut approval_handler,
-                &mut agent_delegate,
-            )
-            .await;
+        let output = run_with_optional_agent_delegate(
+            agent.as_ref(),
+            &mut run_session,
+            AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_logical_run_id(continuation_logical_run_id.as_str())
+                .with_user_input_continuation_context(root_logical_run_id, source_thread_id)
+                .with_initial_provider_physical_attempt_id(physical_attempt_id)
+                .with_tool_artifact_read_budget(tool_artifact_read_budget)
+                .with_cancellation(cancellation_handle),
+            options,
+            &mut handler,
+            &mut approval_handler,
+            &mut agent_delegate,
+        )
+        .await;
         let (payload, resolution) = match output {
             Ok(output) => match output.disposition {
                 AgentRunDisposition::FinalAnswer => (
@@ -548,7 +670,7 @@ where
                 sigil_kernel::UserInputLifecycleEntryV1::Resolved(
                     sigil_kernel::UserInputResolvedV1 {
                         schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
-                        identity,
+                        identity: identity.clone(),
                         request_hash,
                         resolution,
                         resolved_at_unix_ms: current_unix_time_ms(),
@@ -569,7 +691,25 @@ where
                 agent_result_continuation_thread_ids: Vec::new(),
             },
         };
-        let payload =
+        let publication = sigil_runtime::ApplicationRunEventRecorder::resume(
+            &run_session,
+            identity.root_logical_run_id.as_str(),
+        )
+        .and_then(|recorder| recorder.record_user_input_state(&run_session, &identity));
+        let payload = match publication {
+            Ok(()) => payload,
+            Err(error) => RunTaskPayload::Chat {
+                result: Err(format!(
+                    "failed to publish input continuation settlement: {error:#}"
+                )),
+                plan_mode: false,
+                plan_review: false,
+                queue_id: None,
+                provider_logical_run_id: None,
+                agent_result_continuation_thread_ids: Vec::new(),
+            },
+        };
+        let mut payload =
             match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
                 Ok(()) => payload,
                 Err(error) => RunTaskPayload::Chat {
@@ -581,6 +721,20 @@ where
                     agent_result_continuation_thread_ids: Vec::new(),
                 },
             };
+        if !public_cancellation.is_cancel_requested()
+            && let Err(error) = handler.finish_public_payload(&mut run_session, &mut payload)
+        {
+            payload = RunTaskPayload::Chat {
+                result: Err(format!(
+                    "failed to persist input continuation terminal: {error:#}"
+                )),
+                plan_mode: false,
+                plan_review: false,
+                queue_id: None,
+                provider_logical_run_id: None,
+                agent_result_continuation_thread_ids: Vec::new(),
+            };
+        }
         let _ = task_result_tx.send(RunTaskResult {
             run_id,
             session: run_session,
@@ -590,6 +744,7 @@ where
     });
     Ok(Some(ActiveRun {
         run_id,
+        public_run_id,
         handle,
         approval_tx,
         elicitation_audit_buffer,
@@ -784,7 +939,6 @@ pub(in crate::runner) async fn run_automatic_plan_review<H, A>(
     run_session: &mut Session,
     action: sigil_kernel::StartPlanReviewAction,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
-    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
@@ -810,7 +964,6 @@ where
         run_session,
         &request,
         agent,
-        root_config,
         options,
         tool_registry,
         handler,
@@ -828,7 +981,6 @@ pub(in crate::runner) async fn run_explicit_plan_review<H, A>(
     root_logical_run_id: &str,
     workspace_snapshot_id: Option<String>,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
-    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     handler: &mut H,
@@ -854,7 +1006,6 @@ where
         run_session,
         &request,
         agent,
-        root_config,
         options,
         tool_registry,
         handler,
@@ -871,7 +1022,6 @@ pub(in crate::runner) async fn run_prepared_plan_review<H, A>(
     run_session: &mut Session,
     request: &sigil_runtime::PlanReviewRunRequest,
     agent: &sigil_kernel::Agent<impl sigil_kernel::Provider>,
-    root_config: &RootConfig,
     options: AgentRunOptions,
     tool_registry: sigil_kernel::ToolRegistry,
     handler: &mut H,
@@ -900,7 +1050,6 @@ where
         )
     }
     .map_err(|error| format!("failed to start plan review attempt: {error:#}"))?;
-    let plan_review_workspace_root = options.workspace_root.clone();
     let child_resource_provisioner = managed_plan_review_child_resources;
     let outcome_result = match child_resource_provisioner {
         Some(provisioner) => {
@@ -1010,18 +1159,10 @@ where
             ))
         }
         sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } => {
-            let compile_input = sigil_runtime::PlanReviewCoordinator::plan_compile_input(
-                run_session,
-                root_config,
-                &plan_review_workspace_root,
-                request,
-            )
-            .map_err(|error| format!("failed to prepare plan compile input: {error:#}"))?;
             sigil_runtime::PlanReviewCoordinator::commit_draft_from_child(
                 run_session,
                 &draft,
                 request,
-                &compile_input,
                 handler,
                 current_unix_time_ms(),
             )
@@ -1203,9 +1344,10 @@ pub(in crate::runner) fn agent_result_continuation_prompt(thread_ids: &[AgentThr
 
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn start_queued_conversation_run<P>(
+    stop_control: &crate::runner::protocol::WorkerStopControl,
     runtime: &tokio::runtime::Runtime,
     agent: Arc<Agent<P>>,
-    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    agent_supervisor: Option<&sigil_runtime::AgentSupervisor>,
     root_config: &RootConfig,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
@@ -1246,6 +1388,7 @@ where
         .clone()
         .unwrap_or_default();
     let dispatch_run_id = promotion.dispatch_run_id.clone();
+    let public_run_id = Some(dispatch_run_id.clone());
     let Some(session) = current_session.as_ref() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
             "session state is unavailable for follow-up".to_owned(),
@@ -1281,6 +1424,19 @@ where
                 return None;
             }
         };
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    if let Err(error) = handler.start_public_run(session, &dispatch_run_id, &safe_prompt) {
+        let error = format!("failed to persist queued run admission: {error:#}");
+        append_queue_status_and_notify(
+            current_session,
+            message_tx,
+            queue_id,
+            ConversationInputStatus::Rejected,
+            Some(error.clone()),
+        );
+        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+        return None;
+    }
     let Some(run_session) = current_session.take() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
             "session state is unavailable for follow-up".to_owned(),
@@ -1293,7 +1449,6 @@ where
         prompt: safe_prompt.clone(),
     });
 
-    let mut handler = ChannelEventHandler::new(message_tx.clone());
     let (approval_tx, approval_rx) = mpsc::channel();
     let elicitation_audit_buffer: McpElicitationAuditBuffer =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1304,14 +1459,15 @@ where
     if let Some(reasoning_effort) = reasoning_effort {
         options.reasoning_effort = Some(reasoning_effort);
     }
-    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-        agent_supervisor.clone(),
-        effective_orchestration_root_config(root_config, &run_session),
-        base_registry.clone(),
-    )
-    .with_background_runs(background_runs.clone());
+    let mut agent_delegate = optional_agent_tool_runtime(
+        agent_supervisor,
+        root_config,
+        &run_session,
+        base_registry,
+        background_runs,
+    );
     let task_result_tx = task_result_tx.clone();
-    let conversation_coordinator =
+    let conversation_coordinator = agent_supervisor.map(|_| {
         ConversationCoordinator::new(root_config.task.enabled, root_config.task.routing_policy)
             .with_writable_memory_routing(root_config.memory.writable)
             .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
@@ -1321,20 +1477,23 @@ where
             ))
             .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
                 provider_supports_routing_tools: agent.provider_capabilities().supports_tool_stream,
-                route_qualified: sigil_runtime::route_qualification_evidence(root_config),
-            });
+                task_executor_available: true,
+            })
+    });
     let task_root_config = root_config.clone();
     let plan_review_root_config = root_config.clone();
     let task_base_registry = base_registry.clone();
-    let task_agent_supervisor = agent_supervisor.clone();
+    let task_agent_supervisor = agent_supervisor.cloned();
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
     let pending_input_provider = DurableQueuePendingInputProvider::new(context_resolver.clone());
     let session_log_path = session_log_path.to_path_buf();
+    stop_control.bind(&cancellation_owner);
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
+        let public_cancellation = cancellation_handle.clone();
         let mut run_session = run_session;
         let mut payload = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -1343,7 +1502,8 @@ where
                 .with_initial_frozen_provider_request(frozen_request)
                 .with_pending_input_provider(Arc::new(pending_input_provider))
                 .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
-            let input = conversation_coordinator
+            let input = if let Some(conversation_coordinator) = conversation_coordinator.as_ref() {
+                conversation_coordinator
                 .enforce_orchestration_route_kill_switch(&mut run_session, current_unix_time_ms())
                 .and_then(|_| {
                     conversation_coordinator.bind_conversation_input(
@@ -1358,11 +1518,13 @@ where
                         current_unix_time_ms(),
                     )
                 })
-                .map(|input| input.with_cancellation(cancellation_handle.clone()))
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| format!("{error:#}"))
+            } else {
+                Ok(input.with_logical_run_id(dispatch_run_id.clone()))
+            }.map(|input| input.with_cancellation(cancellation_handle.clone()));
             let output = match input {
-                Ok(input) => agent
-                    .run_with_approval_input_and_agent_delegate(
+                Ok(input) => run_with_optional_agent_delegate(
+                        agent.as_ref(),
                         &mut run_session,
                         input,
                         options.clone(),
@@ -1374,8 +1536,8 @@ where
                     .map_err(|error| format!("{error:#}")),
                 Err(error) => Err(error),
             };
-            match output {
-                Ok(output) => match output.disposition {
+            match (output, task_agent_supervisor) {
+                (Ok(output), Some(task_agent_supervisor)) => match output.disposition {
                     AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
                         result: Ok(output.result),
                         plan_mode: false,
@@ -1656,7 +1818,6 @@ where
                             &mut run_session,
                             action,
                             agent.as_ref(),
-                            &plan_review_root_config,
                             options.clone(),
                                     plan_registry,
                             sigil_runtime::plan_handoff_workspace_snapshot_id(
@@ -1715,7 +1876,10 @@ where
                         agent_result_continuation_thread_ids: Vec::new(),
                     },
                 },
-                Err(error) => RunTaskPayload::Chat {
+                (Ok(output), None) => unorchestrated_run_payload(
+                    output, Some(queue_id.clone()), Some(dispatch_run_id.clone()),
+                ),
+                (Err(error), _) => RunTaskPayload::Chat {
                     result: Err(error),
                     plan_mode: false,
                     plan_review: false,
@@ -1780,6 +1944,18 @@ where
                 },
             };
         }
+        if !public_cancellation.is_cancel_requested()
+            && let Err(error) = handler.finish_public_payload(&mut run_session, &mut payload)
+        {
+            payload = RunTaskPayload::Chat {
+                result: Err(format!("failed to persist queued handoff terminal: {error:#}")),
+                plan_mode: false,
+                plan_review: false,
+                queue_id: Some(queue_id.clone()),
+                provider_logical_run_id: None,
+                agent_result_continuation_thread_ids: Vec::new(),
+            };
+        }
         let _ = task_result_tx.send(RunTaskResult {
             run_id,
             session: run_session,
@@ -1790,6 +1966,7 @@ where
 
     Some(ActiveRun {
         run_id,
+        public_run_id,
         handle,
         approval_tx,
         elicitation_audit_buffer,
@@ -1807,9 +1984,10 @@ where
 /// not append the user message again or rebuild a different request.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::runner) fn start_portable_overflow_recovery_run<P>(
+    stop_control: &crate::runner::protocol::WorkerStopControl,
     runtime: &tokio::runtime::Runtime,
     agent: Arc<Agent<P>>,
-    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    agent_supervisor: Option<&sigil_runtime::AgentSupervisor>,
     root_config: &RootConfig,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
@@ -1830,8 +2008,13 @@ where
     let session = current_session
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("session state is unavailable for overflow recovery"))?;
+    let public_run_id = Some(logical_run_id.clone());
     let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
         prepare_run_cancellation(session).map_err(anyhow::Error::msg)?;
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    handler
+        .start_public_run(session, &logical_run_id, "")
+        .context("failed to persist overflow recovery run admission")?;
     let run_session = current_session
         .take()
         .ok_or_else(|| anyhow::anyhow!("session state is unavailable for overflow recovery"))?;
@@ -1840,26 +2023,28 @@ where
         "context window was rejected before generation; compacted history and retrying once"
             .to_owned(),
     ));
-    let mut handler = ChannelEventHandler::new(message_tx.clone());
     let (approval_tx, approval_rx) = mpsc::channel();
     let elicitation_audit_buffer: McpElicitationAuditBuffer =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-        agent_supervisor.clone(),
-        effective_orchestration_root_config(root_config, &run_session),
-        base_registry.clone(),
-    )
-    .with_background_runs(background_runs.clone());
+    let mut agent_delegate = optional_agent_tool_runtime(
+        agent_supervisor,
+        root_config,
+        &run_session,
+        base_registry,
+        background_runs,
+    );
     let options = options.clone();
     let task_result_tx = task_result_tx.clone();
     let run_id = *next_run_id;
     *next_run_id = (*next_run_id).saturating_add(1);
     let url_capability_registrar = run_session.user_url_capability_registrar();
     let image_attachment_resolver = run_session.image_attachment_resolver();
+    stop_control.bind(&cancellation_owner);
     let handle = runtime.spawn(async move {
         let _cancellation_task_guard = cancellation_task_guard;
+        let public_cancellation = cancellation_handle.clone();
         let mut run_session = run_session;
         let result = {
             let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -1868,41 +2053,59 @@ where
                 .with_logical_run_id(logical_run_id)
                 .with_tool_artifact_read_budget(tool_artifact_read_budget)
                 .with_cancellation(cancellation_handle);
-            agent
-                .run_with_approval_input_and_agent_delegate(
-                    &mut run_session,
-                    input,
-                    options,
-                    &mut handler,
-                    &mut approval_handler,
-                    &mut agent_delegate,
-                )
-                .await
-                .map(|output| output.result)
-                .map_err(|error| format!("{error:#}"))
+            run_with_optional_agent_delegate(
+                agent.as_ref(),
+                &mut run_session,
+                input,
+                options,
+                &mut handler,
+                &mut approval_handler,
+                &mut agent_delegate,
+            )
+            .await
+            .map_err(|error| format!("{error:#}"))
         };
         let result =
             match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
                 Ok(()) => result,
                 Err(error) => Err(error),
             };
-        let _ = task_result_tx.send(RunTaskResult {
-            run_id,
-            session: run_session,
-            payload: RunTaskPayload::Chat {
-                result,
+        let mut payload = match result {
+            Ok(output) => unorchestrated_run_payload(output, None, None),
+            Err(error) => RunTaskPayload::Chat {
+                result: Err(error),
                 plan_mode: false,
                 plan_review: false,
                 queue_id: None,
                 provider_logical_run_id: None,
                 agent_result_continuation_thread_ids: Vec::new(),
             },
+        };
+        if !public_cancellation.is_cancel_requested()
+            && let Err(error) = handler.finish_public_payload(&mut run_session, &mut payload)
+        {
+            payload = RunTaskPayload::Chat {
+                result: Err(format!(
+                    "failed to persist overflow retry terminal: {error:#}"
+                )),
+                plan_mode: false,
+                plan_review: false,
+                queue_id: None,
+                provider_logical_run_id: None,
+                agent_result_continuation_thread_ids: Vec::new(),
+            };
+        }
+        let _ = task_result_tx.send(RunTaskResult {
+            run_id,
+            session: run_session,
+            payload,
             post_run_maintenance: None,
         });
     });
 
     Ok(ActiveRun {
         run_id,
+        public_run_id,
         handle,
         approval_tx,
         elicitation_audit_buffer,

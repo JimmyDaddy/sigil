@@ -19,6 +19,8 @@ mod mouse_flow_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod performance_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod plan_review_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod product_smoke_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod session_flow_tests;
@@ -37,7 +39,7 @@ mod timeline_render_store_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod tool_card_interaction_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
-mod worker_bridge_tests;
+pub(crate) mod worker_bridge_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod workspace_trust_flow_tests;
 

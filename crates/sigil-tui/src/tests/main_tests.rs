@@ -30,6 +30,7 @@ use super::{
     flush_pending_worker_commands, leave_terminal_presentation, mouse_layout_snapshot,
     next_mouse_capture_action, next_wake_deadline, process_app_action,
     process_app_action_with_spawner, render_timed_frame, render_tui_exit_resume_hint,
+    report_application_action_receipt, report_application_admission_error,
     restart_worker_after_session_transition, restore_initial_session_from_disk,
     return_to_setup_after_boot_failure, return_to_setup_after_boot_failure_with_draft,
     worker_message_requires_projection_refresh,
@@ -39,6 +40,7 @@ use crate::presentation::PresentationSession;
 fn test_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
@@ -131,6 +133,209 @@ fn test_config_for_workspace(workspace_root: &Path) -> RootConfig {
         },
         ..test_config()
     }
+}
+
+fn application_admission_test_app(workspace_root: &Path) -> AppState {
+    let mut config = test_config_for_workspace(workspace_root);
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(workspace_root.join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(workspace_root.join("cache").display().to_string());
+    config.session.log_dir = Some(workspace_root.join("sessions").display().to_string());
+    AppState::from_root_config(&workspace_root.join("sigil.toml"), &config)
+}
+
+#[test]
+fn application_admission_failure_preserves_pending_approval_and_live_worker() -> Result<()> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use sigil_kernel::{ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec};
+
+    let fixture = tempfile::tempdir()?;
+    let mut app = application_admission_test_app(fixture.path());
+    app.runtime.is_busy = true;
+    app.approval.pending = Some(crate::app::PendingApproval {
+        approval_request_id: "approval-1".to_owned(),
+        call: ToolCall {
+            id: "call-1".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            network_effect: None,
+            preview: ToolPreviewCapability::Required,
+        },
+        effects: Default::default(),
+        subjects: Vec::new(),
+        analysis: sigil_kernel::ToolAnalysisStatus::Complete,
+        containment: Default::default(),
+        safe_summary: Default::default(),
+        decision_reasons: Vec::new(),
+        network_effect: None,
+        local_policy_decision: sigil_kernel::ApprovalMode::Ask,
+        network_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        source_policy_decision: sigil_kernel::ApprovalMode::Allow,
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
+        command_permission_matches: Vec::new(),
+        session_grant_available: false,
+        session_grant_unavailable_reason: None,
+        command_family_allow_pattern: None,
+        preview: None,
+        presentation_state: crate::app::ApprovalPresentationState::Pending,
+    });
+    assert!(app.worker_ready());
+    report_application_admission_error(
+        &mut app,
+        &AppAction::ApprovalDecision {
+            call_id: "call-1".to_owned(),
+            approval_request_id: "approval-1".to_owned(),
+            approved: true,
+        },
+        &anyhow::Error::new(sigil_application::ApplicationError::InvalidRequest(
+            "approval binding is unavailable".to_owned(),
+        )),
+    )?;
+
+    assert!(
+        app.worker_ready(),
+        "admission failure does not stop the worker"
+    );
+    assert!(app.runtime.is_busy, "the pending run still owns the worker");
+    let pending = app
+        .approval
+        .pending
+        .as_ref()
+        .expect("approval remains pending");
+    assert_eq!(pending.approval_request_id, "approval-1");
+    assert!(pending.actions_available());
+    assert_eq!(
+        app.last_notice(),
+        Some("application command was not admitted: approval binding is unavailable")
+    );
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))?,
+        Some(AppAction::ApprovalDecision { call_id, approval_request_id, approved: true })
+            if call_id == "call-1" && approval_request_id == "approval-1"
+    ));
+    Ok(())
+}
+
+#[test]
+fn invalid_new_prompt_admission_releases_only_optimistic_run_state() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut app = application_admission_test_app(fixture.path());
+    app.composer.input = "x".repeat(65_537);
+    let action = app.submit_input()?.expect("new prompt action");
+    let AppAction::SubmitPrompt(prompt) = &action else {
+        panic!("idle input must create a new prompt");
+    };
+    assert!(app.runtime.is_busy);
+    let error = sigil_application::SafeText::new(prompt.clone()).expect_err("over-limit prompt");
+    report_application_admission_error(&mut app, &action, &anyhow::Error::new(error))?;
+
+    assert!(!app.runtime.is_busy);
+    assert!(app.worker_ready());
+    app.composer.input = "valid next prompt".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(_))
+    ));
+
+    // Unavailability does not prove that a dispatched command had no effect.
+    report_application_admission_error(
+        &mut app,
+        &AppAction::SubmitPrompt("valid next prompt".to_owned()),
+        &anyhow::Error::new(sigil_application::ApplicationError::Unavailable),
+    )?;
+    assert!(app.runtime.is_busy);
+    assert!(app.worker_ready());
+    Ok(())
+}
+
+#[test]
+fn queue_admission_rejection_releases_only_its_pending_operation() -> Result<()> {
+    use crate::runner::QueueOperation;
+    use sigil_kernel::ConversationInputQueueId;
+
+    let fixture = tempfile::tempdir()?;
+    let mut app = application_admission_test_app(fixture.path());
+    app.runtime.is_busy = true;
+    let queue_id = ConversationInputQueueId::new("queue-1")?;
+    let other_id = ConversationInputQueueId::new("queue-2")?;
+    let operation = QueueOperation::Cancel {
+        queue_id: queue_id.clone(),
+    };
+    let other_operation = QueueOperation::Cancel {
+        queue_id: other_id.clone(),
+    };
+    app.composer
+        .pending_queue_operations
+        .insert(queue_id.clone(), operation);
+    app.composer
+        .pending_queue_operations
+        .insert(other_id.clone(), other_operation.clone());
+    let action = AppAction::CancelQueuedConversationInput {
+        queue_id: queue_id.clone(),
+    };
+    report_application_action_receipt(
+        &mut app,
+        &action,
+        &sigil_application::ApplicationCommandReceipt::Rejected(
+            sigil_application::CommandRejection {
+                kind: "queue".to_owned(),
+                reason: "queue item was already consumed".to_owned(),
+            },
+        ),
+    )?;
+
+    assert!(app.runtime.is_busy);
+    assert!(app.worker_ready());
+    assert!(
+        !app.composer
+            .pending_queue_operations
+            .contains_key(&queue_id)
+    );
+    assert_eq!(
+        app.composer.pending_queue_operations.get(&other_id),
+        Some(&other_operation)
+    );
+    assert!(
+        app.last_notice()
+            .is_some_and(|message| message.contains("already consumed"))
+    );
+    Ok(())
+}
+
+#[test]
+fn queue_admission_error_preserves_running_task_state() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut app = application_admission_test_app(fixture.path());
+    app.runtime.is_busy = true;
+    app.composer.pending_queue_pause = Some(true);
+    report_application_admission_error(
+        &mut app,
+        &AppAction::SetConversationQueuePaused { paused: true },
+        &anyhow::Error::new(sigil_application::ApplicationError::InvalidRequest(
+            "queue scope is unavailable".to_owned(),
+        )),
+    )?;
+
+    assert!(app.runtime.is_busy);
+    assert!(app.worker_ready());
+    assert_eq!(app.composer.pending_queue_pause, None);
+    assert!(
+        app.last_notice()
+            .is_some_and(|message| message.contains("queue scope"))
+    );
+    Ok(())
 }
 
 fn v2_test_config(default_connection: &str) -> RootConfig {
@@ -241,6 +446,7 @@ fn terminal_presentation_uses_a_balanced_alternate_screen_lifecycle() {
 #[test]
 fn wake_deadline_only_polls_while_runtime_work_is_active() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     assert_eq!(next_wake_deadline(&app), None);
 
     app.runtime.is_busy = true;
@@ -317,7 +523,12 @@ fn restore_initial_session_from_disk_uses_requested_selector() -> Result<()> {
         InitialSessionTarget::Selector("target-123"),
     )?;
 
-    assert_eq!(app.session_id, "target-123");
+    assert_eq!(
+        app.session_id,
+        JsonlSessionStore::read_event_records(&session_log_path)?[0]
+            .stored_event()
+            .session_id
+    );
     assert_eq!(app.session_log_path, session_log_path);
     assert!(
         app.timeline
@@ -341,7 +552,12 @@ fn restore_initial_session_from_disk_latest_reopens_the_most_recent_session() ->
 
     restore_initial_session_from_disk(&mut app, &config, InitialSessionTarget::Latest)?;
 
-    assert_eq!(app.session_id, "latest-existing");
+    assert_eq!(
+        app.session_id,
+        JsonlSessionStore::read_event_records(&session_log_path)?[0]
+            .stored_event()
+            .session_id
+    );
     assert_eq!(app.session_log_path, session_log_path);
     assert!(
         app.timeline
@@ -434,6 +650,10 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -510,6 +730,10 @@ fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> a
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -520,7 +744,7 @@ fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> a
     let sent = command_rx.recv_timeout(Duration::from_secs(1))?;
     assert!(matches!(
         sent,
-        WorkerCommand::ResumeRecoveredPlanReviewResearch {
+        WorkerCommand::ResumeRecoveredUserInput {
             command_id,
             request_id,
             generation: 1,
@@ -539,6 +763,10 @@ fn process_app_action_queues_worker_command_until_runtime_is_ready() -> anyhow::
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: false,
@@ -575,6 +803,10 @@ fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()>
     drop(closed_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx: closed_tx,
         worker_rx,
         ready: true,
@@ -640,6 +872,10 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
     drop(closed_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx: closed_tx,
         worker_rx,
         ready: true,
@@ -654,6 +890,10 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
             drop(retry_rx);
             let (_message_tx, worker_rx) = mpsc::channel();
             Ok(WorkerRuntime {
+                application: None,
+                pending_admission: None,
+                pending_interactions: Vec::new(),
+                join_handle: None,
                 worker_tx: retry_tx,
                 worker_rx,
                 ready: true,
@@ -675,17 +915,14 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
 }
 
 #[test]
-fn process_app_action_reports_restart_failure_without_runtime() -> anyhow::Result<()> {
+fn cancel_without_worker_reports_no_active_run_without_restarting() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let mut worker = None;
 
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("provider is temporarily unavailable; retry or repair the connection")
-    );
+    assert_eq!(app.last_notice(), Some("no active run to stop"));
     Ok(())
 }
 
@@ -724,6 +961,10 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -752,6 +993,10 @@ fn process_app_action_uses_system_clipboard_when_osc52_is_disabled() -> anyhow::
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -829,6 +1074,10 @@ fn process_app_action_handles_feedback_handoff_locally() -> anyhow::Result<()> {
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -877,6 +1126,10 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
     let (_message_tx, worker_rx) = mpsc::channel();
     worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -905,6 +1158,10 @@ fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result
     drop(command_rx);
     let (_message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -930,6 +1187,10 @@ fn fake_worker_runtime() -> (WorkerRuntime, mpsc::Receiver<WorkerCommand>) {
     let (_message_tx, message_rx) = mpsc::channel::<WorkerMessage>();
     (
         WorkerRuntime {
+            application: None,
+            pending_admission: None,
+            pending_interactions: Vec::new(),
+            join_handle: None,
             worker_tx,
             worker_rx: message_rx,
             ready: true,
@@ -994,7 +1255,11 @@ fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<(
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;
 
-    assert!(!app.is_setup_mode());
+    assert!(
+        !app.is_setup_mode(),
+        "boot returned to setup: {:?}",
+        app.last_notice()
+    );
     assert!(app.is_workspace_trust_gate_mode());
     assert!(worker.is_none());
     Ok(())
@@ -1056,7 +1321,7 @@ fn r71_shipping_tui_current_schema_bootstrap_runs_real_authority_file_surface() 
             .plan(ManagedFileAccessPlanRequestV1 {
                 logical_path: ManagedFileLogicalPathV1::new(logical_path.to_owned())?,
                 operation,
-                operation_scope: format!("tui-shipping-{operation:?}"),
+                operation_scope: input.operation_scope(),
             })?;
         let binding = ManagedFileAdmissionBindingV1::ToolPermissionPlan {
             permission_plan_hash: CanonicalHash::from_bytes([0x11; 32]),
@@ -1086,7 +1351,7 @@ fn r71_shipping_tui_current_schema_bootstrap_runs_real_authority_file_surface() 
                     admission_binding_hash: plan.plan_hash,
                 },
                 input,
-                mutation_recorder: None,
+                context: Default::default(),
             },
             token,
         )?)
@@ -1159,7 +1424,12 @@ fn new_session_action_uses_launcher_control_path_when_worker_is_unavailable() ->
     )?;
 
     assert_ne!(app.session_id, previous_session_id);
-    assert_eq!(app.session_id, "control-new");
+    assert_eq!(
+        app.session_id,
+        JsonlSessionStore::read_event_records(&new_session_path)?[0]
+            .stored_event()
+            .session_id
+    );
     assert_eq!(app.session_log_path, new_session_path);
     assert!(worker.is_some());
     let entries = JsonlSessionStore::read_entries(&app.session_log_path)?;
@@ -1345,7 +1615,7 @@ fn authority_boot_failure_returns_to_repairable_setup_without_worker() -> Result
         config_path,
         "configuration saved; authority boot is unavailable: durable journal is corrupt".to_owned(),
         Some(PublicRouteRecoveryCode::AuthorityUnavailable),
-    );
+    )?;
 
     assert!(app.is_setup_mode());
     assert!(worker.is_none());
@@ -1386,7 +1656,7 @@ fn authority_retry_failure_keeps_the_submitted_setup_draft_and_review_row() -> R
         Some(setup_draft),
         "configuration saved; authority boot is unavailable: durable journal is corrupt".to_owned(),
         Some(PublicRouteRecoveryCode::AuthorityUnavailable),
-    );
+    )?;
 
     let setup = app.setup_state().expect("setup draft restored");
     assert_eq!(setup.selected_field, crate::app::SetupField::Save);
@@ -1402,6 +1672,10 @@ fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
     let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: true,
@@ -1420,6 +1694,10 @@ fn drain_worker_messages_marks_runtime_ready() -> Result<()> {
     let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: false,
@@ -1441,6 +1719,10 @@ fn drain_worker_messages_retires_unready_worker_without_dropping_pending_input()
     let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: false,
@@ -1472,6 +1754,10 @@ fn typed_startup_route_recovery_preserves_pending_input_and_avoids_run_failure_c
     let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: false,
@@ -1510,6 +1796,10 @@ fn startup_failure_preserves_a_queued_new_session_command_before_worker_readines
     let (worker_tx, _command_rx) = WorkerCommandSender::test_channel();
     let (message_tx, worker_rx) = mpsc::channel();
     let mut worker = Some(WorkerRuntime {
+        application: None,
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        join_handle: None,
         worker_tx,
         worker_rx,
         ready: false,
@@ -1565,6 +1855,7 @@ fn session_transition_restarts_worker_against_the_restored_compound_route() -> R
     let mut worker = Some(old_worker);
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&target_session),
         session_log_path: target_session.clone(),
         provider_name: "deepseek".to_owned(),
         model_name: target_model.model_id.clone(),

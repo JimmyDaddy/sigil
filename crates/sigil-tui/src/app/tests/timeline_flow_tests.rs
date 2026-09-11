@@ -1543,7 +1543,7 @@ fn child_history_anchor_survives_file_reload_append() -> Result<()> {
             Vec::new(),
         )))?;
     }
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     app.timeline_scroll_back = app.max_timeline_scroll_back() / 2;
     assert!(app.timeline_scroll_back > 0);
     let visible_anchor = |app: &AppState| {
@@ -1565,7 +1565,7 @@ fn child_history_anchor_survives_file_reload_append() -> Result<()> {
             Vec::new(),
         )))?;
     }
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     assert_eq!(
         visible_anchor(&app),
         before,
@@ -1825,7 +1825,7 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
         )))?;
     }
 
-    app.reload_active_agent_child_transcript();
+    crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
     let rendered = transcript_plain(app.transcript_lines(16));
 
     assert!(rendered.contains("showing latest 80 of 96 child transcript entries"));
@@ -1838,7 +1838,7 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
         .as_mut()
         .expect("child transcript");
     transcript.rendered_body_lines = vec![Line::from("cached sentinel")];
-    app.reload_active_agent_child_transcript();
+    crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
     let unchanged = transcript_plain(app.transcript_lines(16));
 
     assert!(unchanged.contains("cached sentinel"));
@@ -1857,7 +1857,7 @@ fn running_child_agent_parent_sync_does_not_reload_changing_transcript() -> Resu
         Some("first child line".to_owned()),
         Vec::new(),
     )))?;
-    app.reload_active_agent_child_transcript();
+    crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
     let transcript = app
         .agent_panel
         .active_child_transcript
@@ -1874,7 +1874,8 @@ fn running_child_agent_parent_sync_does_not_reload_changing_transcript() -> Resu
 
     assert!(rendered.contains("running cached transcript"));
     assert!(!rendered.contains("second child line"));
-    assert!(app.poll_background_tasks());
+    app.poll_background_tasks();
+    crate::app::tests::common::refresh_child_transcript_for_test(&mut app);
     let refreshed = transcript_plain(app.transcript_lines(16));
     assert!(refreshed.contains("second child line"));
     assert!(!app.poll_background_tasks());
@@ -1892,7 +1893,7 @@ fn missing_child_agent_transcript_load_error_is_cached() -> Result<()> {
         child_session_ref: sigil_kernel::SessionRef::new_relative("children/missing.jsonl")?,
     };
 
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     let transcript = app
         .agent_panel
         .active_child_transcript
@@ -1906,7 +1907,7 @@ fn missing_child_agent_transcript_load_error_is_cached() -> Result<()> {
     assert!(transcript.timeline_entries.is_empty());
     assert!(transcript.rendered_body_lines.is_empty());
 
-    assert!(!app.reload_active_agent_child_transcript());
+    assert!(!crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     Ok(())
 }
 
@@ -2727,6 +2728,7 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
     assert_eq!(app.runtime.session_delta_stats.input_cost, 0.20);
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         session_log_path: restored_path,
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-flash".to_owned(),

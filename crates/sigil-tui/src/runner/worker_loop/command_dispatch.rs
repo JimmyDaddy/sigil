@@ -140,7 +140,7 @@ pub(in crate::runner) enum RunPlanCommand {
         expected_request_hash: String,
         decision: sigil_kernel::UserInputDecisionV1,
     },
-    ResumeRecoveredPlanReviewResearch {
+    ResumeRecoveredUserInput {
         command_id: String,
         request_id: String,
         generation: u32,
@@ -468,12 +468,12 @@ pub(in crate::runner) fn classify_worker_command(
             expected_request_hash,
             decision,
         }),
-        WorkerCommand::ResumeRecoveredPlanReviewResearch {
+        WorkerCommand::ResumeRecoveredUserInput {
             command_id,
             request_id,
             generation,
             expected_request_hash,
-        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ResumeRecoveredPlanReviewResearch {
+        } => ClassifiedWorkerCommand::RunPlan(RunPlanCommand::ResumeRecoveredUserInput {
             command_id,
             request_id,
             generation,

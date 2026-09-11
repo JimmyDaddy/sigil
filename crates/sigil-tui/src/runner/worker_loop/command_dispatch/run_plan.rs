@@ -1,7 +1,8 @@
 use super::super::agent_runtime::{
     PlanReviewExecutionResult, apply_user_input_decision, chat_agent_run_input_with_repo_context,
-    effective_orchestration_root_config, run_automatic_plan_review, run_explicit_plan_review,
-    run_prepared_plan_review,
+    effective_orchestration_root_config, optional_agent_tool_runtime, run_automatic_plan_review,
+    run_explicit_plan_review, run_prepared_plan_review, run_with_optional_agent_delegate,
+    unorchestrated_run_payload,
 };
 use super::*;
 use sigil_kernel::EventHandler;
@@ -35,6 +36,26 @@ where
     let mut command_result = Some(command);
     let control = WorkerCommandDispatchControl::Continue;
     while let Some(current_command) = command_result.take() {
+        if state.agent.supervisor.is_none()
+            && run_plan_command_requires_orchestration(&current_command)
+        {
+            let _ = message_tx.send(plan_command_rejection(
+                &current_command,
+                "task orchestration is unavailable in this composition".to_owned(),
+            ));
+            continue;
+        }
+        if matches!(&current_command, RunPlanCommand::InvokeInlineSkill { .. })
+            && (!root_config.skills.enabled
+                || !root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::Skills))
+        {
+            let _ = message_tx.send(WorkerMessage::RunFailed(
+                "skills are unavailable in this composition".to_owned(),
+            ));
+            continue;
+        }
         match current_command {
             RunPlanCommand::Submit {
                 prompt,
@@ -110,7 +131,10 @@ where
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
 
-                let pending_session_title = if !cfg!(test)
+                let pending_session_title = if root_config
+                    .composition
+                    .allows(sigil_kernel::OptionalCapability::SessionTitles)
+                    && !cfg!(test)
                     && !plan_mode
                     && !prompt.trim().is_empty()
                     && !run_session
@@ -145,17 +169,6 @@ where
                 } else {
                     sigil_kernel::safe_persistence_text(&prompt)
                 };
-                let started = if plan_mode {
-                    WorkerMessage::PlanRunStarted {
-                        prompt: safe_started_prompt,
-                    }
-                } else {
-                    WorkerMessage::RunStarted {
-                        prompt: safe_started_prompt,
-                    }
-                };
-                let _ = message_tx.send(started);
-
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
@@ -172,12 +185,13 @@ where
                 );
                 let effective_root_config =
                     effective_orchestration_root_config(root_config, &run_session);
-                let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
-                    state.agent.supervisor.clone(),
-                    effective_root_config.clone(),
-                    agent.tool_registry().clone(),
-                )
-                .with_background_runs(state.agent.background_runs.clone());
+                let mut agent_delegate = optional_agent_tool_runtime(
+                    state.agent.supervisor.as_ref(),
+                    &effective_root_config,
+                    &run_session,
+                    agent.tool_registry(),
+                    &state.agent.background_runs,
+                );
                 let plan_tools = plan_mode.then(|| {
                     sigil_runtime::build_plan_review_tool_registry(
                         agent.tool_registry(),
@@ -187,7 +201,8 @@ where
                 });
                 let task_result_tx = state.run.result_tx.clone();
                 let run_id = state.allocate_run_id();
-                let provider_logical_run_id = format!("foreground-run-{run_id}");
+                let provider_logical_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+                let public_run_id = Some(provider_logical_run_id.clone());
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(session_ref) => session_ref,
                     Err(error) => {
@@ -196,22 +211,25 @@ where
                         continue;
                     }
                 };
-                let conversation_coordinator = ConversationCoordinator::new(
-                    root_config.task.enabled && !plan_mode,
-                    root_config.task.routing_policy,
-                )
-                .with_writable_memory_routing(root_config.memory.writable)
-                .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
-                    &root_config.agent.runtime_provider,
-                    &root_config.agent.model,
-                    sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
-                ))
-                .with_route_capability_evidence(
-                    sigil_runtime::RouteCapabilityEvidence {
-                        provider_supports_routing_tools: provider_capabilities.supports_tool_stream,
-                        route_qualified: sigil_runtime::route_qualification_evidence(root_config),
-                    },
-                );
+                let conversation_coordinator = state.agent.supervisor.as_ref().map(|_| {
+                    ConversationCoordinator::new(
+                        root_config.task.enabled && !plan_mode,
+                        root_config.task.routing_policy,
+                    )
+                    .with_writable_memory_routing(root_config.memory.writable)
+                    .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
+                        &root_config.agent.runtime_provider,
+                        &root_config.agent.model,
+                        sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+                    ))
+                    .with_route_capability_evidence(
+                        sigil_runtime::RouteCapabilityEvidence {
+                            provider_supports_routing_tools: provider_capabilities
+                                .supports_tool_stream,
+                            task_executor_available: true,
+                        },
+                    )
+                });
                 let task_root_config = effective_root_config;
                 let task_base_registry = agent.tool_registry().clone();
                 let task_agent_supervisor = state.agent.supervisor.clone();
@@ -227,11 +245,6 @@ where
                         continue;
                     }
                 };
-                let cancellation_owner = RunCancellationOwner::new();
-                let cancellation_handle = cancellation_owner.handle();
-                let run_task_guard = cancellation_handle
-                    .register_task()
-                    .expect("new root cancellation owner must admit its first task");
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
@@ -242,6 +255,28 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                if let Err(error) = handler.start_public_run(
+                    &run_session,
+                    &provider_logical_run_id,
+                    &safe_started_prompt,
+                ) {
+                    state.run.route_execution_owner = None;
+                    state.session.current = Some(run_session);
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist foreground run admission: {error:#}"
+                    )));
+                    continue;
+                }
+                let started = if plan_mode {
+                    WorkerMessage::PlanRunStarted {
+                        prompt: safe_started_prompt,
+                    }
+                } else {
+                    WorkerMessage::RunStarted {
+                        prompt: safe_started_prompt,
+                    }
+                };
+                let _ = message_tx.send(started);
                 let plan_review_root_config = Arc::clone(&plan_review_root_config);
                 let session_log_path = state.session.log_path.clone();
                 let managed_plan_review_child_resources = state
@@ -250,8 +285,15 @@ where
                     .map(Arc::clone);
                 let managed_verification_execution =
                     managed_verification_execution.as_ref().map(Arc::clone);
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
+                state.stop_control.bind(&cancellation_owner);
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
+                    let public_cancellation = cancellation_handle.clone();
                     let mut run_session = run_session;
                     let mut payload = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
@@ -269,7 +311,6 @@ where
                                 .ok()
                                 .flatten(),
                                 agent.as_ref(),
-                                &plan_review_root_config,
                                 options.clone(),
                                 plan_registry,
                                 &mut handler,
@@ -322,7 +363,8 @@ where
                             .await
                             .with_image_attachments(attachments)
                             .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
-                            let input = conversation_coordinator
+                            let input = if let Some(conversation_coordinator) = conversation_coordinator.as_ref() {
+                                conversation_coordinator
                                 .enforce_orchestration_route_kill_switch(
                                     &mut run_session,
                                     current_unix_time_ms(),
@@ -337,12 +379,14 @@ where
                                         current_unix_time_ms(),
                                     )
                                 })
-                                .map(|input| input.with_cancellation(cancellation_handle.clone()))
-                                .map_err(|error| format!("{error:#}"));
+                                .map_err(|error| format!("{error:#}"))
+                            } else {
+                                Ok(input.with_logical_run_id(provider_logical_run_id.clone()))
+                            }.map(|input| input.with_cancellation(cancellation_handle.clone()));
                             let output = match input {
                                 Ok(input) => {
-                                agent
-                                    .run_with_approval_input_and_agent_delegate(
+                                run_with_optional_agent_delegate(
+                                        agent.as_ref(),
                                         &mut run_session,
                                         input,
                                         options.clone(),
@@ -355,8 +399,8 @@ where
                                 .map_err(|error| format!("{error:#}")),
                                 Err(error) => Err(error),
                             };
-                            match output {
-                            Ok(output) => match output.disposition {
+                            match (output, task_agent_supervisor) {
+                            (Ok(output), Some(task_agent_supervisor)) => match output.disposition {
                                 AgentRunDisposition::FinalAnswer => RunTaskPayload::Chat {
                                     result: Ok(output.result),
                                     plan_mode,
@@ -679,7 +723,6 @@ where
                                         &mut run_session,
                                         action,
                                         agent.as_ref(),
-                                        &plan_review_root_config,
                                         options.clone(),
                                         plan_registry,
                                         sigil_runtime::plan_handoff_workspace_snapshot_id(
@@ -745,7 +788,10 @@ where
                                     }
                                 }
                             },
-                                Err(error) => RunTaskPayload::Chat {
+                                (Ok(output), None) => unorchestrated_run_payload(
+                                    output, None, Some(provider_logical_run_id.clone()),
+                                ),
+                                (Err(error), _) => RunTaskPayload::Chat {
                                     result: Err(error),
                                     plan_mode,
                                     plan_review: false,
@@ -816,6 +862,18 @@ where
                             },
                         };
                     }
+                    if !public_cancellation.is_cancel_requested()
+                        && let Err(error) = handler.finish_public_payload(&mut run_session, &mut payload)
+                    {
+                        payload = RunTaskPayload::Chat {
+                            result: Err(format!("failed to persist foreground handoff terminal: {error:#}")),
+                            plan_mode,
+                            plan_review: false,
+                            queue_id: None,
+                            provider_logical_run_id: Some(provider_logical_run_id.clone()),
+                            agent_result_continuation_thread_ids: Vec::new(),
+                        };
+                    }
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
@@ -826,6 +884,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -906,11 +965,6 @@ where
                         continue;
                     }
                 };
-                let cancellation_owner = RunCancellationOwner::new();
-                let cancellation_handle = cancellation_owner.handle();
-                let run_task_guard = cancellation_handle
-                    .register_task()
-                    .expect("new root cancellation owner must admit its first task");
 
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
@@ -921,6 +975,12 @@ where
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                     continue;
                 }
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
+                state.stop_control.bind(&cancellation_owner);
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -970,6 +1030,7 @@ where
 
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: None,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -982,10 +1043,28 @@ where
                 });
             }
             RunPlanCommand::ApprovalCommand(command) => {
-                if let Some(receipt) = state
-                    .approval_command_receipts
-                    .get(&command.command_id)
-                    .cloned()
+                let envelope_matches = command.protocol_version == WORKER_COMMAND_PROTOCOL_VERSION
+                    && state.session.current.as_ref().map_or_else(
+                        || {
+                            // The active run owns the Session; its execution owner proves this
+                            // attachment's route authority is already bound to the durable scope.
+                            state.run.active.is_some()
+                                && state.run.route_execution_owner.is_some()
+                                && state.session.attachment_lease.as_ref().is_some_and(
+                                    |attachment| {
+                                        attachment
+                                            .route_mutation_authority(&command.session_id)
+                                            .is_ok()
+                                    },
+                                )
+                        },
+                        |session| session.session_scope_id() == command.session_id,
+                    );
+                if envelope_matches
+                    && let Some(receipt) = state
+                        .approval_command_receipts
+                        .get(&command.command_id)
+                        .cloned()
                 {
                     let _ = message_tx.send(WorkerMessage::ApprovalCommandReceipt(
                         WorkerApprovalCommandReceipt {
@@ -997,8 +1076,6 @@ where
                 }
 
                 let command_id = command.command_id;
-                let envelope_matches = command.protocol_version == WORKER_COMMAND_PROTOCOL_VERSION
-                    && command.session_id == state.session.log_path.display().to_string();
                 let (call_id, approval_request_id, decision, approval, family_pattern) =
                     match command.payload {
                         WorkerApprovalCommand::Decision {
@@ -1181,8 +1258,10 @@ where
                     &mut state.session.detached_durable_controls,
                     message_tx,
                     elicitation_handler,
-                    &state.agent.supervisor,
+                    state.agent.supervisor.as_ref(),
                     &mut state.run.discarded_ids,
+                    &mut state.run.retired,
+                    &state.stop_control,
                     ActiveRunStopDisposition::PauseTask,
                     "task paused from TUI",
                 );
@@ -1198,8 +1277,10 @@ where
                         &mut state.session.detached_durable_controls,
                         message_tx,
                         elicitation_handler,
-                        &state.agent.supervisor,
+                        state.agent.supervisor.as_ref(),
                         &mut state.run.discarded_ids,
+                        &mut state.run.retired,
+                        &state.stop_control,
                         ActiveRunStopDisposition::Cancel,
                         "run cancelled from TUI",
                     );
@@ -1209,25 +1290,41 @@ where
                     ));
                 }
             }
-            RunPlanCommand::ResumeRecoveredPlanReviewResearch {
+            RunPlanCommand::ResumeRecoveredUserInput {
                 command_id,
                 request_id,
                 generation,
                 expected_request_hash,
             } => {
-                let recovered = super::super::recover_managed_plan_review_research_attention(state);
+                let input_failure = |message| WorkerMessage::UserInputDecisionFailed {
+                    request_id: request_id.clone(),
+                    generation,
+                    expected_request_hash: expected_request_hash.clone(),
+                    message,
+                    entries: None,
+                };
+                if state.run.active.is_some()
+                    || state.run.retired.iter().any(|handle| !handle.is_finished())
+                    || state.agent.background_runs.has_any()
+                {
+                    let _ = message_tx.send(input_failure(
+                        "the accepted answer still has an active execution owner".to_owned(),
+                    ));
+                    continue;
+                }
+                let recovered = super::super::recover_owned_user_input_attention(state);
                 let recovered = match recovered {
                     Ok(Some(command)) => command,
                     Ok(None) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(
-                            "accepted plan-review input is no longer recoverable; reload the session"
+                        let _ = message_tx.send(input_failure(
+                            "accepted input is no longer recoverable; reload the session"
                                 .to_owned(),
                         ));
                         continue;
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "accepted plan-review input recovery is unavailable: {error:#}"
+                        let _ = message_tx.send(input_failure(format!(
+                            "accepted input recovery is unavailable: {error:#}"
                         )));
                         continue;
                     }
@@ -1237,9 +1334,8 @@ where
                     || recovered.identity.generation != generation
                     || recovered.request_hash != expected_request_hash
                 {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "recovered plan-review input no longer matches the selected request"
-                            .to_owned(),
+                    let _ = message_tx.send(input_failure(
+                        "recovered input no longer matches the selected request".to_owned(),
                     ));
                     continue;
                 }
@@ -1258,9 +1354,19 @@ where
                 expected_request_hash,
                 decision,
             } => {
+                let input_failure = |message| WorkerMessage::UserInputDecisionFailed {
+                    request_id: request_id.clone(),
+                    generation,
+                    expected_request_hash: expected_request_hash.clone(),
+                    message,
+                    entries: None,
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before answering user input".to_owned(),
+                    let _ = message_tx.send(user_input_failure_with_entries(
+                        input_failure(
+                            "wait for the active run before answering user input".to_owned(),
+                        ),
+                        state.session.current.as_ref(),
                     ));
                     continue;
                 }
@@ -1302,11 +1408,28 @@ where
                         })
                 });
                 let Some(exact) = exact else {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "user input request is stale; reload the session".to_owned(),
+                    let _ = message_tx.send(user_input_failure_with_entries(
+                        input_failure("user input request is stale; reload the session".to_owned()),
+                        state.session.current.as_ref(),
                     ));
                     continue;
                 };
+                if state.agent.supervisor.is_none()
+                    && matches!(
+                        &exact.source,
+                        sigil_kernel::UserInputSourceV1::Planner { .. }
+                            | sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+                            | sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
+                    )
+                {
+                    let _ = message_tx.send(user_input_failure_with_entries(
+                        input_failure(
+                            "task orchestration is unavailable in this composition".to_owned(),
+                        ),
+                        state.session.current.as_ref(),
+                    ));
+                    continue;
+                }
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
                 let command_binding = format!(
@@ -1327,9 +1450,12 @@ where
                     })) {
                         Ok(command_id) => command_id,
                         Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "user input command identity failed: {error:#}"
-                            )));
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(format!(
+                                    "user input command identity failed: {error:#}"
+                                )),
+                                state.session.current.as_ref(),
+                            ));
                             continue;
                         }
                     };
@@ -1357,6 +1483,15 @@ where
                         sigil_kernel::UserInputSourceV1::Planner { .. }
                     )
                 }) {
+                    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(
+                                "task orchestration is unavailable in this composition".to_owned(),
+                            ),
+                            state.session.current.as_ref(),
+                        ));
+                        continue;
+                    };
                     let command = sigil_kernel::UserInputDecisionCommandV1 {
                         identity: exact.identity,
                         request_hash: exact.request_hash,
@@ -1382,9 +1517,9 @@ where
                             Ok((receipt, controls)) => {
                                 for control in controls {
                                     if let Err(error) = handler.handle(RunEvent::Control(control)) {
-                                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                        let _ = message_tx.send(user_input_failure_with_entries(input_failure(format!(
                                             "task planner input event delivery failed: {error:#}"
-                                        )));
+                                        )), state.session.current.as_ref()));
                                     }
                                 }
                                 let entries = state
@@ -1400,16 +1535,22 @@ where
                                 });
                             }
                             Err(error) => {
-                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                    "task planner input decision failed: {error:#}"
-                                )));
+                                let _ = message_tx.send(user_input_failure_with_entries(
+                                    input_failure(format!(
+                                        "task planner input decision failed: {error:#}"
+                                    )),
+                                    state.session.current.as_ref(),
+                                ));
                             }
                         }
                         continue;
                     }
                     let Some(mut run_session) = state.session.current.take() else {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "session state is unavailable for task planner input".to_owned(),
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(
+                                "session state is unavailable for task planner input".to_owned(),
+                            ),
+                            state.session.current.as_ref(),
                         ));
                         continue;
                     };
@@ -1420,8 +1561,11 @@ where
                         .cloned();
                     let Some(task) = task else {
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "task planner input references an unavailable task".to_owned(),
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(
+                                "task planner input references an unavailable task".to_owned(),
+                            ),
+                            state.session.current.as_ref(),
                         ));
                         continue;
                     };
@@ -1445,7 +1589,10 @@ where
                         Ok(cancellation) => cancellation,
                         Err(error) => {
                             state.session.current = Some(run_session);
-                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(error),
+                                state.session.current.as_ref(),
+                            ));
                             continue;
                         }
                     };
@@ -1453,16 +1600,22 @@ where
                         .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
                     {
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(error),
+                            state.session.current.as_ref(),
+                        ));
                         continue;
                     }
                     let Some(verification_execution_port) =
                         managed_verification_execution.as_ref().map(Arc::clone)
                     else {
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "planner continuation requires the managed verification route"
-                                .to_owned(),
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(
+                                "planner continuation requires the managed verification route"
+                                    .to_owned(),
+                            ),
+                            state.session.current.as_ref(),
                         ));
                         continue;
                     };
@@ -1471,7 +1624,7 @@ where
                             &effective_config,
                             options,
                             agent.tool_registry(),
-                            state.agent.supervisor.clone(),
+                            agent_supervisor.clone(),
                             role_provider_builder.as_ref(),
                             verification_execution_port,
                             &mut run_session,
@@ -1484,9 +1637,12 @@ where
                         Err(error) => {
                             state.run.route_execution_owner = None;
                             state.session.current = Some(run_session);
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "task planner continuation preparation failed: {error:#}"
-                            )));
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(format!(
+                                    "task planner continuation preparation failed: {error:#}"
+                                )),
+                                state.session.current.as_ref(),
+                            ));
                             continue;
                         }
                     };
@@ -1505,6 +1661,7 @@ where
                     let cancellation_target = RunCancellationTarget::Task {
                         task_id: task_id_value.clone(),
                     };
+                    state.stop_control.bind(&cancellation_owner);
                     let handle = spawn_task_planner_input(
                         runtime,
                         TaskPlannerInputSpawn {
@@ -1529,6 +1686,7 @@ where
                     );
                     state.run.active = Some(ActiveRun {
                         run_id,
+                        public_run_id: None,
                         handle,
                         approval_tx,
                         elicitation_audit_buffer,
@@ -1542,6 +1700,15 @@ where
                     continue;
                 }
                 if child_route.is_some() {
+                    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(
+                                "task orchestration is unavailable in this composition".to_owned(),
+                            ),
+                            state.session.current.as_ref(),
+                        ));
+                        continue;
+                    };
                     let effective_config = state
                         .session
                         .current
@@ -1555,7 +1722,7 @@ where
                         decision,
                     };
                     let mut delegate = sigil_runtime::AgentToolRuntime::new(
-                        state.agent.supervisor.clone(),
+                        agent_supervisor.clone(),
                         effective_config,
                         agent.tool_registry().clone(),
                     )
@@ -1563,9 +1730,12 @@ where
                     let mut handler = ChannelEventHandler::new(message_tx.clone());
                     let result = {
                         let Some(session) = state.session.current.as_mut() else {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(
-                                "session state is unavailable for background child input"
-                                    .to_owned(),
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(
+                                    "session state is unavailable for background child input"
+                                        .to_owned(),
+                                ),
+                                state.session.current.as_ref(),
                             ));
                             continue;
                         };
@@ -1591,9 +1761,12 @@ where
                             });
                         }
                         Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "background child input decision failed: {error:#}"
-                            )));
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(format!(
+                                    "background child input decision failed: {error:#}"
+                                )),
+                                state.session.current.as_ref(),
+                            ));
                         }
                     }
                     continue;
@@ -1609,9 +1782,12 @@ where
                         .map(Arc::clone);
                     let accepted = {
                         let Some(session) = state.session.current.as_mut() else {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(
-                                "session state is unavailable for plan revision guidance"
-                                    .to_owned(),
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(
+                                    "session state is unavailable for plan revision guidance"
+                                        .to_owned(),
+                                ),
+                                state.session.current.as_ref(),
                             ));
                             continue;
                         };
@@ -1633,9 +1809,9 @@ where
                                 ) {
                                     Ok(snapshot_id) => snapshot_id,
                                     Err(error) => {
-                                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                        let _ = message_tx.send(user_input_failure_with_entries(input_failure(format!(
                                             "failed to capture revision workspace snapshot: {error}"
-                                        )));
+                                        )), state.session.current.as_ref()));
                                         continue;
                                     }
                                 };
@@ -1663,30 +1839,33 @@ where
                     let (receipt, revision_request, _terminal_outbox) = match accepted {
                         Ok(accepted) => accepted,
                         Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "plan review input decision failed: {error:#}"
-                            )));
+                            let _ = message_tx.send(user_input_failure_with_entries(
+                                input_failure(format!(
+                                    "plan review input decision failed: {error:#}"
+                                )),
+                                state.session.current.as_ref(),
+                            ));
                             continue;
                         }
                     };
-                    let entries = state
-                        .session
-                        .current
-                        .as_ref()
-                        .map(|session| session.entries().to_vec())
-                        .unwrap_or_default();
-                    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
-                        request: receipt.request,
-                        continuation_started: revision_request.is_some(),
-                        entries,
-                    });
                     let Some(run_request) = revision_request else {
+                        let entries = state
+                            .session
+                            .current
+                            .as_ref()
+                            .map(|session| session.entries().to_vec())
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+                            request: receipt.request,
+                            continuation_started: false,
+                            entries,
+                        });
                         continue;
                     };
-                    let Some(run_session) = state.session.current.take() else {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(
-                            "session state is unavailable for plan revision".to_owned(),
-                        ));
+                    let Some(mut run_session) = state.session.current.take() else {
+                        let _ = message_tx.send(user_input_failure_with_entries(input_failure(
+                            "plan review input was accepted, but session state is unavailable to start its continuation".to_owned(),
+                        ), state.session.current.as_ref()));
                         continue;
                     };
                     let plan_registry = sigil_runtime::build_plan_review_tool_registry(
@@ -1701,27 +1880,44 @@ where
                     let cancellation_recorder = match run_session.run_cancellation_recorder() {
                         Ok(recorder) => recorder,
                         Err(error) => {
+                            reject_unstarted_revision_dispatch(
+                                &mut run_session,
+                                &run_request,
+                                &receipt.request,
+                                format!(
+                                    "failed to create cancellation recorder for plan revision: {error}"
+                                ),
+                                message_tx,
+                            );
                             state.session.current = Some(run_session);
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                "failed to create cancellation recorder for plan revision: {error}"
-                            )));
                             continue;
                         }
                     };
-                    let cancellation_owner = RunCancellationOwner::new();
-                    let cancellation_handle = cancellation_owner.handle();
-                    let run_task_guard = cancellation_handle
-                        .register_task()
-                        .expect("new root cancellation owner must admit its first task");
                     let url_capability_registrar = run_session.user_url_capability_registrar();
                     let image_attachment_resolver = run_session.image_attachment_resolver();
                     if let Err(error) = state
                         .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
                     {
+                        reject_unstarted_revision_dispatch(
+                            &mut run_session,
+                            &run_request,
+                            &receipt.request,
+                            error.to_string(),
+                            message_tx,
+                        );
                         state.session.current = Some(run_session);
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error.to_string()));
                         continue;
                     }
+                    let cancellation_owner = RunCancellationOwner::new();
+                    let cancellation_handle = cancellation_owner.handle();
+                    let run_task_guard = cancellation_handle
+                        .register_task()
+                        .expect("new root cancellation owner must admit its first task");
+                    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+                        request: receipt.request,
+                        continuation_started: true,
+                        entries: run_session.entries().to_vec(),
+                    });
                     let (approval_tx, approval_rx) = mpsc::channel();
                     let elicitation_audit_buffer: McpElicitationAuditBuffer =
                         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1729,12 +1925,12 @@ where
                         .set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                     let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                     let task_result_tx = state.run.result_tx.clone();
-                    let plan_review_root_config = Arc::clone(&plan_review_root_config);
                     let managed_plan_review_child_resources = state
                         .managed_plan_review_child_resources
                         .as_ref()
                         .map(Arc::clone);
                     let revision_terminal_run_id = run_request.child_logical_run_id();
+                    state.stop_control.bind(&cancellation_owner);
                     let handle = runtime.spawn(async move {
                         let _run_task_guard = run_task_guard;
                         let mut run_session = run_session;
@@ -1750,7 +1946,6 @@ where
                             &mut run_session,
                             &run_request,
                             run_agent.as_ref(),
-                            &plan_review_root_config,
                             run_options,
                             plan_registry,
                             &mut handler,
@@ -1808,6 +2003,7 @@ where
                     });
                     state.run.active = Some(ActiveRun {
                         run_id,
+                        public_run_id: None,
                         handle,
                         approval_tx,
                         elicitation_audit_buffer,
@@ -1821,9 +2017,10 @@ where
                     continue;
                 }
                 match apply_user_input_decision(
+                    &state.stop_control,
                     runtime,
                     Arc::clone(agent),
-                    &state.agent.supervisor,
+                    state.agent.supervisor.as_ref(),
                     root_config,
                     agent.tool_registry(),
                     options,
@@ -1842,7 +2039,10 @@ where
                     Ok(Some(active)) => state.run.active = Some(active),
                     Ok(None) => {}
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        let _ = message_tx.send(user_input_failure_with_entries(
+                            input_failure(error),
+                            state.session.current.as_ref(),
+                        ));
                     }
                 }
             }
@@ -1850,8 +2050,16 @@ where
                 plan_id,
                 expected_plan_hash,
             } => {
+                let failure = |message| {
+                    plan_action_failure_message(
+                        sigil_kernel::PublicPlanAction::Reject,
+                        &plan_id,
+                        &expected_plan_hash,
+                        message,
+                    )
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before rejecting a plan".to_owned(),
                     ));
                     continue;
@@ -1861,15 +2069,15 @@ where
                     &state.session.log_path,
                     &mut state.session.current,
                     RejectPlanRequest {
-                        plan_id,
-                        expected_plan_hash,
+                        plan_id: plan_id.clone(),
+                        expected_plan_hash: expected_plan_hash.clone(),
                     },
                 ) {
                     Ok((entry, entries)) => {
                         let _ = message_tx.send(WorkerMessage::PlanRejected { entry, entries });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                        let _ = message_tx.send(failure(error));
                     }
                 }
             }
@@ -1877,14 +2085,22 @@ where
                 plan_id,
                 expected_plan_hash,
             } => {
+                let failure = |message| {
+                    plan_action_failure_message(
+                        sigil_kernel::PublicPlanAction::Save,
+                        &plan_id,
+                        &expected_plan_hash,
+                        message,
+                    )
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before saving a plan".to_owned(),
                     ));
                     continue;
                 }
                 let Some(current_session) = state.session.current.as_mut() else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                    let _ = message_tx.send(failure(
                         "session state is unavailable for plan save".to_owned(),
                     ));
                     continue;
@@ -1892,8 +2108,8 @@ where
                 match sigil_runtime::PlanReviewCoordinator::record_plan_decision(
                     current_session,
                     &sigil_runtime::PlanDecisionCommand {
-                        plan_id,
-                        expected_plan_hash,
+                        plan_id: plan_id.clone(),
+                        expected_plan_hash: expected_plan_hash.clone(),
                         decision: sigil_kernel::PlanDecision::SavedOnly,
                     },
                     current_unix_time_ms(),
@@ -1903,7 +2119,7 @@ where
                         let _ = message_tx.send(WorkerMessage::PlanSaved { entry, entries });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!("{error:#}")));
+                        let _ = message_tx.send(failure(format!("{error:#}")));
                     }
                 }
             }
@@ -1911,8 +2127,16 @@ where
                 plan_id,
                 expected_plan_hash,
             } => {
+                let failure = |message| {
+                    plan_action_failure_message(
+                        sigil_kernel::PublicPlanAction::Revise,
+                        &plan_id,
+                        &expected_plan_hash,
+                        message,
+                    )
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before revising a plan".to_owned(),
                     ));
                     continue;
@@ -1922,13 +2146,13 @@ where
                     &state.session.log_path,
                     &mut state.session.current,
                     RejectPlanRequest {
-                        plan_id,
-                        expected_plan_hash,
+                        plan_id: plan_id.clone(),
+                        expected_plan_hash: expected_plan_hash.clone(),
                     },
                 ) {
                     Ok(revised) => revised,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                        let _ = message_tx.send(failure(error));
                         continue;
                     }
                 };
@@ -1941,14 +2165,22 @@ where
                 plan_id,
                 expected_candidate_hash,
             } => {
+                let failure = |message| {
+                    plan_action_failure_message(
+                        sigil_kernel::PublicPlanAction::AdoptCandidate,
+                        &plan_id,
+                        &expected_candidate_hash,
+                        message,
+                    )
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before adopting a Plan candidate".to_owned(),
                     ));
                     continue;
                 }
                 let Some(current_session) = state.session.current.as_mut() else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                    let _ = message_tx.send(failure(
                         "session state is unavailable for Plan candidate adoption".to_owned(),
                     ));
                     continue;
@@ -1956,7 +2188,7 @@ where
                 let plan_id = match sigil_kernel::PlanId::new(plan_id.clone()) {
                     Ok(plan_id) => plan_id,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        let _ = message_tx.send(failure(format!(
                             "Plan candidate adoption failed: invalid plan id: {error}"
                         )));
                         continue;
@@ -1982,7 +2214,7 @@ where
                         });
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        let _ = message_tx.send(failure(format!(
                             "Plan candidate adoption failed: {error:#}"
                         )));
                     }
@@ -1992,8 +2224,16 @@ where
                 plan_id,
                 expected_candidate_hash,
             } => {
+                let failure = |message| {
+                    plan_action_failure_message(
+                        sigil_kernel::PublicPlanAction::RetryReview,
+                        &plan_id,
+                        expected_candidate_hash.as_deref().unwrap_or_default(),
+                        message,
+                    )
+                };
                 if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
+                    let _ = message_tx.send(failure(
                         "wait for the active run before retrying a Plan review".to_owned(),
                     ));
                     continue;
@@ -2004,7 +2244,7 @@ where
                     .as_ref()
                     .map(|session| session.session_scope_id().to_owned())
                 else {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                    let _ = message_tx.send(failure(
                         "session state is unavailable for Plan review retry".to_owned(),
                     ));
                     continue;
@@ -2012,21 +2252,21 @@ where
                 let plan_id = match sigil_kernel::PlanId::new(plan_id.clone()) {
                     Ok(plan_id) => plan_id,
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        let _ = message_tx.send(failure(format!(
                             "Plan review retry failed: invalid plan id: {error}"
                         )));
                         continue;
                     }
                 };
                 if let Err(error) = state.acquire_route_execution_owner_for_scope(&retry_scope_id) {
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    let _ = message_tx.send(failure(format!(
                         "Plan review retry is unavailable until session authority recovers: {error}"
                     )));
                     continue;
                 }
                 let Some(current_session) = state.session.current.as_mut() else {
                     state.run.route_execution_owner = None;
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                    let _ = message_tx.send(failure(
                         "session state is unavailable for Plan review retry".to_owned(),
                     ));
                     continue;
@@ -2041,9 +2281,8 @@ where
                     Ok(retry) => retry,
                     Err(error) => {
                         state.run.route_execution_owner = None;
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "Plan review retry failed: {error:#}"
-                        )));
+                        let _ = message_tx
+                            .send(failure(format!("Plan review retry failed: {error:#}")));
                         continue;
                     }
                 };
@@ -2073,11 +2312,6 @@ where
                         continue;
                     }
                 };
-                let cancellation_owner = RunCancellationOwner::new();
-                let cancellation_handle = cancellation_owner.handle();
-                let run_task_guard = cancellation_handle
-                    .register_task()
-                    .expect("new root cancellation owner must admit its first task");
                 let url_capability_registrar = run_session.user_url_capability_registrar();
                 let image_attachment_resolver = run_session.image_attachment_resolver();
                 if let Err(error) =
@@ -2093,11 +2327,16 @@ where
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let task_result_tx = state.run.result_tx.clone();
-                let plan_review_root_config = Arc::clone(&plan_review_root_config);
                 let managed_plan_review_child_resources = state
                     .managed_plan_review_child_resources
                     .as_ref()
                     .map(Arc::clone);
+                let cancellation_owner = RunCancellationOwner::new();
+                let cancellation_handle = cancellation_owner.handle();
+                let run_task_guard = cancellation_handle
+                    .register_task()
+                    .expect("new root cancellation owner must admit its first task");
+                state.stop_control.bind(&cancellation_owner);
                 let handle = runtime.spawn(async move {
                     let _run_task_guard = run_task_guard;
                     let mut run_session = run_session;
@@ -2113,7 +2352,6 @@ where
                         &mut run_session,
                         &run_request,
                         run_agent.as_ref(),
-                        &plan_review_root_config,
                         run_options,
                         plan_registry,
                         &mut handler,
@@ -2169,6 +2407,7 @@ where
                 });
                 state.run.active = Some(ActiveRun {
                     run_id,
+                    public_run_id: None,
                     handle,
                     approval_tx,
                     elicitation_audit_buffer,
@@ -2214,4 +2453,130 @@ pub(in crate::runner) fn validate_task_pause_request(
         entries,
     )
     .map_err(|error| error.to_string())
+}
+
+fn user_input_failure_with_entries(
+    mut failure: WorkerMessage,
+    session: Option<&sigil_kernel::Session>,
+) -> WorkerMessage {
+    if let WorkerMessage::UserInputDecisionFailed { entries, .. } = &mut failure {
+        *entries = session.map(|session| session.entries().to_vec());
+    }
+    failure
+}
+
+fn plan_action_failure_message(
+    action: sigil_kernel::PublicPlanAction,
+    plan_id: &str,
+    expected_plan_hash: &str,
+    message: String,
+) -> WorkerMessage {
+    WorkerMessage::PlanActionFailed {
+        action,
+        plan_id: plan_id.to_owned(),
+        expected_plan_hash: expected_plan_hash.to_owned(),
+        message,
+        entries: None,
+    }
+}
+
+fn reject_unstarted_revision_dispatch(
+    session: &mut sigil_kernel::Session,
+    request: &sigil_runtime::PlanReviewRunRequest,
+    accepted_input: &sigil_kernel::PublicUserInputRequestV1,
+    reason: String,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) {
+    let reason = match sigil_runtime::PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+        session,
+        request,
+        &reason,
+        current_unix_time_ms(),
+    ) {
+        Ok(_) => format!("revision could not start: {reason}; the original plan remains available"),
+        Err(error) => {
+            format!("revision could not start: {reason}; its durable state is unchanged: {error:#}")
+        }
+    };
+    let entries = session.entries().to_vec();
+    // The answer receipt is already durable even when restoring the original Plan fails.
+    // Settle that exact input before publishing the continuation's failure presentation.
+    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
+        request: accepted_input.clone(),
+        continuation_started: false,
+        entries: entries.clone(),
+    });
+    let _ = message_tx.send(WorkerMessage::PlanReviewBlocked {
+        reason,
+        paused: false,
+        entries,
+    });
+}
+
+#[cfg(test)]
+#[path = "../../tests/plan_revision_dispatch_tests.rs"]
+mod plan_revision_dispatch_tests;
+
+fn plan_command_rejection(command: &RunPlanCommand, message: String) -> WorkerMessage {
+    let (action, plan_id, plan_hash) = match command {
+        RunPlanCommand::SavePlan {
+            plan_id,
+            expected_plan_hash,
+        } => (
+            sigil_kernel::PublicPlanAction::Save,
+            plan_id,
+            expected_plan_hash.as_str(),
+        ),
+        RunPlanCommand::RejectPlan {
+            plan_id,
+            expected_plan_hash,
+        } => (
+            sigil_kernel::PublicPlanAction::Reject,
+            plan_id,
+            expected_plan_hash.as_str(),
+        ),
+        RunPlanCommand::RevisePlan {
+            plan_id,
+            expected_plan_hash,
+        } => (
+            sigil_kernel::PublicPlanAction::Revise,
+            plan_id,
+            expected_plan_hash.as_str(),
+        ),
+        RunPlanCommand::AdoptPlanCandidate {
+            plan_id,
+            expected_candidate_hash,
+        } => (
+            sigil_kernel::PublicPlanAction::AdoptCandidate,
+            plan_id,
+            expected_candidate_hash.as_str(),
+        ),
+        RunPlanCommand::RetryPlanReview {
+            plan_id,
+            expected_candidate_hash,
+        } => (
+            sigil_kernel::PublicPlanAction::RetryReview,
+            plan_id,
+            expected_candidate_hash.as_deref().unwrap_or_default(),
+        ),
+        _ => return WorkerMessage::RunFailed(message),
+    };
+    plan_action_failure_message(action, plan_id, plan_hash, message)
+}
+
+fn run_plan_command_requires_orchestration(command: &RunPlanCommand) -> bool {
+    match command {
+        RunPlanCommand::Submit { plan_mode, .. } => *plan_mode,
+        RunPlanCommand::InvokeInlineSkill { .. }
+        | RunPlanCommand::ApprovalCommand(_)
+        | RunPlanCommand::CancelRun
+        | RunPlanCommand::ResumeRecoveredUserInput { .. }
+        | RunPlanCommand::SubmitUserInputDecision { .. } => false,
+        RunPlanCommand::PauseTask { .. }
+        | RunPlanCommand::RejectPlan { .. }
+        | RunPlanCommand::SavePlan { .. }
+        | RunPlanCommand::RevisePlan { .. }
+        | RunPlanCommand::AdoptPlanCandidate { .. }
+        | RunPlanCommand::RetryPlanReview { .. } => true,
+    }
 }

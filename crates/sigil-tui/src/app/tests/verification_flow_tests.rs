@@ -54,7 +54,7 @@ fn verification_card_keyboard_focus_inspect_and_exact_action() {
     assert_eq!(request.step_id.as_str(), "step_1");
     assert_eq!(request.check_spec_id, "cargo-test");
     assert_eq!(request.policy_hash, "policy-hash");
-    assert_eq!(request.workspace_snapshot_id, "snapshot-1");
+    assert_eq!(request.workspace_snapshot_id.as_deref(), Some("snapshot-1"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .expect("blur key");

@@ -14,10 +14,9 @@ use sigil_kernel::{
 };
 
 use super::{
-    AdmittedQueuedConversationCandidate, AgentRunOptions, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    ExactConversationPromptStore, JsonlSessionStore, PreparedQueuedConversationCandidate,
-    QueuedConversationPressureAdmission, RootConfig, Session, build_workspace_snapshot,
-    current_unix_time_ms, stable_event_uuid, stable_workspace_id,
+    AdmittedQueuedConversationCandidate, AgentRunOptions, ExactConversationPromptStore,
+    JsonlSessionStore, PreparedQueuedConversationCandidate, QueuedConversationPressureAdmission,
+    RootConfig, Session, current_unix_time_ms, stable_event_uuid,
 };
 use crate::runner::protocol::{
     ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionReview, V2ConstraintPreview,
@@ -874,14 +873,11 @@ pub(in crate::runner) fn prepare_v2_compaction_review(
     session: &Session,
     preview: V2CompactionPreview,
 ) -> Result<(V2CompactionReview, PendingLocalV2Compaction)> {
-    let workspace_id = stable_workspace_id(workspace_root)?;
-    let scope = root_config
-        .verification
-        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?;
-    let valid_for_snapshot = snapshot
-        .workspace_snapshot_id
-        .context("portable compaction requires a complete workspace snapshot")?;
+    let valid_for_snapshot =
+        sigil_runtime::application_compaction::compaction_workspace_snapshot_id(
+            root_config,
+            workspace_root,
+        );
     let now = current_unix_time_ms();
     let source_key = format!(
         "{}:{}:local-preview:{request_id}",
@@ -1406,14 +1402,11 @@ async fn prepare_portable_v2_compaction(
     ) {
         require_deepseek_portable_transport(root_config, session)?;
     }
-    let workspace_id = stable_workspace_id(workspace_root)?;
-    let scope = root_config
-        .verification
-        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?;
-    let valid_for_snapshot = snapshot
-        .workspace_snapshot_id
-        .context("portable compaction requires a complete workspace snapshot")?;
+    let valid_for_snapshot =
+        sigil_runtime::application_compaction::compaction_workspace_snapshot_id(
+            root_config,
+            workspace_root,
+        );
     let now = current_unix_time_ms();
     let source_key = match &initiation {
         CompactionInitiation::Manual => format!(

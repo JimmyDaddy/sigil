@@ -44,6 +44,7 @@ impl AppState {
         if self.agent_panel.active_child_transcript.is_none() {
             self.reload_active_agent_child_transcript();
         }
+        self.mark_child_live_event();
         if self.append_live_agent_thread_event(child_scope.as_str(), event) {
             self.rerender_active_agent_child_transcript();
         }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner::QueueOperationFailure;
 
 const MAX_EXACT_CONVERSATION_PROMPTS: usize = 128;
 const EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
@@ -823,8 +824,13 @@ pub(in crate::runner) fn cancel_queued_conversation_input(
     detached_durable_controls: &mut Vec<ControlEntry>,
     exact_prompts: &mut ExactConversationPromptStore,
     queue_id: ConversationInputQueueId,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
-    ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
+) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
+    let entries = read_conversation_queue_entries(session_log_path, current_session)?;
+    if durable_queue_item_status(&entries, &queue_id) == Some(ConversationInputStatus::Cancelled) {
+        exact_prompts.remove(&queue_id);
+        return Ok(entries);
+    }
+    ensure_queue_item_is_mutable(&entries, &queue_id)?;
     let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
@@ -850,9 +856,11 @@ pub(in crate::runner) fn edit_queued_conversation_input(
     queue_id: ConversationInputQueueId,
     prompt: String,
     reasoning_effort: ReasoningEffort,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
+) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
     if prompt.trim().is_empty() {
-        return Err("follow-up prompt cannot be empty".to_owned());
+        return Err(QueueOperationFailure::InvalidInput {
+            message: "follow-up prompt cannot be empty".to_owned(),
+        });
     }
     ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
     let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
@@ -881,16 +889,16 @@ pub(in crate::runner) fn move_queued_conversation_input(
     detached_durable_controls: &mut Vec<ControlEntry>,
     queue_id: ConversationInputQueueId,
     direction: QueueMoveDirection,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
+) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
     let projection = ConversationQueueProjection::from_entries(&entries);
-    ensure_projection_item_is_mutable(&projection, &queue_id)?;
+    ensure_queue_item_is_mutable(&entries, &queue_id)?;
     let Some(index) = projection
         .items
         .iter()
         .position(|item| item.queued.queue_id == queue_id)
     else {
-        return Err(format!("follow-up {} not found", queue_id.as_str()));
+        return Err(QueueOperationFailure::UnknownItem { queue_id });
     };
     let after_queue_id = match direction {
         QueueMoveDirection::Up if index == 0 => return Ok(entries),
@@ -911,6 +919,7 @@ pub(in crate::runner) fn move_queued_conversation_input(
             },
         )],
     )
+    .map_err(QueueOperationFailure::from)
 }
 
 pub(in crate::runner) fn promote_queued_conversation_input(
@@ -918,10 +927,10 @@ pub(in crate::runner) fn promote_queued_conversation_input(
     current_session: &mut Option<Session>,
     detached_durable_controls: &mut Vec<ControlEntry>,
     queue_id: ConversationInputQueueId,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
+) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
     let projection = ConversationQueueProjection::from_entries(&entries);
-    ensure_projection_item_is_mutable(&projection, &queue_id)?;
+    ensure_queue_item_is_mutable(&entries, &queue_id)?;
     let mut controls = Vec::new();
     if projection.paused {
         controls.push(ControlEntry::ConversationInputQueueControl(
@@ -945,6 +954,7 @@ pub(in crate::runner) fn promote_queued_conversation_input(
         detached_durable_controls,
         controls,
     )
+    .map_err(QueueOperationFailure::from)
 }
 
 pub(in crate::runner) use sigil_runtime::pending_input::DurableQueuePendingInputProvider;
@@ -954,7 +964,11 @@ pub(in crate::runner) fn set_conversation_queue_paused(
     current_session: &mut Option<Session>,
     detached_durable_controls: &mut Vec<ControlEntry>,
     paused: bool,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
+) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
+    let entries = read_conversation_queue_entries(session_log_path, current_session)?;
+    if ConversationQueueProjection::from_entries(&entries).paused == paused {
+        return Ok(entries);
+    }
     append_conversation_queue_control_entries(
         session_log_path,
         current_session,
@@ -971,37 +985,61 @@ pub(in crate::runner) fn set_conversation_queue_paused(
             },
         )],
     )
+    .map_err(QueueOperationFailure::from)
 }
 
 pub(in crate::runner) fn ensure_queued_conversation_item_is_mutable(
     session_log_path: &Path,
     current_session: &Option<Session>,
     queue_id: &ConversationInputQueueId,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(), QueueOperationFailure> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
-    let projection = ConversationQueueProjection::from_entries(&entries);
-    ensure_projection_item_is_mutable(&projection, queue_id)
+    ensure_queue_item_is_mutable(&entries, queue_id)
 }
 
-pub(in crate::runner) fn ensure_projection_item_is_mutable(
-    projection: &ConversationQueueProjection,
+fn durable_queue_item_status(
+    entries: &[SessionLogEntry],
     queue_id: &ConversationInputQueueId,
-) -> std::result::Result<(), String> {
-    let Some(item) = projection
-        .items
-        .iter()
-        .find(|item| item.queued.queue_id == *queue_id)
-    else {
-        return Err(format!("follow-up {} not found", queue_id.as_str()));
-    };
-    if item.status != ConversationInputStatus::Queued {
-        return Err(format!(
-            "follow-up {} is already {}",
-            queue_id.as_str(),
-            queue_status_label(item.status)
-        ));
+) -> Option<ConversationInputStatus> {
+    entries.iter().fold(None, |status, entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+            if queued.queue_id == *queue_id =>
+        {
+            Some(ConversationInputStatus::Queued)
+        }
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(changed))
+            if changed.queue_id == *queue_id && status.is_some() =>
+        {
+            Some(changed.status)
+        }
+        SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promoted))
+            if promoted.queue_id == *queue_id && status.is_some() =>
+        {
+            Some(ConversationInputStatus::Dispatching)
+        }
+        SessionLogEntry::Control(ControlEntry::TaskGuidancePromoted(promoted))
+            if promoted.queue_id == *queue_id && status.is_some() =>
+        {
+            Some(ConversationInputStatus::Dispatching)
+        }
+        _ => status,
+    })
+}
+
+fn ensure_queue_item_is_mutable(
+    entries: &[SessionLogEntry],
+    queue_id: &ConversationInputQueueId,
+) -> std::result::Result<(), QueueOperationFailure> {
+    match durable_queue_item_status(entries, queue_id) {
+        Some(ConversationInputStatus::Queued) => Ok(()),
+        Some(status) => Err(QueueOperationFailure::ItemUnavailable {
+            queue_id: queue_id.clone(),
+            status,
+        }),
+        None => Err(QueueOperationFailure::UnknownItem {
+            queue_id: queue_id.clone(),
+        }),
     }
-    Ok(())
 }
 
 pub(in crate::runner) fn append_conversation_queue_control_entries(
@@ -1122,18 +1160,6 @@ fn durable_conversation_prompt_hash(raw_prompt: &str, safe_prompt: &str) -> Stri
         format!("safe:{safe_hash}")
     } else {
         format!("{EXACT_PROMPT_REQUIRED_HASH_PREFIX}{safe_hash}")
-    }
-}
-
-pub(in crate::runner) fn queue_status_label(status: ConversationInputStatus) -> &'static str {
-    match status {
-        ConversationInputStatus::Queued => "queued",
-        ConversationInputStatus::Dispatching => "dispatching",
-        ConversationInputStatus::Delivered => "delivered",
-        ConversationInputStatus::Rejected => "rejected",
-        ConversationInputStatus::Cancelled => "cancelled",
-        ConversationInputStatus::Stale => "stale",
-        ConversationInputStatus::Unknown => "unknown",
     }
 }
 

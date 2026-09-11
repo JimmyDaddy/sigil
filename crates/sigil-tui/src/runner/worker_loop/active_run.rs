@@ -2,6 +2,8 @@ use super::*;
 
 pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) run_id: u64,
+    /// Exact logical run owned by the shared public-event recorder, when this path uses it.
+    pub(in crate::runner) public_run_id: Option<String>,
     pub(in crate::runner) handle: tokio::task::JoinHandle<()>,
     pub(in crate::runner) approval_tx: mpsc::Sender<ApprovalSignal>,
     pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
@@ -17,15 +19,22 @@ pub(in crate::runner) struct ActiveRun {
 }
 
 // Keep the foreground cancellation deadline below the worker's public terminal wait window.
-// Once this bounded interval elapses we persist `Interrupted` with cleanup uncertainty and drop
-// the join handle; a second synchronous wait would make the TUI unresponsive on a provider or
-// tool that cannot be hard-cancelled.
+// Once this bounded interval elapses we persist `Interrupted` with cleanup uncertainty and
+// retain the join handle for the worker's shared shutdown drain.
 const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum ActiveRunStopDisposition {
     Cancel,
     PauseTask,
+}
+
+pub(in crate::runner) fn finalize_completed_run_cancellation(owner: &RunCancellationOwner) -> bool {
+    // A returned failure or suspended routing microturn may leave the root phase open. Close it
+    // before releasing its owner, without erasing outstanding work or cleanup-failure evidence.
+    owner.handle().try_finalize_naturally();
+    // A stop that already won still needs the live owner to perform its durable settlement.
+    !owner.is_cancel_reserved()
 }
 
 pub(in crate::runner) fn prepare_run_cancellation(
@@ -95,8 +104,10 @@ pub(in crate::runner) fn cancel_active_run(
     detached_durable_controls: &mut Vec<ControlEntry>,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
-    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    agent_supervisor: Option<&sigil_runtime::AgentSupervisor>,
     discarded_run_ids: &mut BTreeSet<u64>,
+    retired_runs: &mut Vec<tokio::task::JoinHandle<()>>,
+    stop_control: &super::super::protocol::WorkerStopControl,
     disposition: ActiveRunStopDisposition,
     reason: &str,
 ) {
@@ -106,12 +117,21 @@ pub(in crate::runner) fn cancel_active_run(
         .as_ref()
         .and_then(Session::tool_artifact_store);
     elicitation_handler.set_audit_buffer(None);
-    if !active_run.cancellation_owner.reserve_cancel() {
+    if !active_run.cancellation_owner.reserve_cancel()
+        && !active_run.cancellation_owner.is_cancel_reserved()
+    {
         let _ = message_tx.send(WorkerMessage::Notice(
             "run already reached its natural terminal state before cancellation".to_owned(),
         ));
+        retired_runs.push(active_run.handle);
         return;
     }
+    let started = Instant::now();
+    let deadline = stop_control
+        .shutdown_deadline()
+        .map_or(started + RUN_QUIESCENCE_TIMEOUT, |deadline| {
+            deadline.min(started + RUN_QUIESCENCE_TIMEOUT)
+        });
     let requested_at_ms = current_unix_time_ms();
     let request_id = format!(
         "{}-{}",
@@ -128,8 +148,9 @@ pub(in crate::runner) fn cancel_active_run(
         reason: reason.to_owned(),
         requested_at_ms,
         quiescence_deadline_ms: requested_at_ms
-            .saturating_add(RUN_QUIESCENCE_TIMEOUT.as_millis() as u64),
+            .saturating_add(deadline.saturating_duration_since(started).as_millis() as u64),
     };
+    stop_control.stage(WorkerShutdownStage::CancellationRequest);
     let request_persisted = match active_run.cancellation_recorder.append_requested(&request) {
         Ok(_) => true,
         Err(error) => {
@@ -154,14 +175,14 @@ pub(in crate::runner) fn cancel_active_run(
     );
     discarded_run_ids.insert(active_run.run_id);
     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
-    let agent_cancel_impact = agent_supervisor.cancel_foreground_run();
+    let agent_cancel_impact =
+        agent_supervisor.map(sigil_runtime::AgentSupervisor::cancel_foreground_run);
     let mut handle = active_run.handle;
-    let join_confirmed = runtime.block_on(async {
-        matches!(
-            tokio::time::timeout(RUN_QUIESCENCE_TIMEOUT, &mut handle).await,
-            Ok(Ok(()))
-        )
+    stop_control.stage(WorkerShutdownStage::RunQuiescence);
+    let joined = runtime.block_on(async {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut handle).await
     });
+    let join_confirmed = matches!(joined, Ok(Ok(())));
     let quiescence = if join_confirmed {
         runtime.block_on(
             active_run
@@ -169,12 +190,11 @@ pub(in crate::runner) fn cancel_active_run(
                 .wait_for_quiescence(Duration::ZERO),
         )
     } else {
-        handle.abort();
-        // The foreground cancellation path is bounded by RUN_QUIESCENCE_TIMEOUT. Once the
-        // deadline has elapsed, dropping the join handle must not turn the cleanup path into a
-        // second unbounded wait. The cancellation owner remains authoritative for any effects
-        // that are still draining and the interrupted terminal records that uncertainty.
-        drop(handle);
+        if joined.is_err() {
+            handle.abort();
+            // Aborting is only a request. Keep the actual task owned until its join completes.
+            retired_runs.push(handle);
+        }
         RunQuiescenceOutcome::TimedOut {
             active_effects: active_run.cancellation_owner.handle().active_effects(),
             active_tasks: active_run.cancellation_owner.handle().active_tasks(),
@@ -210,7 +230,14 @@ pub(in crate::runner) fn cancel_active_run(
                 )
             }
         };
+    if !cleanup_complete || !request_persisted {
+        active_run
+            .cancellation_owner
+            .handle()
+            .mark_cleanup_incomplete();
+    }
     if !request_persisted {
+        stop_control.stage(WorkerShutdownStage::SessionReload);
         if let Ok(session) = load_active_run_session(
             &root_config.agent.runtime_provider,
             &root_config.agent.model,
@@ -227,6 +254,7 @@ pub(in crate::runner) fn cancel_active_run(
         ));
         return;
     }
+    stop_control.stage(WorkerShutdownStage::CancellationFinalization);
     if let Err(error) =
         active_run
             .cancellation_recorder
@@ -241,11 +269,16 @@ pub(in crate::runner) fn cancel_active_run(
                 finalized_at_ms: current_unix_time_ms(),
             })
     {
+        active_run
+            .cancellation_owner
+            .handle()
+            .mark_cleanup_incomplete();
         let _ = message_tx.send(WorkerMessage::RunFailed(format!(
             "failed to persist cancellation terminal outcome: {error:#}"
         )));
         return;
     }
+    stop_control.stage(WorkerShutdownStage::SessionReload);
     match load_active_run_session(
         &root_config.agent.runtime_provider,
         &root_config.agent.model,
@@ -282,9 +315,7 @@ pub(in crate::runner) fn cancel_active_run(
                     event,
                     audit_result,
                     current_session_log_path,
-                    session.provider_name().to_owned(),
-                    session.model_name().to_owned(),
-                    session.entries().to_vec(),
+                    &session,
                     message_tx,
                 );
                 *current_session = Some(session);
@@ -296,12 +327,14 @@ pub(in crate::runner) fn cancel_active_run(
                 return;
             }
             let mut cancel_handler = ChannelEventHandler::new(message_tx.clone());
-            if let Err(error) = sigil_runtime::AgentSupervisor::append_foreground_cancel_audit(
-                &mut session,
-                &mut cancel_handler,
-                agent_cancel_impact,
-                reason,
-            ) {
+            if let Some(agent_cancel_impact) = agent_cancel_impact
+                && let Err(error) = sigil_runtime::AgentSupervisor::append_foreground_cancel_audit(
+                    &mut session,
+                    &mut cancel_handler,
+                    agent_cancel_impact,
+                    reason,
+                )
+            {
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                     "failed to append cancelled agent state: {error:#}"
                 )));
@@ -332,7 +365,23 @@ pub(in crate::runner) fn cancel_active_run(
                 (
                     RunCancellationTerminalOutcome::Cancelled,
                     ActiveRunStopDisposition::Cancel,
-                    RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
+                    RunCancellationTarget::Run,
+                ) => {
+                    // A submitted conversation can create a Task after ActiveRun is installed.
+                    // Only its durable scope binding may select that Task after root quiescence.
+                    sigil_runtime::agent_supervisor::task_execution::append_run_scoped_task_interruption(
+                        &mut session,
+                        &mut cancel_handler,
+                        active_run.cancellation_owner.handle().scope_id(),
+                        "task run stopped from TUI; task remains available to continue",
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                }
+                (
+                    RunCancellationTerminalOutcome::Cancelled,
+                    ActiveRunStopDisposition::Cancel,
+                    RunCancellationTarget::AgentThread { .. },
                 ) => Ok(()),
                 (
                     RunCancellationTerminalOutcome::Interrupted,
@@ -355,6 +404,23 @@ pub(in crate::runner) fn cancel_active_run(
                 *current_session = Some(session);
                 return;
             }
+            if let Some(public_run_id) = active_run.public_run_id.as_deref()
+                && let Err(error) =
+                    sigil_runtime::ApplicationRunEventRecorder::resume(&session, public_run_id)
+                        .and_then(|recorder| {
+                            recorder.finish_cancelled(
+                                outcome == RunCancellationTerminalOutcome::Interrupted,
+                                &terminal_reason,
+                            )
+                        })
+            {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                    "failed to persist the cancelled public run terminal: {error:#}"
+                )));
+                *current_session = Some(session);
+                return;
+            }
+            let session_id = session.session_scope_id().to_owned();
             let entries = session.entries().to_vec();
             *current_session = Some(session);
             let message = match (outcome, disposition, &active_run.cancellation_target) {
@@ -363,6 +429,7 @@ pub(in crate::runner) fn cancel_active_run(
                     ActiveRunStopDisposition::PauseTask,
                     RunCancellationTarget::Task { task_id },
                 ) => WorkerMessage::TaskRunPaused {
+                    session_id,
                     task_id: task_id.clone(),
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
@@ -385,6 +452,7 @@ pub(in crate::runner) fn cancel_active_run(
                     ActiveRunStopDisposition::Cancel,
                     RunCancellationTarget::Task { .. },
                 ) => WorkerMessage::RunInterrupted {
+                    session_id,
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
                         .as_ref()
@@ -402,6 +470,7 @@ pub(in crate::runner) fn cancel_active_run(
                     ActiveRunStopDisposition::Cancel,
                     RunCancellationTarget::Run | RunCancellationTarget::AgentThread { .. },
                 ) => WorkerMessage::RunCancelled {
+                    session_id,
                     session_log_path: current_session_log_path.to_path_buf(),
                     provider_name: current_session
                         .as_ref()
@@ -415,6 +484,7 @@ pub(in crate::runner) fn cancel_active_run(
                 },
                 (RunCancellationTerminalOutcome::Interrupted, _, _) => {
                     WorkerMessage::RunInterrupted {
+                        session_id,
                         session_log_path: current_session_log_path.to_path_buf(),
                         provider_name: current_session
                             .as_ref()
@@ -452,6 +522,7 @@ fn durable_revision_terminal_event(
 
 pub(in crate::runner) fn revision_terminal_worker_message(
     event: &sigil_kernel::PublicRunEventKind,
+    session_id: String,
     session_log_path: &Path,
     provider_name: String,
     model_name: String,
@@ -469,6 +540,7 @@ pub(in crate::runner) fn revision_terminal_worker_message(
             }
         }
         sigil_kernel::PublicRunEventKind::RunCancelled => WorkerMessage::RunCancelled {
+            session_id,
             session_log_path: session_log_path.to_path_buf(),
             provider_name,
             model_name,
@@ -476,6 +548,7 @@ pub(in crate::runner) fn revision_terminal_worker_message(
         },
         sigil_kernel::PublicRunEventKind::RunInterrupted { reason } => {
             WorkerMessage::RunInterrupted {
+                session_id,
                 session_log_path: session_log_path.to_path_buf(),
                 provider_name,
                 model_name,
@@ -512,9 +585,7 @@ pub(in crate::runner) fn deliver_durable_revision_terminal_after_audit(
     event: &sigil_kernel::PublicRunEventKind,
     audit_result: std::result::Result<(), String>,
     session_log_path: &Path,
-    provider_name: String,
-    model_name: String,
-    entries: Vec<SessionLogEntry>,
+    session: &Session,
     message_tx: &mpsc::Sender<WorkerMessage>,
 ) {
     if let Err(error) = audit_result {
@@ -524,10 +595,11 @@ pub(in crate::runner) fn deliver_durable_revision_terminal_after_audit(
     }
     match revision_terminal_worker_message(
         event,
+        session.session_scope_id().to_owned(),
         session_log_path,
-        provider_name,
-        model_name,
-        entries,
+        session.provider_name().to_owned(),
+        session.model_name().to_owned(),
+        session.entries().to_vec(),
     ) {
         Ok(message) => {
             let _ = message_tx.send(message);

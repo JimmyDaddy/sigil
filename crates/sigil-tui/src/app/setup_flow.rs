@@ -70,9 +70,20 @@ impl AppState {
             return lines;
         }
 
+        let (title, description) = if state.authority_boot_retry_required() {
+            (
+                "Startup needs attention",
+                "Review the reported startup failure, then retry Start.",
+            )
+        } else {
+            (
+                "Set up a model connection",
+                "Steps 2–4 · Authenticate, choose a model, then review and start.",
+            )
+        };
         let mut lines = vec![
-            "Set up a model connection".to_owned(),
-            "Steps 2–4 · Authenticate, choose a model, then review and start.".to_owned(),
+            title.to_owned(),
+            description.to_owned(),
             String::new(),
             render_setup_value_row(
                 SetupField::Provider,
@@ -102,6 +113,8 @@ impl AppState {
             "retry save and start"
         } else if state.existing_config_repair_required() {
             "review, replace invalid config and start"
+        } else if state.authority_boot_retry_required() {
+            "Retry Start"
         } else if state.valid_config_boot_retry_required() {
             "review, save changes and retry start"
         } else {
@@ -612,19 +625,16 @@ fn append_setup_startup_recovery_lines(lines: &mut Vec<String>, state: &SetupSta
         lines.push(format!(
             "current configuration is valid; a later startup phase failed: {error}"
         ));
-        lines.push(
-            "Review the current connection and retry start. Saving preserves the remaining current-schema config, uses the exact source snapshot, and refuses any concurrent file change."
-                .to_owned(),
-        );
-        match state.startup_recovery_code {
-            Some(sigil_kernel::PublicRouteRecoveryCode::AuthorityUnavailable) => lines.push(
-                "The authority is unavailable; inspect the current configuration and storage permissions, then retry Start."
+        if state.authority_boot_retry_required() {
+            lines.push("Resolve the reported startup failure, then choose Retry Start.".to_owned());
+        } else {
+            lines.push(
+                "Review the current connection and retry start. Saving preserves the remaining current-schema config, uses the exact source snapshot, and refuses any concurrent file change."
                     .to_owned(),
-            ),
-            _ => lines.push(
-                "Run `sigil doctor` for the boot failure, then review and retry Start."
-                    .to_owned(),
-            ),
+            );
+            lines.push(
+                "Run `sigil doctor` for the boot failure, then review and retry Start.".to_owned(),
+            );
         }
     } else if state.existing_config_repair_required() {
         lines.push(format!("configuration is invalid: {error}"));

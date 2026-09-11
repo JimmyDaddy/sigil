@@ -19,7 +19,11 @@ use super::{
     common::{PlannedProvider, spawn_test_worker, test_root_config},
 };
 
-fn write_finalized_session(path: &Path, prompt: &str) -> Result<()> {
+fn write_finalized_session(
+    path: &Path,
+    prompt: &str,
+    root_config: &sigil_kernel::RootConfig,
+) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
     session.append_control(ControlEntry::SessionIdentity {
@@ -27,6 +31,7 @@ fn write_finalized_session(path: &Path, prompt: &str) -> Result<()> {
         model_name: "deepseek-v4-flash".to_owned(),
         resolved_model_route: None,
     })?;
+    sigil_runtime::bind_session_composition(&mut session, root_config)?;
     session.append_user_message(ModelMessage::user(prompt))?;
     let assistant = ModelMessage::assistant_with_kind(
         Some(format!("completed {prompt}")),
@@ -78,7 +83,7 @@ fn managed_worker_lifecycle_service_uses_authority_namespace() -> Result<()> {
     let writer = Arc::clone(&composition.storage_writer);
     let session_path = paths.session_log_dir.join("session.jsonl");
     fs::create_dir_all(&paths.session_log_dir)?;
-    write_finalized_session(&session_path, "managed lifecycle")?;
+    write_finalized_session(&session_path, "managed lifecycle", &root_config)?;
     let service = super::super::worker_loop::local_session_lifecycle_service_for_worker(
         &root_config,
         &workspace_root,
@@ -110,10 +115,6 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
     let current_path = session_dir.join("current.jsonl");
     let target_path = session_dir.join("target.jsonl");
     let retention_path = session_dir.join("retention.jsonl");
-    write_finalized_session(&current_path, "current")?;
-    write_finalized_session(&target_path, "target")?;
-    write_finalized_session(&retention_path, "retention")?;
-
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
     root_config.config_version = CONFIG_VERSION_V2;
     root_config.agent.runtime_provider.clear();
@@ -139,6 +140,9 @@ fn worker_routes_request_bound_local_session_lifecycle_operations() -> Result<()
         StorageRoot::Path(temp.path().join("state").display().to_string());
     root_config.storage.cache_root =
         StorageRoot::Path(temp.path().join("cache").display().to_string());
+    write_finalized_session(&current_path, "current", &root_config)?;
+    write_finalized_session(&target_path, "target", &root_config)?;
+    write_finalized_session(&retention_path, "retention", &root_config)?;
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     let mut current_route_config = root_config.clone();
     current_route_config.agent.connection = Some(ConnectionId::new("current-route")?);
@@ -359,8 +363,6 @@ fn active_session_fork_uses_the_owned_writer_instead_of_catalog_scanning() -> Re
     let session_dir = temp.path().join("sessions");
     fs::create_dir(&session_dir)?;
     let source_path = session_dir.join("current.jsonl");
-    write_finalized_session(&source_path, "current")?;
-
     let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
     root_config.config_version = CONFIG_VERSION_V2;
     root_config.agent.runtime_provider.clear();
@@ -379,6 +381,7 @@ fn active_session_fork_uses_the_owned_writer_instead_of_catalog_scanning() -> Re
             }
         }),
     );
+    write_finalized_session(&source_path, "current", &root_config)?;
     let current_model_route =
         sigil_runtime::provider_connections::resolve_default_model_route(&root_config)?.1;
     let active_store = JsonlSessionStore::new(&source_path)?;

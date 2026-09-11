@@ -373,7 +373,7 @@ impl AppState {
     }
 
     fn approval_worker_command(&self, payload: WorkerApprovalCommand) -> WorkerCommand {
-        let session_id = self.session_log_path.display().to_string();
+        let session_id = self.session_id.clone();
         let command_id = stable_approval_command_id(&session_id, &payload);
         WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
             command_id,

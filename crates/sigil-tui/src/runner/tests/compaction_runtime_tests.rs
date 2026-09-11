@@ -368,6 +368,7 @@ fn append_context_window_rejection(
 fn root_config(workspace_root: &std::path::Path, cache_root: &std::path::Path) -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },

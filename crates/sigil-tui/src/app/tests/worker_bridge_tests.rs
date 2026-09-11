@@ -1,7 +1,7 @@
 use super::*;
-use crate::app::ComposerMode;
 use crate::app::modal_flow::ModelCatalogState;
 use crate::app::tests::common::adaptive_test_compaction_preview;
+use crate::app::{ComposerMode, PlanWorkbenchAction};
 use crate::runner::{
     LocalOperationKind, LocalOperationOutcome, TerminalTaskControlIdentity,
     ToolOutputShrinkPreview, V2CompactionAdmission, V2CompactionPreviewState, V2CompactionReview,
@@ -54,7 +54,7 @@ fn connection_catalog_result(
     }
 }
 
-fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
+pub(super) fn structured_plan_text(summary: &str, title: &str, path: &str) -> String {
     format!(
         r#"Plan:
 
@@ -384,12 +384,12 @@ fn plan_actions_map_to_worker_commands() {
                 "cargo-test".to_owned(),
                 "check-hash".to_owned(),
                 "policy-hash".to_owned(),
-                "snapshot-1".to_owned(),
+                Some("snapshot-1".to_owned()),
             ),
         }),
         WorkerCommand::RerunTaskVerification { ref request }
             if request.check_spec_id == "cargo-test"
-                && request.workspace_snapshot_id == "snapshot-1"
+                && request.workspace_snapshot_id.as_deref() == Some("snapshot-1")
     ));
     let integration_request = sigil_kernel::TaskIntegrationReviewRequest {
         request_id: "integration-review-request".to_owned(),
@@ -502,26 +502,6 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         &mut review_session,
         &draft,
         &review_request,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: "attempt-1".to_owned(),
-            source_turn_id: "message-1".to_owned(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some("test-session".to_owned()),
-        },
         &mut handler,
         3,
     )?;
@@ -535,6 +515,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         entries: review_session.entries().to_vec(),
     })?;
 
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     let pending = app
         .pending_plan_approval()
         .expect("plan output should create a pending approval");
@@ -557,7 +538,12 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             .is_some_and(|plan| plan.workbench_open)
     );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(app.pending_plan_approval().is_none());
+    assert!(app.pending_plan_approval().is_some_and(|pending| {
+        pending.action_feedback
+            == Some(crate::app::PlanActionFeedback::Pending(
+                crate::app::PlanWorkbenchAction::Run,
+            ))
+    }));
     assert!(matches!(
         action,
         Some(AppAction::CreateTaskFromPlan {
@@ -877,6 +863,7 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
 
     let entries = JsonlSessionStore::read_entries(&restored_path)?;
     app.handle_worker_message(WorkerMessage::RunCancelled {
+        session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         session_log_path: restored_path.clone(),
         provider_name: "cancel-provider".to_owned(),
         model_name: "cancel-model".to_owned(),
@@ -887,7 +874,10 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
     assert!(app.approval.pending.is_none());
     assert_eq!(app.runtime.provider_name, "cancel-provider");
     assert_eq!(app.runtime.model_name, "cancel-model");
-    assert_eq!(app.session_id, "cancelled");
+    assert_eq!(
+        app.session_id,
+        crate::app::tests::common::fixture_session_id(&app.session_log_path)
+    );
     assert_eq!(app.session_log_path, restored_path);
     assert!(
         app.timeline
@@ -961,6 +951,7 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
     }));
 
     app.handle_worker_message(WorkerMessage::TaskRunPaused {
+        session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         task_id: task_id.as_str().to_owned(),
         session_log_path: restored_path.clone(),
         provider_name: "pause-provider".to_owned(),
@@ -972,7 +963,10 @@ fn task_pause_messages_restore_the_resumable_durable_session_view() -> Result<()
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.runtime.provider_name, "pause-provider");
     assert_eq!(app.runtime.model_name, "pause-model");
-    assert_eq!(app.session_id, "task-paused");
+    assert_eq!(
+        app.session_id,
+        crate::app::tests::common::fixture_session_id(&app.session_log_path)
+    );
     assert_eq!(app.session_log_path, restored_path);
     assert_eq!(
         app.last_notice(),
@@ -1767,6 +1761,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     );
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_id: crate::app::tests::common::fixture_session_id(&restored_path),
         session_log_path: restored_path.clone(),
         provider_name: "restored-provider".to_owned(),
         model_name: "restored-model".to_owned(),
@@ -2450,13 +2445,13 @@ fn child_completed_call_restores_command_after_switch_before_progress_and_final(
     ))?;
 
     app.agent_panel.active_view = super::super::AgentView::Main;
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
     assert!(app.agent_panel.safe_child_tool_calls.is_empty());
     app.agent_panel.active_view = super::super::AgentView::Child {
         child_task_id: thread_id.as_str().to_owned(),
         child_session_ref: child_session_ref.clone(),
     };
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
 
     let restored = app
         .agent_panel
@@ -2564,7 +2559,7 @@ fn child_failed_audit_then_live_result_replaces_one_restored_occurrence() -> Res
         child_task_id: thread_id.as_str().to_owned(),
         child_session_ref: child_session_ref.clone(),
     };
-    assert!(app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut app));
 
     let restored = app
         .agent_panel
@@ -2624,7 +2619,7 @@ fn child_failed_audit_then_live_result_replaces_one_restored_occurrence() -> Res
         child_task_id: thread_id.as_str().to_owned(),
         child_session_ref,
     };
-    assert!(replacement_app.reload_active_agent_child_transcript());
+    assert!(crate::app::tests::common::refresh_child_transcript_for_test(&mut replacement_app));
     replacement_app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolCallStarted(ToolCall {
@@ -4691,6 +4686,7 @@ fn new_session_started_restores_empty_session_view() -> Result<()> {
     let new_session_log_path = std::path::PathBuf::from(".sigil/sessions/session-new.jsonl");
 
     app.handle_worker_message(WorkerMessage::NewSessionStarted {
+        session_id: crate::app::tests::common::fixture_session_id(&new_session_log_path),
         session_log_path: new_session_log_path.clone(),
         provider_name: "deepseek".to_owned(),
         model_name: "deepseek-v4-pro".to_owned(),
@@ -5554,6 +5550,7 @@ fn session_restore_rehydrates_the_complete_plan_workbench() -> Result<()> {
     )?
     .expect("plan draft");
     app.restore_session_view(
+        crate::app::tests::common::fixture_session_id(Path::new("restored-plan.jsonl")),
         Path::new("restored-plan.jsonl").to_path_buf(),
         "mock".to_owned(),
         "mock".to_owned(),
@@ -5575,39 +5572,49 @@ fn session_restore_rehydrates_the_complete_plan_workbench() -> Result<()> {
 
 #[test]
 fn task_creation_failure_restores_the_same_actionable_plan() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let draft = sigil_kernel::plan_draft_created_entry(
-        &structured_plan_text(
-            "Commit the prepared changes",
-            "Commit support crates",
-            "crates",
-        ),
-        sigil_kernel::PlanSourceRef::default(),
-        1,
-        None,
-    )?
-    .expect("plan draft");
+    let (mut app, mut session, draft) = super::plan_review_flow_tests::ready_plan()?;
     let reason = "agent display name is too long";
-    let entries = vec![
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDraftCreated(
-            draft.clone(),
-        )),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDecisionRecorded(
-            sigil_kernel::PlanDecisionRecordedEntry {
-                plan_id: draft.plan_id.clone(),
-                plan_hash: draft.plan_hash.clone(),
-                decision: sigil_kernel::PlanDecision::TaskCreationFailed,
-                decided_by: sigil_kernel::PlanDecisionActor::System,
-                decided_at_ms: 2,
-                reason: Some(reason.to_owned()),
-            },
-        )),
-    ];
-
-    app.handle_worker_message(WorkerMessage::PlanTaskCreationFailed {
+    session.append_control(ControlEntry::PlanDecisionRecorded(
+        sigil_kernel::PlanDecisionRecordedEntry {
+            plan_id: draft.plan_id.clone(),
+            plan_hash: draft.plan_hash.clone(),
+            decision: sigil_kernel::PlanDecision::TaskCreationFailed,
+            decided_by: sigil_kernel::PlanDecisionActor::System,
+            decided_at_ms: 5,
+            reason: Some(reason.to_owned()),
+        },
+    ))?;
+    let entries = session.entries().to_vec();
+    let original_entry_count = app.session_browser.current_entries.len();
+    assert!(matches!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?,
+        Some(AppAction::CreateTaskFromPlan { .. })
+    ));
+    app.handle_worker_message(WorkerMessage::PlanActionFailed {
+        action: sigil_kernel::PublicPlanAction::Run,
         plan_id: draft.plan_id.as_str().to_owned(),
-        error: reason.to_owned(),
-        entries,
+        expected_plan_hash: "stale-plan-hash".to_owned(),
+        message: "stale failure".to_owned(),
+        entries: Some(Vec::new()),
+    })?;
+    assert_eq!(
+        app.session_browser.current_entries.len(),
+        original_entry_count
+    );
+    assert_eq!(
+        app.pending_plan_approval()
+            .expect("pending plan")
+            .action_feedback,
+        Some(crate::app::PlanActionFeedback::Pending(
+            crate::app::PlanWorkbenchAction::Run
+        ))
+    );
+    app.handle_worker_message(WorkerMessage::PlanActionFailed {
+        action: sigil_kernel::PublicPlanAction::Run,
+        plan_id: draft.plan_id.as_str().to_owned(),
+        expected_plan_hash: draft.plan_hash.clone(),
+        message: reason.to_owned(),
+        entries: Some(entries),
     })?;
 
     let pending = app
@@ -5616,11 +5623,13 @@ fn task_creation_failure_restores_the_same_actionable_plan() -> Result<()> {
     assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
     assert_eq!(pending.last_run_failure.as_deref(), Some(reason));
     assert!(pending.workbench_open);
-    assert!(!app.runtime.is_busy);
-    assert_eq!(
-        app.last_notice(),
-        Some("plan could not start: agent display name is too long")
+    assert!(
+        matches!(&pending.action_feedback, Some(crate::app::PlanActionFeedback::Failed {
+        action: crate::app::PlanWorkbenchAction::Run, message,
+    }) if message == reason)
     );
+    assert!(!app.runtime.is_busy);
+    assert_eq!(app.last_notice(), Some(reason));
     Ok(())
 }
 
@@ -5994,51 +6003,88 @@ fn plan_workbench_end_and_up_use_the_rendered_scroll_extent() -> Result<()> {
 }
 
 #[test]
-fn stale_pending_plan_blocks_run_and_save_but_keeps_revise_and_reject() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let draft = sigil_kernel::plan_draft_created_entry(
-        &structured_plan_text("Update README", "Update README.md", "README.md"),
-        sigil_kernel::PlanSourceRef::default(),
-        1,
-        Some("base-snapshot".to_owned()),
-    )?
-    .expect("non-empty plan should create draft");
-    app.set_pending_plan_approval_from_draft(&draft, Some("current-snapshot"));
-
-    let pending = app.pending_plan_approval().expect("pending plan");
-    assert!(pending.stale);
-    assert_eq!(
-        pending.workspace_snapshot_id.as_deref(),
-        Some("base-snapshot")
-    );
-    let reason = pending.stale_reason.clone().expect("stale reason");
-    assert!(
-        reason.contains("stale"),
-        "reason must mention staleness: {reason}"
-    );
-
-    let open = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(open.is_none(), "Enter opens review before any decision");
-    let run = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
-    assert!(run.is_none(), "stale plan must not run");
-    assert!(
-        app.pending_plan_approval().is_some(),
-        "stale plan stays pending"
-    );
-    assert_eq!(app.last_notice(), Some(reason.as_str()));
-
-    let save = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
-    assert!(save.is_none(), "stale plan must not save");
-
-    let revise = app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))?;
-    assert!(matches!(revise, Some(AppAction::RevisePlan { .. })));
-
-    let reject = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
-    assert!(matches!(reject, Some(AppAction::RejectPlan { .. })));
+fn workspace_changes_and_missing_snapshots_do_not_block_plan_actions() -> Result<()> {
+    for (base, current) in [
+        (Some("base-snapshot"), Some("current-snapshot")),
+        (Some("base-snapshot"), None),
+        (None, Some("current-snapshot")),
+        (None, None),
+    ] {
+        for (key, action) in [
+            ('r', PlanWorkbenchAction::Run),
+            ('s', PlanWorkbenchAction::Save),
+            ('v', PlanWorkbenchAction::Revise),
+            ('x', PlanWorkbenchAction::Reject),
+        ] {
+            let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+            let draft = sigil_kernel::plan_draft_created_entry(
+                &structured_plan_text("Update README", "Update README.md", "README.md"),
+                sigil_kernel::PlanSourceRef::default(),
+                1,
+                base.map(str::to_owned),
+            )?
+            .expect("non-empty plan should create draft");
+            app.set_pending_plan_approval_from_draft(&draft, current);
+            let pending = app.pending_plan_approval().expect("pending plan");
+            assert!(pending.stale);
+            assert!(pending.action_enabled(action));
+            assert!(
+                pending
+                    .stale_reason
+                    .as_deref()
+                    .expect("workspace context remains informational")
+                    .contains("remain available")
+            );
+            let open = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+            assert!(open.is_none(), "Enter opens review before any decision");
+            let command =
+                app.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))?;
+            match (action, command) {
+                (
+                    PlanWorkbenchAction::Run,
+                    Some(AppAction::CreateTaskFromPlan {
+                        plan_id,
+                        expected_plan_hash,
+                        ..
+                    }),
+                )
+                | (
+                    PlanWorkbenchAction::Save,
+                    Some(AppAction::SavePlan {
+                        plan_id,
+                        expected_plan_hash,
+                    }),
+                )
+                | (
+                    PlanWorkbenchAction::Revise,
+                    Some(AppAction::RevisePlan {
+                        plan_id,
+                        expected_plan_hash,
+                    }),
+                )
+                | (
+                    PlanWorkbenchAction::Reject,
+                    Some(AppAction::RejectPlan {
+                        plan_id,
+                        expected_plan_hash,
+                    }),
+                ) => {
+                    assert_eq!(plan_id, draft.plan_id.as_str());
+                    assert_eq!(expected_plan_hash, draft.plan_hash);
+                }
+                (_, command) => panic!("workspace observation blocked {action:?}: {command:?}"),
+            }
+            assert!(
+                app.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))?
+                    .is_none(),
+                "duplicate operations still wait for their exact receipt"
+            );
+        }
+    }
     Ok(())
 }
 
-fn pending_text_user_input_request() -> Result<sigil_kernel::PublicUserInputRequestV1> {
+pub(crate) fn pending_text_user_input_request() -> Result<sigil_kernel::PublicUserInputRequestV1> {
     Ok(sigil_kernel::PublicUserInputRequestV1 {
         identity: sigil_kernel::UserInputIdentityV1 {
             session_scope_id: sigil_kernel::SessionScopeId::new("tui-input-session")?,
@@ -6223,9 +6269,9 @@ fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers()
     assert!(
         action
             .as_ref()
-            .and_then(|action| app.recovered_plan_review_research_resume_command(action))
-            .is_none(),
-        "ordinary non-PlanReview recovery must continue through the application receipt path"
+            .and_then(|action| app.recovered_user_input_resume_command(action))
+            .is_some(),
+        "ordinary accepted recovery must use the exact worker-owned resume command"
     );
     assert!(matches!(
         action,
@@ -6342,11 +6388,11 @@ fn recovered_plan_review_attention_message_restores_the_existing_private_resume_
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let private_resume = action
         .as_ref()
-        .and_then(|action| app.recovered_plan_review_research_resume_command(action))
+        .and_then(|action| app.recovered_user_input_resume_command(action))
         .expect("only the private plan-review recovery form may bypass application receipt replay");
     assert!(matches!(
         private_resume,
-        crate::runner::WorkerCommand::ResumeRecoveredPlanReviewResearch {
+        crate::runner::WorkerCommand::ResumeRecoveredUserInput {
             command_id,
             request_id,
             generation,
@@ -6463,10 +6509,12 @@ fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_se
         ControlEntry::AgentUserInputRoute(route),
     )];
     app.restore_durable_attention_surfaces();
+    app.request_session_auxiliary_refresh();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
 
     assert_eq!(
         app.last_notice(),
-        Some("an accepted answer is ready to resume; choose Resume")
+        Some("an accepted input decision is ready to resume; choose Resume")
     );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(

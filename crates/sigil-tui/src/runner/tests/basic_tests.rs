@@ -19,7 +19,7 @@ use super::{
         WorkerMessage, spawn_agent_worker, worker_loop::skill_child_agent_role,
     },
     common::{
-        PlannedProvider, StreamPlan, WriteTool, planned_role_provider_builder,
+        PlannedProvider, StreamPlan, TestWorker, WriteTool, planned_role_provider_builder,
         routed_unauthenticated_test_root_config, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, test_root_config, wait_for_session_entry,
     },
@@ -59,27 +59,17 @@ fn test_child_session_skill(agent: Option<&str>) -> SkillDescriptor {
     }
 }
 
-fn structured_plan_tool_chunks(summary: &str, title: &str, path: &str) -> Vec<ProviderChunk> {
+fn plan_review_result_tool_chunks(summary: &str, title: &str, path: &str) -> Vec<ProviderChunk> {
     let args = serde_json::json!({
-        "schema_version": 2,
-        "summary": summary,
-        "steps": [{
-            "step_id": "step-1",
-            "title": title,
-            "role": "executor",
-            "depends_on": [],
-            "mode": "write",
-            "isolation": "sequential_workspace_write",
-            "target_paths": [path]
-        }],
-        "target_paths": [path],
-        "suggested_checks": ["cargo test -p sigil-kernel plan"]
+        "schema_version": 1,
+        "outcome": "draft",
+        "content": format!("# {summary}\n\n1. {title}\n\nPath: {path}\nCheck: cargo test -p sigil-kernel plan"),
     })
     .to_string();
     vec![
         ProviderChunk::ToolCallStart {
             id: "submit-plan-draft".to_owned(),
-            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
         },
         ProviderChunk::ToolCallArgsDelta {
             id: "submit-plan-draft".to_owned(),
@@ -87,7 +77,7 @@ fn structured_plan_tool_chunks(summary: &str, title: &str, path: &str) -> Vec<Pr
         },
         ProviderChunk::ToolCallComplete(ToolCall {
             id: "submit-plan-draft".to_owned(),
-            name: sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            name: sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
             args_json: args,
         }),
         ProviderChunk::Done,
@@ -96,6 +86,27 @@ fn structured_plan_tool_chunks(summary: &str, title: &str, path: &str) -> Vec<Pr
 
 fn test_image_attachment() -> Result<ImageAttachment> {
     ImageAttachment::from_bytes("image_1", ImageMimeType::Png, 1, 1, vec![1])
+}
+
+fn recv_live_source_before_started(
+    worker: &TestWorker,
+) -> Result<sigil_runtime::RuntimeLivePreviewSource> {
+    let attachment = worker.recv()?;
+    let WorkerMessage::LivePreviewSource { source } = attachment else {
+        anyhow::bail!("expected live source before run startup, got {attachment:?}");
+    };
+    let frontier = worker.recv()?;
+    assert!(
+        matches!(
+            &frontier,
+            WorkerMessage::LivePreviewDurableFrontier { session_id, run_id, sequence }
+                if session_id == source.session_id()
+                    && run_id == source.run_id()
+                    && *sequence > 0
+        ),
+        "expected the attached run's committed startup frontier, got {frontier:?}"
+    );
+    Ok(source)
 }
 
 fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
@@ -167,23 +178,34 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
         prompt: "hello".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
+    let live_source = recv_live_source_before_started(&worker)?;
     let started = worker.recv()?;
     assert!(matches!(
         started,
         WorkerMessage::RunStarted { ref prompt } if prompt == "hello"
     ));
 
-    let text_event = worker.recv_until(|message| {
+    let final_message = worker.recv_until(|message| {
+        assert!(
+            !matches!(message, WorkerMessage::RunFinished { .. }),
+            "the final assistant message must precede RunFinished"
+        );
+        assert!(
+            !matches!(message, WorkerMessage::Event(event) if matches!(event.as_ref(), RunEvent::TextDelta(_))),
+            "text deltas must remain in the bounded live source"
+        );
         matches!(
             message,
             WorkerMessage::Event(event)
-                if matches!(event.as_ref(), RunEvent::TextDelta(delta) if delta == "hello from worker")
+                if matches!(event.as_ref(), RunEvent::AssistantMessage(message)
+                    if message.content.as_deref() == Some("hello from worker"))
         )
     })?;
     assert!(matches!(
-        text_event,
+        final_message,
         WorkerMessage::Event(event)
-            if matches!(event.as_ref(), RunEvent::TextDelta(delta) if delta == "hello from worker")
+            if matches!(event.as_ref(), RunEvent::AssistantMessage(message)
+                if message.content.as_deref() == Some("hello from worker"))
     ));
 
     let finished =
@@ -195,8 +217,15 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
                 && result.tool_calls == 0
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("hello")))
     ));
+    assert!(live_source.is_terminal());
 
+    let command_sender = worker.command_sender();
     worker.shutdown()?;
+    assert!(
+        command_sender.cleanup_complete(),
+        "{}",
+        command_sender.shutdown_diagnostic("sigil-agent-worker")
+    );
     Ok(())
 }
 
@@ -215,6 +244,7 @@ fn submit_image_attachment_reaches_capability_admission_before_transport() -> Re
         attachments: vec![test_image_attachment()?],
         reasoning_effort: ReasoningEffort::Max,
     })?;
+    recv_live_source_before_started(&worker)?;
     let started = worker.recv()?;
     assert!(matches!(
         started,
@@ -286,12 +316,12 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
             }),
             ProviderChunk::Done,
         ]),
-        StreamPlan::Chunks(structured_plan_tool_chunks(
+        StreamPlan::Chunks(plan_review_result_tool_chunks(
             "plan after blocked write",
             "Inspect README.md after blocked write",
             "README.md",
         )),
-        StreamPlan::Chunks(structured_plan_tool_chunks(
+        StreamPlan::Chunks(plan_review_result_tool_chunks(
             "plan after blocked write",
             "Inspect README.md after blocked write",
             "README.md",
@@ -307,6 +337,7 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
         prompt: "inspect first".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
+    recv_live_source_before_started(&worker)?;
     let started = worker.recv()?;
     assert!(matches!(
         started,
@@ -389,7 +420,7 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-plan-task.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(plan_review_result_tool_chunks(
         "Update README",
         "Update README.md",
         "README.md",
@@ -412,7 +443,7 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
         .latest_pending_plan()
         .expect("plan run should append durable draft")
         .clone();
-    assert_eq!(draft.suggested_checks.len(), 1);
+    assert!(draft.suggested_checks.is_empty());
 
     worker.send(WorkerCommand::CreateTaskFromPlan {
         plan_id: draft.plan_id.as_str().to_owned(),
@@ -420,8 +451,11 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
         start_mode: PlanTaskStartMode::CreatePaused,
         permission_grant: None,
     })?;
-    let created = worker
-        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
+    let created = worker.recv_until_with_timeout_diagnostic(
+        "create paused task",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }),
+    )?;
     let WorkerMessage::TaskCreatedFromPlan {
         entry,
         start_mode,
@@ -500,7 +534,7 @@ fn reject_plan_command_appends_rejected_decision_and_clears_pending_projection()
         .path()
         .join(".sigil/sessions/session-plan-reject.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(plan_review_result_tool_chunks(
         "Update README",
         "Update README.md",
         "README.md",
@@ -563,7 +597,7 @@ fn create_task_from_plan_run_now_starts_direct_executor_without_model_dag() -> R
     // process-global API key; the planner participant runs on the planned role provider.
     let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     let provider = PlannedProvider::new(vec![
-        StreamPlan::Chunks(structured_plan_tool_chunks(
+        StreamPlan::Chunks(plan_review_result_tool_chunks(
             "Fix README typo",
             "Update the approved README typo",
             "README.md",
@@ -657,7 +691,7 @@ fn create_task_from_plan_after_workspace_change_starts_direct_execution() -> Res
         .path()
         .join(".sigil/sessions/session-plan-task-stale.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(plan_review_result_tool_chunks(
         "Update README",
         "Update README.md",
         "README.md",
@@ -719,7 +753,7 @@ fn create_task_from_plan_after_workspace_change_starts_direct_execution() -> Res
 }
 
 #[test]
-fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<()> {
+fn create_task_from_plan_rejects_scoped_edits_without_typed_target_paths() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     fs::write(workspace_root.join("README.md"), "before\n")?;
@@ -727,7 +761,7 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         .path()
         .join(".sigil/sessions/session-plan-task-grant.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(structured_plan_tool_chunks(
+    let provider = PlannedProvider::new(vec![StreamPlan::Chunks(plan_review_result_tool_chunks(
         "Update README",
         "Update README.md",
         "README.md",
@@ -757,28 +791,35 @@ fn create_task_from_plan_with_scoped_edits_appends_task_bound_grant() -> Result<
         start_mode: PlanTaskStartMode::CreatePaused,
         permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
     })?;
-    let created = worker
-        .recv_until(|message| matches!(message, WorkerMessage::TaskCreatedFromPlan { .. }))?;
-    let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
-        unreachable!("recv_until only returns TaskCreatedFromPlan");
+    let failed = worker.recv_until_with_timeout_diagnostic(
+        "create scoped task",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::PlanActionFailed { .. }),
+    )?;
+    let WorkerMessage::PlanActionFailed {
+        action,
+        plan_id,
+        expected_plan_hash,
+        message,
+        entries,
+    } = failed
+    else {
+        unreachable!("recv_until only returns PlanActionFailed");
     };
-
-    assert!(!entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
-    )));
-    let grant = entries
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => Some(grant),
-            _ => None,
-        })
-        .expect("direct approval must persist the scoped Task grant");
-    assert_eq!(grant.plan_id, draft.plan_id);
-    assert_eq!(grant.plan_hash, draft.plan_hash);
-    assert_eq!(grant.task_id, entry.task_id);
-    assert_eq!(grant.permission, PlanApprovalPermission::WorkspaceEdits);
-    assert_eq!(grant.scope.workspace_paths, vec!["README.md".to_owned()]);
+    assert_eq!(action, sigil_kernel::PublicPlanAction::Run);
+    assert_eq!(plan_id, draft.plan_id.as_str());
+    assert_eq!(expected_plan_hash, draft.plan_hash);
+    assert_eq!(
+        message,
+        "the requested permission is unavailable: the approved plan has no concrete target paths"
+    );
+    assert!(
+        entries.is_some_and(|entries| !entries.iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(_))
+                | SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(_))
+        )))
+    );
 
     worker.shutdown()?;
     Ok(())
@@ -1355,7 +1396,8 @@ fn check_changed_files_diagnostics_is_rejected_while_run_is_active() -> Result<(
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.code_intelligence.enabled = true;
     let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
     let agent = Agent::new(provider, ToolRegistry::new());
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
@@ -1405,7 +1447,7 @@ fn task_verification_rerun_is_rejected_while_run_is_active() -> Result<()> {
             "test-check".to_owned(),
             "test-check-hash".to_owned(),
             "test-policy-hash".to_owned(),
-            "test-snapshot".to_owned(),
+            Some("test-snapshot".to_owned()),
         ),
     })?;
     let outcome =
@@ -1956,6 +1998,133 @@ fn submit_prompt_surfaces_provider_startup_errors() -> Result<()> {
         WorkerMessage::RunFailed(ref error) if error.contains("provider startup failed")
     ));
 
+    let command_sender = worker.command_sender();
+    worker.shutdown()?;
+    assert!(
+        command_sender.cleanup_complete(),
+        "{}",
+        command_sender.shutdown_diagnostic("sigil-agent-worker")
+    );
+    Ok(())
+}
+
+#[test]
+fn queue_operation_refusals_leave_the_foreground_worker_running() -> Result<()> {
+    use crate::runner::{QueueMoveDirection, QueueOperation, QueueOperationFailure};
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/queue-local-refusal.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.task.enabled = false;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (provider, stream_started) =
+        PlannedProvider::new_with_stream_start_signal(vec![StreamPlan::GatedChunks {
+            gate: Arc::clone(&gate),
+            chunks: vec![
+                ProviderChunk::TextDelta("ongoing run finished".to_owned()),
+                ProviderChunk::Done,
+            ],
+        }]);
+    let worker = spawn_test_worker(
+        root_config,
+        session_log_path.clone(),
+        Agent::new(provider, ToolRegistry::new()),
+        workspace_root,
+    )?;
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "keep working".to_owned(),
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    stream_started.recv_timeout(Duration::from_secs(3))?;
+    let missing = ConversationInputQueueId::new("missing_queue")?;
+    for command in [
+        WorkerCommand::CancelQueuedConversationInput {
+            queue_id: missing.clone(),
+        },
+        WorkerCommand::EditQueuedConversationInput {
+            queue_id: missing.clone(),
+            prompt: "updated".to_owned(),
+            reasoning_effort: ReasoningEffort::High,
+        },
+        WorkerCommand::MoveQueuedConversationInput {
+            queue_id: missing.clone(),
+            direction: QueueMoveDirection::Up,
+        },
+        WorkerCommand::PromoteQueuedConversationInput {
+            queue_id: missing.clone(),
+        },
+        WorkerCommand::SendQueuedConversationInputNow {
+            queue_id: missing.clone(),
+        },
+    ] {
+        worker.send(command)?;
+        let message = worker.recv_until(|message| {
+            matches!(
+                message,
+                WorkerMessage::ConversationQueueOperationCompleted { .. }
+                    | WorkerMessage::RunFailed(_)
+                    | WorkerMessage::RunFinished { .. }
+            )
+        })?;
+        assert!(
+            matches!(message, WorkerMessage::ConversationQueueOperationCompleted {
+            session_log_path: ref receipt_path, result: Err(QueueOperationFailure::UnknownItem { ref queue_id }), ..
+        } if receipt_path == &session_log_path && queue_id == &missing)
+        );
+    }
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "unavailable task guidance".to_owned(),
+        kind: ConversationInputKind::TaskGuidance,
+        target: ConversationInputTarget::Task {
+            task_id: TaskId::new("task_disabled")?,
+        },
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let message = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueOperationCompleted { .. }
+                | WorkerMessage::RunFailed(_)
+                | WorkerMessage::RunFinished { .. }
+        )
+    })?;
+    assert!(matches!(
+        message,
+        WorkerMessage::ConversationQueueOperationCompleted {
+            operation: QueueOperation::Enqueue { .. },
+            result: Err(QueueOperationFailure::Unavailable { .. }),
+            ..
+        }
+    ));
+    for paused in [true, false] {
+        worker.send(WorkerCommand::SetConversationQueuePaused { paused })?;
+        let message = worker.recv_until(|message| {
+            matches!(
+                message,
+                WorkerMessage::ConversationQueueOperationCompleted { .. }
+                    | WorkerMessage::RunFailed(_)
+                    | WorkerMessage::RunFinished { .. }
+            )
+        })?;
+        assert!(
+            matches!(message, WorkerMessage::ConversationQueueOperationCompleted {
+            operation: QueueOperation::SetPaused { paused: actual }, result: Ok(()), ..
+        } if actual == paused)
+        );
+    }
+    gate.notify_one();
+    let message = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::RunFinished { .. } | WorkerMessage::RunFailed(_)
+        )
+    })?;
+    assert!(
+        matches!(message, WorkerMessage::RunFinished { result, .. } if result.final_text == "ongoing run finished")
+    );
     worker.shutdown()?;
     Ok(())
 }

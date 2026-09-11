@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+use crate::app::PlanActionFeedback;
 use crate::surface::{PendingPlanApproval, PlanWorkbenchAction};
 
 use super::{
@@ -25,9 +26,17 @@ pub(super) fn render_plan_workbench(
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(if pending.revision_detail().is_some() {
+                3
+            } else {
+                2
+            }),
             Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(if pending.action_feedback.is_some() {
+                4
+            } else {
+                2
+            }),
         ])
         .split(area);
     render_header(frame, rows[0], pending, theme);
@@ -36,17 +45,16 @@ pub(super) fn render_plan_workbench(
 }
 
 fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, theme: &Theme) {
-    let stale = if pending.stale { " · stale" } else { "" };
-    // Current Plans are runnable from their durable text. These labels only explain incomplete
-    // legacy compiler records and never grant or revoke Run authority.
-    let compile_status = match pending.detail.compile.state {
-        sigil_kernel::PlanReadyStateV1::Ready => None,
-        sigil_kernel::PlanReadyStateV1::CompileFailed => Some(" · needs changes"),
-        sigil_kernel::PlanReadyStateV1::CandidatePrepared => Some(" · compiling (incomplete)"),
-        sigil_kernel::PlanReadyStateV1::LegacyPlanNeedsRecompile => Some(" · needs recompile"),
-        sigil_kernel::PlanReadyStateV1::NotReady => None,
+    let stale = if pending.stale {
+        " · workspace notice"
+    } else {
+        ""
     };
-    let mut title_spans = vec![
+    let counts = pending
+        .structure_summary()
+        .map(|value| format!(" · {value}"))
+        .unwrap_or_default();
+    let title_spans = vec![
         Span::styled(
             "Plan Review",
             Style::default()
@@ -54,49 +62,37 @@ fn render_header(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, t
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                " · {} steps · {} paths · {} checks{stale}",
-                pending.detail.steps.len(),
-                pending.detail.target_paths.len(),
-                pending.detail.suggested_checks.len(),
-            ),
+            format!(" · {}{counts}{stale}", pending.status_label()),
             styles::muted(&theme.palette),
         ),
     ];
-    if let Some(status) = compile_status {
-        title_spans.push(Span::styled(
-            status,
-            Style::default().fg(theme.palette.accent_danger),
-        ));
-    }
-    if let Some(revision) = pending.revision.as_ref() {
-        let status = match revision.status {
-            sigil_kernel::PublicPlanRevisionStatusV1::AwaitingGuidance => "awaiting guidance",
-            sigil_kernel::PublicPlanRevisionStatusV1::Queued => "queued",
-            sigil_kernel::PublicPlanRevisionStatusV1::Researching => "researching",
-            sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput => "waiting for input",
-            sigil_kernel::PublicPlanRevisionStatusV1::Finalizing => "finalizing",
-            sigil_kernel::PublicPlanRevisionStatusV1::Failed => "failed; original restored",
-            sigil_kernel::PublicPlanRevisionStatusV1::Cancelled => "cancelled; original restored",
-            sigil_kernel::PublicPlanRevisionStatusV1::Succeeded => "succeeded",
-        };
-        title_spans.push(Span::styled(
-            format!(" · revision {status}"),
-            styles::muted(&theme.palette),
-        ));
-    }
     let title = Line::from(title_spans);
-    let action_hint =
-        if pending.retrying_materialization && pending.action_allowed(PlanWorkbenchAction::Run) {
-            "↑↓/Pg scroll · Tab action · R retry task · V revise · Enter confirm · Esc close"
-        } else if pending.action_allowed(PlanWorkbenchAction::AdoptCandidate) {
-            "↑↓/Pg scroll · A adopt candidate · X dismiss · Enter confirm · Esc close"
+    let mut lines = vec![title];
+    if let Some(detail) = pending.revision_detail() {
+        lines.push(Line::from(Span::styled(
+            detail,
+            styles::muted(&theme.palette),
+        )));
+    }
+    let full_key_hint = pending.workbench_key_hint();
+    let key_hint = if Line::from(full_key_hint.as_str()).width() > usize::from(area.width) {
+        if PlanWorkbenchAction::ORDER
+            .into_iter()
+            .any(|action| pending.action_enabled(action))
+        {
+            "↑↓/Pg scroll · Tab · ↵ · Esc".to_owned()
         } else {
-            "↑↓/Pg scroll · Tab action · R/S/V/X act · Enter confirm · Esc close"
-        };
-    let hint = Line::from(Span::styled(action_hint, styles::muted(&theme.palette)));
+            "↑↓/Pg scroll · Esc close".to_owned()
+        }
+    } else {
+        full_key_hint
+    };
+    lines.push(Line::from(Span::styled(
+        key_hint,
+        styles::muted(&theme.palette),
+    )));
     frame.render_widget(
-        Paragraph::new(Text::from(vec![title, hint])).style(styles::body(&theme.palette)),
+        Paragraph::new(Text::from(lines)).style(styles::body(&theme.palette)),
         area,
     );
 }
@@ -182,11 +178,20 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
     if detail.steps.is_empty()
         && let Some(candidate) = detail.legacy_markdown.as_deref()
     {
-        lines.push(heading("Candidate", theme));
+        lines.push(heading(
+            if pending.status == Some(sigil_kernel::PublicPlanReviewStatus::DraftReady) {
+                "Plan"
+            } else {
+                "Candidate"
+            },
+            theme,
+        ));
         push_multiline(&mut lines, "", candidate);
         lines.push(Line::raw(String::new()));
     }
-    lines.push(heading("Steps", theme));
+    if !detail.steps.is_empty() {
+        lines.push(heading("Steps", theme));
+    }
     for (index, step) in detail.steps.iter().enumerate() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -322,10 +327,7 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
         .enumerate()
         .flat_map(|(index, action)| {
             let selected = action == pending.selected_action;
-            let disabled = pending.stale && matches!(action, PlanWorkbenchAction::Save)
-                || (pending.stale
-                    && !pending.retrying_materialization
-                    && action == PlanWorkbenchAction::Run);
+            let disabled = !pending.action_enabled(action);
             let style = if selected {
                 Style::default()
                     .fg(theme.palette.button_selected_fg)
@@ -342,7 +344,13 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
             };
             let action_label =
                 if action == PlanWorkbenchAction::Run && pending.retrying_materialization {
-                    "Retry task"
+                    if compact_labels {
+                        "Retry"
+                    } else {
+                        "Retry task"
+                    }
+                } else if compact_labels && action == PlanWorkbenchAction::Save {
+                    "Save"
                 } else {
                     action.label()
                 };
@@ -363,8 +371,39 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
             ]
         })
         .collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    if let Some(feedback) = pending.action_feedback.as_ref() {
+        let (message, color) = match feedback {
+            PlanActionFeedback::Pending(action) => (
+                format!("{}…", action.pending_label()),
+                theme.palette.accent_info,
+            ),
+            PlanActionFeedback::Succeeded { message, .. } => {
+                (message.clone(), theme.palette.status_success)
+            }
+            PlanActionFeedback::Failed { action, message } => (
+                format!("{} failed: {message}", action.label()),
+                theme.palette.status_error,
+            ),
+        };
+        lines.extend(
+            wrap_terminal_lines(
+                vec![Line::from(Span::styled(
+                    message,
+                    Style::default().fg(color),
+                ))],
+                area.width as usize,
+            )
+            .into_iter()
+            .take(2),
+        );
+    }
+    lines.extend(wrap_terminal_lines(
+        vec![Line::from(spans)],
+        area.width as usize,
+    ));
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(styles::body(&theme.palette)),
+        Paragraph::new(Text::from(lines)).style(styles::body(&theme.palette)),
         area,
     );
 }

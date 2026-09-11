@@ -639,6 +639,7 @@ fn composer_queue_hit_areas(live_area: Rect, app: &AppState) -> Option<ComposerQ
         queue_rows,
     )
     .into_iter()
+    .filter(|_| app.composer_queue_actions_enabled())
     .filter_map(|placement| {
         let action = ComposerQueueAction::ORDER
             .get(placement.button_index)

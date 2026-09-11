@@ -217,22 +217,74 @@ impl TuiApplicationSession {
         Ok(binding)
     }
 
+    pub(crate) fn pending_observations(&self) -> usize {
+        self.projection_binding.pending_observations()
+    }
+
+    pub(crate) fn read_handle(
+        &self,
+    ) -> Result<sigil_kernel::SessionRecordReadHandle, ApplicationError> {
+        self.projection_binding.read_handle()
+    }
+
     pub(crate) async fn refresh(&self) -> Result<ApplicationProjection, ApplicationError> {
         self.application.refresh().await
+    }
+
+    pub(crate) async fn refresh_delivery(
+        &self,
+    ) -> Result<sigil_application::AppliedDeliveryBatch, ApplicationError> {
+        self.application.refresh_delivery().await
+    }
+
+    pub(crate) fn current_projection(
+        &self,
+    ) -> Result<Option<ApplicationProjection>, ApplicationError> {
+        self.application.current_projection()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn take_applied_delivery_event_ids(&self) -> Result<Vec<String>, ApplicationError> {
+        self.application.take_applied_delivery_event_ids()
     }
 
     /// Marks only the public events represented by a successfully committed TUI projection as
     /// delivered. The TUI owner schedules this only after its application reducer and product
     /// state have both accepted the projection; a worker-channel enqueue is deliberately not
     /// enough.
-    pub(crate) async fn acknowledge_public_events_through(
+    #[allow(dead_code)]
+    pub(crate) async fn acknowledge_public_events(
         &self,
-        projection: &ApplicationProjection,
-    ) -> Result<usize> {
+        event_ids: Vec<String>,
+        frontier: &sigil_application::ApplicationFrontier,
+    ) -> Result<usize, ApplicationError> {
         self.projection_binding
-            .acknowledge_tui_public_outbox_through(&projection.frontier)
+            .acknowledge_tui_public_events(&event_ids, frontier)
             .await
-            .map_err(Into::into)
+    }
+
+    pub(crate) fn prepare_plan_revision(
+        &self,
+        plan_id: String,
+        plan_hash: String,
+    ) -> Result<ApplicationCommandRequest, ApplicationError> {
+        self.application.prepare_command(
+            sigil_application::ApplicationCommandId::new(format!(
+                "tui-revise-{}",
+                uuid::Uuid::new_v4()
+            ))?,
+            ApplicationCommand::PlanTask(PlanTaskCommand::RevisePlan {
+                plan_id: sigil_application::SafeText::new(plan_id)?,
+                expected_plan_hash: sigil_application::SafeText::new(plan_hash)?,
+            }),
+        )
+    }
+
+    pub(crate) async fn execute_prepared(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.application.execute_prepared(request).await
     }
 
     /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
@@ -244,6 +296,17 @@ impl TuiApplicationSession {
         queue_target: Option<&sigil_kernel::ConversationInputTarget>,
         attachment_recovery_binding: Option<&str>,
     ) -> Result<Option<ApplicationCommandReceipt>, ApplicationError> {
+        self.prepare_action(action, queue_target, attachment_recovery_binding)?
+            .map(|request| futures::executor::block_on(self.execute_prepared(request)))
+            .transpose()
+    }
+
+    pub(crate) fn prepare_action(
+        &self,
+        action: &AppAction,
+        queue_target: Option<&sigil_kernel::ConversationInputTarget>,
+        attachment_recovery_binding: Option<&str>,
+    ) -> Result<Option<ApplicationCommandRequest>, ApplicationError> {
         if !matches!(
             action,
             AppAction::SubmitPrompt(_)
@@ -316,10 +379,18 @@ impl TuiApplicationSession {
         ) {
             return Ok(None);
         }
-        let latest = self
-            .application
-            .current_projection()?
-            .ok_or(ApplicationError::Unavailable)?;
+        // A native approval card can arrive before the periodic application refresh. Resolve
+        // action bindings from the current durable frontier before admitting a control command.
+        let latest = if matches!(
+            action,
+            AppAction::ApprovalDecision { .. } | AppAction::CancelRun
+        ) {
+            futures::executor::block_on(self.application.refresh())?
+        } else {
+            self.application
+                .current_projection()?
+                .ok_or(ApplicationError::Unavailable)?
+        };
         let command = match action {
             AppAction::SubmitPrompt(prompt) => Some(ApplicationCommand::Conversation(
                 ConversationCommand::SubmitPrompt {
@@ -365,23 +436,28 @@ impl TuiApplicationSession {
                     },
                 }))
             }
-            AppAction::ApprovalDecision { approved, .. } => latest
-                .approval
-                .binding
-                .clone()
-                .map(|binding| {
-                    ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
-                        binding,
-                        accepted: *approved,
-                        resolution: None,
-                    })
-                })
-                .ok_or_else(|| {
+            AppAction::ApprovalDecision {
+                call_id,
+                approval_request_id,
+                approved,
+            } => {
+                let binding = latest.approval.binding.clone().ok_or_else(|| {
                     ApplicationError::InvalidRequest(
                         "cannot resolve approval without an active application binding".to_owned(),
                     )
-                })
-                .map(Some)?,
+                })?;
+                let (_, bound_call, bound_request) = parse_approval_binding(&binding)?;
+                if &bound_call != call_id || &bound_request != approval_request_id {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                Some(ApplicationCommand::Approval(
+                    sigil_application::ApprovalCommand::Resolve {
+                        binding,
+                        accepted: *approved,
+                        resolution: None,
+                    },
+                ))
+            }
             AppAction::ActivateLazyMcp { server_name } => server_name.as_ref().map(|binding| {
                 ApplicationCommand::Mcp(McpCommand::Activate {
                     binding: binding.clone(),
@@ -997,17 +1073,19 @@ impl TuiApplicationSession {
         let Some(command) = command else {
             return Ok(None);
         };
-        let receipt = match action {
+        let command_id = match action {
             AppAction::SubmitUserInputDecision {
                 command_id: Some(command_id),
                 ..
-            } => futures::executor::block_on(self.application.execute_with_id(
-                sigil_application::ApplicationCommandId::new(command_id.clone())?,
-                command,
+            } => sigil_application::ApplicationCommandId::new(command_id.clone())?,
+            _ => sigil_application::ApplicationCommandId::new(format!(
+                "application-command-{}",
+                uuid::Uuid::new_v4()
             ))?,
-            _ => futures::executor::block_on(self.application.execute(command))?,
         };
-        Ok(Some(receipt))
+        self.application
+            .prepare_command(command_id, command)
+            .map(Some)
     }
 }
 
@@ -1069,6 +1147,7 @@ pub(crate) fn build_for_worker(
     app: &crate::app::AppState,
     worker_tx: WorkerCommandSender,
     reasoning_effort: ReasoningEffort,
+    projection_owner: sigil_runtime::RuntimeSessionProjectionOwner,
 ) -> Result<TuiApplicationSession> {
     let cutover = app
         .boot_cutover()
@@ -1091,19 +1170,22 @@ pub(crate) fn build_for_worker(
         )?),
     };
     let session_scope_id = app.session_id.clone();
-    let projection = Arc::new(sigil_runtime::RuntimeSessionProjectionBinding::new(
-        app.config_path.clone(),
-        std::env::current_dir()?,
-        app.session_log_path.clone(),
-        session_scope_id.clone(),
-        application_instance,
-        subject,
-        scope.workspace.clone(),
-        cutover.manifest().application_generation,
-        1,
-        1,
-        1,
-    )?);
+    let projection = Arc::new(
+        sigil_runtime::RuntimeSessionProjectionBinding::new(
+            app.config_path.clone(),
+            std::env::current_dir()?,
+            app.session_log_path.clone(),
+            session_scope_id.clone(),
+            application_instance,
+            subject,
+            scope.workspace.clone(),
+            cutover.manifest().application_generation,
+            1,
+            1,
+            1,
+        )?
+        .with_owner(projection_owner),
+    );
     let reservations = sigil_runtime::ManagedApplicationReservationStore::open(
         Arc::clone(&composition.storage_writer),
         "tui-application",
@@ -2224,4 +2306,4 @@ fn tui_permission_mode(mode: ApplicationPermissionMode) -> sigil_kernel::Permiss
 
 #[cfg(test)]
 #[path = "tests/application_bridge_tests.rs"]
-mod tests;
+pub(crate) mod tests;

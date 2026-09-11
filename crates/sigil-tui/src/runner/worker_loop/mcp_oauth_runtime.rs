@@ -4,6 +4,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(in crate::runner) struct ActiveMcpOAuthFlow {
     control_tx: tokio::sync::mpsc::Sender<sigil_runtime::McpOAuthFlowControl>,
     cancelled: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ActiveMcpOAuthFlow {
+    fn request_stop(self) -> tokio::task::JoinHandle<()> {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self
+            .control_tx
+            .try_send(sigil_runtime::McpOAuthFlowControl::Cancel);
+        self.handle.abort();
+        self.handle
+    }
 }
 
 impl std::fmt::Debug for ActiveMcpOAuthFlow {
@@ -32,6 +44,7 @@ pub(in crate::runner) fn dispatch_mcp_oauth_action<P>(
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    state.stop_control.stage(WorkerShutdownStage::McpOAuth);
     let Some(server) = root_config
         .mcp_servers
         .iter()
@@ -53,11 +66,11 @@ pub(in crate::runner) fn dispatch_mcp_oauth_action<P>(
         };
         if active
             .control_tx
-            .blocking_send(sigil_runtime::McpOAuthFlowControl::ManualCallback(callback))
+            .try_send(sigil_runtime::McpOAuthFlowControl::ManualCallback(callback))
             .is_err()
         {
             let _ = message_tx.send(WorkerMessage::Notice(format!(
-                "MCP {server_name} OAuth flow is no longer active"
+                "MCP {server_name} OAuth callback could not be queued; retry while the flow remains active"
             )));
         }
         return;
@@ -69,7 +82,7 @@ pub(in crate::runner) fn dispatch_mcp_oauth_action<P>(
         active.cancelled.store(true, Ordering::Release);
         let _ = active
             .control_tx
-            .blocking_send(sigil_runtime::McpOAuthFlowControl::Cancel);
+            .try_send(sigil_runtime::McpOAuthFlowControl::Cancel);
         return;
     }
 
@@ -158,15 +171,9 @@ pub(in crate::runner) fn dispatch_mcp_oauth_action<P>(
                 revocation: None,
             });
             let (control_tx, control_rx) = tokio::sync::mpsc::channel(4);
-            state.mcp_oauth.active.insert(
-                server_name.clone(),
-                ActiveMcpOAuthFlow {
-                    control_tx,
-                    cancelled,
-                },
-            );
             let result_tx = state.mcp_oauth.result_tx.clone();
-            runtime.spawn(async move {
+            let result_server_name = server_name.clone();
+            let handle = runtime.spawn(async move {
                 let result = flow.run(control_rx).await;
                 let (status, activate_server) = match result {
                     Ok(status) => (status, true),
@@ -174,11 +181,19 @@ pub(in crate::runner) fn dispatch_mcp_oauth_action<P>(
                     Err(error) => (prompt.failed(&error), false),
                 };
                 let _ = result_tx.send(McpOAuthTaskResult {
-                    server_name,
+                    server_name: result_server_name,
                     status,
                     activate_server,
                 });
             });
+            state.mcp_oauth.active.insert(
+                server_name,
+                ActiveMcpOAuthFlow {
+                    control_tx,
+                    cancelled,
+                    handle,
+                },
+            );
         }
         McpOAuthUserAction::Refresh => {
             let _ = message_tx.send(WorkerMessage::McpOAuthStatus {
@@ -269,7 +284,16 @@ pub(in crate::runner) fn advance_mcp_oauth_results(
     let mut advanced = false;
     while let Some(result) = state.readiness.mcp_oauth_results.pop_front() {
         advanced = true;
-        state.mcp_oauth.active.remove(&result.server_name);
+        if let Some(active) = state.mcp_oauth.active.remove(&result.server_name) {
+            state.mcp_oauth.retired.push(active.handle);
+        }
+        super::shutdown::reap_finished_owned_tasks(
+            &mut state.mcp_oauth.retired,
+            &mut state.mcp_oauth.task_panicked,
+        );
+        if state.mcp_oauth.task_panicked {
+            state.stop_control.fail_stage(WorkerShutdownStage::McpOAuth);
+        }
         let _ = message_tx.send(WorkerMessage::McpOAuthStatus {
             status: result.status,
             revocation: None,
@@ -283,11 +307,11 @@ pub(in crate::runner) fn advance_mcp_oauth_results(
 }
 
 pub(in crate::runner) fn cancel_all_mcp_oauth_flows(state: &mut WorkerLoopState) {
-    for active in state.mcp_oauth.active.values() {
-        active.cancelled.store(true, Ordering::Release);
-        let _ = active
-            .control_tx
-            .blocking_send(sigil_runtime::McpOAuthFlowControl::Cancel);
+    for (_, active) in std::mem::take(&mut state.mcp_oauth.active) {
+        state.mcp_oauth.retired.push(active.request_stop());
     }
-    state.mcp_oauth.active.clear();
 }
+
+#[cfg(test)]
+#[path = "tests/mcp_oauth_runtime_tests.rs"]
+mod tests;

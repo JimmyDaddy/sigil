@@ -524,9 +524,12 @@ fn advance_task_provider_route_diagnostics(
     message_tx: &mpsc::Sender<WorkerMessage>,
     state: &mut WorkerLoopState,
 ) -> bool {
+    let Some(agent_supervisor) = state.agent.supervisor.as_ref() else {
+        return false;
+    };
     let task_run_active = active_task_id(state).is_some();
     let active_snapshot = if task_run_active {
-        state.agent.supervisor.task_provider_route_diagnostics()
+        agent_supervisor.task_provider_route_diagnostics()
     } else {
         sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default()
     };
@@ -546,10 +549,13 @@ fn advance_task_completion_progress(
     message_tx: &mpsc::Sender<WorkerMessage>,
     state: &mut WorkerLoopState,
 ) -> bool {
+    let Some(agent_supervisor) = state.agent.supervisor.as_ref() else {
+        return false;
+    };
     let active_task_id = active_task_id(state);
     let active_snapshot = task_completion_progress_for_active_task(
         active_task_id,
-        state.agent.supervisor.task_completion_progress(),
+        agent_supervisor.task_completion_progress(),
     );
     let Some(snapshot) = changed_task_completion_progress(
         active_task_id.is_some(),
@@ -623,6 +629,9 @@ where
         state,
         ..
     } = context;
+    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+        return WorkerAdvancementControl::PollCommand;
+    };
     if state.run.active.is_some() || state.run.pending_task_handoffs.is_empty() {
         return WorkerAdvancementControl::PollCommand;
     }
@@ -671,11 +680,7 @@ where
             }
         };
     let task_id_value = action.task_id.as_str().to_owned();
-    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-        task_id: task_id_value.clone(),
-        objective: task.objective.clone(),
-    });
-    let handler = ChannelEventHandler::new(message_tx.clone());
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
     let (approval_tx, approval_rx) = mpsc::channel();
     let elicitation_audit_buffer: McpElicitationAuditBuffer =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -693,6 +698,24 @@ where
         let _ = message_tx.send(WorkerMessage::RunFailed(error));
         return WorkerAdvancementControl::SkipCommandPoll;
     }
+    let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+    if let Err(error) = handler.start_public_run(
+        &run_session,
+        &public_run_id,
+        &sigil_kernel::safe_persistence_text(&task.objective),
+    ) {
+        state.run.route_execution_owner = None;
+        state.session.current = Some(run_session);
+        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+            "failed to persist task foreground run admission: {error:#}"
+        )));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    }
+    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+        task_id: task_id_value.clone(),
+        objective: task.objective.clone(),
+    });
+    state.stop_control.bind(&cancellation_owner);
     let handle = spawn_task_run(
         runtime,
         TaskRunSpawn {
@@ -705,7 +728,7 @@ where
             root_config: root_config.clone(),
             options: options.clone(),
             base_registry: agent.tool_registry().clone(),
-            agent_supervisor: state.agent.supervisor.clone(),
+            agent_supervisor: agent_supervisor.clone(),
             role_provider_builder: Arc::clone(role_provider_builder),
             managed_verification_execution: managed_verification_execution.as_ref().map(Arc::clone),
             task_result_tx: state.run.result_tx.clone(),
@@ -719,6 +742,7 @@ where
     );
     state.run.active = Some(ActiveRun {
         run_id,
+        public_run_id: Some(public_run_id),
         handle,
         approval_tx,
         elicitation_audit_buffer,
@@ -748,6 +772,9 @@ where
         state,
         ..
     } = context;
+    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+        return WorkerAdvancementControl::PollCommand;
+    };
     if state.run.active.is_some() {
         return WorkerAdvancementControl::PollCommand;
     }
@@ -935,11 +962,7 @@ where
 
             let task_id = candidate.promotion.task_id.clone();
             let task_id_value = task_id.as_str().to_owned();
-            let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                task_id: task_id_value.clone(),
-                objective: sigil_kernel::safe_persistence_text(&task.objective),
-            });
-            let handler = ChannelEventHandler::new(message_tx.clone());
+            let mut handler = ChannelEventHandler::new(message_tx.clone());
             let (approval_tx, approval_rx) = mpsc::channel();
             let elicitation_audit_buffer: McpElicitationAuditBuffer =
                 Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -964,6 +987,24 @@ where
                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 return WorkerAdvancementControl::SkipCommandPoll;
             }
+            let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+            if let Err(error) = handler.start_public_run(
+                &run_session,
+                &public_run_id,
+                &sigil_kernel::safe_persistence_text(&task.objective),
+            ) {
+                state.run.route_execution_owner = None;
+                state.session.current = Some(run_session);
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                    "failed to persist task foreground run admission: {error:#}"
+                )));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+            let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                task_id: task_id_value.clone(),
+                objective: sigil_kernel::safe_persistence_text(&task.objective),
+            });
+            state.stop_control.bind(&cancellation_owner);
             let handle = spawn_task_continue(
                 runtime,
                 TaskContinueSpawn {
@@ -978,7 +1019,7 @@ where
                     root_config: root_config.clone(),
                     options: options.clone(),
                     base_registry: agent.tool_registry().clone(),
-                    agent_supervisor: state.agent.supervisor.clone(),
+                    agent_supervisor: agent_supervisor.clone(),
                     role_provider_builder: Arc::clone(role_provider_builder),
                     managed_verification_execution: managed_verification_execution
                         .as_ref()
@@ -994,6 +1035,7 @@ where
             );
             state.run.active = Some(ActiveRun {
                 run_id,
+                public_run_id: Some(public_run_id),
                 handle,
                 approval_tx,
                 elicitation_audit_buffer,
@@ -1904,9 +1946,10 @@ where
                     entries,
                 });
                 match start_portable_overflow_recovery_run(
+                    &state.stop_control,
                     runtime,
                     Arc::clone(agent),
-                    &state.agent.supervisor,
+                    state.agent.supervisor.as_ref(),
                     root_config,
                     agent.tool_registry(),
                     options,
@@ -1974,14 +2017,27 @@ where
             )));
             continue;
         }
+        if state
+            .run
+            .active
+            .as_ref()
+            .is_some_and(|active| !finalize_completed_run_cancellation(&active.cancellation_owner))
+        {
+            // The urgent stop lane owns this result now. Keep ActiveRun until it can audit and
+            // join the cancellation; publishing completion here would drop that unique owner.
+            continue;
+        }
         elicitation_handler.set_audit_buffer(None);
-        state.run.active = None;
+        if let Some(completed) = state.run.active.take() {
+            state.run.retired.push(completed.handle);
+        }
         // The completed run returns the authoritative in-memory session for its own appends. Queue
         // controls accepted while that session was detached were already persisted through the
         // same linear writer, so merge only that tracked delta instead of rereading the JSONL.
         task_result
             .session
             .record_durably_appended_controls(state.session.detached_durable_controls.drain(..));
+        let completed_session_id = task_result.session.session_scope_id().to_owned();
         state.session.current = Some(task_result.session);
         if let Some(maintenance) = task_result.post_run_maintenance.take() {
             state.session_maintenance.spawn(runtime, maintenance);
@@ -2108,6 +2164,7 @@ where
                     .map(|session| session.entries().to_vec())
                     .unwrap_or_default();
                 let _ = message_tx.send(WorkerMessage::RunCancelled {
+                    session_id: completed_session_id,
                     session_log_path: state.session.log_path.clone(),
                     provider_name: state
                         .session
@@ -2132,6 +2189,7 @@ where
                     .map(|session| session.entries().to_vec())
                     .unwrap_or_default();
                 let _ = message_tx.send(WorkerMessage::RunInterrupted {
+                    session_id: completed_session_id,
                     session_log_path: state.session.log_path.clone(),
                     provider_name: state
                         .session
@@ -2661,11 +2719,14 @@ where
         state,
         ..
     } = context;
+    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+        return WorkerAdvancementControl::PollCommand;
+    };
     if state.run.active.is_none() {
         let completed_agent_threads = collect_finished_background_agent_runs(
             runtime,
             &state.agent.background_runs,
-            &state.agent.supervisor,
+            &agent_supervisor,
             root_config,
             agent.tool_registry(),
             &mut state.session.current,
@@ -2739,9 +2800,10 @@ where
                 return WorkerAdvancementControl::SkipCommandPoll;
             }
             state.run.active = start_agent_result_continuation_run(
+                &state.stop_control,
                 runtime,
                 Arc::clone(agent),
-                &state.agent.supervisor,
+                &agent_supervisor,
                 root_config,
                 &state.session.log_path,
                 agent.tool_registry(),
@@ -2781,6 +2843,9 @@ where
         state,
         ..
     } = context;
+    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
+        return WorkerAdvancementControl::PollCommand;
+    };
     if state.run.active.is_none() {
         let queued_input_ready = match state
             .session
@@ -2799,9 +2864,10 @@ where
             let continuation_threads =
                 std::mem::take(&mut state.session.pending_agent_result_continuations);
             state.run.active = start_agent_result_continuation_run(
+                &state.stop_control,
                 runtime,
                 Arc::clone(agent),
-                &state.agent.supervisor,
+                &agent_supervisor,
                 root_config,
                 &state.session.log_path,
                 agent.tool_registry(),
@@ -2899,23 +2965,31 @@ where
             let session_log_path = state.session.log_path.clone();
             let exact_prompts = state.session.exact_prompts.clone();
             let options = options.clone();
-            let conversation_coordinator = ConversationCoordinator::new(
-                root_config.task.enabled,
-                root_config.task.routing_policy,
-            )
-            .with_writable_memory_routing(root_config.memory.writable)
-            .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
-                &root_config.agent.runtime_provider,
-                &root_config.agent.model,
-                sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
-            ))
-            .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
-                provider_supports_routing_tools: agent.provider_capabilities().supports_tool_stream,
-                route_qualified: sigil_runtime::route_qualification_evidence(&root_config),
-            });
-            let route_capability = conversation_coordinator.resolve_route_capability(session);
-            let tools = if route_capability.routes_automatically() {
-                conversation_coordinator.route_tool_specs_for_session(session, route_capability)
+            let tools = if super::agent_runtime::task_orchestration_enabled(&root_config) {
+                let conversation_coordinator = ConversationCoordinator::new(
+                    root_config.task.enabled,
+                    root_config.task.routing_policy,
+                )
+                .with_writable_memory_routing(root_config.memory.writable)
+                .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
+                    &root_config.agent.runtime_provider,
+                    &root_config.agent.model,
+                    sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+                ))
+                .with_route_capability_evidence(
+                    sigil_runtime::RouteCapabilityEvidence {
+                        provider_supports_routing_tools: agent
+                            .provider_capabilities()
+                            .supports_tool_stream,
+                        task_executor_available: true,
+                    },
+                );
+                let route_capability = conversation_coordinator.resolve_route_capability(session);
+                if route_capability.routes_automatically() {
+                    conversation_coordinator.route_tool_specs_for_session(session, route_capability)
+                } else {
+                    agent.tool_registry().specs()
+                }
             } else {
                 agent.tool_registry().specs()
             };
@@ -3138,9 +3212,10 @@ where
                         send_conversation_queue_update(message_tx, session.entries());
                     }
                     state.run.active = start_queued_conversation_run(
+                        &state.stop_control,
                         runtime,
                         Arc::clone(agent),
-                        &state.agent.supervisor,
+                        state.agent.supervisor.as_ref(),
                         root_config,
                         agent.tool_registry(),
                         options,

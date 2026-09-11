@@ -88,9 +88,9 @@ fn worker_revision_waiting_commits_the_exact_public_outbox_before_tui_wakeup() -
         terminal_reason: None,
         recorded_at_ms: 11,
     };
+    // Started and DraftReady retain the same immutable lifecycle binding.
     let mut base_started = base_attempt.clone();
     base_started.status = sigil_kernel::PlanReviewAttemptStatus::Started;
-    base_started.finalizer_session_ref = None;
     base_started.recorded_at_ms = 9;
     session.append_control(ControlEntry::PlanReviewAttempt(base_started))?;
     session.append_controls(vec![
@@ -206,6 +206,7 @@ fn durable_revision_terminals_keep_their_typed_worker_projection() {
     let entries = Vec::new();
     let cancelled = revision_terminal_worker_message(
         &PublicRunEventKind::RunCancelled,
+        "worker-owned-session".to_owned(),
         std::path::Path::new("session.jsonl"),
         "provider".to_owned(),
         "model".to_owned(),
@@ -218,6 +219,7 @@ fn durable_revision_terminals_keep_their_typed_worker_projection() {
         &PublicRunEventKind::RunInterrupted {
             reason: "durable interruption".to_owned(),
         },
+        "worker-owned-session".to_owned(),
         std::path::Path::new("session.jsonl"),
         "provider".to_owned(),
         "model".to_owned(),
@@ -233,6 +235,7 @@ fn durable_revision_terminals_keep_their_typed_worker_projection() {
         &PublicRunEventKind::RunFinished {
             final_text: "the original durable revision result".to_owned(),
         },
+        "worker-owned-session".to_owned(),
         std::path::Path::new("session.jsonl"),
         "provider".to_owned(),
         "model".to_owned(),
@@ -310,9 +313,7 @@ fn active_cancel_delivery_keeps_the_exact_revision_terminal_after_audit_failure(
         &PublicRunEventKind::RunCancelled,
         audit_result,
         std::path::Path::new("session.jsonl"),
-        "provider".to_owned(),
-        "model".to_owned(),
-        Vec::new(),
+        &session,
         &message_tx,
     );
     assert!(matches!(
@@ -925,6 +926,7 @@ fn root_config_with_checks(
 ) -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },

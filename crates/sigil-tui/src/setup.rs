@@ -216,7 +216,7 @@ impl SetupState {
             orchestration_rollout =
                 new_install_orchestration_rollout_decision_for_config(root_config);
         }
-        Self {
+        let mut state = Self {
             config_path,
             selected_field: SetupField::Provider,
             model,
@@ -234,7 +234,11 @@ impl SetupState {
             startup_config,
             orchestration_rollout,
             provider_drafts: BTreeMap::new(),
+        };
+        if state.authority_boot_retry_required() {
+            state.selected_field = SetupField::Save;
         }
+        state
     }
 
     pub(crate) fn is_custom(&self) -> bool {
@@ -536,6 +540,11 @@ impl SetupState {
                 .startup_config
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.parsed().is_some())
+    }
+
+    pub(crate) fn authority_boot_retry_required(&self) -> bool {
+        self.valid_config_boot_retry_required()
+            && self.startup_recovery_code == Some(PublicRouteRecoveryCode::AuthorityUnavailable)
     }
 
     pub(crate) fn startup_config_snapshot_missing(&self) -> bool {

@@ -706,6 +706,7 @@ fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.set_terminal_size(120, 20);
     app.composer.input = "/resume".to_owned();
+    crate::app::tests::common::settle_session_auxiliary(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point(&layout, 0);
 
@@ -2300,6 +2301,18 @@ fn mouse_click_run_next_targets_the_selected_follow_up() -> Result<()> {
         AppMouseOutcome::Action(AppAction::PromoteQueuedConversationInput { queue_id })
             if queue_id.as_str() == "queue_2"
     ));
-    assert_eq!(app.last_notice(), Some("follow-up will run next"));
+    assert_eq!(app.last_notice(), Some("scheduling follow-up next"));
+    let repeated = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(!matches!(repeated, AppMouseOutcome::Action(_)));
+    let pending_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 30), &app);
+    assert!(
+        pending_layout
+            .composer_queue_hit_areas
+            .as_ref()
+            .expect("queue still visible")
+            .actions
+            .is_empty()
+    );
+    assert_eq!(app.composer.pending_queue_operations.len(), 1);
     Ok(())
 }

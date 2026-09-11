@@ -16,16 +16,15 @@ use sigil_kernel::{
     ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
     JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
     MutationEventRecorder, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
-    PlanSourceRef, PlanTaskStartMode, Provider, PublicIntentStackStateV1, ReasoningEffort,
-    RootConfig, Session, SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
+    PlanTaskStartMode, Provider, PublicIntentStackStateV1, ReasoningEffort, RootConfig, Session,
+    SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
     TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
     TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
     ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
     ToolResultMeta, UsageStats, VerificationScope, WorkspaceMutationDetected,
-    WorkspaceRootSnapshot, plan_draft_created_entry, plan_draft_created_entry_with_plan_id,
-    plan_task_input_from_draft, session_io_lock_metrics, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    WorkspaceRootSnapshot, plan_draft_created_entry_with_plan_id, plan_task_input_from_draft,
+    session_io_lock_metrics, task_id_from_plan_draft,
 };
 use sigil_runtime::{McpRuntimeEventHandler, PlanReviewCoordinator};
 use tempfile::tempdir;
@@ -88,39 +87,7 @@ fn commit_explicit_plan_review_draft(
         workspace_snapshot_id,
     )?
     .expect("structured plan review draft");
-    PlanReviewCoordinator::commit_draft_from_child(
-        session,
-        &draft,
-        &request,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: "attempt-1".to_owned(),
-            source_turn_id: "message-1".to_owned(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: Some(sigil_kernel::stable_event_uuid(
-                "sigil-intent-schema-v1",
-                "v1",
-            )),
-            max_plan_steps: 64,
-            workspace_id: Some(sigil_kernel::stable_event_uuid(
-                "sigil-test-workspace-v1",
-                "intent-workspace",
-            )),
-            session_scope_id: Some(session.session_scope_id().to_owned()),
-        },
-        &mut handler,
-        3,
-    )?;
+    PlanReviewCoordinator::commit_draft_from_child(session, &draft, &request, &mut handler, 3)?;
     Ok(draft)
 }
 
@@ -371,10 +338,29 @@ fn task_from_plan_rejects_created_anchor_prefix_without_approval_authority() -> 
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
-    let promotion = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
-        .expect("v2 plan should promote");
-    let promoted = promotion.task_plan;
-    let step_mapping = promotion.step_mapping;
+    // Fixed historical crash-prefix record; current Plan approval never constructs this DAG.
+    let promoted = TaskPlanEntry {
+        task_id: stable_task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("inspect")?,
+            title: "Inspect".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: Some(sigil_kernel::TaskStepMode::Read),
+            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: Some("historical plan promotion prefix".to_owned()),
+    };
+    let step_mapping = vec![sigil_kernel::PlanToTaskStepMapping {
+        plan_step_id: "inspect".to_owned(),
+        task_step_id: TaskStepId::new("inspect")?,
+        title: "Inspect".to_owned(),
+    }];
     session.append_control(ControlEntry::TaskPlan(promoted))?;
     session.append_control(ControlEntry::TaskCreatedFromPlan(
         TaskCreatedFromPlanEntry {
@@ -424,16 +410,22 @@ fn task_from_plan_without_base_snapshot_starts_host_direct_execution() -> Result
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let store = JsonlSessionStore::new(&session_log_path)?;
     let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = plan_draft_created_entry(
+    let draft = commit_explicit_plan_review_draft(
+        &mut session,
+        "Inspect the workspace",
+        "plan-no-base-snapshot-review",
         r#"```sigil-plan-v2
 {"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
 ```"#,
-        PlanSourceRef::default(),
-        1,
         None,
-    )?
-    .expect("structured plan draft");
-    session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
+    )?;
+    assert!(draft.workspace_snapshot_id.is_none());
+    assert!(
+        session
+            .plan_artifact_projection()
+            .latest_candidate(&draft.plan_id)
+            .is_none()
+    );
     let mut current_session = Some(session);
 
     let mut session = current_session.take().expect("session");
@@ -503,9 +495,24 @@ fn task_from_plan_rejects_legacy_prefix_before_workspace_admission() -> Result<(
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
-    let promoted = task_plan_from_plan_draft(&draft, stable_task_id.clone(), 1)?
-        .expect("v2 plan should promote")
-        .task_plan;
+    // Fixed historical crash-prefix record; current Plan approval never constructs this DAG.
+    let promoted = TaskPlanEntry {
+        task_id: stable_task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("inspect")?,
+            title: "Inspect".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: Some(sigil_kernel::TaskStepMode::Read),
+            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
+        }],
+        reason: Some("historical plan promotion prefix".to_owned()),
+    };
     session.append_control(ControlEntry::TaskPlan(promoted))?;
     fs::write(workspace_root.join("README.md"), "snapshot b\n")?;
     let entry_count_before_run = session.entries().len();
@@ -1282,7 +1289,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
             Some(scratch_control),
             managed_terminal,
         );
-    let terminal_control = handles.terminal;
+    let terminal_control = handles.terminal.expect("terminal capability enabled");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -1332,7 +1339,9 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         ),
     )?;
     let start_entry = TerminalTaskEntry::from_tool_result_details(&start.metadata.details)?
-        .expect("terminal_start should return terminal metadata");
+        .ok_or_else(|| {
+            anyhow::anyhow!("terminal_start should return terminal metadata: {start:?}")
+        })?;
     runtime.block_on(wait_for_terminal_output(
         &registry,
         tool_context.clone(),
@@ -1499,7 +1508,9 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         sigil_kernel::WorkspaceTrust::Unknown,
     )?;
     let registry = surface.registry;
-    let terminal_control = surface.terminal_control;
+    let terminal_control = surface
+        .terminal_control
+        .expect("terminal capability enabled");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

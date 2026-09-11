@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use sigil_kernel::{
@@ -13,10 +9,9 @@ use sigil_kernel::{
 use sigil_kernel::{ModelMessage, ToolExecutionEntry};
 #[cfg(test)]
 use sigil_kernel::{ToolEgressEntry, ToolExecutionStatus, ToolPreviewSnapshot};
-use uuid::Uuid;
 
 use super::{
-    AppState, RunPhase, SessionHistoryEntry, SessionHistoryRow, SessionViewMode, TimelineRole,
+    AppState, RunPhase, SessionHistoryRow, SessionViewMode, TimelineRole,
     formatting::{
         format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_content_block_redacted_for_restore,
@@ -31,6 +26,8 @@ mod audit_log;
 pub(super) use audit_log::render_control_entry_line;
 mod history;
 mod restore_projection;
+#[cfg(test)]
+use super::SessionHistoryEntry;
 #[cfg(test)]
 use audit_log::{
     agent_invocation_mode_label, agent_route_status_label, agent_terminal_status_label,
@@ -50,12 +47,11 @@ use audit_log::{
     should_render_restored_tool_execution, unix_time_ms,
 };
 pub(super) use history::{current_focus_label, session_history_display_label, short_session_token};
-use history::{
-    discard_bootstrap_only_session_file, session_entries_have_resumable_activity,
-    session_history_title_from_log, session_id_from_path, session_log_has_resumable_activity,
-};
+use history::{discard_bootstrap_only_session_file, session_entries_have_resumable_activity};
 #[cfg(test)]
-use history::{read_bounded_line, session_history_label};
+use history::{
+    read_bounded_line, session_history_label, session_history_title_from_log, session_id_from_path,
+};
 #[cfg(test)]
 use restore_projection::push_restored_reasoning_timeline_entry;
 use restore_projection::{
@@ -94,11 +90,7 @@ impl AppState {
         else {
             return false;
         };
-        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
-            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
-                .ok()
-                .flatten()
-        });
+        let current_snapshot = self.session_auxiliary.workspace_snapshot.clone();
         let Ok(detail) = sigil_kernel::plan_review_detail_from_entries(
             &self.session_browser.current_entries,
             &link.plan_id,
@@ -106,11 +98,16 @@ impl AppState {
         ) else {
             return false;
         };
-        let Some(review) = sigil_runtime::conversation_display::public_plan_review_from_entries(
+        let review = match sigil_runtime::conversation_display::public_plan_review_from_entries(
             &self.session_browser.current_entries,
             current_snapshot.as_deref(),
-        ) else {
-            return false;
+        ) {
+            Ok(Some(review)) => review,
+            Ok(None) => return false,
+            Err(error) => {
+                self.last_notice = Some(format!("plan review recovery unavailable: {error}"));
+                return false;
+            }
         };
         if review.plan_id != link.plan_id.as_str()
             || review.plan_hash.as_deref() != Some(link.plan_hash.as_str())
@@ -154,7 +151,10 @@ impl AppState {
     }
 
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
-        self.refresh_session_history();
+        if let Err(error) = self.load_session_history_before_terminal() {
+            self.last_notice = Some(format!("session history unavailable: {error}"));
+            return false;
+        }
         let Some(session_log_path) = self
             .session_browser
             .history
@@ -211,8 +211,16 @@ impl AppState {
 
         let provider_name = session.provider_name().to_owned();
         let model_name = session.model_name().to_owned();
+        let session_id = session.session_scope_id().to_owned();
         let entries = session.entries().to_vec();
-        self.restore_session_view(session_log_path, provider_name, model_name, entries, notice);
+        self.restore_session_view(
+            session_id,
+            session_log_path,
+            provider_name,
+            model_name,
+            entries,
+            notice,
+        );
         self.last_notice = Some(notice.to_owned());
         self.refresh_session_history();
         Ok(true)
@@ -225,7 +233,7 @@ impl AppState {
         fallback_model_name: &str,
         notice: &str,
     ) -> Result<bool> {
-        self.refresh_session_history();
+        self.load_session_history_before_terminal()?;
         let Some(session_log_path) = self.resolve_resume_target(selector) else {
             return Ok(false);
         };
@@ -378,44 +386,69 @@ impl AppState {
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
         let entries =
             preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
-        let review_snapshot =
-            super::session_review::session_review_snapshot(&self.session_log_path, &entries);
+        let review_snapshot = self.session_auxiliary.review.clone().unwrap_or_else(|| {
+            super::session_review::session_review_snapshot_from_entries(&entries)
+        });
+        self.apply_synced_session_state(entries, review_snapshot);
+    }
+
+    /// Applies a worker-delivered snapshot without reopening the JSONL stream. This path is used
+    /// immediately before interactive attention forms, where a second physical read can contend
+    /// with the append that produced the delivered entries.
+    pub(super) fn sync_current_session_state_from_delivered_entries(
+        &mut self,
+        entries: Vec<SessionLogEntry>,
+    ) {
+        let entries =
+            preserve_local_ui_control_entries(&self.session_browser.current_entries, entries);
+        let review_snapshot = super::session_review::session_review_snapshot_from_entries(&entries);
+        self.apply_synced_session_state(entries, review_snapshot);
+    }
+
+    fn apply_synced_session_state(
+        &mut self,
+        entries: Vec<SessionLogEntry>,
+        review_snapshot: super::session_review::SessionReviewSnapshot,
+    ) {
         self.review.latest_checkpoint_restore_sequence =
             review_snapshot.latest_checkpoint_restore_sequence;
         self.review.readiness_sequences_by_scope = review_snapshot.readiness_sequences_by_scope;
         self.runtime.stats = session_stats_from_entries(&entries);
         self.tool_preview_snapshots = restored_tool_occurrences(&entries).pending_previews;
         self.session_browser.current_entries = entries;
+        self.reconcile_pending_user_input_attention();
         self.reconcile_integration_review();
         self.mark_current_session_entries_changed_with_review_lines(review_snapshot.lines);
         self.reconcile_optimistic_conversation_queue_items();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_conversation_queue_selection();
         self.refresh_usage_sidebar_cache();
+        self.request_session_auxiliary_refresh();
     }
 
     pub(super) fn restore_durable_attention_surfaces(&mut self) {
+        let previous_plan = self.composer.pending_plan_approval.take();
+        let previous_input = self.composer.pending_user_input.clone();
+        self.restore_durable_attention_surfaces_inner();
+        self.restore_pending_plan_presentation(previous_plan);
+        self.restore_pending_user_input_presentation(previous_input);
+    }
+
+    fn restore_durable_attention_surfaces_inner(&mut self) {
         self.clear_pending_plan_approval();
-        self.clear_pending_user_input();
 
         let recovery_command = sigil_kernel::recoverable_user_input_decision_from_entries(
             &self.session_browser.current_entries,
-        )
-        .and_then(|command| {
-            if command.is_some() {
-                Ok(command)
-            } else {
-                sigil_runtime::application_run::recoverable_agent_user_input_decision_from_child_sessions(
-                    &self.session_log_path,
-                    &self.session_browser.current_entries,
-                )
-            }
-        });
-        match sigil_runtime::conversation_display::public_user_inputs_from_entries(
-            &self.session_browser.current_entries,
-        ) {
+        );
+        match self.public_user_input_attention_requests() {
             Ok(requests) => match recovery_command {
                 Ok(command) => {
+                    let command = command.filter(|command| {
+                        !self.user_input_attention_is_submitted(
+                            &command.identity,
+                            &command.request_hash,
+                        )
+                    });
                     let has_recovery = command.is_some();
                     self.set_pending_user_inputs(requests, command);
                     if has_recovery {
@@ -448,25 +481,30 @@ impl AppState {
         {
             return;
         }
-        let current_snapshot = self.config_snapshot.as_ref().and_then(|root_config| {
-            sigil_runtime::plan_handoff_workspace_snapshot_id(root_config, &self.workspace_root)
-                .ok()
-                .flatten()
-        });
-        if let Some(review) = sigil_runtime::conversation_display::public_plan_review_from_entries(
-            &self.session_browser.current_entries,
-            current_snapshot.as_deref(),
-        ) && plans.latest_pending_plan().is_none()
+        let current_snapshot = self.session_auxiliary.workspace_snapshot.clone();
+        let public_review =
+            match sigil_runtime::conversation_display::public_plan_review_from_entries(
+                &self.session_browser.current_entries,
+                current_snapshot.as_deref(),
+            ) {
+                Ok(review) => review,
+                Err(error) => {
+                    self.last_notice = Some(format!("plan review recovery unavailable: {error}"));
+                    return;
+                }
+            };
+        if let Some(review) = public_review.as_ref()
+            && plans.latest_pending_plan().is_none()
         {
             if review.candidate.is_some() {
-                self.set_pending_plan_candidate(&review, current_snapshot.as_deref());
+                self.set_pending_plan_candidate(review, current_snapshot.as_deref());
                 return;
             }
             if review
                 .allowed_actions
                 .contains(&sigil_kernel::PublicPlanAction::RetryReview)
             {
-                self.set_pending_plan_retry(&review, current_snapshot.as_deref());
+                self.set_pending_plan_retry(review, current_snapshot.as_deref());
                 return;
             }
         }
@@ -488,11 +526,8 @@ impl AppState {
                 if let Some(pending) = self.composer.pending_plan_approval.as_mut() {
                     pending.last_run_failure = last_run_failure;
                 }
-                match sigil_runtime::conversation_display::public_plan_review_from_entries(
-                    &self.session_browser.current_entries,
-                    current_snapshot.as_deref(),
-                ) {
-                    Some(review) => self.apply_pending_plan_public_review(&review),
+                match public_review.as_ref() {
+                    Some(review) => self.apply_pending_plan_public_review(review),
                     None => {
                         self.last_notice = Some(
                             "plan is readable, but its action projection is unavailable; actions remain disabled"
@@ -516,25 +551,20 @@ impl AppState {
         &mut self,
         command: sigil_kernel::UserInputDecisionCommandV1,
     ) {
-        self.clear_pending_plan_approval();
-        self.clear_pending_user_input();
-        match sigil_runtime::conversation_display::public_user_inputs_from_entries(
-            &self.session_browser.current_entries,
-        ) {
+        if self.user_input_attention_is_submitted(&command.identity, &command.request_hash)
+            || self.user_input_has_advanced_past_attention(&command.identity, &command.request_hash)
+        {
+            return;
+        }
+        match self.public_user_input_attention_requests() {
             Ok(requests) => {
-                let command_matches_request = requests.iter().any(|request| {
+                if requests.iter().any(|request| {
                     request.identity == command.identity
                         && request.request_hash == command.request_hash
-                });
-                if command_matches_request {
+                }) {
                     self.set_pending_user_inputs(requests, Some(command));
                     self.last_notice = Some(
                         "an accepted input decision is ready to resume; choose Resume".to_owned(),
-                    );
-                } else {
-                    self.set_pending_user_inputs(requests, None);
-                    self.last_notice = Some(
-                        "accepted input recovery no longer matches the durable request".to_owned(),
                     );
                 }
             }
@@ -544,10 +574,54 @@ impl AppState {
         }
     }
 
+    pub(super) fn restore_worker_recovered_user_input_attention(
+        &mut self,
+        command: sigil_kernel::UserInputDecisionCommandV1,
+    ) {
+        if self.user_input_attention_is_resolved(&command.identity, &command.request_hash) {
+            return;
+        }
+        let Ok(mut requests) = self.public_user_input_attention_requests() else {
+            return;
+        };
+        if let Ok(routes) = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+            &self.session_browser.current_entries,
+        ) && let Some(route) = routes.unresolved().find(|route| {
+            route.request.identity == command.identity
+                && route.request.request_hash == command.request_hash
+        }) && !requests.iter().any(|request| {
+            request.identity == command.identity && request.request_hash == command.request_hash
+        }) {
+            requests.push(route.request.clone());
+        }
+        if requests.iter().any(|request| {
+            request.identity == command.identity && request.request_hash == command.request_hash
+        }) {
+            self.allow_recovered_user_input_attention(&command);
+            self.set_pending_user_inputs(requests, Some(command));
+            self.last_notice =
+                Some("an accepted input decision is ready to resume; choose Resume".to_owned());
+        }
+    }
+
     pub(super) fn append_current_session_control(&mut self, control: ControlEntry) {
+        let affects_user_input = matches!(
+            &control,
+            ControlEntry::AgentUserInputRoute(_)
+                | ControlEntry::UserInputRequested(_)
+                | ControlEntry::UserInputDecisionAccepted(_)
+                | ControlEntry::UserInputContinuationClaimed(_)
+                | ControlEntry::UserInputContinuationStarted(_)
+                | ControlEntry::UserInputContinuationReleased(_)
+                | ControlEntry::UserInputResolved(_)
+                | ControlEntry::PlanReviewAttempt(_)
+        );
         self.session_browser
             .current_entries
             .push(SessionLogEntry::Control(control));
+        if affects_user_input {
+            self.reconcile_pending_user_input_attention();
+        }
         self.runtime.stats = session_stats_from_entries(&self.session_browser.current_entries);
         self.tool_preview_snapshots =
             restored_tool_occurrences(&self.session_browser.current_entries).pending_previews;
@@ -559,150 +633,33 @@ impl AppState {
     }
 
     pub(super) fn refresh_session_history(&mut self) {
-        let mut sessions = Vec::new();
-        let mut add_session = |path: PathBuf, label: String, metadata: fs::Metadata| {
-            if !session_log_has_resumable_activity(&path) {
-                return;
-            }
-            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let modified_epoch_secs = modified
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or(0);
-            let bytes = metadata.len();
-            let title = session_history_title_from_log(&path);
-            sessions.push((
-                modified,
-                SessionHistoryEntry {
-                    path,
-                    label,
-                    title,
-                    modified_epoch_secs,
-                    bytes,
-                },
-            ));
-        };
-
-        if let Ok(entries) = fs::read_dir(&self.session_log_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let is_jsonl = path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .map(|value| value.eq_ignore_ascii_case("jsonl"))
-                    .unwrap_or(false);
-                if is_jsonl && entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
-                    let label = path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_owned();
-                    if let Ok(metadata) = entry.metadata() {
-                        add_session(path, label, metadata);
-                    }
-                }
-            }
-        }
-
-        // Current-schema sessions live below the authority-declared managed leaf, one opaque
-        // directory per session, rather than beside the configured legacy JSONL directory.
-        // Include those leaves in the same history projection so `resume` can resolve the exact
-        // managed source after a fresh process boot.
-        let managed_session_root = self.managed_history_writer.as_ref().and_then(|writer| {
-            writer
-                .managed_leaf_path(
-                    sigil_runtime::managed_storage_writer::StorageWriterChannelV1::SessionLog,
-                )
-                .ok()
-        });
-        if let Some(root) = managed_session_root
-            && let Ok(entries) = fs::read_dir(root)
-        {
-            for entry in entries.flatten() {
-                let key_dir = entry.path();
-                if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
-                    continue;
-                }
-                let path = key_dir.join("records.jsonl");
-                let Ok(metadata) = fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    continue;
-                }
-                let label = key_dir
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("unknown")
-                    .to_owned();
-                add_session(path, label, metadata);
-            }
-        }
-        sessions.sort_by(|left, right| right.0.cmp(&left.0));
-        self.session_browser.history = sessions.into_iter().map(|(_, entry)| entry).collect();
-        let current_index = self
-            .session_browser
-            .history
-            .iter()
-            .position(|entry| entry.path == self.session_log_path)
-            .unwrap_or(0);
-        self.session_browser.history_selected = self
-            .filtered_session_indices()
-            .iter()
-            .position(|index| *index == current_index)
-            .unwrap_or(0)
-            .min(self.filtered_session_indices().len().saturating_sub(1));
+        self.request_session_history_refresh();
     }
 
+    #[cfg(test)]
     pub(crate) fn discard_current_bootstrap_only_session(&self) -> bool {
-        let Ok(entries) = JsonlSessionStore::read_entries(&self.session_log_path) else {
-            return false;
-        };
-        if session_entries_have_resumable_activity(&entries) {
-            return false;
-        }
+        discard_bootstrap_session(
+            &self.session_log_path,
+            &self.session_log_dir,
+            &self.workspace_root,
+        )
+    }
 
-        let current_holds_workspace_trust = entries.iter().rev().find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision)) => {
-                Some(decision.trust)
-            }
-            _ => None,
-        }) == Some(sigil_kernel::WorkspaceTrust::Trusted);
-        if current_holds_workspace_trust && !self.another_session_holds_workspace_trust() {
-            return false;
-        }
-
-        discard_bootstrap_only_session_file(&self.session_log_path, &self.session_log_dir)
-            .unwrap_or(false)
+    pub(crate) fn start_bootstrap_session_cleanup(
+        &self,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let path = self.session_log_path.clone();
+        let directory = self.session_log_dir.clone();
+        let workspace = self.workspace_root.clone();
+        std::thread::Builder::new()
+            .name("sigil-tui-bootstrap-cleanup".to_owned())
+            .spawn(move || {
+                let _ = discard_bootstrap_session(&path, &directory, &workspace);
+            })
     }
 
     pub(crate) fn current_session_has_resumable_activity(&self) -> bool {
         session_entries_have_resumable_activity(&self.session_browser.current_entries)
-            || session_log_has_resumable_activity(&self.session_log_path)
-    }
-
-    fn another_session_holds_workspace_trust(&self) -> bool {
-        let Ok(workspace_id) = sigil_kernel::stable_workspace_id(&self.workspace_root) else {
-            return false;
-        };
-        let Ok(entries) = fs::read_dir(&self.session_log_dir) else {
-            return false;
-        };
-        entries.flatten().any(|entry| {
-            let path = entry.path();
-            path != self.session_log_path
-                && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
-                && JsonlSessionStore::read_entries(path)
-                    .ok()
-                    .is_some_and(|entries| {
-                        entries.iter().rev().find_map(|entry| match entry {
-                            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
-                                decision,
-                            )) if decision.workspace_id == workspace_id => Some(decision.trust),
-                            _ => None,
-                        }) == Some(sigil_kernel::WorkspaceTrust::Trusted)
-                    })
-        })
     }
 
     pub(super) fn refresh_memory_summary(&mut self) {
@@ -801,12 +758,15 @@ impl AppState {
 
     pub(super) fn restore_session_view(
         &mut self,
+        session_id: String,
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
         entries: Vec<SessionLogEntry>,
         notice: &str,
     ) {
+        // Identity belongs to the loaded worker/store snapshot. UI restoration performs no
+        // session I/O, so a busy writer cannot interrupt delivery of an already-switched view.
         self.clear_pending_session_route_startup();
         // A task pause/cancel/interruption restores an actual Task view, not the Plan that
         // admitted it. Clear any plan workbench left by a prior redraw before the durable
@@ -823,6 +783,10 @@ impl AppState {
         self.composer.optimistic_queue_items.clear();
         self.composer.deferred_queue_promotions.clear();
         self.composer.queue_edit_target = None;
+        self.composer.pending_queue_operations.clear();
+        self.composer.pending_queue_pause = None;
+        self.composer.pending_queue_enqueues.clear();
+        self.composer.queue_operation_errors.clear();
         self.blur_composer_queue_panel();
         if self.checkpoint_restore_modal_open() || self.intent_stack_modal_open() {
             self.modal_state = None;
@@ -871,8 +835,7 @@ impl AppState {
         self.runtime.provider_name = projected_provider;
         self.runtime.model_name = projected_model;
         self.runtime.model_route = projected_route;
-        self.session_id = session_id_from_path(&self.session_log_path)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.session_id = session_id;
         self.agent_panel.active_view = super::AgentView::Main;
         self.agent_panel.active_child_transcript = None;
         self.sync_current_session_state(entries.clone());
@@ -1140,3 +1103,58 @@ fn local_ui_control_entries_equal(left: &SessionLogEntry, right: &SessionLogEntr
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/session_flow_detail_tests.rs"]
 mod tests;
+
+fn discard_bootstrap_session(
+    session_log_path: &std::path::Path,
+    session_log_dir: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let Ok(entries) = JsonlSessionStore::read_entries(session_log_path) else {
+        return false;
+    };
+    if session_entries_have_resumable_activity(&entries) {
+        return false;
+    }
+
+    let current_holds_workspace_trust = entries.iter().rev().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision)) => {
+            Some(decision.trust)
+        }
+        _ => None,
+    }) == Some(sigil_kernel::WorkspaceTrust::Trusted);
+    if current_holds_workspace_trust
+        && !another_session_holds_workspace_trust(session_log_path, session_log_dir, workspace_root)
+    {
+        return false;
+    }
+
+    discard_bootstrap_only_session_file(session_log_path, session_log_dir).unwrap_or(false)
+}
+
+fn another_session_holds_workspace_trust(
+    session_log_path: &std::path::Path,
+    session_log_dir: &std::path::Path,
+    workspace_root: &std::path::Path,
+) -> bool {
+    let Ok(workspace_id) = sigil_kernel::stable_workspace_id(workspace_root) else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(session_log_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path != session_log_path
+            && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && JsonlSessionStore::read_entries(path)
+                .ok()
+                .is_some_and(|entries| {
+                    entries.iter().rev().find_map(|entry| match entry {
+                        SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
+                            decision,
+                        )) if decision.workspace_id == workspace_id => Some(decision.trust),
+                        _ => None,
+                    }) == Some(sigil_kernel::WorkspaceTrust::Trusted)
+                })
+    })
+}

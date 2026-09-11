@@ -3,6 +3,7 @@ use super::*;
 fn test_root_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: Default::default(),
         storage: Default::default(),
         session: Default::default(),

@@ -31,6 +31,10 @@ impl AppState {
             if key.code == KeyCode::BackTab && key.modifiers == KeyModifiers::SHIFT {
                 if let Some(form) = self.composer.pending_user_input.as_mut() {
                     form.open = true;
+                    if form.is_plan_revision_editor() {
+                        form.focus_actions = false;
+                        self.active_pane = super::PaneFocus::Composer;
+                    }
                 }
                 self.last_notice = Some("input form reopened".to_owned());
                 return Some(None);
@@ -38,11 +42,28 @@ impl AppState {
             return None;
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            let revision = self
+                .composer
+                .pending_user_input
+                .as_ref()
+                .is_some_and(PendingUserInputForm::is_plan_revision_editor);
             if let Some(form) = self.composer.pending_user_input.as_mut() {
                 form.open = false;
             }
-            self.last_notice = Some("input form closed; Shift-Tab reopens it".to_owned());
+            self.last_notice = Some(if revision {
+                "revision draft kept; Shift-Tab returns to editing".to_owned()
+            } else {
+                "input form closed; Shift-Tab reopens it".to_owned()
+            });
             return Some(None);
+        }
+        if self
+            .composer
+            .pending_user_input
+            .as_ref()
+            .is_some_and(PendingUserInputForm::is_plan_revision_editor)
+        {
+            return Some(self.handle_plan_revision_editor_key(key));
         }
         let focus_actions = self
             .composer
@@ -53,6 +74,38 @@ impl AppState {
             return self.handle_user_input_action_key(key);
         }
         self.handle_user_input_field_key(key)
+    }
+
+    fn handle_plan_revision_editor_key(&mut self, key: KeyEvent) -> Option<AppAction> {
+        let form = self.composer.pending_user_input.as_mut()?;
+        if form.plan_revision_editor.submitting {
+            return None;
+        }
+        form.focus_actions = false;
+        form.focused_question = 0;
+        if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+            form.selected_action = UserInputFormAction::Submit;
+            return self.submit_user_input_action();
+        }
+        if let Some(UserInputDraftValue::Text(value)) = form.drafts.first_mut() {
+            form.plan_revision_editor.handle_key(value, key);
+        }
+        None
+    }
+
+    pub(super) fn handle_user_input_form_paste_text(&mut self, text: &str) -> bool {
+        let Some(form) = self
+            .composer
+            .pending_user_input
+            .as_mut()
+            .filter(|form| form.open && form.is_plan_revision_editor())
+        else {
+            return false;
+        };
+        if let Some(UserInputDraftValue::Text(value)) = form.drafts.first_mut() {
+            form.plan_revision_editor.insert(value, text);
+        }
+        true
     }
 
     fn handle_user_input_action_key(&mut self, key: KeyEvent) -> Option<Option<AppAction>> {
@@ -354,6 +407,13 @@ impl AppState {
 
     fn submit_user_input_action(&mut self) -> Option<AppAction> {
         let form = self.composer.pending_user_input.as_ref()?;
+        let revision = form.is_plan_revision_editor();
+        if revision && form.plan_revision_editor.submitting {
+            return None;
+        }
+        if !user_input_action_available(form, form.selected_action) {
+            return None;
+        }
         let (command_id, decision) = match form.selected_action {
             UserInputFormAction::Resume => {
                 let command = form.recovery_command.as_ref()?;
@@ -369,7 +429,12 @@ impl AppState {
                         Ok(Some(answer)) => answers.push(answer),
                         Ok(None) => {}
                         Err(error) => {
-                            self.last_notice = Some(error);
+                            self.last_notice = Some(error.clone());
+                            if revision
+                                && let Some(form) = self.composer.pending_user_input.as_mut()
+                            {
+                                form.plan_revision_editor.error = Some(error);
+                            }
                             return None;
                         }
                     }
@@ -391,28 +456,79 @@ impl AppState {
             .request
             .as_ref()
             .expect("durable input form must retain its authoritative request");
-        self.last_notice = Some(if command_id.is_some() {
-            "resuming accepted user input".to_owned()
-        } else {
-            "submitting user input decision".to_owned()
-        });
-        Some(AppAction::SubmitUserInputDecision {
-            command_id,
+        let action = AppAction::SubmitUserInputDecision {
+            command_id: command_id.clone(),
             request_id: request.identity.request_id.as_str().to_owned(),
             generation: request.identity.generation,
             expected_request_hash: request.request_hash.clone(),
             decision,
-        })
+        };
+        if revision && let Some(form) = self.composer.pending_user_input.as_mut() {
+            form.plan_revision_editor.submitting = true;
+            form.plan_revision_editor.error = None;
+        }
+        self.last_notice = Some(if revision {
+            "submitting revision request".to_owned()
+        } else if command_id.is_some() {
+            "resuming accepted user input".to_owned()
+        } else {
+            "submitting user input decision".to_owned()
+        });
+        Some(action)
     }
 
-    /// Recognizes only the private PlanReview research recovery form that the worker populated
-    /// from an exact durable child receipt.  The returned worker command deliberately excludes
-    /// the answer: the worker re-reads and validates the authoritative receipt before it enters
-    /// the ordinary submit dispatcher.
-    ///
-    /// This prevents the durable application reservation cache from treating a historical
-    /// `Uncertain` application receipt as a replacement for the worker-owned recovery path.
-    pub(crate) fn recovered_plan_review_research_resume_command(
+    pub(crate) fn fail_pending_user_input_submission(
+        &mut self,
+        request_id: &str,
+        generation: u32,
+        expected_request_hash: &str,
+        message: String,
+    ) -> bool {
+        let mut matched = false;
+        for form in self
+            .composer
+            .pending_user_input
+            .iter_mut()
+            .chain(self.composer.pending_user_input_queue.iter_mut())
+        {
+            if form.is_plan_revision_editor()
+                && form.plan_revision_editor.submitting
+                && form.request.as_ref().is_some_and(|request| {
+                    request.identity.request_id.as_str() == request_id
+                        && request.identity.generation == generation
+                        && request.request_hash == expected_request_hash
+                })
+            {
+                form.plan_revision_editor.submitting = false;
+                form.plan_revision_editor.error = Some(message.clone());
+                form.open = true;
+                form.focus_actions = false;
+                matched = true;
+            }
+        }
+        matched
+    }
+
+    pub(super) fn restore_pending_user_input_presentation(
+        &mut self,
+        previous: Option<PendingUserInputForm>,
+    ) {
+        let Some(previous) = previous.filter(PendingUserInputForm::is_plan_revision_editor) else {
+            return;
+        };
+        for next in self
+            .composer
+            .pending_user_input
+            .iter_mut()
+            .chain(self.composer.pending_user_input_queue.iter_mut())
+        {
+            preserve_plan_revision_draft(next, &previous);
+        }
+    }
+
+    /// Routes only a worker-recovered form through the private recovery dispatcher. The worker
+    /// re-reads the exact command under its current owner; no answer or new command id is sent.
+    pub(crate) fn recovered_user_input_resume_command(
         &self,
         action: &AppAction,
     ) -> Option<crate::runner::WorkerCommand> {
@@ -429,10 +545,7 @@ impl AppState {
         else {
             return None;
         };
-        if !matches!(
-            &request.source,
-            sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
-        ) || recovery.identity != request.identity
+        if recovery.identity != request.identity
             || recovery.request_hash != request.request_hash
             || recovery.command_id.as_str() != command_id
             || recovery.identity.request_id.as_str() != request_id
@@ -442,14 +555,12 @@ impl AppState {
         {
             return None;
         }
-        Some(
-            crate::runner::WorkerCommand::ResumeRecoveredPlanReviewResearch {
-                command_id: recovery.command_id.as_str().to_owned(),
-                request_id: recovery.identity.request_id.as_str().to_owned(),
-                generation: recovery.identity.generation,
-                expected_request_hash: recovery.request_hash.clone(),
-            },
-        )
+        Some(crate::runner::WorkerCommand::ResumeRecoveredUserInput {
+            command_id: recovery.command_id.as_str().to_owned(),
+            request_id: recovery.identity.request_id.as_str().to_owned(),
+            generation: recovery.identity.generation,
+            expected_request_hash: recovery.request_hash.clone(),
+        })
     }
 
     pub(crate) fn set_pending_user_input(
@@ -473,6 +584,9 @@ impl AppState {
         request: sigil_kernel::PublicUserInputRequestV1,
         recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
     ) {
+        if self.user_input_attention_is_submitted(&request.identity, &request.request_hash) {
+            return;
+        }
         let view = UserInputFormViewModel::from(&request);
         let drafts = empty_user_input_drafts(&view.questions);
         let selected_action = if recovery_command.is_some() {
@@ -485,7 +599,7 @@ impl AppState {
                 })
                 .unwrap_or(UserInputFormAction::Submit)
         };
-        let form = PendingUserInputForm {
+        let mut form = PendingUserInputForm {
             view,
             request: Some(request),
             source: UserInputFormSource::DurableAgent,
@@ -497,9 +611,22 @@ impl AppState {
             focus_actions: selected_action == UserInputFormAction::Resume,
             selected_action,
             drafts,
+            plan_revision_editor: Default::default(),
             scroll: 0,
             scroll_extent: Default::default(),
         };
+        if let Some(previous) = self
+            .composer
+            .pending_user_input
+            .iter()
+            .chain(self.composer.pending_user_input_queue.iter())
+            .find(|previous| same_plan_revision_request(&form, previous))
+        {
+            preserve_plan_revision_draft(&mut form, previous);
+        }
+        if form.open && form.is_plan_revision_editor() {
+            self.active_pane = super::PaneFocus::Composer;
+        }
         self.upsert_pending_user_input(form);
     }
 
@@ -525,6 +652,7 @@ impl AppState {
             focus_actions: false,
             selected_action: UserInputFormAction::Submit,
             drafts,
+            plan_revision_editor: Default::default(),
             scroll: 0,
             scroll_extent: Default::default(),
         });
@@ -583,6 +711,7 @@ impl AppState {
         self.composer.pending_user_input.as_ref()
     }
 
+    #[cfg(test)]
     pub(in crate::app) fn clear_pending_user_input(&mut self) {
         self.composer.pending_user_input = None;
         self.composer.pending_user_input_queue.clear();
@@ -595,16 +724,244 @@ impl AppState {
         requests: Vec<sigil_kernel::PublicUserInputRequestV1>,
         recovery_command: Option<sigil_kernel::UserInputDecisionCommandV1>,
     ) {
-        self.composer.pending_user_input = None;
-        self.composer.pending_user_input_queue.clear();
+        let previous_active = self.composer.pending_user_input.take();
+        let previous_queue = std::mem::take(&mut self.composer.pending_user_input_queue);
+        let previous_index = self.composer.pending_user_input_queue_index;
         self.composer.pending_user_input_queue_index = 0;
         for request in requests {
             let recovery = recovery_command
                 .as_ref()
-                .filter(|command| command.identity == request.identity)
-                .cloned();
+                .filter(|command| {
+                    command.identity == request.identity
+                        && command.request_hash == request.request_hash
+                })
+                .cloned()
+                .or_else(|| {
+                    previous_active
+                        .iter()
+                        .chain(previous_queue.iter())
+                        .find(|previous| {
+                            previous.request.as_ref().is_some_and(|old| {
+                                old.identity == request.identity
+                                    && old.request_hash == request.request_hash
+                                    && old.source == request.source
+                            })
+                        })
+                        .and_then(|previous| previous.recovery_command.clone())
+                });
             self.set_pending_user_input_with_recovery(request, recovery);
         }
+        for next in &mut self.composer.pending_user_input_queue {
+            if let Some(previous) = previous_active
+                .iter()
+                .chain(previous_queue.iter())
+                .find(|previous| same_user_input_presentation(next, previous))
+            {
+                preserve_user_input_presentation(next, previous);
+            }
+        }
+        self.select_pending_user_input_after_reconcile(previous_active, previous_index);
+    }
+
+    pub(super) fn user_input_attention_is_submitted(
+        &self,
+        identity: &sigil_kernel::UserInputIdentityV1,
+        request_hash: &str,
+    ) -> bool {
+        self.session_auxiliary
+            .submitted_user_inputs
+            .contains(&(identity.clone(), request_hash.to_owned()))
+    }
+
+    pub(super) fn dismiss_submitted_user_input(
+        &mut self,
+        request: &sigil_kernel::PublicUserInputRequestV1,
+    ) {
+        self.request_session_auxiliary_refresh();
+        self.session_auxiliary
+            .submitted_user_inputs
+            .insert((request.identity.clone(), request.request_hash.clone()));
+        self.retain_pending_user_inputs(|form| {
+            form.request.as_ref().is_none_or(|pending| {
+                pending.identity != request.identity || pending.request_hash != request.request_hash
+            })
+        });
+    }
+
+    pub(super) fn allow_recovered_user_input_attention(
+        &mut self,
+        command: &sigil_kernel::UserInputDecisionCommandV1,
+    ) {
+        self.session_auxiliary
+            .submitted_user_inputs
+            .remove(&(command.identity.clone(), command.request_hash.clone()));
+    }
+
+    pub(super) fn public_user_input_attention_requests(
+        &self,
+    ) -> anyhow::Result<Vec<sigil_kernel::PublicUserInputRequestV1>> {
+        let mut requests = sigil_runtime::conversation_display::public_user_inputs_from_entries(
+            &self.session_browser.current_entries,
+        )?;
+        let routes = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+            &self.session_browser.current_entries,
+        )?;
+        // Only an explicit worker recovery may expose a Registered route again. Preserve
+        // that exact presentation during later projection refreshes without inventing one.
+        for route in routes
+            .unresolved()
+            .filter(|route| route.status == sigil_kernel::AgentRouteStatus::Registered)
+        {
+            if self
+                .composer
+                .pending_user_input
+                .iter()
+                .chain(self.composer.pending_user_input_queue.iter())
+                .any(|form| {
+                    form.recovery_command.as_ref().is_some_and(|command| {
+                        command.identity == route.request.identity
+                            && command.request_hash == route.request.request_hash
+                    })
+                })
+                && !requests.iter().any(|request| {
+                    request.identity == route.request.identity
+                        && request.request_hash == route.request.request_hash
+                })
+            {
+                requests.push(route.request.clone());
+            }
+        }
+        Ok(requests)
+    }
+
+    /// Reconciles attention, not run ownership. Pending questions remain visible while busy;
+    /// exact inputs handed back to execution stay hidden until the worker offers recovery.
+    pub(super) fn reconcile_pending_user_input_attention(&mut self) {
+        let Ok(requests) = self.public_user_input_attention_requests() else {
+            return;
+        };
+        let mut pending = requests
+            .into_iter()
+            .map(|request| (request.identity, request.request_hash))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut unresolved = pending.clone();
+        if let Ok(routes) = sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
+            &self.session_browser.current_entries,
+        ) {
+            unresolved.extend(routes.unresolved().map(|route| {
+                (
+                    route.request.identity.clone(),
+                    route.request.request_hash.clone(),
+                )
+            }));
+        }
+        // Retain suppression through Registered, but never retain completed input history.
+        self.session_auxiliary
+            .submitted_user_inputs
+            .retain(|key| unresolved.contains(key));
+        pending.retain(|key| !self.session_auxiliary.submitted_user_inputs.contains(key));
+        self.retain_pending_user_inputs(|form| {
+            form.request.as_ref().is_none_or(|request| {
+                pending.contains(&(request.identity.clone(), request.request_hash.clone()))
+            })
+        });
+    }
+
+    pub(super) fn user_input_has_advanced_past_attention(
+        &self,
+        identity: &sigil_kernel::UserInputIdentityV1,
+        request_hash: &str,
+    ) -> bool {
+        let entries = &self.session_browser.current_entries;
+        if sigil_kernel::UserInputProjectionV1::from_session_entries(entries)
+            .ok()
+            .and_then(|projection| projection.request(identity).cloned())
+            .is_some_and(|request| {
+                request.requested.request_hash == request_hash
+                    && request.status == sigil_kernel::UserInputStatusV1::Resolved
+            })
+        {
+            return true;
+        }
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(entries)
+            .ok()
+            .and_then(|projection| {
+                projection
+                    .route_for_request(identity, request_hash)
+                    .cloned()
+            })
+            .is_some_and(|route| route.status != sigil_kernel::AgentRouteStatus::Requested)
+    }
+
+    pub(super) fn user_input_attention_is_resolved(
+        &self,
+        identity: &sigil_kernel::UserInputIdentityV1,
+        request_hash: &str,
+    ) -> bool {
+        let entries = &self.session_browser.current_entries;
+        let local = sigil_kernel::UserInputProjectionV1::from_session_entries(entries)
+            .ok()
+            .and_then(|projection| projection.request(identity).cloned());
+        if local.is_some_and(|request| {
+            request.requested.request_hash == request_hash
+                && request.status == sigil_kernel::UserInputStatusV1::Resolved
+        }) {
+            return true;
+        }
+        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(entries)
+            .ok()
+            .and_then(|projection| {
+                projection
+                    .route_for_request(identity, request_hash)
+                    .cloned()
+            })
+            .is_some_and(|route| {
+                !matches!(
+                    route.status,
+                    sigil_kernel::AgentRouteStatus::Requested
+                        | sigil_kernel::AgentRouteStatus::Registered
+                )
+            })
+    }
+
+    fn retain_pending_user_inputs(&mut self, keep: impl FnMut(&PendingUserInputForm) -> bool) {
+        let previous_active = self.composer.pending_user_input.take();
+        let previous_index = self.composer.pending_user_input_queue_index;
+        for form in &mut self.composer.pending_user_input_queue {
+            if let Some(active) = previous_active
+                .as_ref()
+                .filter(|active| same_user_input_presentation(form, active))
+            {
+                *form = active.clone();
+            }
+        }
+        self.composer.pending_user_input_queue.retain(keep);
+        self.select_pending_user_input_after_reconcile(previous_active, previous_index);
+    }
+
+    fn select_pending_user_input_after_reconcile(
+        &mut self,
+        previous_active: Option<PendingUserInputForm>,
+        previous_index: usize,
+    ) {
+        let queue = &mut self.composer.pending_user_input_queue;
+        let len = queue.len();
+        for (index, form) in queue.iter_mut().enumerate() {
+            form.queue_position = index + 1;
+            form.queue_length = len;
+        }
+        let selected = previous_active
+            .as_ref()
+            .and_then(|previous| {
+                queue
+                    .iter()
+                    .position(|next| same_user_input_presentation(next, previous))
+            })
+            .unwrap_or_else(|| previous_index.min(len.saturating_sub(1)));
+        self.composer.pending_user_input_queue_index = selected;
+        self.composer.pending_user_input = previous_active
+            .filter(|form| matches!(form.source, UserInputFormSource::Mcp { .. }))
+            .or_else(|| queue.get(selected).cloned());
     }
 
     fn upsert_pending_user_input(&mut self, mut form: PendingUserInputForm) {
@@ -709,6 +1066,72 @@ impl AppState {
             len
         ));
     }
+}
+
+fn same_user_input_presentation(
+    next: &PendingUserInputForm,
+    previous: &PendingUserInputForm,
+) -> bool {
+    next.view == previous.view
+        && next.recovery_command == previous.recovery_command
+        && next
+            .request
+            .as_ref()
+            .zip(previous.request.as_ref())
+            .is_some_and(|(next, previous)| {
+                next.identity == previous.identity
+                    && next.request_hash == previous.request_hash
+                    && next.source == previous.source
+                    && next.status == previous.status
+            })
+}
+
+fn preserve_user_input_presentation(
+    next: &mut PendingUserInputForm,
+    previous: &PendingUserInputForm,
+) {
+    next.open = previous.open;
+    next.focused_question = previous.focused_question;
+    next.focus_actions = previous.focus_actions;
+    next.selected_action = previous.selected_action;
+    next.drafts = previous.drafts.clone();
+    next.plan_revision_editor = previous.plan_revision_editor.clone();
+    next.scroll = previous.scroll;
+    next.scroll_extent = previous.scroll_extent.clone();
+}
+
+fn same_plan_revision_request(
+    next: &PendingUserInputForm,
+    previous: &PendingUserInputForm,
+) -> bool {
+    next.is_plan_revision_editor()
+        && previous.is_plan_revision_editor()
+        && next.view == previous.view
+        && next
+            .request
+            .as_ref()
+            .zip(previous.request.as_ref())
+            .is_some_and(|(next, previous)| {
+                next.identity == previous.identity
+                    && next.request_hash == previous.request_hash
+                    && next.source == previous.source
+                    && next.status == sigil_kernel::UserInputStatusV1::Requested
+                    && previous.status == sigil_kernel::UserInputStatusV1::Requested
+            })
+}
+
+fn preserve_plan_revision_draft(next: &mut PendingUserInputForm, previous: &PendingUserInputForm) {
+    if !same_plan_revision_request(next, previous) {
+        return;
+    }
+    next.open = previous.open;
+    next.focused_question = 0;
+    next.focus_actions = false;
+    next.selected_action = UserInputFormAction::Submit;
+    next.drafts = previous.drafts.clone();
+    next.plan_revision_editor = previous.plan_revision_editor.clone();
+    next.scroll = previous.scroll;
+    next.scroll_extent = previous.scroll_extent.clone();
 }
 
 fn mcp_content_from_answers(
@@ -915,3 +1338,7 @@ fn user_input_answer(
         value,
     }))
 }
+
+#[cfg(test)]
+#[path = "tests/user_input_flow_tests.rs"]
+mod tests;

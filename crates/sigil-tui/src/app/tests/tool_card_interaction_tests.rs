@@ -452,6 +452,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
 
     let mut available_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     available_app.restore_session_view(
+        crate::app::tests::common::fixture_session_id(&session_path),
         session_path.clone(),
         "deepseek".to_owned(),
         "deepseek-v4-flash".to_owned(),
@@ -463,6 +464,7 @@ fn restored_tool_artifact_card_reconciles_physical_availability() -> Result<()> 
     std::fs::remove_dir_all(artifact_store.root().join("blobs"))?;
     let mut missing_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     missing_app.restore_session_view(
+        crate::app::tests::common::fixture_session_id(&session_path),
         session_path,
         "deepseek".to_owned(),
         "deepseek-v4-flash".to_owned(),

@@ -24,7 +24,7 @@ pub(super) fn render_user_input_form(
     if area.width == 0 || area.height == 0 {
         return;
     }
-    if is_plan_revision(form) && area.width >= 72 && area.height >= 14 {
+    if form.is_plan_revision_editor() {
         render_plan_revision_form(frame, area, form, theme);
         return;
     }
@@ -96,7 +96,11 @@ fn render_plan_revision_form(
     form: &PendingUserInputForm,
     theme: &Theme,
 ) {
-    let card = plan_revision_card_area(area);
+    let card = if area.width >= 72 && area.height >= 14 {
+        plan_revision_card_area(area)
+    } else {
+        area
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -114,13 +118,18 @@ fn render_plan_revision_form(
         return;
     }
 
-    let header_height = 5.min(inner.height.saturating_sub(5));
-    let footer_height = 3.min(inner.height.saturating_sub(header_height + 3));
+    let header_height = if inner.height >= 8 {
+        2
+    } else {
+        1.min(inner.height.saturating_sub(5))
+    };
+    let footer_height =
+        if inner.height >= 8 { 3 } else { 2 }.min(inner.height.saturating_sub(header_height + 3));
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
-            Constraint::Min(3),
+            Constraint::Min(1),
             Constraint::Length(footer_height),
         ])
         .split(inner);
@@ -147,28 +156,12 @@ fn render_plan_revision_header(
     theme: &Theme,
 ) {
     let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "CURRENT PLAN ",
-                Style::default()
-                    .fg(theme.palette.accent_success)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "stays active while you revise it",
-                styles::muted(&theme.palette),
-            ),
-        ]),
         Line::from(Span::styled(
             form.view.prompt.clone(),
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            "Tell Sigil what to add, remove, reorder, or change.",
-            styles::muted(&theme.palette),
-        )),
-        Line::from(Span::styled(
-            "It will prepare a new draft for review; this plan stays available until that succeeds.",
+            "Your current plan stays available.",
             styles::muted(&theme.palette),
         )),
     ];
@@ -185,7 +178,7 @@ fn render_plan_revision_editor(
     form: &PendingUserInputForm,
     theme: &Theme,
 ) {
-    let focused = !form.focus_actions;
+    let focused = form.open && !form.plan_revision_editor.submitting;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused {
@@ -196,7 +189,7 @@ fn render_plan_revision_editor(
         .style(styles::body(&theme.palette).bg(theme.palette.surface_input))
         .title(Line::from(vec![
             Span::styled(
-                " YOUR REVISION REQUEST ",
+                " REVISION REQUEST ",
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled("required", styles::muted(&theme.palette)),
@@ -207,11 +200,37 @@ fn render_plan_revision_editor(
         return;
     }
 
-    let mut lines = plan_revision_editor_lines(form, theme);
-    lines = wrap_terminal_lines(lines, inner.width as usize);
-    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    form.plan_revision_editor
+        .viewport
+        .set((inner.width as usize, inner.height as usize));
+    let value = form
+        .drafts
+        .first()
+        .and_then(|draft| match draft {
+            UserInputDraftValue::Text(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    let layout = form
+        .plan_revision_editor
+        .layout(value, inner.width as usize);
+    let max_scroll = layout.rows.len().saturating_sub(inner.height as usize);
     form.scroll_extent.set(max_scroll);
-    let scroll = form.scroll.min(max_scroll);
+    let mut scroll = form.scroll.min(max_scroll);
+    let (cursor_row, cursor_column) = layout.cursor_position;
+    if cursor_row < scroll {
+        scroll = cursor_row;
+    } else if cursor_row >= scroll + inner.height as usize {
+        scroll = cursor_row + 1 - inner.height as usize;
+    }
+    let lines = if value.is_empty() {
+        vec![Line::from(Span::styled(
+            "Describe the changes you want…",
+            styles::muted(&theme.palette),
+        ))]
+    } else {
+        layout.rows.into_iter().map(Line::raw).collect()
+    };
     frame.render_widget(
         Paragraph::new(Text::from(
             lines
@@ -223,41 +242,12 @@ fn render_plan_revision_editor(
         .style(styles::body(&theme.palette).bg(theme.palette.surface_input)),
         inner,
     );
-}
-
-fn plan_revision_editor_lines(form: &PendingUserInputForm, theme: &Theme) -> Vec<Line<'static>> {
-    let value = form.drafts.first().and_then(|draft| match draft {
-        UserInputDraftValue::Text(value) => Some(value.as_str()),
-        _ => None,
-    });
-    let Some(value) = value.filter(|value| !value.is_empty()) else {
-        return vec![
-            Line::from(vec![
-                Span::styled("› ", Style::default().fg(theme.palette.accent_primary)),
-                Span::styled(
-                    "Describe the change you want to make…",
-                    styles::muted(&theme.palette),
-                ),
-            ]),
-            Line::from(Span::styled(
-                "Examples: add a verification step, change priority, or preserve a constraint.",
-                styles::muted(&theme.palette),
-            )),
-        ];
-    };
-    value
-        .split('\n')
-        .enumerate()
-        .map(|(index, line)| {
-            Line::from(vec![
-                Span::styled(
-                    if index == 0 { "› " } else { "  " },
-                    Style::default().fg(theme.palette.accent_primary),
-                ),
-                Span::styled(line.to_owned(), styles::body(&theme.palette)),
-            ])
-        })
-        .collect()
+    if focused {
+        frame.set_cursor_position((
+            inner.x + cursor_column.min(inner.width.saturating_sub(1) as usize) as u16,
+            inner.y + cursor_row.saturating_sub(scroll) as u16,
+        ));
+    }
 }
 
 fn render_plan_revision_actions(
@@ -266,55 +256,42 @@ fn render_plan_revision_actions(
     form: &PendingUserInputForm,
     theme: &Theme,
 ) {
-    let mut spans = Vec::new();
-    for action in UserInputFormAction::ORDER
-        .iter()
-        .filter(|action| action_available(form, **action))
-    {
-        let selected = form.focus_actions && *action == form.selected_action;
-        let style = if selected {
-            Style::default()
-                .fg(theme.palette.button_selected_fg)
-                .bg(theme.palette.button_selected_bg)
-                .add_modifier(Modifier::BOLD)
-        } else if *action == UserInputFormAction::Submit {
-            Style::default()
-                .fg(theme.palette.accent_primary)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.palette.button_inactive_fg)
-        };
-        spans.extend([
-            Span::raw(if spans.is_empty() { "" } else { "   " }),
-            Span::styled(action_label(form, *action), style),
-        ]);
-    }
-    let keyboard_hint = if form.focus_actions {
-        "← → choose an action · Enter confirm · ↑ return to editing"
-    } else if form
-        .view
-        .questions
-        .get(form.focused_question)
-        .is_some_and(|question| {
-            matches!(
-                question.field,
-                sigil_kernel::UserInputFieldKindV1::Text {
-                    multiline: true,
-                    ..
-                }
-            )
-        })
-    {
-        "↑↓/Tab next field · Enter newline · Ctrl-Enter actions · Esc close"
+    let submitting = form.plan_revision_editor.submitting;
+    let action_style = if submitting {
+        styles::muted(&theme.palette)
     } else {
-        "↑↓/Tab next field · Enter next field · Ctrl-Enter actions · Esc close"
+        Style::default()
+            .fg(theme.palette.accent_primary)
+            .add_modifier(Modifier::BOLD)
     };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            if submitting {
+                "Submitting revision…"
+            } else {
+                "Enter  Submit revision"
+            },
+            action_style,
+        ),
+        Span::styled("    Esc  Back", styles::muted(&theme.palette)),
+    ])];
+    if let Some(error) = form.plan_revision_editor.error.as_ref() {
+        lines.push(Line::from(Span::styled(
+            crate::ui::sanitize_terminal_text(error),
+            Style::default().fg(theme.palette.accent_danger),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        if submitting {
+            "Waiting for confirmation"
+        } else {
+            "Shift+Enter / Ctrl+J  New line"
+        },
+        styles::muted(&theme.palette),
+    )));
     frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(spans),
-            Line::from(Span::styled(keyboard_hint, styles::muted(&theme.palette))),
-        ]))
-        .style(styles::body(&theme.palette).bg(theme.palette.modal_bg)),
+        Paragraph::new(Text::from(lines))
+            .style(styles::body(&theme.palette).bg(theme.palette.modal_bg)),
         area,
     );
 }
@@ -335,7 +312,7 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
     ];
     if form.recovery_command.is_some() {
         lines.push(Line::from(Span::styled(
-            "The answer was accepted before the previous owner stopped. Resume reuses the exact durable command and does not ask the provider to repeat the question.",
+            "Your answer is saved. Resume reuses the accepted answer and checks that the request can continue.",
             styles::muted(&theme.palette),
         )));
         if let Some(receipt) = form

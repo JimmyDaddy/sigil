@@ -67,6 +67,7 @@ pub(in crate::runner) enum CompactionPreparationTaskResult {
 pub(in crate::runner) struct CompactionPreparationTaskManager {
     active: Option<ActiveCompactionPreparationTask>,
     retired: Vec<JoinHandle<()>>,
+    task_panicked: bool,
 }
 
 struct ActiveCompactionPreparationTask {
@@ -266,7 +267,7 @@ impl CompactionPreparationTaskManager {
     }
 
     pub(in crate::runner) fn reap_finished(&mut self) {
-        self.retired.retain(|handle| !handle.is_finished());
+        super::shutdown::reap_finished_owned_tasks(&mut self.retired, &mut self.task_panicked);
     }
 
     pub(in crate::runner) fn accept_result(
@@ -277,9 +278,7 @@ impl CompactionPreparationTaskManager {
         if self.active.as_ref().is_some_and(|task| {
             task.request_id == request_id && task.session_scope_id == session_scope_id
         }) {
-            if let Some(task) = self.active.take()
-                && !task.handle.is_finished()
-            {
+            if let Some(task) = self.active.take() {
                 self.retired.push(task.handle);
             }
             self.reap_finished();
@@ -311,10 +310,26 @@ impl CompactionPreparationTaskManager {
         self.reap_finished();
     }
 
+    pub(in crate::runner) fn shutdown_until(
+        &mut self,
+        runtime: &Runtime,
+        deadline: std::time::Instant,
+    ) -> Result<(), super::shutdown::OwnedTaskDrainFailure> {
+        self.abort_all();
+        super::shutdown::drain_owned_tasks_until(
+            &mut self.retired,
+            &mut self.task_panicked,
+            runtime,
+            deadline,
+        )
+    }
+
     pub(in crate::runner) fn cancel_and_join(&mut self, runtime: &Runtime) {
         self.abort_all();
         for handle in self.retired.drain(..) {
-            let _ = runtime.block_on(handle);
+            self.task_panicked |= runtime
+                .block_on(handle)
+                .is_err_and(|error| error.is_panic());
         }
     }
 }
@@ -335,5 +350,37 @@ fn compaction_route_owner(
 impl Drop for CompactionPreparationTaskManager {
     fn drop(&mut self) {
         self.abort_all();
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn finished_compaction_panic_survives_abort_and_repeated_shutdown() {
+        let runtime = Runtime::new().expect("build compaction shutdown test runtime");
+        let handle = runtime.spawn(async { panic!("compaction fixture panic") });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(handle.is_finished());
+        let mut manager = CompactionPreparationTaskManager::new();
+        manager.active = Some(ActiveCompactionPreparationTask {
+            request_id: 1,
+            session_scope_id: "panic-scope".to_owned(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            handle,
+        });
+        manager.abort_all();
+        assert!(manager.retired.is_empty());
+        assert!(manager.task_panicked);
+        for _ in 0..2 {
+            assert!(matches!(
+                manager.shutdown_until(&runtime, deadline),
+                Err(super::super::shutdown::OwnedTaskDrainFailure::TaskPanicked)
+            ));
+        }
     }
 }

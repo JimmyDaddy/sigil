@@ -183,6 +183,7 @@ where
                             attachment: Arc::clone(&transition.session_attachment),
                         });
                         let _ = message_tx.send(WorkerMessage::LocalSessionForked {
+                            session_id: transition.session_id,
                             request_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
@@ -511,14 +512,15 @@ where
                             attachment: Arc::clone(&transition.session_attachment),
                         });
                         let entries = transition.entries;
-                        let recovered_plan_review_input = transition.recovered_plan_review_input;
+                        let recovered_user_input = transition.recovered_user_input;
                         let _ = message_tx.send(WorkerMessage::SessionSwitched {
+                            session_id: transition.session_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
                             model_name: transition.model_name,
                             entries: entries.clone(),
                         });
-                        if let Some(command) = recovered_plan_review_input {
+                        if let Some(command) = recovered_user_input {
                             let _ = message_tx.send(WorkerMessage::RecoveredUserInputAttention {
                                 command,
                                 entries,
@@ -566,6 +568,7 @@ where
                             attachment: Arc::clone(&transition.session_attachment),
                         });
                         let _ = message_tx.send(WorkerMessage::NewSessionStarted {
+                            session_id: transition.session_id,
                             session_log_path: transition.session_log_path,
                             provider_name: transition.provider_name,
                             model_name: transition.model_name,

@@ -240,10 +240,17 @@ impl AppState {
     }
 
     fn build_session_view_cache(&self) -> SessionViewCache {
-        let session_review_lines = session_review::session_review_sidebar_lines(
-            &self.session_log_path,
-            &self.session_browser.current_entries,
-        );
+        let session_review_lines = self
+            .session_auxiliary
+            .review
+            .as_ref()
+            .map(|review| review.lines.clone())
+            .unwrap_or_else(|| {
+                session_review::session_review_snapshot_from_entries(
+                    &self.session_browser.current_entries,
+                )
+                .lines
+            });
         self.build_session_view_cache_with_review_lines(session_review_lines)
     }
 

@@ -8,6 +8,65 @@ fn config_for_workspace(workspace_root: &std::path::Path) -> RootConfig {
 }
 
 #[test]
+fn core_ui_preserves_editable_configuration_without_discovering_optional_modules() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = config_for_workspace(temp.path());
+    config.composition = sigil_kernel::RuntimeCompositionConfig::core();
+    config.task.planner.model = Some("unselected-invalid-role".to_owned());
+    config.code_intelligence.enabled = true;
+    std::fs::create_dir_all(temp.path().join(".sigil"))?;
+    std::fs::write(
+        temp.path().join(".sigil/agents"),
+        "invalid discovery directory",
+    )?;
+    std::fs::write(
+        temp.path().join(".sigil/skills"),
+        "invalid discovery directory",
+    )?;
+    std::fs::write(
+        temp.path().join(".sigil/plugins"),
+        "invalid discovery directory",
+    )?;
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &config);
+    app.apply_persisted_config_snapshot(&config);
+
+    let persisted = app
+        .persisted_config_snapshot()
+        .expect("persisted configuration");
+    assert!(persisted.memory.enabled);
+    assert!(persisted.code_intelligence.enabled);
+    assert!(persisted.persisted_toml().is_ok());
+    let runtime = app
+        .session_runtime_config_snapshot()
+        .expect("runtime configuration");
+    assert!(runtime.selected_capabilities().is_empty());
+    assert!(!runtime.memory.enabled);
+    assert!(!runtime.code_intelligence.enabled);
+    assert!(runtime.persisted_toml().is_err());
+    assert!(!app.runtime.memory_enabled);
+    assert_eq!(app.runtime.memory_document_count, 0);
+    assert!(app.runtime.mcp_server_statuses.is_empty());
+    assert_eq!(
+        app.discover_config_agents(&config),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(
+        app.discover_config_skills(&config),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(app.discover_config_plugins(), (Vec::new(), Vec::new()));
+    app.open_config_panel();
+    assert!(app.config_state.is_some());
+    assert!(
+        app.persisted_config_snapshot()
+            .expect("config after opening")
+            .persisted_toml()
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
 fn startup_keeps_connection_inventory_offline_until_config_is_opened() {
     let config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &config);

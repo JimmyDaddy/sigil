@@ -11,6 +11,7 @@ use tempfile::tempdir;
 fn test_root_config() -> RootConfig {
     RootConfig {
         config_version: 2,
+        composition: Default::default(),
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
