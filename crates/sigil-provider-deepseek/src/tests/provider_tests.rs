@@ -590,7 +590,7 @@ fn activate_real_cache_test_compaction(
             initiation: CompactionInitiation::Manual,
             base_projection_revision: "deepseek-real-cache-compaction-r1".to_owned(),
             branch_id: None,
-            valid_for_snapshot: "deepseek-real-cache-snapshot-r1".to_owned(),
+            valid_for_snapshot: Some("deepseek-real-cache-snapshot-r1".to_owned()),
             objective: Some(
                 "Preserve the cache-conformance objective across epoch rotation".to_owned(),
             ),

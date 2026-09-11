@@ -296,6 +296,7 @@ fn build_messages_request_rejects_malformed_tool_args_and_missing_result_id() {
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        logical_run_id: None,
         image_attachments: Vec::new(),
         tool_result_payload: None,
     }];
