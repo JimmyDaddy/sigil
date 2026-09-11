@@ -485,8 +485,8 @@ pub(crate) async fn desktop_restart_after_update(
             "Install the signed Desktop update before restarting.",
         ));
     }
-    let mut manager = app_state.manager.lock().await;
-    let active_runs = match workspace_active_run_count(&mut manager).await {
+    let manager = &app_state.manager;
+    let active_runs = match workspace_active_run_count(manager).await {
         Ok(active_runs) => active_runs,
         Err(error) => {
             updater.mark_restart_error(&app, error.code);
@@ -526,7 +526,7 @@ pub(crate) async fn desktop_restart_after_update(
 }
 
 async fn workspace_active_run_count(
-    manager: &mut DesktopWorkspaceManager,
+    manager: &DesktopWorkspaceManager,
 ) -> Result<usize, DesktopUpdateCommandError> {
     let workspaces = manager.list().map_err(|_| {
         DesktopUpdateCommandError::new(

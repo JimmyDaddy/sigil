@@ -147,8 +147,6 @@ pub(crate) async fn desktop_support_doctor(
     validate_workspace_id(&workspace_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -166,8 +164,6 @@ pub(crate) async fn desktop_provider_connections(
     validate_workspace_id(&workspace_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -186,8 +182,6 @@ pub(crate) async fn desktop_provider_setup_catalog(
     validate_workspace_id(&workspace_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -204,8 +198,7 @@ pub(crate) async fn desktop_save_provider_setup(
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopProviderSetupSaveSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
-    let mut manager = state.manager.lock().await;
-    let client = configuration_change_client(&mut manager, &workspace_id).await?;
+    let client = configuration_change_client(&state.manager, &workspace_id).await?;
     ensure_workspace_restart_safe(&client).await?;
     state.run_streams.stop_workspace(&workspace_id).await;
     let result = client
@@ -213,7 +206,8 @@ pub(crate) async fn desktop_save_provider_setup(
         .await
         .map(Into::into)
         .map_err(project_client_error)?;
-    manager
+    state
+        .manager
         .restart(&workspace_id)
         .await
         .map_err(project_manager_error)?;
@@ -227,8 +221,7 @@ pub(crate) async fn desktop_save_provider_default_model(
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopProviderDefaultModelSaveSummary, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
-    let mut manager = state.manager.lock().await;
-    let client = configuration_change_client(&mut manager, &workspace_id).await?;
+    let client = configuration_change_client(&state.manager, &workspace_id).await?;
     ensure_workspace_restart_safe(&client).await?;
     state.run_streams.stop_workspace(&workspace_id).await;
     let result = client
@@ -236,7 +229,8 @@ pub(crate) async fn desktop_save_provider_default_model(
         .await
         .map(Into::into)
         .map_err(project_client_error)?;
-    manager
+    state
+        .manager
         .restart(&workspace_id)
         .await
         .map_err(project_manager_error)?;
@@ -252,8 +246,6 @@ pub(crate) async fn desktop_export_support_bundle(
     validate_workspace_id(&workspace_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let bundle = client
@@ -368,12 +360,7 @@ pub(crate) async fn desktop_bootstrap(
     window: WebviewWindow,
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopBootstrap, DesktopCommandError> {
-    let workspaces = state
-        .manager
-        .lock()
-        .await
-        .list()
-        .map_err(project_manager_error)?;
+    let workspaces = state.manager.list().map_err(project_manager_error)?;
     let open_workspace_ids = workspaces
         .iter()
         .map(|workspace| workspace.id.clone())
@@ -474,8 +461,6 @@ pub(crate) async fn desktop_pick_workspace(
     );
     let workspace = state
         .manager
-        .lock()
-        .await
         .open(request)
         .await
         .map_err(project_manager_error)?;
@@ -522,8 +507,6 @@ pub(crate) async fn desktop_open_recent_workspace(
         .map_err(project_recent_error)?;
     let workspace = state
         .manager
-        .lock()
-        .await
         .open(DesktopWorkspaceOpenRequest::new(
             DesktopLaunchRequest::with_implicit_user_config(&state.sigil_binary, &workspace_root),
             display_name,
@@ -560,7 +543,7 @@ pub(crate) async fn desktop_close_workspace(
         ));
     }
     if confirm_active_runs != Some(true) {
-        let client = state.manager.lock().await.client(&workspace_id);
+        let client = state.manager.client(&workspace_id);
         match client {
             Ok(client) => {
                 let sessions = client.list_sessions().await.map_err(|_| {
@@ -588,16 +571,16 @@ pub(crate) async fn desktop_close_workspace(
         }
     }
     state.run_streams.stop_workspace(&workspace_id).await;
-    let mut manager = state.manager.lock().await;
     state
         .history_queries
         .cancel_workspace(&workspace_id)
         .map_err(project_history_query_error)?;
-    manager
+    state
+        .manager
         .close(&workspace_id)
         .await
         .map_err(project_manager_error)?;
-    manager.list().map_err(project_manager_error)
+    state.manager.list().map_err(project_manager_error)
 }
 
 #[tauri::command]
@@ -613,8 +596,6 @@ pub(crate) async fn desktop_attach_run(
     validate_owner_revision(&input.owner_revision)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let run = client
@@ -682,8 +663,6 @@ pub(crate) async fn desktop_continuity(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let continuity = client
@@ -708,8 +687,6 @@ pub(crate) async fn desktop_conversation_queue(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -731,8 +708,6 @@ pub(crate) async fn desktop_command_conversation_queue(
     validate_queue_action(&input.action)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -758,8 +733,6 @@ pub(crate) async fn desktop_conversation_recovery(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -781,8 +754,6 @@ pub(crate) async fn desktop_checkpoint_restore_preview(
     validate_recovery_token(&input.checkpoint_digest)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -808,8 +779,6 @@ pub(crate) async fn desktop_conversation_compaction_preview(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -829,8 +798,6 @@ pub(crate) async fn desktop_compact_conversation(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let review = client
@@ -947,8 +914,6 @@ pub(crate) async fn desktop_command_conversation_recovery(
     validate_recovery_action(&input.action)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -970,8 +935,6 @@ pub(crate) async fn desktop_start_run(
     validate_prompt(&input.prompt)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let session = client
@@ -1045,8 +1008,6 @@ pub(crate) async fn desktop_continue_task(
     validate_task_continuation(&input)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let session = client
@@ -1105,8 +1066,6 @@ pub(crate) async fn desktop_run_context(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1126,8 +1085,6 @@ pub(crate) async fn desktop_agent_activity(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1148,8 +1105,6 @@ pub(crate) async fn desktop_cancel_run(
     validate_session_id(&input.run_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let snapshot = client
@@ -1198,8 +1153,6 @@ pub(crate) async fn desktop_cancel_terminal_task(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let receipt = client
@@ -1263,8 +1216,6 @@ pub(crate) async fn desktop_pause_task(
     };
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let snapshot = client
@@ -1313,8 +1264,6 @@ pub(crate) async fn desktop_plan_decision(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let receipt = client
@@ -1378,8 +1327,6 @@ pub(crate) async fn desktop_plan_detail(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1406,8 +1353,6 @@ pub(crate) async fn desktop_user_input_request(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1439,8 +1384,6 @@ pub(crate) async fn desktop_user_input_decision(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let receipt = client
@@ -1483,8 +1426,6 @@ pub(crate) async fn desktop_resolve_approval(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let snapshot = client
@@ -1552,8 +1493,6 @@ pub(crate) async fn desktop_verification(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1574,8 +1513,6 @@ pub(crate) async fn desktop_rerun_verification(
     validate_verification_rerun(&input)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1595,8 +1532,6 @@ pub(crate) async fn desktop_task_integration_review(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1617,8 +1552,6 @@ pub(crate) async fn desktop_accept_task_integration(
     validate_task_integration_acceptance(&input)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1638,8 +1571,6 @@ pub(crate) async fn desktop_intent_stack(
     validate_session_id(&session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1660,8 +1591,6 @@ pub(crate) async fn desktop_preview_intent_drop(
     validate_intent_version_binding(&input.intent_ref)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1682,8 +1611,6 @@ pub(crate) async fn desktop_execute_intent_drop(
     validate_intent_drop_binding(&input.request)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1703,8 +1630,6 @@ pub(crate) async fn desktop_catalog(
     let query = validate_catalog_request(request)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1724,8 +1649,6 @@ pub(crate) async fn desktop_plan_session_catalog_batch(
     let items = validate_batch_items(input.action, input.items)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1754,8 +1677,6 @@ pub(crate) async fn desktop_execute_session_catalog_batch(
     let items = validate_batch_items(input.action, input.items)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1783,8 +1704,6 @@ pub(crate) async fn desktop_create_session(
     }
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     let created: DesktopSessionSummary = client
@@ -1814,8 +1733,6 @@ pub(crate) async fn desktop_open_session(
     validate_optional_label(input.label.as_deref())?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1841,8 +1758,6 @@ pub(crate) async fn desktop_rename_session(
     validate_display_name(&input.display_name)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1870,8 +1785,6 @@ pub(crate) async fn desktop_delete_session(
     validate_session_reference(&input.session_ref, &input.session_id)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1898,8 +1811,6 @@ pub(crate) async fn desktop_quarantine_session(
     validate_session_ref(&input.session_ref)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1927,8 +1838,6 @@ pub(crate) async fn desktop_delete_invalid_session_source(
     validate_session_ref(&input.session_ref)?;
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -1953,10 +1862,8 @@ pub(crate) async fn desktop_prepare_history_query(
 ) -> Result<String, DesktopCommandError> {
     validate_workspace_id(&workspace_id)?;
     validate_session_id(&session_id)?;
-    // Workspace close uses this same lock through cancellation and removal, so a ticket cannot
-    // appear between the close sweep and the manager retiring that workspace.
-    let mut manager = state.manager.lock().await;
-    manager
+    state
+        .manager
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     state
@@ -2019,8 +1926,6 @@ pub(crate) async fn desktop_transcript(
             }
             let client = state
                 .manager
-                .lock()
-                .await
                 .client(&workspace_id)
                 .map_err(project_manager_error)?;
             client
@@ -2069,8 +1974,6 @@ pub(crate) async fn desktop_message_content(
             })?;
             let client = state
                 .manager
-                .lock()
-                .await
                 .client(&workspace_id)
                 .map_err(project_manager_error)?;
             client
@@ -2137,8 +2040,6 @@ pub(crate) async fn desktop_display(
             validate_conversation_display_request(&request)?;
             let client = state
                 .manager
-                .lock()
-                .await
                 .client(&workspace_id)
                 .map_err(project_manager_error)?;
             client
@@ -2213,8 +2114,6 @@ pub(crate) async fn desktop_read_tool_artifact(
     };
     let client = state
         .manager
-        .lock()
-        .await
         .client(&workspace_id)
         .map_err(project_manager_error)?;
     client
@@ -2796,7 +2695,8 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
                 ])
         }
         DesktopWorkspaceManagerError::WorkspaceUnavailable
-        | DesktopWorkspaceManagerError::ProcessStatusUnavailable => DesktopCommandError::new(
+        | DesktopWorkspaceManagerError::ProcessStatusUnavailable
+        | DesktopWorkspaceManagerError::WorkspaceOperationInProgress => DesktopCommandError::new(
             "workspace_server_unavailable",
             "The workspace server is unavailable.",
         )
@@ -2887,7 +2787,7 @@ fn project_manager_error(error: DesktopWorkspaceManagerError) -> DesktopCommandE
 }
 
 async fn configuration_change_client(
-    manager: &mut sigil_desktop::DesktopWorkspaceManager,
+    manager: &sigil_desktop::DesktopWorkspaceManager,
     workspace_id: &str,
 ) -> Result<DesktopHttpClient, DesktopCommandError> {
     match manager.client(workspace_id) {

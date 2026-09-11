@@ -286,7 +286,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::async_runtime::spawn(async move {
                     updater.stop_background();
                     streams.stop_all().await;
-                    manager.lock().await.close_all().await;
+                    manager.close_all().await;
                     exit_state.allow_exit();
                     handle.exit(0);
                 });

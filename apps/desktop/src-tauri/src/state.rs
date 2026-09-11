@@ -13,7 +13,7 @@ use crate::run_streams::DesktopRunStreamOwner;
 
 #[derive(Clone)]
 pub(crate) struct DesktopAppState {
-    pub(crate) manager: Arc<Mutex<DesktopWorkspaceManager>>,
+    pub(crate) manager: Arc<DesktopWorkspaceManager>,
     pub(crate) recent_workspaces: Arc<Mutex<RecentWorkspaceStore>>,
     pub(crate) appearance: Arc<StdMutex<AppearanceStore>>,
     pub(crate) run_streams: DesktopRunStreamOwner,
@@ -28,7 +28,7 @@ impl DesktopAppState {
         appearance: AppearanceStore,
     ) -> Self {
         Self {
-            manager: Arc::new(Mutex::new(DesktopWorkspaceManager::default())),
+            manager: Arc::new(DesktopWorkspaceManager::default()),
             recent_workspaces: Arc::new(Mutex::new(RecentWorkspaceStore::new(
                 recent_workspaces_path,
             ))),
