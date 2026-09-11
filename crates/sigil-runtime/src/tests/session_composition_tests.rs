@@ -36,6 +36,33 @@ fn composition_change_requires_a_new_session() -> Result<()> {
 }
 
 #[test]
+fn updater_selection_does_not_invalidate_an_existing_execution_contract() -> Result<()> {
+    let mut session = Session::new("fixture", "model");
+    let mut original = crate::provider_connections::default_setup_root_config();
+    original.composition = RuntimeCompositionConfig::standard();
+    bind_session_composition(&mut session, &original)?;
+
+    let mut without_updater = original.clone();
+    without_updater.composition = RuntimeCompositionConfig::new(
+        sigil_kernel::RuntimeCompositionProfile::Core,
+        OptionalCapability::ALL
+            .into_iter()
+            .filter(|capability| *capability != OptionalCapability::Updater),
+    );
+    validate_session_composition(&session, &without_updater)?;
+
+    let mut core_with_updater = core_config();
+    core_with_updater
+        .composition
+        .enhancements
+        .insert(OptionalCapability::Updater);
+    let mut core_session = Session::new("fixture", "model");
+    bind_session_composition(&mut core_session, &core_with_updater)?;
+    validate_session_composition(&core_session, &core_config())?;
+    Ok(())
+}
+
+#[test]
 fn unbound_execution_history_is_not_silently_migrated() -> Result<()> {
     let mut session = Session::new("fixture", "model");
     session.append_user_message(ModelMessage::user("old request"))?;

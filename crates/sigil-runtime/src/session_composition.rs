@@ -2,8 +2,8 @@
 
 use anyhow::{Result, bail, ensure};
 use sigil_kernel::{
-    ControlEntry, RootConfig, RuntimeCompositionConfig, Session, SessionCompositionSnapshotV1,
-    SessionLogEntry,
+    ControlEntry, OptionalCapability, RootConfig, RuntimeCompositionConfig, Session,
+    SessionCompositionSnapshotV1, SessionLogEntry,
 };
 
 /// Ensures a long-lived host uses only the capabilities admitted by its current authority boot.
@@ -61,7 +61,10 @@ pub(crate) fn validate_session_composition_snapshot(
     }
     match binding {
         Some(actual) => ensure!(
-            actual == expected,
+            actual.schema_version == expected.schema_version
+                && actual.core_contract_version == expected.core_contract_version
+                && execution_capabilities(&actual.capabilities)
+                    == execution_capabilities(&expected.capabilities),
             "session capability composition differs from configuration; start a new session"
         ),
         None if has_execution_history => {
@@ -70,6 +73,19 @@ pub(crate) fn validate_session_composition_snapshot(
         None => {}
     }
     Ok(())
+}
+
+/// Returns capabilities that participate in the session's execution contract. Host maintenance
+/// modules such as the updater may be added or removed while an existing session remains usable;
+/// they do not change provider, tool, or durable execution semantics.
+fn execution_capabilities(
+    capabilities: &std::collections::BTreeSet<OptionalCapability>,
+) -> std::collections::BTreeSet<OptionalCapability> {
+    capabilities
+        .iter()
+        .copied()
+        .filter(|capability| *capability != OptionalCapability::Updater)
+        .collect()
 }
 
 /// Appends exactly one recovery-critical selection. Queued user input is permitted before the
