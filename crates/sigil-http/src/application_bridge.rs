@@ -5,8 +5,17 @@
 //! runtime paths or authority objects in the wire request.  Commands without a lossless HTTP
 //! adapter mapping are rejected by the typed application executor until their host semantics are
 //! migrated.
+//!
+//! Rebuilt clients retain the first expected frontier per full command reservation key within
+//! the same production driver. This bounded transport metadata holds no command/receipt body;
+//! the managed journal remains the sole replay/conflict authority. Driver restart discards this
+//! metadata and does not promise response-lost replay across a changed durable frontier.
 
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -59,6 +68,48 @@ pub(crate) struct HttpApplicationContext {
     pub(crate) registry: Arc<HttpSessionRunRegistry>,
     pub(crate) runtime: Handle,
     pub(crate) projection_owner: Option<sigil_runtime::RuntimeSessionProjectionOwner>,
+    pub(crate) command_frontiers: Arc<HttpCommandFrontiers>,
+}
+
+// Matches the managed reservation journal's existing entry bound. This transport metadata
+// retains neither command bodies nor outcomes and cannot grant reservation/effect authority.
+const MAX_HTTP_COMMAND_FRONTIERS: usize = 4096;
+
+/// Original command frontiers retained for response-lost retries within one driver lifetime.
+/// A restarted driver still relies on the durable reservation owner's conflict/recovery rules.
+#[derive(Default)]
+pub(crate) struct HttpCommandFrontiers {
+    entries: Mutex<
+        BTreeMap<sigil_application::CommandReservationKey, sigil_application::ExpectedFrontier>,
+    >,
+}
+
+impl HttpCommandFrontiers {
+    fn retain_original(
+        &self,
+        request: &mut ApplicationCommandRequest,
+    ) -> Result<(), ApplicationError> {
+        let key = request
+            .admission
+            .reservation_key(&request.envelope.command_id);
+        key.validate()?;
+        if request.envelope.expected_frontier.scope != key.authority_scope {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if let Some(original) = entries.get(&key) {
+            request.envelope.expected_frontier = original.clone();
+        } else {
+            if entries.len() >= MAX_HTTP_COMMAND_FRONTIERS {
+                return Err(ApplicationError::Unavailable);
+            }
+            entries.insert(key, request.envelope.expected_frontier.clone());
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn application_scope(
@@ -88,6 +139,7 @@ pub struct HttpApplicationClient {
     client: ApplicationClient,
     runtime: Handle,
     source_generation: u64,
+    command_frontiers: Arc<HttpCommandFrontiers>,
 }
 
 impl HttpApplicationClient {
@@ -113,7 +165,9 @@ impl HttpApplicationClient {
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         let command_id = ApplicationCommandId::new(command_id.to_owned())?;
-        self.block_on(self.client.execute_with_id(command_id, command))
+        let mut request = self.client.prepare_command(command_id, command)?;
+        self.command_frontiers.retain_original(&mut request)?;
+        self.block_on(self.client.execute_prepared(request))
     }
 
     pub(crate) fn page(
@@ -201,6 +255,7 @@ pub(crate) fn build_client(
         client,
         runtime: context.runtime.clone(),
         source_generation: context.application_generation,
+        command_frontiers: Arc::clone(&context.command_frontiers),
     })
 }
 
@@ -1374,3 +1429,7 @@ fn http_run_start_request(
         task_continuation,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/application_frontier_tests.rs"]
+mod frontier_tests;

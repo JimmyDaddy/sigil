@@ -4208,7 +4208,7 @@ pub fn http_openapi_document() -> Value {
                         "check_spec_id": { "type": "string" },
                         "check_spec_hash": { "type": "string" },
                         "policy_hash": { "type": "string" },
-                        "workspace_snapshot_id": { "type": "string" }
+                        "workspace_snapshot_id": { "type": ["string", "null"] }
                     }
                 },
                 "VerificationRerunCommandReceipt": {

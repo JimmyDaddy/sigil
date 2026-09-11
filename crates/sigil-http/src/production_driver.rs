@@ -342,6 +342,7 @@ pub struct HttpProductionRunDriver {
     runtime: Handle,
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
     application_reservations: OnceLock<Arc<sigil_runtime::ManagedApplicationReservationStore>>,
+    application_command_frontiers: Arc<crate::application_bridge::HttpCommandFrontiers>,
     application_delivery_acks:
         Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
@@ -718,6 +719,66 @@ impl HttpProductionRunDriver {
         self.services
             .authority_composition()
             .and_then(|composition| composition.services.borrowed_configuration.clone())
+    }
+
+    /// Dispatches accepted revision guidance against the current configuration. A confirmed
+    /// failure before any run owner exists restores the base Plan through the runtime authority.
+    fn spawn_plan_review_revision_from_current_config(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: sigil_runtime::PlanReviewRunRequest,
+    ) -> Result<(), HttpRunDriverError> {
+        let dispatch = sigil_kernel::RootConfig::load(&self.options.config_path)
+            .and_then(|config| config.with_effective_composition())
+            .map_err(|error| HttpRunDriverError::new(format!("plan review config failed: {error}")))
+            .and_then(|root_config| {
+                let workspace_root = sigil_kernel::resolve_workspace_root(
+                    &self.options.config_path,
+                    &self.options.launch_cwd,
+                    &root_config.workspace.root,
+                );
+                self.spawn_plan_review_revision(
+                    session,
+                    &root_config,
+                    &workspace_root,
+                    request.clone(),
+                )
+            });
+        let Err(error) = dispatch else {
+            return Ok(());
+        };
+        let Ok(registry) = self.attached_registry() else {
+            return Err(error);
+        };
+        let Ok(runs) = self.active_runs.lock() else {
+            return Err(error);
+        };
+        let run_id = request.child_logical_run_id();
+        if runs.contains_key(&run_id)
+            || !matches!(
+                registry.get_run(&run_id),
+                Err(HttpRegistryError::RunNotFound { .. })
+            )
+        {
+            // A duplicate or queued owner can still start this exact revision. Keep its accepted
+            // guidance intact, including when the current caller failed to load configuration.
+            return Err(error);
+        }
+        // Hold the active-run lock through the durable append so another dispatcher cannot
+        // register the same run between the zero-owner check and its unstarted failure.
+        sigil_runtime::application_run::record_application_plan_revision_dispatch_failure(
+            Path::new(&session.session_log_path),
+            &session.durable_session_scope_id,
+            &request,
+            &error.message,
+        )
+        .map_err(|recovery_error| {
+            HttpRunDriverError::new(format!(
+                "{}; revision dispatch recovery failed: {recovery_error:#}",
+                error.message
+            ))
+        })?;
+        Err(error)
     }
 
     /// Executes one prepared plan review revision as an owned, supervised background run so
@@ -1337,6 +1398,7 @@ impl HttpProductionRunDriver {
             runtime,
             registry: OnceLock::new(),
             application_reservations: OnceLock::new(),
+            application_command_frontiers: Arc::default(),
             application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
@@ -1562,6 +1624,7 @@ impl HttpProductionRunDriver {
             registry,
             runtime: self.runtime.clone(),
             projection_owner,
+            command_frontiers: Arc::clone(&self.application_command_frontiers),
         })
     }
 
@@ -2652,30 +2715,89 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 Err(_) => return Err(HttpSessionOpenBindingError::Unavailable),
             }
         };
-        let (binding, route_recovery, projection_owner) =
-            if let Some(attachment) = attachment.as_ref() {
-                match bind_existing_application_session_with_attachment_and_projection_owner(
-                    &self.options.config_path,
-                    &candidate.session_log_path,
-                    attachment.as_ref(),
-                ) {
-                    Ok((binding, owner)) => (binding, None, Some(owner)),
-                    Err(error) => {
-                        let Some(recovery) = http_route_recovery_from_prepare_error(
-                            &error,
-                            &stable_http_attachment_recovery_binding(
-                                &candidate.session_id,
-                                attachment.generation(),
-                            ),
-                        ) else {
-                            return Err(HttpSessionOpenBindingError::Unavailable);
-                        };
-                        (read_binding, Some(recovery), None)
-                    }
-                }
+        let registry = self
+            .attached_registry()
+            .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
+        let _activation = if attachment.is_some() {
+            let runs = self
+                .active_runs
+                .lock()
+                .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
+            let owns_active_run = registry.list_sessions().iter().any(|session| {
+                session.durable_session_scope_id == candidate.session_id
+                    && runs.values().any(|run| run.session_id == session.id)
+            });
+            let mutation = if owns_active_run {
+                None
             } else {
-                (read_binding, attachment_recovery, None)
+                match registry.reserve_durable_session_mutation(&candidate.session_id) {
+                    Ok(mutation) => Some(mutation),
+                    Err(
+                        HttpRegistryError::DurableSessionMutationActive
+                        | HttpRegistryError::SessionForegroundRunActive { .. }
+                        | HttpRegistryError::SessionRunCleanupActive { .. }
+                        | HttpRegistryError::SessionVerificationActive { .. },
+                    ) => None,
+                    Err(_) => return Err(HttpSessionOpenBindingError::Unavailable),
+                }
             };
+            let Some(mutation) = mutation else {
+                // An existing live or queued owner still controls this Plan. Preserve its
+                // installed projection owner and return only the read binding; startup
+                // inspection must not interrupt or settle work that can still complete.
+                return Ok(HttpSessionBinding {
+                    session_scope_id: read_binding.session_scope_id,
+                    session_log_path: read_binding.session_log_path.display().to_string(),
+                    route_transition: Some(http_session_route_transition(
+                        read_binding.route_transition,
+                    )),
+                    route_recovery: None,
+                });
+            };
+            // Registration and durable mutation admission stay excluded until activation and
+            // installation finish, rather than racing a new owner after the initial check.
+            Some((runs, mutation))
+        } else {
+            None
+        };
+        let (binding, route_recovery, projection_owner) = if let Some(attachment) =
+            attachment.as_ref()
+        {
+            if let Some(composition) = self.services.authority_composition() {
+                // The controller owns the exact parent attachment before reading its
+                // authority-admitted child. Settle any completed draft before route
+                // inspection invokes generic startup interruption recovery.
+                let provisioner = composition.plan_review_child_resource_provisioner();
+                sigil_runtime::PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+                        JsonlSessionStore::new(&candidate.session_log_path)
+                            .map_err(|_| HttpSessionOpenBindingError::Unavailable)?,
+                        provisioner.as_ref(),
+                        sigil_runtime::current_unix_time_ms(),
+                    )
+                    .map_err(|_| HttpSessionOpenBindingError::Unavailable)?;
+            }
+            match bind_existing_application_session_with_attachment_and_projection_owner(
+                &self.options.config_path,
+                &candidate.session_log_path,
+                attachment.as_ref(),
+            ) {
+                Ok((binding, owner)) => (binding, None, Some(owner)),
+                Err(error) => {
+                    let Some(recovery) = http_route_recovery_from_prepare_error(
+                        &error,
+                        &stable_http_attachment_recovery_binding(
+                            &candidate.session_id,
+                            attachment.generation(),
+                        ),
+                    ) else {
+                        return Err(HttpSessionOpenBindingError::Unavailable);
+                    };
+                    (read_binding, Some(recovery), None)
+                }
+            }
+        } else {
+            (read_binding, attachment_recovery, None)
+        };
         if let Some(attachment) = attachment {
             self.install_session_attachment(
                 &binding.session_scope_id,
@@ -4209,21 +4331,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let _attachment = session_attachment;
         let command: sigil_runtime::ApplicationPlanDecisionCommand = request.clone().into();
-        let root_config = sigil_kernel::RootConfig::load(&self.options.config_path)
-            .and_then(|config| config.with_effective_composition())
-            .map_err(|error| {
-                HttpRunDriverError::new(format!("plan decision config failed: {error}"))
-            })?;
-        // Resolve the same workspace root the display projection uses so stale evaluation and
-        // Task promotion bind the identical snapshot.
-        let workspace_root = sigil_kernel::resolve_workspace_root(
-            &self.options.config_path,
-            &self.options.launch_cwd,
-            &root_config.workspace.root,
-        );
         let receipt = sigil_runtime::application_plan_decision(
-            &root_config,
-            &workspace_root,
             Path::new(&session.session_log_path),
             &session.durable_session_scope_id,
             &command,
@@ -4232,18 +4340,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
         let revision_request = receipt.revision_request.clone();
         let mut http_receipt: HttpPlanDecisionCommandReceipt = receipt.into();
         http_receipt.session_id = session.durable_session_scope_id.clone();
-        if let Some(revision_request) = revision_request
-            && let Err(error) = self.spawn_plan_review_revision(
-                session,
-                &root_config,
-                &workspace_root,
-                revision_request,
-            )
-        {
-            // `RevisionRequested` is durable, but a failed host spawn is not a revision domain
-            // terminal.  Leave it recoverable; only the exact attempt/outbox finalizer may
-            // settle the revision.
-            return Err(error);
+        if let Some(revision_request) = revision_request {
+            self.spawn_plan_review_revision_from_current_config(session, revision_request)?;
         }
         Ok(http_receipt)
     }
@@ -4403,25 +4501,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             }
         }
         if let Some(revision_request) = revision_request {
-            let root_config =
-                sigil_kernel::RootConfig::load(&self.options.config_path).map_err(|error| {
-                    HttpRunDriverError::new(format!(
-                        "plan revision guidance config failed: {error}"
-                    ))
-                })?;
-            let workspace_root = sigil_kernel::resolve_workspace_root(
-                &self.options.config_path,
-                &self.options.launch_cwd,
-                &root_config.workspace.root,
-            );
-            // The accepted guidance remains a durable recovery candidate. A host spawn
-            // error cannot manufacture RevisionFailed outside the atomic finalizer bundle.
-            self.spawn_plan_review_revision(
-                session,
-                &root_config,
-                &workspace_root,
-                revision_request,
-            )?;
+            self.spawn_plan_review_revision_from_current_config(session, revision_request)?;
         }
         if let Some(outbox) = revision_terminal_outbox {
             deliver_and_reconcile_plan_review_revision_terminal(

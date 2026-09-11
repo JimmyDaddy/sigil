@@ -48,6 +48,12 @@ mod projection_owner;
 #[path = "production_artifact_access_tests.rs"]
 mod artifact_access;
 
+#[path = "production_direct_delivery_tests.rs"]
+mod direct_delivery;
+
+#[path = "production_plan_recovery_tests.rs"]
+mod plan_recovery;
+
 #[test]
 fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
     let error = anyhow::Error::new(
@@ -6257,32 +6263,355 @@ fn seed_revision_session(
         &mut session_log,
         &draft,
         &request,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: "attempt-1".to_owned(),
-            source_turn_id: "message-1".to_owned(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some("test-session".to_owned()),
-        },
         &mut handler,
         120,
     )
     .expect("seed draft should commit");
     drop(session_log);
     review_id
+}
+
+fn production_revision_guidance_fixture(
+    temp: &tempfile::TempDir,
+    suffix: &str,
+) -> (
+    Arc<HttpProductionRunDriver>,
+    Arc<HttpSessionRunRegistry>,
+    HttpSessionSnapshot,
+    HttpUserInputRequest,
+) {
+    let driver = production_queue_driver(temp, suffix);
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands.json"), 32)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should create");
+    let review_id = seed_revision_session(temp, &session);
+    let guidance = registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "request-revision-guidance",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: sigil_kernel::plan_review_plan_id_for_attempt(
+                        &review_id,
+                        &sigil_kernel::plan_review_attempt_id_for_review(&review_id),
+                    )
+                    .as_str()
+                    .to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
+                    action: HttpPlanDecisionAction::Revise,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Revise should create durable guidance")
+        .user_input_request
+        .expect("Revise must return the exact guidance request");
+    (driver, registry, session, guidance)
+}
+
+fn production_revision_guidance_answer() -> sigil_kernel::UserInputDecisionV1 {
+    sigil_kernel::UserInputDecisionV1::Submitted {
+        answers: vec![sigil_kernel::UserInputAnswerV1 {
+            question_id: "revision_guidance".to_owned(),
+            value: sigil_kernel::UserInputAnswerValueV1::Text {
+                value: "Preserve the existing compatibility boundary.".to_owned(),
+            },
+        }],
+    }
+}
+
+fn accept_production_revision_guidance(
+    temp: &tempfile::TempDir,
+    session: &HttpSessionSnapshot,
+    guidance: &HttpUserInputRequest,
+) -> sigil_runtime::PlanReviewRunRequest {
+    let config = sigil_kernel::RootConfig::load(&temp.path().join("sigil.toml"))
+        .expect("guidance should be accepted against valid configuration");
+    let (_, request) = sigil_runtime::application_plan_revision_guidance_decision(
+        &config,
+        temp.path(),
+        Path::new(&session.session_log_path),
+        &session.durable_session_scope_id,
+        sigil_kernel::UserInputDecisionCommandV1 {
+            identity: guidance.identity.clone(),
+            request_hash: guidance.request_hash.clone(),
+            command_id: sigil_kernel::UserInputCommandId::new("accept-revision-guidance")
+                .expect("guidance command id"),
+            decision: production_revision_guidance_answer(),
+        },
+    )
+    .expect("guidance should be accepted durably before dispatch");
+    request.expect("accepted guidance must produce an executable revision request")
+}
+
+#[tokio::test]
+async fn production_revision_config_failure_after_guidance_restores_base_plan_actions() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let (driver, registry, session, guidance) =
+        production_revision_guidance_fixture(&temp, "revision-config-failure");
+    let mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("guidance dispatch should own its mutation frontier");
+    let request = accept_production_revision_guidance(&temp, &session, &guidance);
+    let run_id = request.child_logical_run_id();
+    let base_plan_id = request.base_plan_id.clone().expect("revision base Plan");
+
+    // Exercise the real dispatch window after the runtime accepted guidance and before HTTP
+    // reloads configuration. Corrupting it before acceptance would test an earlier safe failure.
+    std::fs::write(temp.path().join("sigil.toml"), "invalid = [")
+        .expect("configuration should become unreadable");
+    let error = driver
+        .spawn_plan_review_revision_from_current_config(&session, request)
+        .expect_err("invalid current configuration must reject dispatch");
+    assert!(error.message.contains("plan review config failed"));
+    assert!(!error.message.contains("dispatch recovery failed"));
+    drop(mutation);
+
+    let log = sigil_kernel::Session::load_from_store_for_control(
+        JsonlSessionStore::new(&session.session_log_path).expect("session store should reopen"),
+    )
+    .expect("failed dispatch should remain readable");
+    assert_eq!(
+        log.plan_artifact_projection()
+            .latest_decision(&base_plan_id)
+            .expect("revision failure should be durable")
+            .decision,
+        sigil_kernel::PlanDecision::RevisionFailed
+    );
+    assert_eq!(
+        log.user_input_projection()
+            .expect("input projection should read")
+            .request(&guidance.identity)
+            .expect("accepted input should remain durable")
+            .public_view()
+            .resolution,
+        Some(sigil_kernel::UserInputResolutionV1::Consumed)
+    );
+    assert!(log.entries().iter().all(|entry| !matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if attempt.revision_request_id.as_ref() == Some(&guidance.identity.request_id)
+    )));
+    assert!(matches!(
+        registry.get_run(&run_id),
+        Err(HttpRegistryError::RunNotFound { .. })
+    ));
+    assert!(
+        !driver
+            .active_runs
+            .lock()
+            .expect("active-run state")
+            .contains_key(&run_id)
+    );
+
+    registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "save-after-revision-dispatch-failure",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: base_plan_id.as_str().to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
+                    action: HttpPlanDecisionAction::Save,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("Save must remain available even while configuration is broken");
+}
+
+#[tokio::test]
+async fn production_revision_config_failure_preserves_registered_queued_owner() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let (driver, registry, session, guidance) =
+        production_revision_guidance_fixture(&temp, "revision-config-queued-owner");
+    let mutation = registry
+        .reserve_durable_session_mutation(&session.durable_session_scope_id)
+        .expect("guidance dispatch should own its mutation frontier");
+    let request = accept_production_revision_guidance(&temp, &session, &guidance);
+    let run_id = request.child_logical_run_id();
+    registry
+        .register_supervised_session_run(
+            &session.id,
+            &run_id,
+            HttpPermissionMode::ReadOnly,
+            "queued revision owner",
+        )
+        .expect("the accepted revision should already have a registered owner");
+    assert!(
+        !driver
+            .active_runs
+            .lock()
+            .expect("active-run state")
+            .contains_key(&run_id)
+    );
+    let before = std::fs::read(&session.session_log_path).expect("accepted guidance should read");
+    std::fs::write(temp.path().join("sigil.toml"), "invalid = [")
+        .expect("configuration should become unreadable");
+
+    let error = driver
+        .spawn_plan_review_revision_from_current_config(&session, request)
+        .expect_err("invalid current configuration must reject the duplicate caller");
+    assert!(error.message.contains("plan review config failed"));
+    assert_eq!(
+        std::fs::read(&session.session_log_path).expect("queued guidance should read"),
+        before,
+        "a registry owner without an active-run entry still prevents unstarted settlement"
+    );
+    assert_eq!(
+        registry
+            .get_run(&run_id)
+            .expect("queued owner should remain")
+            .status,
+        HttpRunStatus::Running
+    );
+    registry.rollback_supervised_session_run_registration(&session.id, &run_id);
+    drop(mutation);
+}
+
+#[tokio::test]
+async fn production_revision_without_provider_publishes_failure_and_restores_base_plan_actions() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let (driver, registry, session, guidance) =
+        production_revision_guidance_fixture(&temp, "revision-no-provider");
+    let persisted_session = sigil_kernel::Session::load_from_store_for_control(
+        JsonlSessionStore::new(&session.session_log_path).expect("session store should reopen"),
+    )
+    .expect("persisted revision route should remain readable");
+    let persisted_route = persisted_session
+        .resolved_model_route()
+        .expect("the existing session must retain its selected route")
+        .clone();
+    drop(persisted_session);
+    let config_path = temp.path().join("sigil.toml");
+    let config = std::fs::read_to_string(&config_path).expect("configuration should read");
+    std::fs::write(
+        &config_path,
+        config
+            .split("[connections.local-test]")
+            .next()
+            .expect("config prefix"),
+    )
+    .expect("the configured provider connection should be removed");
+    let disconnected_config = sigil_kernel::RootConfig::load(&config_path).expect("valid config");
+    assert!(disconnected_config.connections.is_empty());
+    let expected_route_error = sigil_runtime::provider_connections::validate_persisted_model_route(
+        &disconnected_config,
+        &persisted_route,
+    )
+    .expect_err("the persisted provider route must be unavailable")
+    .to_string();
+    let answer_registry = Arc::clone(&registry);
+    let answer_session_id = session.id.clone();
+    let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let receipt = tokio::task::spawn_blocking(move || {
+        answer_registry.user_input_decision_command(
+            &answer_session_id,
+            &answer_request_id,
+            HttpCommandEnvelope::new(
+                "accept-revision-without-provider",
+                "client-1",
+                &answer_session_id,
+                HttpUserInputDecisionRequest {
+                    generation: guidance.identity.generation,
+                    expected_request_hash: guidance.request_hash,
+                    decision: production_revision_guidance_answer(),
+                    permission_mode: None,
+                },
+            ),
+        )
+    })
+    .await
+    .expect("guidance caller should join")
+    .expect("guidance acceptance must not depend on provider assembly");
+    let run_id = receipt
+        .continuation_run_id
+        .expect("revision should register a run");
+    let idle_driver = Arc::clone(&driver);
+    tokio::task::spawn_blocking(move || idle_driver.wait_for_idle(Duration::from_secs(10)))
+        .await
+        .expect("idle caller should join")
+        .expect("provider resolution failure must release the owned revision run");
+    let records = JsonlSessionStore::new(&session.session_log_path)
+        .expect("session store should reopen")
+        .read_event_records_writer()
+        .expect("durable event records should read");
+    let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)
+        .expect("failed revision terminal should be consistent");
+    let terminal_error = outbox
+        .events_in_order()
+        .into_iter()
+        .find_map(|entry| match &entry.event.event {
+            PublicRunEventKind::RunFailed { error } if entry.run_id == run_id => Some(error),
+            _ => None,
+        })
+        .expect("the admitted revision must publish its provider failure");
+    assert!(
+        terminal_error.contains(&expected_route_error),
+        "unexpected revision failure: {terminal_error}"
+    );
+    assert_eq!(
+        registry
+            .get_run(&run_id)
+            .expect("failed run should remain visible")
+            .status,
+        HttpRunStatus::Failed
+    );
+    let log = sigil_kernel::Session::load_from_store_for_control(
+        JsonlSessionStore::new(&session.session_log_path).expect("session store should reopen"),
+    )
+    .expect("failed revision should remain readable");
+    let review = sigil_kernel::PlanReviewProjection::from_entries(log.entries());
+    let attempt = review
+        .reviews()
+        .next()
+        .expect("review should exist")
+        .latest_attempt()
+        .expect("revision attempt should exist");
+    assert_eq!(
+        attempt.status,
+        sigil_kernel::PlanReviewAttemptStatus::Failed
+    );
+    let base_plan_id = attempt
+        .base_plan_id
+        .clone()
+        .expect("revision base should remain");
+    assert_eq!(
+        log.plan_artifact_projection()
+            .latest_decision(&base_plan_id)
+            .expect("base decision")
+            .decision,
+        sigil_kernel::PlanDecision::RevisionFailed
+    );
+    registry
+        .plan_decision_command(
+            &session.id,
+            HttpCommandEnvelope::new(
+                "save-after-revision-provider-failure",
+                "client-1",
+                &session.id,
+                HttpPlanDecisionRequest {
+                    plan_id: base_plan_id.as_str().to_owned(),
+                    expected_plan_hash: format!("sha256:{}", "d".repeat(64)),
+                    expected_candidate_hash: None,
+                    action: HttpPlanDecisionAction::Save,
+                    permission_grant: None,
+                },
+            ),
+        )
+        .expect("provider failure must restore Save on the original Plan");
 }
 
 #[tokio::test]
@@ -6380,11 +6709,16 @@ credential = {{ source = "none" }}
         .expect("Revise should create durable guidance")
         .user_input_request
         .expect("Revise must return the exact guidance request");
-    let attempt_2 = sigil_kernel::plan_review_attempt_id_for_revision_ordinal(
-        &review_id,
-        &guidance.identity.request_id,
-        1,
-    );
+    let attempt_2 = sigil_kernel::PlanReviewAttemptId::new(sigil_kernel::stable_event_uuid(
+        "sigil-plan-review-revision-generation-attempt-v1",
+        &format!(
+            "{}|revision-request|{}|generation|{}|attempt|1",
+            review_id.as_str(),
+            guidance.identity.request_id.as_str(),
+            guidance.identity.generation,
+        ),
+    ))
+    .expect("revision dispatch identity should bind the accepted guidance generation");
     let revision_request_id = guidance.identity.request_id.clone();
     let revision_run_id = format!("plan-review-{}-{}", review_id.as_str(), attempt_2.as_str());
     driver
@@ -6683,7 +7017,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
 
     // Local chat-completions fixture exercising the real current-schema review tool sequence.
     // The request always contains the available tool declarations, so selecting a response by
-    // searching for `submit_plan_draft` would make this test false-green.
+    // searching for `submit_plan_review_result` would make this test false-green.
     let provider_call = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -6701,7 +7035,7 @@ async fn production_plan_review_revision_runs_supervised_and_publishes_terminal_
                 let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
                 let body = if call_index >= 3 {
                     concat!(
-                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised coordinator migration\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-call\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_review_result\",\"arguments\":\"{\\\"schema_version\\\":1,\\\"outcome\\\":\\\"draft\\\",\\\"content\\\":\\\"# Revised coordinator migration\\\\n\\\\n1. Revise migration\\\\n\\\\nPaths: src/coordinator.rs\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 } else if call_index == 2 {
@@ -6993,11 +7327,15 @@ credential = {{ source = "none" }}
     );
     let revision_request_id = sigil_kernel::UserInputRequestId::new(answer_request_id.clone())
         .expect("revision guidance request id should remain valid");
-    let attempt_id = sigil_kernel::plan_review_attempt_id_for_revision_ordinal(
-        &review_id,
-        &revision_request_id,
-        1,
+    let attempt = projection
+        .latest_attempt(&review_id)
+        .expect("durable revision attempt");
+    assert_eq!(
+        attempt.revision_request_id.as_ref(),
+        Some(&revision_request_id)
     );
+    assert_eq!(attempt.attempt_ordinal, 1);
+    let attempt_id = &attempt.attempt_id;
     let child_key = format!("pr-{}-research-0", attempt_id.as_str());
     let child_scope_id = format!("{}-research", revision_run_id);
     let child_session_log_path = driver
@@ -7072,12 +7410,12 @@ credential = {{ source = "none" }}
         "the three current-schema inspection tools must all succeed and publish artifacts; durable={durable_tool_names:?}"
     );
     assert!(
-        durable_tool_names.contains("submit_plan_draft"),
-        "submit_plan_draft must also leave a durable artifact-backed tool result"
+        durable_tool_names.contains("submit_plan_review_result"),
+        "submit_plan_review_result must also leave a durable artifact-backed tool result"
     );
     assert!(
         provider_call.load(Ordering::SeqCst) >= 4,
-        "revision must execute ls, grep, read_file, and submit_plan_draft"
+        "revision must execute ls, grep, read_file, and submit_plan_review_result"
     );
 
     // Ownership is released: the run leaves active_runs and the foreground slot is free.
@@ -7554,7 +7892,7 @@ async fn production_plan_review_waiting_input_resumes_same_run_without_a_termina
                     )
                 } else {
                     concat!(
-                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-after-answer\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_draft\",\"arguments\":\"{\\\"schema_version\\\":2,\\\"summary\\\":\\\"Revised after research answer\\\",\\\"steps\\\":[{\\\"step_id\\\":\\\"migrate_2\\\",\\\"title\\\":\\\"Revise migration\\\",\\\"role\\\":\\\"executor\\\",\\\"mode\\\":\\\"write\\\",\\\"isolation\\\":\\\"sequential_workspace_write\\\",\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"]}],\\\"target_paths\\\":[\\\"src/coordinator.rs\\\"],\\\"suggested_checks\\\":[\\\"cargo test\\\"]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-draft-after-answer\",\"type\":\"function\",\"function\":{\"name\":\"submit_plan_review_result\",\"arguments\":\"{\\\"schema_version\\\":1,\\\"outcome\\\":\\\"draft\\\",\\\"content\\\":\\\"# Revised after research answer\\\\n\\\\n1. Revise migration\\\\n\\\\nPaths: src/coordinator.rs\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 };

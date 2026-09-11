@@ -346,17 +346,8 @@ impl HttpSupportContext {
         )
         .map_err(|_| HttpProviderSetupFailure::Invalid)?;
         resolve_model_route(&current, &model_ref).map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        let mut inventory = connection_inventory_native(&current);
-        let connection_is_usable = inventory.entries.iter().any(|entry| {
-            entry.id == model_ref.connection_id
-                && matches!(
-                    entry.readiness,
-                    ConnectionReadiness::Ready | ConnectionReadiness::Unverified
-                )
-        });
-        if !connection_is_usable {
-            return Err(HttpProviderSetupFailure::Invalid);
-        }
+        // Saving a route is configuration work. Credential readiness is diagnostic here;
+        // provider construction validates credentials when the user actually starts a run.
         let mut connections = loaded
             .connections
             .into_iter()
@@ -400,7 +391,7 @@ impl HttpSupportContext {
                 },
             )
             .map_err(|_| HttpProviderSetupFailure::Invalid)?;
-        inventory = connection_inventory_native(&next);
+        let inventory = connection_inventory_native(&next);
         Ok((
             HttpProviderDefaultModelSaveResult {
                 default_model: project_model_ref(model_ref),

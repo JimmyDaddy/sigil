@@ -524,8 +524,8 @@ credential = { source = "none" }
 label = "Beta"
 provider = "custom"
 protocol = "chat_completions"
-base_url = "http://127.0.0.1:41002/v1"
-credential = { source = "none" }
+base_url = "https://127.0.0.1:41002/v1"
+credential = { source = "environment", name = "SIGIL_OPENAI_COMPATIBLE_API_KEY" }
 "#,
     )
     .expect("test configuration should write");
@@ -605,6 +605,10 @@ credential = { source = "none" }
     .await;
 
     assert_eq!(status, 200, "default-route save response: {saved}");
+    assert_eq!(
+        saved["inventory"]["connections"][1]["readiness"],
+        "needs_credential"
+    );
     assert_eq!(saved["default_model"]["connection_id"], "beta");
     assert_eq!(saved["default_model"]["model_id"], "beta-model");
     assert_eq!(
@@ -10731,7 +10735,7 @@ fn verification_rerun_request() -> TaskVerificationRerunRequest {
         "cargo-test".to_owned(),
         "check-hash".to_owned(),
         "policy-hash".to_owned(),
-        "snapshot-1".to_owned(),
+        Some("snapshot-1".to_owned()),
     )
 }
 
