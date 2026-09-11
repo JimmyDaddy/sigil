@@ -21,7 +21,9 @@ use thiserror::Error;
 use super::{
     AgentSupervisor,
     task_role_runtime::{
-        TaskRoleProviderBuilder, TaskRoleRuntime, build_task_role_runtime_for_route,
+        TaskRoleDemand, TaskRoleProviderBuilder, TaskRoleRuntime,
+        build_task_role_runtime_for_route, build_task_role_runtime_for_route_with_demand,
+        task_role_demand_for_continuation,
     },
 };
 
@@ -854,13 +856,24 @@ where
         &task.task_id,
     )
     .map_err(TaskExecutionPreflightError::VerificationMaterialization)?;
+    let role_demand = if task.execution_route == ResolvedTaskExecutionRoute::Planned {
+        task_role_demand_for_continuation(
+            session,
+            &task.task_id,
+            guidance.is_some()
+                || guidance_promotion.is_some()
+                || continuation_guidance_receipt.is_some(),
+        )?
+    } else {
+        TaskRoleDemand::all()
+    };
     let TaskRoleRuntime {
         orchestrator,
         planner_options,
         executor_options,
         subagent_read_options,
         subagent_write_options,
-    } = build_task_role_runtime_for_route(
+    } = build_task_role_runtime_for_route_with_demand(
         &root_config,
         &options,
         &base_registry,
@@ -868,6 +881,7 @@ where
         role_provider_builder,
         verification_execution_port,
         task.execution_route,
+        role_demand,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;

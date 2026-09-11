@@ -6,8 +6,8 @@ use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
     AgentRole, AgentRouteStatus, AgentRunOptions, AgentUserInputRouteEntryV1, ControlEntry,
     Provider, RootConfig, SequentialTaskOrchestrator, Session, TaskConfig,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskRunStatus, ToolRegistry,
-    UserInputDecisionCommandV1, UserInputDecisionReceiptV1, UserInputSourceV1,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskRunStatus, TaskStepStatus,
+    ToolRegistry, UserInputDecisionCommandV1, UserInputDecisionReceiptV1, UserInputSourceV1,
 };
 
 use super::{AgentSupervisor, AgentSupervisorTaskChildRunner};
@@ -45,6 +45,50 @@ pub struct PreparedTaskPlannerUserInputContinuation {
     pub route: AgentUserInputRouteEntryV1,
 }
 
+/// Roles required by one task execution segment.  A planned continuation may carry a much
+/// smaller set than the initial planner run; keeping the demand explicit prevents unrelated role
+/// credentials from becoming a preflight dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TaskRoleDemand {
+    pub(super) planner: bool,
+    pub(super) executor: bool,
+    pub(super) subagent_read: bool,
+    pub(super) subagent_write: bool,
+    pub(super) synthesis: bool,
+}
+
+impl TaskRoleDemand {
+    pub(super) const fn all() -> Self {
+        Self {
+            planner: true,
+            executor: true,
+            subagent_read: true,
+            subagent_write: true,
+            synthesis: true,
+        }
+    }
+
+    pub(super) const fn planner_only() -> Self {
+        Self {
+            planner: true,
+            executor: false,
+            subagent_read: false,
+            subagent_write: false,
+            synthesis: false,
+        }
+    }
+
+    pub(super) const fn executor_only() -> Self {
+        Self {
+            planner: false,
+            executor: true,
+            subagent_read: false,
+            subagent_write: false,
+            synthesis: false,
+        }
+    }
+}
+
 /// Builds every task role, validates the exact parent/child route, then durably accepts one
 /// submitted planner answer as the final fallible preparation step.
 pub async fn prepare_task_planner_user_input_continuation(
@@ -68,13 +112,15 @@ pub async fn prepare_task_planner_user_input_continuation(
     {
         anyhow::bail!("task planner answer does not match its submitted durable route");
     }
-    let runtime = build_task_role_runtime(
+    let runtime = build_task_role_runtime_for_route_with_demand(
         root_config,
         options,
         base_registry,
         agent_supervisor,
         role_provider_builder,
         verification_execution_port,
+        super::task_execution::ResolvedTaskExecutionRoute::NeedsPlanning,
+        TaskRoleDemand::planner_only(),
     )
     .await?;
     let mut child = super::build_child_session(parent_session, &route.child_session_ref)?;
@@ -249,7 +295,7 @@ pub async fn build_task_role_runtime(
     role_provider_builder: &dyn TaskRoleProviderBuilder,
     verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
 ) -> Result<TaskRoleRuntime> {
-    build_task_role_runtime_for_route(
+    build_task_role_runtime_for_route_with_demand(
         root_config,
         options,
         base_registry,
@@ -257,6 +303,7 @@ pub async fn build_task_role_runtime(
         role_provider_builder,
         verification_execution_port,
         super::task_execution::ResolvedTaskExecutionRoute::Planned,
+        TaskRoleDemand::all(),
     )
     .await
 }
@@ -270,47 +317,119 @@ pub(super) async fn build_task_role_runtime_for_route(
     verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
     route: super::task_execution::ResolvedTaskExecutionRoute,
 ) -> Result<TaskRoleRuntime> {
-    let executor_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Executor).await?;
-    let executor_registry =
-        crate::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
-            .into_registry();
-    let executor = crate::configured_agent(root_config, executor_provider, executor_registry)?;
-    let child_runner = if route == super::task_execution::ResolvedTaskExecutionRoute::Direct {
-        AgentSupervisorTaskChildRunner::new_with_executor(agent_supervisor, executor)
+    let demand = if route == super::task_execution::ResolvedTaskExecutionRoute::Direct {
+        TaskRoleDemand::executor_only()
     } else {
-        let planner_provider =
-            build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
-        let synthesis_provider =
-            build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
-        let subagent_read_provider =
-            build_role_provider(role_provider_builder, root_config, AgentRole::SubagentRead)
-                .await?;
-        let subagent_write_provider =
-            build_role_provider(role_provider_builder, root_config, AgentRole::SubagentWrite)
-                .await?;
-        let planner_registry =
-            crate::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
-                .into_registry();
-        let subagent_read_registry =
-            crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentRead)
-                .into_registry();
-        let subagent_write_registry =
-            crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentWrite)
-                .into_registry();
-        AgentSupervisorTaskChildRunner::new_with_task_roles(
-            agent_supervisor,
-            crate::configured_agent(root_config, planner_provider, planner_registry)?,
-            executor,
-            crate::configured_agent(root_config, subagent_read_provider, subagent_read_registry)?,
-            crate::configured_agent(
-                root_config,
-                subagent_write_provider,
-                subagent_write_registry,
-            )?,
-            crate::configured_agent(root_config, synthesis_provider, ToolRegistry::new())?,
-        )
+        TaskRoleDemand::all()
+    };
+    build_task_role_runtime_for_route_with_demand(
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+        verification_execution_port,
+        route,
+        demand,
+    )
+    .await
+}
+
+pub(super) async fn build_task_role_runtime_for_route_with_demand(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    base_registry: &ToolRegistry,
+    agent_supervisor: AgentSupervisor,
+    role_provider_builder: &dyn TaskRoleProviderBuilder,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
+    route: super::task_execution::ResolvedTaskExecutionRoute,
+    mut demand: TaskRoleDemand,
+) -> Result<TaskRoleRuntime> {
+    if route == super::task_execution::ResolvedTaskExecutionRoute::Direct {
+        demand = TaskRoleDemand::executor_only();
     }
+    // Planner discovery is an actual read-role dispatch.  Include that role whenever the
+    // configured planner can use discovery, while still leaving the write role optional.
+    if demand.planner
+        && root_config.task.multi_agent_mode != sigil_kernel::MultiAgentMode::None
+        && root_config.task.max_planning_research_agents > 0
+    {
+        demand.subagent_read = true;
+    }
+
+    let build_agent = async |role: AgentRole, tools: ToolRegistry| -> Result<super::BoxedAgent> {
+        let provider = build_role_provider(role_provider_builder, root_config, role).await?;
+        crate::configured_agent(root_config, provider, tools)
+    };
+    let executor = if demand.executor {
+        Some(
+            build_agent(
+                AgentRole::Executor,
+                crate::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
+                    .into_registry(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let planner = if demand.planner {
+        Some(
+            build_agent(
+                AgentRole::Planner,
+                crate::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
+                    .into_registry(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let subagent_read = if demand.subagent_read {
+        Some(
+            build_agent(
+                AgentRole::SubagentRead,
+                crate::build_role_tool_registry(
+                    base_registry,
+                    root_config,
+                    AgentRole::SubagentRead,
+                )
+                .into_registry(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let subagent_write = if demand.subagent_write {
+        Some(
+            build_agent(
+                AgentRole::SubagentWrite,
+                crate::build_role_tool_registry(
+                    base_registry,
+                    root_config,
+                    AgentRole::SubagentWrite,
+                )
+                .into_registry(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let synthesis = if demand.synthesis {
+        Some(build_agent(AgentRole::Planner, ToolRegistry::new()).await?)
+    } else {
+        None
+    };
+    let child_runner = AgentSupervisorTaskChildRunner::new_with_available_task_roles(
+        agent_supervisor,
+        planner,
+        executor,
+        subagent_read,
+        subagent_write,
+        synthesis,
+    )
     .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
         &root_config.task,
     ))
@@ -369,6 +488,58 @@ pub(super) async fn build_task_role_runtime_for_route(
         subagent_read_options,
         subagent_write_options,
     })
+}
+
+/// Derives the role set for a continuation from the accepted plan's unfinished steps.  Planner is
+/// requested by the caller only when guidance/replanning needs it; synthesis remains required for
+/// every accepted plan because it is the owner of the final task settlement.
+pub(super) fn task_role_demand_for_continuation(
+    session: &Session,
+    task_id: &sigil_kernel::TaskId,
+    planner_required: bool,
+) -> Result<TaskRoleDemand> {
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(task_id)
+        .context("task role demand references an unknown task")?;
+    let plan_version = task
+        .latest_plan_version
+        .context("planned continuation is missing its accepted plan")?;
+    let plan = task
+        .plans
+        .get(&plan_version)
+        .context("planned continuation is missing its plan projection")?;
+    let mut demand = TaskRoleDemand {
+        planner: planner_required,
+        executor: false,
+        subagent_read: false,
+        subagent_write: false,
+        // Final synthesis is a separate planner-provider transcript and may be reached after the
+        // currently pending step batch completes, so it is part of the accepted-plan contract.
+        synthesis: true,
+    };
+    for step in &plan.steps {
+        let completed = task
+            .steps
+            .get(&(plan_version, step.step_id.clone()))
+            .is_some_and(|status| {
+                matches!(
+                    status.status,
+                    TaskStepStatus::Completed | TaskStepStatus::Superseded
+                )
+            });
+        if completed {
+            continue;
+        }
+        match step.role {
+            AgentRole::Planner => demand.planner = true,
+            AgentRole::Executor => demand.executor = true,
+            AgentRole::SubagentRead => demand.subagent_read = true,
+            AgentRole::SubagentWrite => demand.subagent_write = true,
+        }
+    }
+    Ok(demand)
 }
 
 async fn build_role_provider(

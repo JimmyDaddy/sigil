@@ -126,34 +126,65 @@ impl AgentSupervisorTaskChildRunner {
         subagent_write: BoxedAgent,
         synthesis: BoxedAgent,
     ) -> Self {
+        Self::new_with_available_task_roles(
+            supervisor,
+            Some(planner),
+            Some(executor),
+            Some(subagent_read),
+            Some(subagent_write),
+            Some(synthesis),
+        )
+    }
+
+    /// Builds a planned-task runner from only the roles that the host has proven necessary for
+    /// this execution segment.  Missing roles remain an explicit dispatch-time error instead of
+    /// turning an unused provider configuration into a preflight blocker.
+    pub(super) fn new_with_available_task_roles(
+        supervisor: AgentSupervisor,
+        planner: Option<BoxedAgent>,
+        executor: Option<BoxedAgent>,
+        subagent_read: Option<BoxedAgent>,
+        subagent_write: Option<BoxedAgent>,
+        synthesis: Option<BoxedAgent>,
+    ) -> Self {
         let provider_pressure = supervisor.provider_pressure().clone();
         Self {
             supervisor,
-            planner: Some(Arc::new(wrap_task_agent_provider(
-                planner,
-                provider_pressure.clone(),
-                TaskProviderRouteConsumer::Planner,
-            ))),
-            executor: Some(Arc::new(wrap_task_agent_provider(
-                executor,
-                provider_pressure.clone(),
-                TaskProviderRouteConsumer::Executor,
-            ))),
-            subagent_read: Some(Arc::new(wrap_task_agent_provider(
-                subagent_read,
-                provider_pressure.clone(),
-                TaskProviderRouteConsumer::SubagentRead,
-            ))),
-            subagent_write: Some(Arc::new(wrap_task_agent_provider(
-                subagent_write,
-                provider_pressure.clone(),
-                TaskProviderRouteConsumer::SubagentWrite,
-            ))),
-            synthesis: Some(Arc::new(wrap_task_agent_provider(
-                synthesis,
-                provider_pressure.clone(),
-                TaskProviderRouteConsumer::Synthesis,
-            ))),
+            planner: planner.map(|agent| {
+                Arc::new(wrap_task_agent_provider(
+                    agent,
+                    provider_pressure.clone(),
+                    TaskProviderRouteConsumer::Planner,
+                ))
+            }),
+            executor: executor.map(|agent| {
+                Arc::new(wrap_task_agent_provider(
+                    agent,
+                    provider_pressure.clone(),
+                    TaskProviderRouteConsumer::Executor,
+                ))
+            }),
+            subagent_read: subagent_read.map(|agent| {
+                Arc::new(wrap_task_agent_provider(
+                    agent,
+                    provider_pressure.clone(),
+                    TaskProviderRouteConsumer::SubagentRead,
+                ))
+            }),
+            subagent_write: subagent_write.map(|agent| {
+                Arc::new(wrap_task_agent_provider(
+                    agent,
+                    provider_pressure.clone(),
+                    TaskProviderRouteConsumer::SubagentWrite,
+                ))
+            }),
+            synthesis: synthesis.map(|agent| {
+                Arc::new(wrap_task_agent_provider(
+                    agent,
+                    provider_pressure.clone(),
+                    TaskProviderRouteConsumer::Synthesis,
+                ))
+            }),
             integration_verification_port: None,
             planner_discovery_max_probes: 0,
             provider_pressure,
