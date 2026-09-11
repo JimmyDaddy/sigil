@@ -463,7 +463,7 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
     }
 
     if input.policy.required_checks.is_empty() {
-        if has_relevant_mutation(input) {
+        if input.workspace_knowledge.is_unknown_dirty() {
             return missing_for_mutation(input, reasons, required_actions);
         }
         reasons.push(ReadinessReason::NoVerificationRequired);
@@ -726,16 +726,6 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
             )
         }
     }
-}
-
-fn has_relevant_mutation(input: &ReadinessInput) -> bool {
-    matches!(
-        input.workspace_knowledge,
-        WorkspaceKnowledge::Dirty(_) | WorkspaceKnowledge::UnknownDirty
-    ) || input
-        .mutations
-        .iter()
-        .any(|mutation| mutation.invalidates_scope(&input.policy.verification_scope))
 }
 
 fn missing_for_mutation(

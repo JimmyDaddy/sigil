@@ -4817,7 +4817,8 @@ async fn agent_final_answer_appends_inconclusive_readiness_for_external_process_
 }
 
 #[tokio::test]
-async fn agent_final_answer_appends_missing_readiness_after_workspace_mutation() -> Result<()> {
+async fn agent_final_answer_appends_not_applicable_readiness_after_workspace_mutation() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -4875,19 +4876,13 @@ async fn agent_final_answer_appends_missing_readiness_after_workspace_mutation()
     assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Completed);
     assert_eq!(
         readiness.evaluation.verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
     assert_eq!(
         readiness.evaluation.visible_state,
-        VisibleCompletionState::CompletedUnverified
+        VisibleCompletionState::Completed
     );
-    assert!(
-        readiness
-            .evaluation
-            .required_actions
-            .iter()
-            .any(|action| { matches!(action, crate::RequiredAction::ProvideVerificationConfig) })
-    );
+    assert!(readiness.evaluation.required_actions.is_empty());
     let detected = JsonlSessionStore::read_event_records(&store_path)?
         .into_iter()
         .filter(|record| {

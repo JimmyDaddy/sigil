@@ -781,7 +781,7 @@ fn pure_question_maps_to_not_applicable() {
 }
 
 #[test]
-fn code_write_without_check_maps_to_missing() {
+fn code_write_without_check_is_not_applicable() {
     let mut input = ReadinessInput::new_run(
         RunStatus::Completed,
         VerificationPolicy::no_checks_required("scope-main"),
@@ -795,12 +795,14 @@ fn code_write_without_check_maps_to_missing() {
 
     assert_eq!(
         evaluation.verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
+    assert_eq!(evaluation.visible_state, VisibleCompletionState::Completed);
+    assert!(evaluation.required_actions.is_empty());
     assert!(
         evaluation
-            .required_actions
-            .contains(&RequiredAction::ProvideVerificationConfig)
+            .reasons
+            .contains(&ReadinessReason::NoVerificationRequired)
     );
 }
 

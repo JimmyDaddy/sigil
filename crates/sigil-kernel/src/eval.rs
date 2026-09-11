@@ -2095,14 +2095,6 @@ impl EvalCaseRunner {
         if !changed_files.is_empty()
             && matches!(
                 verification_verdict,
-                VerificationVerdict::NotApplicable | VerificationVerdict::NotEvaluated
-            )
-        {
-            verification_verdict = VerificationVerdict::Missing;
-        }
-        if !changed_files.is_empty()
-            && matches!(
-                verification_verdict,
                 VerificationVerdict::Missing
                     | VerificationVerdict::Inconclusive
                     | VerificationVerdict::Stale
@@ -2220,8 +2212,6 @@ fn apply_fake_tool_action(
                 );
                 failure.evidence.push(write_evidence);
                 failures.push(failure);
-            } else {
-                *verification_verdict = VerificationVerdict::Missing;
             }
             capture.record(
                 "tool_result",

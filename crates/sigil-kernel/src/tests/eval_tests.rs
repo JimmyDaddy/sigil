@@ -977,22 +977,18 @@ fn eval_write_missing_keeps_execution_and_verification_separate() {
     let result = runner.run(case).expect("write-missing eval run");
 
     assert_eq!(result.run_status, RunStatus::Completed);
-    assert_eq!(result.verification_verdict, VerificationVerdict::Missing);
     assert_eq!(
-        result.visible_state,
-        VisibleCompletionState::CompletedUnverified
+        result.verification_verdict,
+        VerificationVerdict::NotApplicable
     );
-    assert_eq!(result.outcome, EvalOutcomeKind::CompletedUnverified);
+    assert_eq!(result.visible_state, VisibleCompletionState::Completed);
+    assert_eq!(result.outcome, EvalOutcomeKind::Completed);
     assert_eq!(
         result.changed_files,
         vec![std::path::PathBuf::from("note.txt")]
     );
     assert!(result.failures.is_empty());
-    assert_eq!(result.required_actions.len(), 1);
-    assert_eq!(
-        result.required_actions[0].kind,
-        EvalRequiredActionKind::RunCheck
-    );
+    assert!(result.required_actions.is_empty());
     assert!(
         result
             .evidence
