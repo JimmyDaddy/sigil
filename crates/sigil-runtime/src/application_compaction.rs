@@ -16,6 +16,31 @@ use sigil_kernel::{
     stable_event_uuid, stable_workspace_id, workspace_trust_from_entries,
 };
 
+/// Observes workspace state for a continuation without making it a compaction prerequisite.
+/// Durable transcript identity and source checks still determine whether compaction can apply.
+pub fn compaction_workspace_snapshot_id(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+) -> Option<String> {
+    let observation = (|| -> Result<Option<String>> {
+        let workspace_id = stable_workspace_id(workspace_root)?;
+        let scope = root_config
+            .verification
+            .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+        Ok(
+            build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?
+                .workspace_snapshot_id,
+        )
+    })();
+    match observation {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(%error, "compaction workspace snapshot unavailable; retaining unverified workspace context");
+            None
+        }
+    }
+}
+
 /// Provider-native compaction remains fail-closed until the resulting carrier is consumed by the
 /// next request on the exact same route and source cursor.
 ///
@@ -410,7 +435,7 @@ pub fn preview_application_compaction(
 /// # Errors
 ///
 /// Returns an error when the supplied attachment does not belong to the session or when the
-/// durable route, workspace snapshot, or compaction projection cannot be validated.
+/// durable route or compaction projection cannot be validated.
 pub fn preview_application_compaction_with_attachment(
     config_path: &Path,
     launch_cwd: &Path,
@@ -475,14 +500,7 @@ pub fn preview_application_compaction_with_attachment(
             ),
         )
     );
-    let workspace_id = stable_workspace_id(&workspace_root)?;
-    let scope = root_config
-        .verification
-        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    let snapshot = build_workspace_snapshot(&workspace_root, workspace_id, &scope, 0)?;
-    let valid_for_snapshot = snapshot
-        .workspace_snapshot_id
-        .context("portable compaction requires a complete workspace snapshot")?;
+    let valid_for_snapshot = compaction_workspace_snapshot_id(&root_config, &workspace_root);
     let now = crate::current_unix_time_ms();
     let local_preflight =
         store.prepare_portable_semantic_compaction(PortableSemanticCompactionRequest {
@@ -936,14 +954,7 @@ async fn prepare_exact_application_compaction(
     ) {
         bail!("route has no admitted normal portable compaction target profile");
     }
-    let workspace_id = stable_workspace_id(workspace_root)?;
-    let scope = root_config
-        .verification
-        .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?;
-    let valid_for_snapshot = snapshot
-        .workspace_snapshot_id
-        .context("portable compaction requires a complete workspace snapshot")?;
+    let valid_for_snapshot = compaction_workspace_snapshot_id(root_config, workspace_root);
     let now = crate::current_unix_time_ms();
     let next_turn_p95_tokens = preview
         .plan

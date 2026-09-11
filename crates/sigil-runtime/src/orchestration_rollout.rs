@@ -257,15 +257,6 @@ pub fn new_install_orchestration_rollout_decision_for_config(
     new_install_orchestration_rollout_decision_for_config_and_task(root_config, &root_config.task)
 }
 
-/// Returns true when the current exact route is qualified by the release rollout manifest.
-///
-/// This is the runtime capability evidence used to grant `DirectTask`: without a matching
-/// qualified manifest the automatic route stays at the `ReviewFirst` baseline.
-#[must_use]
-pub fn route_qualification_evidence(root_config: &RootConfig) -> bool {
-    new_install_orchestration_rollout_decision_for_config(root_config).is_qualified()
-}
-
 /// Stable digest used by both eval reports and new-install route matching.
 ///
 /// # Errors

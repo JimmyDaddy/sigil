@@ -653,21 +653,22 @@ impl AgentToolDelegate for AgentToolRuntime {
         Ok(None)
     }
 
-    fn final_answer_context(
+    async fn final_answer_context(
         &mut self,
         session: &Session,
         _options: &AgentRunOptions,
         outcome: &AgentRunOutcome,
     ) -> Result<Option<FinalAnswerContext>> {
         let facts =
-            collect_session_facts(session, Some(outcome), self.root_logical_run_id.as_deref())?;
+            collect_session_facts(session, Some(outcome), self.root_logical_run_id.as_deref())
+                .await?;
         if !facts.has_recorded_facts {
             return Ok(None);
         }
         let key = hash_text(&serde_json::to_string(&facts.value)?);
         let prompt = json!({
             "type": "active_run_facts",
-            "message": "These are host-recorded facts for the active run. Continue the task from the current state; this context is not a finalization request and does not mean the run is complete. Use the facts when deciding next actions and, eventually, when composing the final answer. Do not claim checks, commands, approvals, subagent results, or file changes that are not listed here. If background agents are still running, say that they are still running rather than implying their work is complete. If a command has exit_code or verdict, do not rerun it only to recover truncated output.",
+            "message": "These are selected recorded evidence, not an exhaustive history or a completion decision. An omitted result does not mean the operation did not happen. Continue from the current state and check only specific evidence gaps. Support successful checks, commands and changes with their tool or verification results; exit_code=0 alone does not prove every pipeline stage or required check passed, and changed_files is not a complete inventory of shell effects. Keep each result source and availability in mind. If background agents are still running, do not imply their work is complete.",
             "session_facts": facts.value
         })
         .to_string();
@@ -708,7 +709,7 @@ struct SessionFactsSummary {
     has_recorded_facts: bool,
 }
 
-fn collect_session_facts(
+async fn collect_session_facts(
     session: &Session,
     run_outcome: Option<&AgentRunOutcome>,
     root_logical_run_id: Option<&str>,
@@ -740,8 +741,6 @@ fn collect_session_facts(
     ]);
     let mut approval_subject_counts = BTreeMap::<String, u64>::new();
     let mut approval_grant_reuses = Vec::new();
-    let mut commands = Vec::new();
-    let mut gates = Vec::new();
     let mut changed_files = std::collections::BTreeSet::<String>::new();
 
     for entry in session.entries() {
@@ -845,48 +844,6 @@ fn collect_session_facts(
                     for file in &execution.changed_files {
                         changed_files.insert(file.clone());
                     }
-                    let shell = execution
-                        .metadata
-                        .details
-                        .get("shell_analysis")
-                        .or_else(|| execution.metadata.details.get("shell"));
-                    let command = shell
-                        .and_then(|shell| shell.get("command"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    let command_family = shell
-                        .and_then(|shell| shell.get("command_family"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    let verdict = shell
-                        .and_then(|shell| shell.get("verdict"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    let rerun_not_needed = execution.metadata.exit_code == Some(0)
-                        && verdict.as_deref() == Some("passed");
-                    if command.is_some() {
-                        let command_fact = json!({
-                            "tool": execution.tool_name.as_str(),
-                            "status": tool_execution_status_label(execution.status),
-                            "command": command,
-                            "command_family": command_family,
-                            "exit_code": execution.metadata.exit_code,
-                            "verdict": verdict,
-                            "output_truncated": execution.metadata.truncated,
-                            "rerun_not_needed": rerun_not_needed,
-                            "changed_files": &execution.changed_files,
-                        });
-                        if let Some(family) =
-                            command_fact.get("command_family").and_then(Value::as_str)
-                            && matches!(
-                                family,
-                                "cargo_check" | "cargo_fmt_check" | "cargo_test" | "check_touched"
-                            )
-                        {
-                            gates.push(command_fact.clone());
-                        }
-                        commands.push(command_fact);
-                    }
                 }
             }
             _ => {}
@@ -945,17 +902,134 @@ fn collect_session_facts(
         }));
     }
 
+    // This is a selection from the existing bounded working set, never a full-history claim.
+    let pressure = session
+        .active_projection_snapshot()?
+        .map(|snapshot| snapshot.tool_output_pressure());
+    let evidence_run_ids = root_logical_run_id
+        .map(|run_id| session.recorded_evidence_run_ids(run_id))
+        .transpose()?
+        .unwrap_or_default();
+    let evidence_belongs_to_scope =
+        |call_id: &str, logical_run_id: Option<&sigil_kernel::LogicalRunId>| {
+            run_outcome.is_some() && call_belongs_to_current_run(call_id)
+                || logical_run_id.is_some_and(|run_id| evidence_run_ids.contains(run_id.as_str()))
+        };
+    let mut recorded_evidence = Vec::new();
+    let mut omitted_by_limit = 0_usize;
+    let mut archived_not_selected = 0_usize;
+    let mut archived_sources = Vec::new();
+    let mut scope_unbound = 0_usize;
+    if let Some(pressure) = &pressure {
+        scope_unbound = pressure
+            .items
+            .iter()
+            .filter(|item| {
+                item.logical_run_id.is_none() && !evidence_belongs_to_scope(&item.call_id, None)
+            })
+            .count()
+            + pressure
+                .archived_artifact_bindings
+                .values()
+                .filter(|binding| {
+                    binding.logical_run_id.is_none()
+                        && !evidence_belongs_to_scope(&binding.call_id, None)
+                })
+                .count();
+        for item in
+            pressure.items.iter().rev().filter(|item| {
+                evidence_belongs_to_scope(&item.call_id, item.logical_run_id.as_ref())
+            })
+        {
+            if recorded_evidence.len() == 32 {
+                omitted_by_limit += 1;
+                continue;
+            }
+            recorded_evidence.push(json!({
+                "source_event_id": item.source_event_id,
+                "source_stream_sequence": item.source_stream_sequence,
+                "message_id": item.message_id,
+                "call_id": item.call_id,
+                "tool_name": item.tool_name,
+                "logical_run_id": item.logical_run_id,
+                "facts": item.facts,
+                "artifact_ref": item.artifact_ref,
+                "artifact_availability": item.artifact_availability,
+                "complete": item.complete,
+            }));
+        }
+        let mut archived = pressure
+            .archived_artifact_bindings
+            .values()
+            .filter(|binding| {
+                evidence_belongs_to_scope(&binding.call_id, binding.logical_run_id.as_ref())
+            })
+            .collect::<Vec<_>>();
+        archived.sort_by_key(|binding| std::cmp::Reverse(binding.source_stream_sequence));
+        let archived_count = archived.len();
+        let selected_archived = archived
+            .into_iter()
+            .take(32_usize.saturating_sub(recorded_evidence.len()))
+            .cloned()
+            .collect::<Vec<_>>();
+        archived_not_selected = archived_count.saturating_sub(selected_archived.len());
+        let recovered = session
+            .archived_tool_result_facts(&selected_archived)
+            .await?;
+        for (binding, recovered) in selected_archived.iter().zip(recovered) {
+            if let Some(recovered) = recovered {
+                recorded_evidence.push(json!({
+                    "source_event_id": binding.source_event_id,
+                    "source_stream_sequence": binding.source_stream_sequence,
+                    "message_id": binding.source_message_id,
+                    "call_id": binding.call_id,
+                    "tool_name": binding.tool_name,
+                    "logical_run_id": binding.logical_run_id,
+                    "facts": recovered.facts,
+                    "artifact_ref": binding.artifact_ref,
+                    "artifact_availability": binding.artifact_availability,
+                    "complete": recovered.complete,
+                }));
+            } else {
+                archived_sources.push(json!({
+                    "source_event_id": binding.source_event_id,
+                    "source_stream_sequence": binding.source_stream_sequence,
+                    "message_id": binding.source_message_id,
+                    "call_id": binding.call_id,
+                    "tool_name": binding.tool_name,
+                    "logical_run_id": binding.logical_run_id,
+                    "artifact_ref": binding.artifact_ref,
+                    "artifact_availability": binding.artifact_availability,
+                    "reason": "original_source_unavailable",
+                }));
+            }
+        }
+    }
+
     let has_recorded_facts = approvals_policy_deny > 0
         || approvals_requested > 0
         || approvals_resolved > 0
         || approval_session_grants > 0
         || approval_session_grant_reuses > 0
-        || !commands.is_empty()
+        || !recorded_evidence.is_empty()
+        || omitted_by_limit > 0
+        || archived_not_selected > 0
+        || !archived_sources.is_empty()
+        || scope_unbound > 0
         || subagents_total > 0
         || !changed_files.is_empty();
     Ok(SessionFactsSummary {
         has_recorded_facts,
         value: json!({
+            "selected_recorded_evidence": recorded_evidence,
+            "evidence_omissions": {
+                "selection_limit": omitted_by_limit,
+                "archived_not_selected": archived_not_selected,
+                "archived_unavailable": archived_sources.len(),
+                "archived_sources": archived_sources,
+                "scope_unbound": scope_unbound,
+                "projection_unavailable": pressure.is_none(),
+            },
             "approvals": {
                 "policy_allow": approvals_policy_allow,
                 "policy_deny": approvals_policy_deny,
@@ -975,8 +1049,6 @@ fn collect_session_facts(
                     "network_effect": network_effects,
                 },
             },
-            "commands": commands,
-            "gates": gates,
             "subagents": {
                 "total": subagents_total,
                 "running": subagents_running,
@@ -998,14 +1070,4 @@ fn approval_mode_counts() -> BTreeMap<String, u64> {
 
 fn record_approval_mode(counts: &mut BTreeMap<String, u64>, mode: ApprovalMode) {
     *counts.entry(mode.as_str().to_owned()).or_default() += 1;
-}
-
-fn tool_execution_status_label(status: ToolExecutionStatus) -> &'static str {
-    match status {
-        ToolExecutionStatus::Started => "started",
-        ToolExecutionStatus::Completed => "completed",
-        ToolExecutionStatus::Failed => "failed",
-        ToolExecutionStatus::Cancelled => "cancelled",
-        ToolExecutionStatus::Interrupted => "interrupted",
-    }
 }

@@ -11,14 +11,14 @@ use serde_json::{Value, json};
 use sigil_kernel::{
     AgentBatchId, AgentDelegationRunContext, AgentInvocationGrantSource, AgentInvocationMode,
     AgentInvocationSource, AgentProfileSource, AgentRole, AgentRouteId, AgentRunInput,
-    AgentRunOptions, AgentThreadId, AgentTrustState, ApprovalHandler, ApprovalMode, EventHandler,
-    ModelMessage, RunCancellationHandle, RunEvent, SequentialTaskRequest, Session, SessionRef,
-    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskOrchestratorPhase,
-    TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool, ToolAccess,
-    ToolAnalysisStatus, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionSummary,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
-    ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, WebTaskTreeBudget,
+    AgentRunOptions, AgentThreadId, AgentThreadStatus, AgentTrustState, ApprovalHandler,
+    ApprovalMode, EventHandler, ModelMessage, RunCancellationHandle, RunEvent,
+    SequentialTaskRequest, Session, SessionRef, TaskChildSessionStatus, TaskId, TaskIsolationMode,
+    TaskOrchestratorPhase, TaskParticipantAttemptId, TaskStepId, TaskStepMode, TaskStepSpec, Tool,
+    ToolAccess, ToolAnalysisStatus, ToolApproval, ToolCall, ToolCategory, ToolContext,
+    ToolErrorKind, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope, WebTaskTreeBudget,
     child_session_ref,
 };
 
@@ -447,26 +447,36 @@ impl<'a> TaskDiscoveryDelegate<'a> {
                                 probe.probe_id.as_str()
                             )));
                         }
-                        discovery_member_error(&probe, &thread, "failed to commit discovery result")
+                        discovery_member_error(
+                            &probe,
+                            &thread,
+                            AgentThreadStatus::Failed,
+                            "failed to commit discovery result",
+                        )
                     } else {
                         discovery_member_from_projection(self.parent_session, &probe, &thread)
                     }
                 }
                 Err(error) => {
                     let reason = format!("{error:#}");
-                    if let Err(commit_error) = self.supervisor.record_task_child_failure(
+                    let status = match self.supervisor.record_task_child_error(
                         self.parent_session,
                         handler,
                         &thread,
-                        reason.clone(),
-                    ) && first_commit_error.is_none()
-                    {
-                        first_commit_error = Some(commit_error.context(format!(
-                            "failed to commit planner discovery failure {}",
-                            probe.probe_id.as_str()
-                        )));
-                    }
-                    discovery_member_error(&probe, &thread, &reason)
+                        &error,
+                    ) {
+                        Ok(status) => status,
+                        Err(commit_error) => {
+                            if first_commit_error.is_none() {
+                                first_commit_error = Some(commit_error.context(format!(
+                                    "failed to commit planner discovery failure {}",
+                                    probe.probe_id.as_str()
+                                )));
+                            }
+                            AgentThreadStatus::Failed
+                        }
+                    };
+                    discovery_member_error(&probe, &thread, status, &reason)
                 }
             };
             members.push((sequence, member));
@@ -995,13 +1005,14 @@ fn discovery_member_from_projection(
 fn discovery_member_error(
     probe: &TaskDiscoveryProbe,
     thread: &AgentTaskChildThread,
+    status: AgentThreadStatus,
     reason: &str,
 ) -> Value {
     json!({
         "probe_id": probe.probe_id.as_str(),
         "title": probe.title,
         "thread_id": thread.thread_id.as_str(),
-        "status": "failed",
+        "status": status,
         "summary": sigil_kernel::safe_persistence_text(reason)
             .chars()
             .take(1_000)

@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sigil_kernel::{
     Agent, AgentRunDisposition, AgentRunInput, AgentRunOptions, AgentRunPurpose, ControlEntry,
     ConversationRoute, ConversationRouteDecisionProjection, ConversationTurnRef, EventHandler,
-    JsonlSessionStore, ModelMessage, PlanApprovalPermission, PlanApprovalScope, PlanCompileInputV1,
-    PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
+    JsonlSessionStore, ModelMessage, PlanApprovalPermission, PlanApprovalScope, PlanDecision,
+    PlanDecisionActor, PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId,
     PlanPermissionGrantedEntry, PlanReviewAttemptEntry, PlanReviewAttemptId,
     PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
     PlanReviewTerminalReason, PlanSourceRef, PlanTaskStartMode, ProviderPhysicalAttemptOutcome,
@@ -18,27 +18,20 @@ use sigil_kernel::{
     SessionLogEntry, SessionRef, StartPlanReviewAction, TaskCreatedFromPlanEntry, TaskId,
     TaskRunEntry, TaskRunStatus, TaskStepId, build_workspace_snapshot,
     plain_text_plan_draft_entry_with_plan_id, plan_review_attempt_id_for_review,
-    plan_review_attempt_id_for_revision_ordinal, plan_review_child_session_ref,
-    plan_review_finalizer_session_ref, plan_review_id_for_explicit_command,
-    plan_review_no_draft_retry_contract_material, plan_review_plan_id_for_attempt,
-    plan_review_system_prompt_contract_material, plan_task_input_from_draft, plan_text_hash,
-    safe_persistence_text, stable_event_uuid, stable_workspace_id, task_id_from_plan_draft,
+    plan_review_child_session_ref, plan_review_finalizer_session_ref,
+    plan_review_id_for_explicit_command, plan_review_no_draft_retry_contract_material,
+    plan_review_plan_id_for_attempt, plan_review_system_prompt_contract_material,
+    plan_task_input_from_draft, plan_text_hash, safe_persistence_text, stable_event_uuid,
+    stable_workspace_id, task_id_from_plan_draft,
 };
 
 use sigil_kernel::ApprovalHandler;
 
-#[cfg(test)]
-use sigil_kernel::{
-    IntentAcceptanceAuthorityV1, IntentAdmissionContextV1, IntentStackId, PlanApprovalExpiry,
-    TaskPlanEntry, TaskPlanStatus, admit_suggested_decomposition,
-    append_task_intent_plan_admission_with_step_contracts, bind_task_plan_intents,
-    task_plan_from_plan_draft,
-};
-
 use crate::managed_artifact_store::ManagedArtifactStoreLeaseV1;
 use crate::managed_storage_writer::{
     ManagedExistingSessionLogMutationLeaseV1, ManagedExistingSessionLogReadLeaseV1,
-    ManagedStorageWriterAdapterV1, ManagedStorageWriterLeaseV1, StorageWriterChannelV1,
+    ManagedStorageWriterAdapterV1, ManagedStorageWriterErrorV1, ManagedStorageWriterLeaseV1,
+    StorageWriterChannelV1,
 };
 use crate::{RootConfig, attach_session_url_capability_store};
 
@@ -101,6 +94,9 @@ pub struct PlanReviewRunRequest {
     pub child_session_ref: SessionRef,
     pub finalizer_session_ref: SessionRef,
     pub revision_request_id: Option<sigil_kernel::UserInputRequestId>,
+    /// Accepted guidance generation. Persisted attempts recover it from their immutable source
+    /// prefix; it is never inferred from guidance text or the mutable base-plan decision.
+    pub revision_generation: Option<u32>,
     pub attempt_ordinal: u32,
     pub base_plan_id: Option<PlanId>,
     pub base_plan_hash: Option<String>,
@@ -176,7 +172,7 @@ impl std::fmt::Debug for CurrentSchemaPlanReviewRecoveredSessionV1 {
 }
 
 impl CurrentSchemaPlanReviewRecoveredSessionV1 {
-    fn entries(&self, expected_session_scope_id: &str) -> Result<Vec<SessionLogEntry>> {
+    fn records(&self) -> Result<Vec<sigil_kernel::SessionStreamRecord>> {
         let lease = self
             .session_log_lease
             .as_ref()
@@ -187,8 +183,12 @@ impl CurrentSchemaPlanReviewRecoveredSessionV1 {
             .map_err(|error| {
                 anyhow!("failed to read managed plan-review recovery session: {error}")
             })?;
-        let records = JsonlSessionStore::read_event_records_from_validated_bytes(&bytes)
-            .context("managed plan-review recovery session has an invalid durable stream")?;
+        JsonlSessionStore::read_event_records_from_validated_bytes(&bytes)
+            .context("managed plan-review recovery session has an invalid durable stream")
+    }
+
+    fn entries(&self, expected_session_scope_id: &str) -> Result<Vec<SessionLogEntry>> {
+        let records = self.records()?;
         if records
             .iter()
             .any(|record| record.session_id() != expected_session_scope_id)
@@ -358,23 +358,18 @@ impl CurrentSchemaPlanReviewChildResourceBundleV1 {
     /// Verifies that every capability in this bundle belongs to the same deterministic child
     /// admission.  The coordinator must not let a custom provisioner substitute a session log,
     /// artifact facade, or authority generation from another child scope.
-    fn validate_for(
-        &self,
-        request: &PlanReviewRunRequest,
-        kind: PlanReviewChildResourceKindV1,
-        ordinal: u32,
-    ) -> Result<()> {
-        validate_managed_plan_review_request_binding(request, kind, ordinal)?;
+    fn validate_for(&self, request: &PlanReviewRunRequest) -> Result<()> {
+        validate_managed_plan_review_request_binding(request)?;
         validate_authority_generation(self.authority_generation)?;
 
-        let expected_scope_id = format!("{}-{}", request.child_logical_run_id(), kind.tag());
+        let expected_scope_id = format!("{}-research", request.child_logical_run_id());
         if self.scope_id != expected_scope_id {
             bail!(
                 "managed plan-review child bundle scope does not match its request: expected {expected_scope_id}"
             );
         }
 
-        let expected_key = plan_review_child_resource_key(request, kind, ordinal);
+        let expected_key = plan_review_child_resource_key(request);
         let expected_session_log_dir = self
             .session_log_lease
             .writer
@@ -491,28 +486,11 @@ impl Drop for ManagedPlanReviewSessionLogLeaseV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum PlanReviewChildResourceKindV1 {
-    Research,
-    Finalizer,
-}
-
-impl PlanReviewChildResourceKindV1 {
-    const fn tag(self) -> &'static str {
-        match self {
-            Self::Research => "research",
-            Self::Finalizer => "finalizer",
-        }
-    }
-}
-
 /// Runtime-owned provisioning port for current-schema plan-review child scopes.
 pub trait PlanReviewChildResourceProvisionerV1: Send + Sync {
     fn provision(
         &self,
         request: &PlanReviewRunRequest,
-        kind: PlanReviewChildResourceKindV1,
-        ordinal: u32,
     ) -> Result<CurrentSchemaPlanReviewChildResourceBundleV1>;
 
     /// Reopens only an already-admitted `research/0` child session for recovery.
@@ -558,16 +536,14 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
     fn provision(
         &self,
         request: &PlanReviewRunRequest,
-        kind: PlanReviewChildResourceKindV1,
-        ordinal: u32,
     ) -> Result<CurrentSchemaPlanReviewChildResourceBundleV1> {
-        validate_managed_plan_review_request_binding(request, kind, ordinal)?;
+        validate_managed_plan_review_request_binding(request)?;
         validate_authority_generation(self.authority_generation)?;
-        let key = plan_review_child_resource_key(request, kind, ordinal);
+        let key = plan_review_child_resource_key(request);
         let session_log_lease =
             ManagedPlanReviewSessionLogLeaseV1::acquire(Arc::clone(&self.writer), &key)?;
         let session_log_path = session_log_lease.path().join("records.jsonl");
-        let scope_id = format!("{}-{}", request.child_logical_run_id(), kind.tag());
+        let scope_id = format!("{}-research", request.child_logical_run_id());
         let artifact_lease = ManagedArtifactStoreLeaseV1::acquire_with_session_path(
             Arc::clone(&self.writer),
             &key,
@@ -600,7 +576,7 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
             session_log_lease,
             artifact_lease,
         };
-        if let Err(error) = bundle.validate_for(request, kind, ordinal) {
+        if let Err(error) = bundle.validate_for(request) {
             return combine_child_resource_settlement(Err(error), bundle.finish());
         }
         Ok(bundle)
@@ -610,17 +586,12 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
         &self,
         request: &PlanReviewRunRequest,
     ) -> Result<CurrentSchemaPlanReviewRecoveredSessionV1> {
-        validate_managed_plan_review_request_binding(
-            request,
-            PlanReviewChildResourceKindV1::Research,
-            0,
-        )?;
-        let key =
-            plan_review_child_resource_key(request, PlanReviewChildResourceKindV1::Research, 0);
+        validate_managed_plan_review_request_binding(request)?;
+        let key = plan_review_child_resource_key(request);
         let session_log_lease = self
             .writer
             .acquire_existing_session_log_for_recovery(&key)
-            .map_err(|error| anyhow!("plan-review child recovery admission failed: {error}"))?;
+            .context("plan-review child recovery admission failed")?;
         Ok(CurrentSchemaPlanReviewRecoveredSessionV1 {
             writer: Arc::clone(&self.writer),
             session_log_lease: Some(session_log_lease),
@@ -631,13 +602,8 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
         &self,
         request: &PlanReviewRunRequest,
     ) -> Result<CurrentSchemaPlanReviewExistingResearchSessionV1> {
-        validate_managed_plan_review_request_binding(
-            request,
-            PlanReviewChildResourceKindV1::Research,
-            0,
-        )?;
-        let key =
-            plan_review_child_resource_key(request, PlanReviewChildResourceKindV1::Research, 0);
+        validate_managed_plan_review_request_binding(request)?;
+        let key = plan_review_child_resource_key(request);
         let session_log_lease = self
             .writer
             .acquire_existing_session_log_for_mutation(&key)
@@ -649,17 +615,8 @@ impl PlanReviewChildResourceProvisionerV1 for RuntimePlanReviewChildResourceProv
     }
 }
 
-fn plan_review_child_resource_key(
-    request: &PlanReviewRunRequest,
-    kind: PlanReviewChildResourceKindV1,
-    ordinal: u32,
-) -> String {
-    format!(
-        "pr-{}-{}-{}",
-        request.attempt_id.as_str(),
-        kind.tag(),
-        ordinal
-    )
+fn plan_review_child_resource_key(request: &PlanReviewRunRequest) -> String {
+    format!("pr-{}-research-0", request.attempt_id.as_str())
 }
 
 fn validate_authority_generation(
@@ -677,31 +634,13 @@ fn validate_authority_generation(
     Ok(())
 }
 
-fn validate_managed_plan_review_request_binding(
-    request: &PlanReviewRunRequest,
-    kind: PlanReviewChildResourceKindV1,
-    ordinal: u32,
-) -> Result<()> {
+fn validate_managed_plan_review_request_binding(request: &PlanReviewRunRequest) -> Result<()> {
     let expected_child_session_ref =
         plan_review_child_session_ref(&request.plan_review_id, &request.attempt_id);
     if request.child_session_ref != expected_child_session_ref {
         bail!("managed plan-review request has a non-canonical child session reference");
     }
-    let expected_finalizer_session_ref =
-        plan_review_finalizer_session_ref(&request.plan_review_id, &request.attempt_id, 1);
-    if request.finalizer_session_ref != expected_finalizer_session_ref {
-        bail!("managed plan-review request has a non-canonical finalizer session reference");
-    }
-    match kind {
-        PlanReviewChildResourceKindV1::Research if ordinal == 0 => Ok(()),
-        PlanReviewChildResourceKindV1::Finalizer if ordinal > 0 => Ok(()),
-        PlanReviewChildResourceKindV1::Research => {
-            bail!("managed plan-review research bundle must use ordinal zero")
-        }
-        PlanReviewChildResourceKindV1::Finalizer => {
-            bail!("managed plan-review finalizer bundle must use a positive ordinal")
-        }
-    }
+    Ok(())
 }
 
 impl PlanReviewRunRequest {
@@ -731,7 +670,7 @@ impl PlanReviewRunRequest {
 ///
 /// Explicit `/plan`, automatic `PlanReview` route decisions, and revisions all enter through this
 /// coordinator. It owns the durable attempt lifecycle, the retry-stable child session, the typed
-/// `submit_plan_draft` draft commit, and the RFC-0018 Plan-to-Task decision commands.
+/// `submit_plan_review_result` draft commit, and the RFC-0018 Plan-to-Task decision commands.
 #[derive(Debug, Clone, Default)]
 pub struct PlanReviewCoordinator;
 
@@ -742,30 +681,6 @@ pub struct PlanDecisionCommand {
     pub plan_id: String,
     pub expected_plan_hash: String,
     pub decision: PlanDecision,
-}
-
-/// Typed create-task-from-plan command shared by TUI, HTTP, and Desktop surfaces.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-#[cfg(test)]
-pub struct CreateTaskFromPlanRequest {
-    pub plan_id: String,
-    pub expected_plan_hash: String,
-    pub start_mode: PlanTaskStartMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_grant: Option<PlanApprovalPermission>,
-}
-
-/// Result of creating a durable task from an accepted plan.
-#[derive(Debug, Clone)]
-#[cfg(test)]
-pub struct CreatedTaskFromPlan {
-    pub task_id: TaskId,
-    pub task_id_value: String,
-    pub objective: String,
-    pub entry: TaskCreatedFromPlanEntry,
-    pub start_mode: PlanTaskStartMode,
-    pub entries: Vec<SessionLogEntry>,
 }
 
 /// Result of recording a plan rejection.
@@ -1267,6 +1182,7 @@ impl PlanReviewCoordinator {
             child_session_ref,
             finalizer_session_ref,
             revision_request_id: None,
+            revision_generation: None,
             attempt_ordinal: 1,
             base_plan_id: None,
             base_plan_hash: None,
@@ -1328,6 +1244,7 @@ impl PlanReviewCoordinator {
                 1,
             ),
             revision_request_id: None,
+            revision_generation: None,
             attempt_ordinal: 1,
             base_plan_id: None,
             base_plan_hash: None,
@@ -1345,8 +1262,9 @@ impl PlanReviewCoordinator {
     /// typed draft is committed later by the normal parent coordinator. Research uses the
     /// caller's ordinary `AgentRunOptions` budget without a Plan-specific turn clamp. If research
     /// finishes without a typed draft or loses a provider stream at a typed recoverable boundary,
-    /// the host starts one submit-only finalization turn. An unclassified finalization pauses with
-    /// its candidate available for explicit adoption.
+    /// the host continues the same child in submit-only mode. Unclassified final prose remains
+    /// Unknown evidence; only a typed result or an already Complete candidate's user adoption
+    /// can make the Plan ready.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn run_plan_review<H, A>(
@@ -1426,11 +1344,7 @@ impl PlanReviewCoordinator {
         A: ApprovalHandler + Send,
     {
         if child_resource_provisioner.is_some() {
-            validate_managed_plan_review_request_binding(
-                request,
-                PlanReviewChildResourceKindV1::Research,
-                0,
-            )?;
+            validate_managed_plan_review_request_binding(request)?;
             if request.source_turn.session_scope_id != parent_session.session_scope_id() {
                 return Err(anyhow::Error::new(
                     sigil_kernel::SessionContextPrefixError::ConflictingBoundary,
@@ -1441,20 +1355,34 @@ impl PlanReviewCoordinator {
             }
         }
 
+        if cancellation.is_cancel_requested() {
+            return Ok(PlanReviewRunOutcome::Cancelled);
+        }
+        if let Some(provisioner) = child_resource_provisioner.as_deref()
+            && let Some(draft) =
+                Self::recover_managed_plan_review_draft(parent_session, request, provisioner)?
+        {
+            // The already completed child owns these exact immutable facts. Recovery only
+            // reads its authority-admitted stream; it cannot provision another child or send
+            // another provider request before the parent settles this result.
+            return complete_plan_review_run(
+                &cancellation,
+                PlanReviewRunOutcome::DraftReady {
+                    draft: Box::new(draft),
+                },
+            );
+        }
+
         // Admit and validate every child capability before recording the parent Started state.
         // A failed managed admission must not leave a parent attempt claiming that execution
         // began, and must never reach provider/tool dispatch.
         let child_bundle = child_resource_provisioner
             .as_ref()
-            .map(|provisioner| {
-                provisioner.provision(request, PlanReviewChildResourceKindV1::Research, 0)
-            })
+            .map(|provisioner| provisioner.provision(request))
             .transpose()?;
         let child_bundle = match child_bundle {
             Some(bundle) => {
-                if let Err(error) =
-                    bundle.validate_for(request, PlanReviewChildResourceKindV1::Research, 0)
-                {
+                if let Err(error) = bundle.validate_for(request) {
                     return combine_child_resource_settlement(Err(error), bundle.finish());
                 }
                 Some(bundle)
@@ -1492,7 +1420,6 @@ impl PlanReviewCoordinator {
             plan_id: request.plan_id.clone(),
             source: request.plan_source_ref(),
             workspace_snapshot_id: request.workspace_snapshot_id.clone(),
-            candidate_content: None,
         };
         if cancellation.is_cancel_requested() {
             return Ok(PlanReviewRunOutcome::Cancelled);
@@ -1516,8 +1443,6 @@ impl PlanReviewCoordinator {
                 .max_by_key(|candidate| candidate.requested_at_unix_ms)
                 .and_then(|candidate| projection.request(&candidate.identity).cloned())
         };
-        let mut research_candidate_text =
-            plan_review_candidate_content(&child_session, request)?;
         if let Some(state) = existing_research_input.as_ref()
             && state.status == sigil_kernel::UserInputStatusV1::Requested
         {
@@ -1615,8 +1540,6 @@ impl PlanReviewCoordinator {
                     &parent_context,
                     None,
                     None,
-                    None,
-                    0,
                 )
             };
             let mut child_handler = PlanReviewChildEventHandler { inner: handler };
@@ -1667,7 +1590,7 @@ impl PlanReviewCoordinator {
                             && !output.result.final_text.trim().is_empty()
                         {
                             let source_event_id = output.result.final_message_id.clone();
-                            research_candidate_text = match record_plan_review_candidate(
+                            let candidate_text = match record_plan_review_candidate(
                                 &mut child_session,
                                 request,
                                 &output.result.final_text,
@@ -1689,7 +1612,7 @@ impl PlanReviewCoordinator {
                                     );
                                 }
                             };
-                            if let Some(content) = research_candidate_text.as_deref()
+                            if let Some(content) = candidate_text.as_deref()
                                 && let Err(error) = record_plan_review_candidate_in_parent(
                                     parent_session,
                                     request,
@@ -1849,62 +1772,32 @@ impl PlanReviewCoordinator {
                 now_ms(),
             )?;
         }
-        let evidence = plan_review_finalizer_evidence_bundle(request, &child_session);
-        let research_model_turns = child_session
-            .entries()
-            .iter()
-            .filter(|entry| matches!(entry, SessionLogEntry::Assistant(_)))
-            .count();
-        if options
-            .max_turns
-            .is_some_and(|max_turns| research_model_turns >= max_turns)
-        {
-            return complete_plan_review_run(
-                &cancellation,
-                PlanReviewRunOutcome::Paused(
-                    "plan review reached the configured model-turn budget before result confirmation"
-                        .to_owned(),
-                ),
-            );
-        }
         let mut last_violation = None;
         let mut last_violation_digest = None;
         for corrective_ordinal in 1..=2 {
             if cancellation.is_cancel_requested() {
                 return Ok(PlanReviewRunOutcome::Cancelled);
             }
-            let finalizer_bundle = child_resource_provisioner
-                .as_ref()
-                .map(|provisioner| {
-                    provisioner.provision(
-                        request,
-                        PlanReviewChildResourceKindV1::Finalizer,
-                        corrective_ordinal,
-                    )
-                })
-                .transpose()?;
-            let finalization = async {
-            let mut finalizer_session = build_plan_review_finalizer_session(
-                parent_session,
-                request,
-                corrective_ordinal,
-                finalizer_bundle.as_ref(),
-            )?;
-            if let Some(draft) = finalizer_session
-                .plan_artifact_projection()
-                .plans
-                .get(&request.plan_id)
-                .cloned()
+            let completed_model_turns = child_session
+                .entries()
+                .iter()
+                .filter(|entry| matches!(entry, SessionLogEntry::Assistant(_)))
+                .count();
+            if options
+                .max_turns
+                .is_some_and(|max_turns| completed_model_turns >= max_turns)
             {
                 return complete_plan_review_run(
                     &cancellation,
-                    PlanReviewRunOutcome::DraftReady {
-                        draft: Box::new(draft),
-                    },
-                ).map(Some);
+                    PlanReviewRunOutcome::Paused(
+                        "plan review reached the configured model-turn budget before result confirmation"
+                            .to_owned(),
+                    ),
+                );
             }
+            let finalization = async {
             let mut finalization_options = options.clone();
-            if let Some(bundle) = finalizer_bundle.as_ref() {
+            if let Some(bundle) = child_bundle.as_ref() {
                 finalization_options =
                     finalization_options.with_tool_authority(bundle.tool_authority());
             }
@@ -1913,7 +1806,7 @@ impl PlanReviewCoordinator {
                     .max_turns
                     .map(|max_turns| {
                         max_turns
-                            .saturating_sub(research_model_turns)
+                            .saturating_sub(completed_model_turns)
                             .min(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS)
                     })
                     .unwrap_or(PLAN_REVIEW_FINALIZATION_MAX_MODEL_TURNS),
@@ -1923,15 +1816,14 @@ impl PlanReviewCoordinator {
                 &draft_context,
                 &cancellation,
                 &parent_context,
-                Some(&evidence),
-                research_candidate_text.as_deref(),
+                Some(corrective_ordinal),
                 last_violation.as_deref(),
-                corrective_ordinal,
             );
+            let finalization_entry_start = child_session.entries().len();
             let mut child_handler = PlanReviewChildEventHandler { inner: handler };
             let finalization = agent
                 .run_with_approval_input_and_tool_registry(
-                    &mut finalizer_session,
+                    &mut child_session,
                     finalization_input,
                     finalization_options,
                     sigil_kernel::ToolRegistry::new(),
@@ -1964,11 +1856,11 @@ impl PlanReviewCoordinator {
             {
                 let source_event_id = output.result.final_message_id.clone();
                 if let Err(error) = record_plan_review_candidate(
-                    &mut finalizer_session,
+                    &mut child_session,
                     request,
                     &output.result.final_text,
                     source_event_id.clone(),
-                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
                     now_ms(),
                 ) {
                     handler.handle(RunEvent::Notice(format!(
@@ -1988,7 +1880,7 @@ impl PlanReviewCoordinator {
                     request,
                     &output.result.final_text,
                     source_event_id,
-                    sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
+                    sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown,
                     handler,
                     now_ms(),
                 ) {
@@ -2005,7 +1897,7 @@ impl PlanReviewCoordinator {
                     .map(Some);
                 }
             }
-            if let Some(reason) = plan_review_no_plan_reason(&finalizer_session) {
+            if let Some(reason) = plan_review_no_plan_reason(&child_session) {
                 record_plan_review_candidate_in_parent(
                     parent_session,
                     request,
@@ -2024,14 +1916,19 @@ impl PlanReviewCoordinator {
                 )
                 .map(Some);
             }
-            if finalizer_session.entries().iter().any(|entry| {
+            // The kernel has already committed a successful typed draft and rejected every
+            // unavailable side call before dispatch. Do not regenerate that immutable draft
+            // merely because the same batch also contained a rejected call.
+            let draft_submitted = matches!(
+                &output.disposition,
+                AgentRunDisposition::PlanReviewDraftSubmitted(_)
+            );
+            if !draft_submitted && child_session.entries()[finalization_entry_start..].iter().any(|entry| {
                 matches!(
                     entry,
                     SessionLogEntry::Assistant(message)
                         if message.tool_calls.iter().any(|call| {
-                        call.name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
-                                && call.name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
-                                && call.name != sigil_kernel::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
+                            call.name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
                         })
                 )
             }) {
@@ -2039,7 +1936,7 @@ impl PlanReviewCoordinator {
                 last_violation = Some(reason.clone());
                 if corrective_ordinal == 1 {
                     handler.handle(RunEvent::Notice(
-                        "Plan finalization attempted an unavailable research tool; retrying once in a fresh submit-only context."
+                        "Plan finalization attempted an unavailable research tool; retrying once in the same submit-only conversation."
                             .to_owned(),
                     ))?;
                     return Ok(None);
@@ -2049,7 +1946,7 @@ impl PlanReviewCoordinator {
                     PlanReviewRunOutcome::SubmitOnlyProtocolViolation(reason),
                 ).map(Some);
             }
-            if let Some(reason) = invalid_plan_draft_submission_reason(&finalizer_session) {
+            if !draft_submitted && let Some(reason) = invalid_plan_draft_submission_reason(&child_session.entries()[finalization_entry_start..]) {
                 let digest = sigil_kernel::stable_event_hash(reason.as_bytes());
                 if last_violation_digest.as_deref() == Some(digest.as_str()) {
                     return complete_plan_review_run(
@@ -2065,7 +1962,7 @@ impl PlanReviewCoordinator {
                 last_violation = Some(reason.clone());
                 if corrective_ordinal == 1 {
                     handler.handle(RunEvent::Notice(
-                        "Plan finalization produced an invalid typed draft; retrying once in a fresh submit-only context."
+                        "Plan finalization produced an invalid typed draft; retrying once in the same submit-only conversation."
                             .to_owned(),
                     ))?;
                     return Ok(None);
@@ -2077,11 +1974,11 @@ impl PlanReviewCoordinator {
             }
             let outcome = match output.disposition {
                 AgentRunDisposition::PlanReviewDraftSubmitted(action) => {
-                    plan_review_draft_ready_outcome(&finalizer_session, &action.plan_id)?
+                    plan_review_draft_ready_outcome(&child_session, &action.plan_id)?
                 }
                 AgentRunDisposition::FinalAnswer => {
                     PlanReviewRunOutcome::Paused(
-                        "a complete Plan candidate was preserved and awaits explicit confirmation"
+                        "Plan review text was preserved as unconfirmed evidence; submit a typed result to make a Plan ready"
                             .to_owned(),
                     )
                 }
@@ -2108,12 +2005,7 @@ impl PlanReviewCoordinator {
             };
             complete_plan_review_run(&cancellation, outcome).map(Some)
             }.await;
-            let finalization = combine_child_resource_settlement(
-                finalization,
-                finalizer_bundle
-                    .map(|bundle| bundle.finish())
-                    .unwrap_or(Ok(())),
-            )?;
+            let finalization = finalization?;
             if let Some(outcome) = finalization {
                 return Ok(outcome);
             }
@@ -2144,21 +2036,12 @@ impl PlanReviewCoordinator {
         parent: &mut Session,
         draft: &PlanDraftCreatedEntry,
         request: &PlanReviewRunRequest,
-        _compile_input: &PlanCompileInputV1,
         handler: &mut H,
         now_ms: u64,
     ) -> Result<()>
     where
         H: EventHandler + ?Sized,
     {
-        validate_plan_review_request_lineage(request)?;
-        validate_plan_review_request_objective(parent, request)?;
-        if request.revision_request_id.is_some() {
-            bail!(
-                "revision draft completion requires the atomic revision terminal and public outbox"
-            );
-        }
-        validate_plan_review_child_draft(draft, request)?;
         let controls = Self::plan_review_draft_terminal_controls(parent, draft, request, now_ms)?;
         if !controls.is_empty() {
             handler.commit_controls(parent, controls)?;
@@ -2213,45 +2096,6 @@ impl PlanReviewCoordinator {
             controls.push(ControlEntry::PlanReviewAttempt(attempt_entry));
         }
         Ok(controls)
-    }
-
-    /// Builds the pure, deterministic compile input for one plan review attempt (RFC-0067 7.2).
-    ///
-    /// The contract hashes prove which planner/task/intent/config contract generation produced
-    /// the candidate. They are evidence, not runtime permission.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the stable workspace identity cannot be derived.
-    pub fn plan_compile_input(
-        session: &Session,
-        root_config: &RootConfig,
-        workspace_root: &Path,
-        request: &PlanReviewRunRequest,
-    ) -> Result<PlanCompileInputV1> {
-        Ok(PlanCompileInputV1 {
-            source_attempt_id: request.attempt_id.as_str().to_owned(),
-            source_turn_id: request.source_turn.message_id.clone(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                &format!("max_plan_steps={}", root_config.task.max_plan_steps),
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "submit_plan_draft-v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "task-step-contract-v2",
-            ),
-            intent_schema_hash: Some(sigil_kernel::stable_event_uuid(
-                "sigil-intent-schema-v1",
-                "intent-contract-v1",
-            )),
-            max_plan_steps: root_config.task.max_plan_steps,
-            workspace_id: stable_workspace_id(workspace_root).ok(),
-            session_scope_id: Some(session.session_scope_id().to_owned()),
-        })
     }
 
     /// Durably closes a plan review run that terminated without a committed draft.
@@ -2489,28 +2333,7 @@ impl PlanReviewCoordinator {
             expected_plan_hash,
             sigil_kernel::PublicPlanAction::Revise,
         )?;
-        if projection.plan_is_rejected(plan_id) {
-            bail!("plan {} was rejected", plan_id.as_str());
-        }
-        if projection.task_created_for_plan(plan_id) {
-            bail!("plan {} already created a task", plan_id.as_str());
-        }
-        if let Some(existing) = projection.latest_decision(plan_id)
-            && !matches!(
-                existing.decision,
-                PlanDecision::RevisionFailed | PlanDecision::SavedOnly
-            )
-        {
-            bail!(
-                "plan {} already has decision {}",
-                plan_id.as_str(),
-                existing.decision.as_str()
-            );
-        }
         let review_projection = PlanReviewProjection::from_entries(session.entries());
-        if review_projection.has_conflicts() {
-            bail!("plan review projection contains conflicts");
-        }
         let previous = review_projection
             .attempt_for_plan(plan_id)
             .cloned()
@@ -2527,7 +2350,8 @@ impl PlanReviewCoordinator {
             .map(|request| request.identity.generation)
             .max()
             .unwrap_or(0)
-            .saturating_add(1);
+            .checked_add(1)
+            .context("revision guidance generation exhausted")?;
         let root_logical_run_id = sigil_kernel::LogicalRunId::new(stable_event_uuid(
             "sigil-plan-revision-root-run-v1",
             previous.plan_review_id.as_str(),
@@ -2592,31 +2416,39 @@ impl PlanReviewCoordinator {
         base_plan_id: &PlanId,
         base_plan_hash: &str,
         revision_request_id: sigil_kernel::UserInputRequestId,
+        revision_generation: u32,
         guidance: &str,
         workspace_snapshot_id: Option<String>,
     ) -> Result<PlanReviewRunRequest> {
         let review_projection = PlanReviewProjection::from_entries(session.entries());
-        if review_projection.has_conflicts() {
-            bail!("plan review projection contains conflicts");
-        }
         let base = review_projection
             .attempt_for_plan(base_plan_id)
             .cloned()
             .context("revision base plan is not bound to a plan review lifecycle")?;
+        if review_projection
+            .review(&base.plan_review_id)
+            .is_some_and(|review| !review.conflicts.is_empty())
+        {
+            bail!("plan review lifecycle contains conflicts");
+        }
         let latest = review_projection
             .latest_attempt(&base.plan_review_id)
             .cloned()
             .context("revision lifecycle has no attempt")?;
         let ordinal = if latest.revision_request_id.as_ref() == Some(&revision_request_id) {
-            latest.attempt_ordinal.saturating_add(1)
+            latest
+                .attempt_ordinal
+                .checked_add(1)
+                .context("revision attempt ordinal exhausted")?
         } else {
             1
         };
-        let attempt_id = plan_review_attempt_id_for_revision_ordinal(
+        let attempt_id = plan_review_attempt_id_for_guidance_generation(
             &base.plan_review_id,
             &revision_request_id,
+            revision_generation,
             ordinal,
-        );
+        )?;
         let next_plan_id = plan_review_plan_id_for_attempt(&base.plan_review_id, &attempt_id);
         let original_objective = plan_review_original_objective_from_attempt(session, &base)?;
         let objective = format!(
@@ -2637,6 +2469,7 @@ impl PlanReviewCoordinator {
                 1,
             ),
             revision_request_id: Some(revision_request_id),
+            revision_generation: Some(revision_generation),
             attempt_ordinal: ordinal,
             base_plan_id: Some(base_plan_id.clone()),
             base_plan_hash: Some(base_plan_hash.to_owned()),
@@ -2713,7 +2546,9 @@ impl PlanReviewCoordinator {
                 if let Some(existing) = plan_projection.latest_decision(&base_plan_id)
                     && !matches!(
                         existing.decision,
-                        PlanDecision::RevisionFailed | PlanDecision::SavedOnly
+                        PlanDecision::RevisionFailed
+                            | PlanDecision::SavedOnly
+                            | PlanDecision::TaskCreationFailed
                     )
                 {
                     bail!(
@@ -2726,6 +2561,7 @@ impl PlanReviewCoordinator {
                     &base_plan_id,
                     &base_plan_hash,
                     state.requested.request.identity.request_id.clone(),
+                    state.requested.request.identity.generation,
                     guidance,
                     workspace_snapshot_id,
                 )?;
@@ -2808,19 +2644,30 @@ impl PlanReviewCoordinator {
             return Ok(None);
         }
         let request_id = &state.requested.request.identity.request_id;
-        let review_projection = PlanReviewProjection::from_entries(session.entries());
-        let base_attempt = review_projection
-            .attempt_for_plan(base_plan_id)
-            .context("revision replay lost its base review attempt")?;
-        if review_projection
-            .review(&base_attempt.plan_review_id)
-            .is_some_and(|review| {
-                review
-                    .attempts
-                    .iter()
-                    .any(|attempt| attempt.revision_request_id.as_ref() == Some(request_id))
+        let latest_input = session
+            .user_input_projection()?
+            .public_requests()
+            .into_iter()
+            .filter(|input| input.identity.request_id == *request_id)
+            .max_by_key(|input| input.identity.generation);
+        if latest_input.is_none_or(|input| input.identity != state.requested.request.identity) {
+            // A replay of an older answer must not dispatch the current guidance generation.
+            return Ok(None);
+        }
+        let accepted_at = session
+            .entries()
+            .iter()
+            .rposition(|entry| {
+                matches!(entry,
+            SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(accepted))
+            if accepted.identity == state.requested.request.identity)
             })
-        {
+            .context("revision replay lost its accepted guidance")?;
+        if session.entries()[accepted_at + 1..].iter().any(|entry| {
+            matches!(entry,
+            SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+            if attempt.revision_request_id.as_ref() == Some(request_id))
+        }) {
             return Ok(None);
         }
         let guidance = state
@@ -2848,98 +2695,11 @@ impl PlanReviewCoordinator {
             base_plan_id,
             base_plan_hash,
             request_id.clone(),
+            state.requested.request.identity.generation,
             guidance,
             workspace_snapshot_id,
         )
         .map(Some)
-    }
-
-    /// Reuses already accepted revision guidance while allocating a fresh physical attempt.
-    pub fn retry_plan_revision(
-        session: &mut Session,
-        base_plan_id: &PlanId,
-        base_plan_hash: &str,
-        workspace_snapshot_id: Option<String>,
-        now_ms: u64,
-    ) -> Result<Option<PlanReviewRunRequest>> {
-        let plan_projection = session.plan_artifact_projection();
-        if !plan_projection
-            .latest_decision(base_plan_id)
-            .is_some_and(|decision| {
-                decision.decision == PlanDecision::RevisionFailed
-                    && decision.plan_hash == base_plan_hash
-            })
-        {
-            return Ok(None);
-        }
-        let latest = session
-            .user_input_projection()?
-            .public_requests()
-            .into_iter()
-            .filter(|request| {
-                matches!(
-                    &request.source,
-                    sigil_kernel::UserInputSourceV1::PlanRevision {
-                        base_plan_id: candidate_id,
-                        base_plan_hash: candidate_hash,
-                    } if candidate_id == base_plan_id && candidate_hash == base_plan_hash
-                )
-            })
-            .max_by_key(|request| request.identity.generation);
-        let Some(latest) = latest else {
-            return Ok(None);
-        };
-        let accepted = session
-            .entries()
-            .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(accepted))
-                    if accepted.identity == latest.identity =>
-                {
-                    Some((**accepted).clone())
-                }
-                _ => None,
-            });
-        let Some(accepted) = accepted else {
-            return Ok(None);
-        };
-        let guidance = match accepted.decision {
-            sigil_kernel::UserInputDurableDecisionV1::Submitted {
-                answers: Some(answers),
-                ..
-            } => answers.into_iter().find_map(|answer| {
-                (answer.question_id == "revision_guidance")
-                    .then_some(answer.value)
-                    .and_then(|value| match value {
-                        sigil_kernel::UserInputAnswerValueV1::Text { value } => Some(value),
-                        _ => None,
-                    })
-            }),
-            _ => None,
-        };
-        let Some(guidance) = guidance else {
-            return Ok(None);
-        };
-        let request = Self::plan_review_revision_request(
-            session,
-            base_plan_id,
-            base_plan_hash,
-            latest.identity.request_id,
-            &guidance,
-            workspace_snapshot_id,
-        )?;
-        session.append_control(ControlEntry::PlanDecisionRecorded(
-            PlanDecisionRecordedEntry {
-                plan_id: base_plan_id.clone(),
-                plan_hash: base_plan_hash.to_owned(),
-                decision: PlanDecision::RevisionRequested,
-                decided_by: PlanDecisionActor::User,
-                decided_at_ms: now_ms,
-                reason: Some(safe_persistence_text(&guidance)),
-            },
-        ))?;
-        Ok(Some(request))
     }
 
     /// Records a confirmed failure to start an accepted revision before its attempt exists.
@@ -3001,6 +2761,7 @@ impl PlanReviewCoordinator {
             base_plan_id,
             base_plan_hash,
             request_id.clone(),
+            current_request.identity.generation,
             &accepted_revision_guidance_for_request(session, request)?,
             request.workspace_snapshot_id.clone(),
         )?;
@@ -3151,6 +2912,7 @@ impl PlanReviewCoordinator {
                 1,
             ),
             revision_request_id: latest.revision_request_id.clone(),
+            revision_generation: request.revision_generation,
             attempt_ordinal: latest.attempt_ordinal.saturating_add(1),
             base_plan_id: latest.base_plan_id.clone(),
             base_plan_hash: latest.base_plan_hash.clone(),
@@ -3334,6 +3096,166 @@ impl PlanReviewCoordinator {
             request,
             current_waiting_attempt,
         )
+    }
+
+    /// Reads an already completed typed draft from the exact managed research child.
+    ///
+    /// The parent must still own this active attempt. The recovery port cannot create a
+    /// namespace, open write/tool capabilities, or dispatch the provider. Historical logical
+    /// session references remain lineage only; the resource authority resolves physical storage.
+    ///
+    /// # Errors
+    ///
+    /// Rejects conflicting lineage, an unavailable managed stream, and invalid child records.
+    pub fn recover_managed_plan_review_draft(
+        parent: &Session,
+        request: &PlanReviewRunRequest,
+        provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+    ) -> Result<Option<PlanDraftCreatedEntry>> {
+        validate_managed_plan_review_request_binding(request)?;
+        validate_plan_review_request_lineage(request)?;
+        validate_plan_review_request_objective(parent, request)?;
+        let projection = PlanReviewProjection::from_entries(parent.entries());
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        let Some(attempt) = projection
+            .latest_attempt(&request.plan_review_id)
+            .filter(|attempt| attempt.attempt_id == request.attempt_id)
+        else {
+            return Ok(None);
+        };
+        validate_revision_attempt_request_binding(attempt, request)?;
+        if !matches!(
+            attempt.status,
+            PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
+        ) {
+            return Ok(None);
+        }
+        let bundle = match provisioner.recover_research_session(request) {
+            Ok(bundle) => bundle,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<ManagedStorageWriterErrorV1>(),
+                    Some(
+                        ManagedStorageWriterErrorV1::ExistingNamespaceMissing
+                            | ManagedStorageWriterErrorV1::ExistingSessionLogUninitialized
+                    )
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            // RA selected the exact attempt namespace. The kernel verifies that this stream
+            // has one consistent envelope identity; its physical-path session id is distinct
+            // from the logical artifact/tool scope and must not be guessed from that scope.
+            let records = bundle.records()?;
+            sigil_kernel::conversation_route::recover_plan_review_draft_from_child_records(
+                attempt, &records,
+            )
+        })();
+        combine_child_resource_settlement(result, bundle.finish())
+    }
+
+    /// Settles managed child drafts before generic startup recovery can interrupt their parent.
+    ///
+    /// Runtime composition calls this with a control-loaded parent while it owns startup. Each
+    /// child is read through require-existing authority admission, and the ordinary draft or
+    /// revision terminal/outbox is appended through its existing durable commit protocol.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid parent/child lineage and returns any managed read or commit failure.
+    pub fn recover_managed_plan_review_drafts(
+        parent: &mut Session,
+        provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+        now_ms: u64,
+    ) -> Result<usize> {
+        let projection = PlanReviewProjection::from_entries(parent.entries());
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        let attempts = projection
+            .reviews()
+            .filter_map(|review| review.latest_attempt())
+            .filter(|attempt| {
+                matches!(
+                    attempt.status,
+                    PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut recovered = 0;
+        for attempt in attempts {
+            let request = plan_review_request_from_attempt(parent, &attempt)?;
+            let Some(draft) =
+                Self::recover_managed_plan_review_draft(parent, &request, provisioner)?
+            else {
+                continue;
+            };
+            if request.revision_request_id.is_some() {
+                let outcome = PlanReviewRunOutcome::DraftReady {
+                    draft: Box::new(draft),
+                };
+                let run_id = request.child_logical_run_id();
+                let event = PublicRunEvent::new(
+                    parent.session_scope_id().to_owned(),
+                    run_id.clone(),
+                    parent.next_plan_review_public_sequence(&run_id)?,
+                    Self::revision_terminal_public_event(&outcome)
+                        .context("recovered draft has no terminal public event")?,
+                );
+                Self::commit_revision_terminal_with_outbox(
+                    parent, &request, &outcome, event, now_ms,
+                )?;
+            } else {
+                let controls =
+                    Self::plan_review_draft_terminal_controls(parent, &draft, &request, now_ms)?;
+                if !controls.is_empty() {
+                    parent.append_controls(controls)?;
+                }
+            }
+            recovered += 1;
+        }
+        Ok(recovered)
+    }
+
+    /// Recovers managed Plan results from an existing parent before its startup loader runs.
+    /// Empty or inactive streams require no control session and are left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid durable records or a failed managed recovery/commit.
+    pub fn recover_managed_plan_review_drafts_from_store(
+        store: JsonlSessionStore,
+        provisioner: &dyn PlanReviewChildResourceProvisionerV1,
+        now_ms: u64,
+    ) -> Result<usize> {
+        let entries = store
+            .read_event_records_coordinated()?
+            .iter()
+            .map(sigil_kernel::SessionStreamRecord::session_log_entry)
+            .filter_map(|entry| entry.transpose())
+            .collect::<Result<Vec<_>>>()?;
+        let projection = PlanReviewProjection::from_entries(&entries);
+        if projection.has_conflicts() {
+            bail!("plan review projection contains conflicts");
+        }
+        if !projection.reviews().any(|review| {
+            review.latest_attempt().is_some_and(|attempt| {
+                matches!(
+                    attempt.status,
+                    PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
+                )
+            })
+        }) {
+            return Ok(0);
+        }
+        let mut parent = Session::load_from_store_for_control(store)?;
+        Self::recover_managed_plan_review_drafts(&mut parent, provisioner, now_ms)
     }
 
     /// Reconstructs one exact accepted plan-research input from its managed child session.
@@ -3585,10 +3507,6 @@ impl PlanReviewCoordinator {
         if projection.plan_is_rejected(&plan_id) {
             bail!("plan {} was rejected", plan_id.as_str());
         }
-        if command.decision == PlanDecision::Accepted && projection.task_created_for_plan(&plan_id)
-        {
-            bail!("plan {} already created a task", plan_id.as_str());
-        }
         if let Some(existing) = projection.latest_decision(&plan_id) {
             if matches!(
                 existing.decision,
@@ -3725,527 +3643,6 @@ impl PlanReviewCoordinator {
         Ok(draft)
     }
 
-    /// Creates a durable task from an accepted plan through the shared RFC-0018 handoff.
-    ///
-    /// This is the single Plan-to-Task promotion path used by TUI, HTTP, and Desktop. The function
-    /// is idempotent: retries reconcile the deterministic prefix; conflicting facts fail closed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a stale hash, missing/rejected plan, step-limit violation, unsafe
-    /// promotion, or conflicting durable prefix facts.
-    #[cfg(test)]
-    pub fn create_task_from_plan(
-        session: &mut Session,
-        root_config: &RootConfig,
-        workspace_root: &Path,
-        parent_session_ref: SessionRef,
-        request: &CreateTaskFromPlanRequest,
-    ) -> Result<CreatedTaskFromPlan> {
-        let result = Self::create_task_from_plan_inner(
-            session,
-            root_config,
-            workspace_root,
-            parent_session_ref,
-            request,
-        );
-        if let Err(error) = &result
-            && let Err(record_error) = Self::record_task_creation_failure(
-                session,
-                request,
-                &format!("{error:#}"),
-                now_ms(),
-            )
-        {
-            return Err(anyhow!(
-                "{error:#}; failed to record task creation failure: {record_error:#}"
-            ));
-        }
-        result
-    }
-
-    #[cfg(test)]
-    fn create_task_from_plan_inner(
-        session: &mut Session,
-        root_config: &RootConfig,
-        workspace_root: &Path,
-        parent_session_ref: SessionRef,
-        request: &CreateTaskFromPlanRequest,
-    ) -> Result<CreatedTaskFromPlan> {
-        let plan_id = PlanId::new(request.plan_id.clone())
-            .map_err(|error| anyhow!("invalid plan id for task creation: {error}"))?;
-        let projection = session.plan_artifact_projection();
-        let draft =
-            projection.plans.get(&plan_id).cloned().ok_or_else(|| {
-                anyhow!("plan {} is not present in this session", plan_id.as_str())
-            })?;
-        if draft.plan_hash != request.expected_plan_hash {
-            bail!(
-                "plan {} is stale: expected {}, current {}",
-                plan_id.as_str(),
-                request.expected_plan_hash,
-                draft.plan_hash
-            );
-        }
-        let exact_prefix_exists = projection
-            .latest_decision(&plan_id)
-            .is_some_and(|decision| {
-                decision.decision == PlanDecision::Accepted
-                    && decision.plan_hash == request.expected_plan_hash
-            })
-            || projection
-                .tasks_created
-                .get(&plan_id)
-                .and_then(|entries| entries.last())
-                .is_some_and(|created| created.plan_hash == request.expected_plan_hash);
-        if !exact_prefix_exists {
-            ensure_plan_action_allowed(
-                session,
-                &plan_id,
-                &request.expected_plan_hash,
-                sigil_kernel::PublicPlanAction::Run,
-            )?;
-        }
-        if projection.plan_is_rejected(&plan_id) {
-            bail!("plan {} was rejected", plan_id.as_str());
-        }
-        let current_workspace_snapshot_id =
-            plan_handoff_workspace_snapshot_id(root_config, workspace_root)?;
-        let stale_reason = plan_handoff_stale_reason(
-            draft.workspace_snapshot_id.as_deref(),
-            current_workspace_snapshot_id.as_deref(),
-        );
-        let task_id = task_id_from_plan_draft(&draft)?;
-        let task_id_value = task_id.as_str().to_owned();
-        let objective = plan_task_input_from_draft(&draft);
-        let decision = PlanDecisionRecordedEntry {
-            plan_id: plan_id.clone(),
-            plan_hash: draft.plan_hash.clone(),
-            decision: PlanDecision::Accepted,
-            decided_by: PlanDecisionActor::User,
-            decided_at_ms: now_ms(),
-            reason: Some("created task from plan".to_owned()),
-        };
-        if draft.steps.len() > root_config.task.max_plan_steps {
-            bail!(
-                "plan {} has {} steps, exceeding task.max_plan_steps={}",
-                plan_id.as_str(),
-                draft.steps.len(),
-                root_config.task.max_plan_steps
-            );
-        }
-        let promoted = if stale_reason.is_none() {
-            task_plan_from_plan_draft(&draft, task_id.clone(), 1)?
-        } else {
-            None
-        };
-        let (task_plan, step_contracts, step_mapping, intent_admission) = match promoted {
-            Some(promotion) => {
-                let step_contracts = promotion.step_contracts;
-                let mut task_plan = promotion.task_plan;
-                let intent_admission = match draft.intent_proposal.as_ref() {
-                    Some(proposal) => {
-                        let workspace_id = stable_workspace_id(workspace_root)
-                            .map_err(|error| anyhow!("failed to scope IntentPlan: {error}"))?;
-                        let stack_id = IntentStackId::new(stable_event_uuid(
-                            "sigil-plan-intent-stack-v1",
-                            &format!("{}:{}", draft.plan_id.as_str(), draft.plan_hash),
-                        ))?;
-                        let context = IntentAdmissionContextV1::initial(
-                            stack_id,
-                            workspace_id,
-                            session.session_scope_id().to_owned(),
-                        )?;
-                        let authority_event_id = stable_event_uuid(
-                            "sigil-plan-intent-acceptance-v1",
-                            &format!(
-                                "{}:{}:{}",
-                                draft.plan_id.as_str(),
-                                draft.plan_hash,
-                                task_id.as_str()
-                            ),
-                        );
-                        let authority = IntentAcceptanceAuthorityV1::explicit_user_confirmation(
-                            proposal.source_turn_id.clone(),
-                            authority_event_id,
-                            proposal.proposal_digest.clone(),
-                        )?;
-                        let admission =
-                            admit_suggested_decomposition(&context, proposal, &authority)?;
-                        task_plan = bind_task_plan_intents(
-                            &admission,
-                            task_plan,
-                            &promotion.intent_alias_bindings,
-                        )?;
-                        Some(admission)
-                    }
-                    None => {
-                        if !promotion.intent_alias_bindings.is_empty() {
-                            bail!(
-                                "plan {} carries intent aliases without a digest-bound proposal",
-                                plan_id.as_str()
-                            );
-                        }
-                        None
-                    }
-                };
-                (
-                    Some(task_plan),
-                    step_contracts,
-                    promotion.step_mapping,
-                    intent_admission,
-                )
-            }
-            None => (None, Vec::new(), Vec::new(), None),
-        };
-        let existing_accepted_plan = session
-            .task_state_projection()
-            .tasks
-            .get(&task_id)
-            .and_then(|task| {
-                task.plans
-                    .values()
-                    .find(|plan| plan.status == TaskPlanStatus::Accepted)
-            })
-            .cloned();
-        if task_plan.is_none()
-            && let Some(existing_plan) = existing_accepted_plan
-        {
-            session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-                task_id: task_id.clone(),
-                plan_version: existing_plan.plan_version,
-                status: TaskPlanStatus::Superseded,
-                steps: existing_plan.steps,
-                reason: Some(
-                    "workspace drift invalidated a crash-interrupted plan promotion".to_owned(),
-                ),
-            }))?;
-            let existing_task = session
-                .task_state_projection()
-                .tasks
-                .get(&task_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("stale promoted task prefix is missing its task run"))?;
-            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-                task_id: task_id.clone(),
-                parent_session_ref: existing_task.parent_session_ref,
-                objective: existing_task.objective,
-                title: None,
-                status: TaskRunStatus::Cancelled,
-                reason: Some(
-                    "plan creation cancelled because the workspace changed before commit"
-                        .to_owned(),
-                ),
-            }))?;
-            bail!(
-                "plan {} creation prefix conflicts with current workspace drift; refusing to execute an earlier promoted task plan",
-                plan_id.as_str()
-            );
-        }
-        let task_created = TaskCreatedFromPlanEntry {
-            plan_id: plan_id.clone(),
-            plan_hash: draft.plan_hash.clone(),
-            task_id: task_id.clone(),
-            task_plan_version: task_plan.as_ref().map_or(0, |plan| plan.plan_version),
-            step_mapping: step_mapping.clone(),
-            stale_reason,
-            created_at_ms: now_ms(),
-        };
-        let permission_grant = match request.permission_grant {
-            Some(permission) => {
-                if draft.target_paths.is_empty() {
-                    bail!(
-                        "plan {} has no concrete target paths for scoped edits",
-                        plan_id.as_str()
-                    );
-                }
-                Some(PlanPermissionGrantedEntry {
-                    plan_id: plan_id.clone(),
-                    plan_hash: draft.plan_hash.clone(),
-                    task_id: task_id.clone(),
-                    workspace_snapshot_id: current_workspace_snapshot_id,
-                    permission,
-                    scope: PlanApprovalScope {
-                        summary: format!("scoped edits for task {}", task_id.as_str()),
-                        workspace_paths: draft.target_paths.clone(),
-                    },
-                    expires: PlanApprovalExpiry::Session,
-                    granted_at_ms: now_ms(),
-                })
-            }
-            None => None,
-        };
-
-        let desired_task_status = if request.start_mode == PlanTaskStartMode::CreatePaused {
-            TaskRunStatus::Paused
-        } else {
-            TaskRunStatus::Started
-        };
-        let safe_objective = safe_persistence_text(&objective);
-        let existing_task = session.task_state_projection().tasks.get(&task_id).cloned();
-        match existing_task {
-            Some(existing)
-                if existing.parent_session_ref == parent_session_ref
-                    && existing.objective == safe_objective
-                    && existing.status == desired_task_status => {}
-            Some(existing)
-                if existing.parent_session_ref == parent_session_ref
-                    && existing.objective == safe_objective
-                    && existing.status == TaskRunStatus::Paused
-                    && desired_task_status == TaskRunStatus::Started
-                    && existing.participant_attempts.is_empty()
-                    && existing.steps.is_empty() =>
-            {
-                session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-                    task_id: task_id.clone(),
-                    parent_session_ref: parent_session_ref.clone(),
-                    objective: safe_objective.clone(),
-                    title: Some(sigil_kernel::task_semantic_title(&draft.summary)),
-                    status: TaskRunStatus::Started,
-                    reason: Some(format!(
-                        "resumed crash-interrupted creation from plan {}",
-                        plan_id.as_str()
-                    )),
-                }))?;
-            }
-            Some(_) => {
-                bail!(
-                    "plan {} task prefix conflicts with the requested task facts",
-                    plan_id.as_str()
-                );
-            }
-            None => session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-                task_id: task_id.clone(),
-                parent_session_ref: parent_session_ref.clone(),
-                objective: safe_objective,
-                title: Some(sigil_kernel::task_semantic_title(&draft.summary)),
-                status: desired_task_status,
-                reason: Some(format!("created from plan {}", plan_id.as_str())),
-            }))?,
-        }
-
-        if let Some(task_plan) = task_plan {
-            let existing_plan = session
-                .task_state_projection()
-                .tasks
-                .get(&task_id)
-                .and_then(|task| task.plans.get(&task_plan.plan_version))
-                .cloned();
-            let plan_already_exists = match existing_plan {
-                Some(existing)
-                    if existing.plan_version == task_plan.plan_version
-                        && existing.status == task_plan.status
-                        && existing.steps == task_plan.steps
-                        && existing.reason == task_plan.reason =>
-                {
-                    true
-                }
-                Some(_) => {
-                    bail!(
-                        "plan {} task-plan prefix conflicts with direct promotion",
-                        plan_id.as_str()
-                    );
-                }
-                None => false,
-            };
-            if let Some(admission) = intent_admission.as_ref() {
-                append_task_intent_plan_admission_with_step_contracts(
-                    session,
-                    admission,
-                    task_plan.clone(),
-                    step_contracts.clone(),
-                )?;
-            } else if !plan_already_exists {
-                let mut controls = Vec::with_capacity(step_contracts.len().saturating_add(2));
-                controls.push(ControlEntry::TaskPlan(task_plan.clone()));
-                controls.extend(
-                    step_contracts
-                        .iter()
-                        .cloned()
-                        .map(ControlEntry::TaskStepContractBoundV2),
-                );
-                controls.push(ControlEntry::TaskPlanContractSetCommittedV2(
-                    sigil_kernel::TaskPlanContractSetCommittedV2::new(&task_plan, &step_contracts)?,
-                ));
-                session.append_controls(controls)?;
-            } else {
-                let task_projection = session.task_state_projection();
-                let existing_contracts = task_projection
-                    .tasks
-                    .get(&task_id)
-                    .and_then(|task| task.plans.get(&task_plan.plan_version))
-                    .map(|plan| &plan.step_contracts)
-                    .context("directly promoted task plan disappeared during contract replay")?;
-                let mut missing = Vec::new();
-                for step_contract in &step_contracts {
-                    match existing_contracts.get(&step_contract.step_id) {
-                        Some(contract) if contract == &step_contract.contract => {}
-                        Some(_) => bail!(
-                            "plan {} task-step contract conflicts with direct promotion",
-                            plan_id.as_str()
-                        ),
-                        None => missing
-                            .push(ControlEntry::TaskStepContractBoundV2(step_contract.clone())),
-                    }
-                }
-                let committed = task_projection
-                    .tasks
-                    .get(&task_id)
-                    .and_then(|task| task.plans.get(&task_plan.plan_version))
-                    .is_some_and(|plan| plan.contract_set_committed_v2);
-                if !committed {
-                    missing.push(ControlEntry::TaskPlanContractSetCommittedV2(
-                        sigil_kernel::TaskPlanContractSetCommittedV2::new(
-                            &task_plan,
-                            &step_contracts,
-                        )?,
-                    ));
-                }
-                if !missing.is_empty() {
-                    session.append_controls(missing)?;
-                }
-            }
-        }
-
-        if let Some(grant) = permission_grant {
-            let existing_grants = session
-                .plan_artifact_projection()
-                .permission_grants
-                .get(&plan_id)
-                .cloned()
-                .unwrap_or_default();
-            if existing_grants.iter().any(|existing| {
-                existing.plan_hash == grant.plan_hash
-                    && existing.task_id == grant.task_id
-                    && existing.workspace_snapshot_id == grant.workspace_snapshot_id
-                    && existing.permission == grant.permission
-                    && existing.scope == grant.scope
-                    && existing.expires == grant.expires
-            }) {
-                // The crash-prefix retry already persisted this exact grant.
-            } else if existing_grants
-                .iter()
-                .any(|existing| existing.task_id == task_id)
-            {
-                bail!(
-                    "plan {} already has a conflicting permission grant for this task",
-                    plan_id.as_str()
-                );
-            } else {
-                session.append_control(ControlEntry::PlanPermissionGranted(grant))?;
-            }
-        }
-
-        let existing_created = session
-            .plan_artifact_projection()
-            .tasks_created
-            .get(&plan_id)
-            .and_then(|entries| entries.last())
-            .cloned();
-        match existing_created {
-            Some(existing)
-                if existing.plan_id == task_created.plan_id
-                    && existing.plan_hash == task_created.plan_hash
-                    && existing.task_id == task_created.task_id
-                    && existing.task_plan_version == task_created.task_plan_version
-                    && existing.step_mapping == task_created.step_mapping
-                    && existing.stale_reason == task_created.stale_reason => {}
-            Some(_) => {
-                bail!(
-                    "plan {} already has a conflicting task-created anchor",
-                    plan_id.as_str()
-                );
-            }
-            None => {
-                session.append_control(ControlEntry::TaskCreatedFromPlan(task_created.clone()))?
-            }
-        }
-
-        let existing_decision = session
-            .plan_artifact_projection()
-            .latest_decision(&plan_id)
-            .cloned();
-        match existing_decision {
-            Some(existing)
-                if existing.decision == PlanDecision::Accepted
-                    && existing.plan_hash == draft.plan_hash => {}
-            Some(existing) if existing.decision == PlanDecision::Accepted => {
-                bail!(
-                    "plan {} already has an accepted decision for another hash",
-                    plan_id.as_str()
-                );
-            }
-            _ => session.append_control(ControlEntry::PlanDecisionRecorded(decision))?,
-        }
-
-        let entries = session.entries().to_vec();
-        Ok(CreatedTaskFromPlan {
-            task_id,
-            task_id_value,
-            objective,
-            entry: task_created,
-            start_mode: request.start_mode,
-            entries,
-        })
-    }
-
-    /// Records a failed Run action without consuming the immutable plan.
-    ///
-    /// Invalid ids, stale hashes and already-created tasks do not acquire new durable authority,
-    /// so they remain ordinary request errors. Exact pending plans receive a bounded system
-    /// settlement that survives reload and permits a later retry.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the exact pending plan exists but its failure settlement conflicts
-    /// with durable decision state or cannot be appended.
-    #[cfg(test)]
-    pub fn record_task_creation_failure(
-        session: &mut Session,
-        request: &CreateTaskFromPlanRequest,
-        reason: &str,
-        now_ms: u64,
-    ) -> Result<Option<PlanDecisionRecordedEntry>> {
-        let Ok(plan_id) = PlanId::new(request.plan_id.clone()) else {
-            return Ok(None);
-        };
-        let projection = session.plan_artifact_projection();
-        let Some(draft) = projection.plans.get(&plan_id) else {
-            return Ok(None);
-        };
-        if draft.plan_hash != request.expected_plan_hash
-            || projection.task_created_for_plan(&plan_id)
-        {
-            return Ok(None);
-        }
-        let safe_reason = safe_persistence_text(reason);
-        let reason = safe_reason.chars().take(512).collect::<String>();
-        if let Some(existing) = projection.latest_decision(&plan_id) {
-            match existing.decision {
-                PlanDecision::TaskCreationFailed if existing.reason.as_deref() == Some(&reason) => {
-                    return Ok(Some(existing.clone()));
-                }
-                PlanDecision::SavedOnly
-                | PlanDecision::RevisionFailed
-                | PlanDecision::TaskCreationFailed => {}
-                PlanDecision::Accepted
-                | PlanDecision::Rejected
-                | PlanDecision::RevisionRequested
-                | PlanDecision::RevisionSucceeded => return Ok(None),
-            }
-        }
-        let entry = PlanDecisionRecordedEntry {
-            plan_id,
-            plan_hash: draft.plan_hash.clone(),
-            decision: PlanDecision::TaskCreationFailed,
-            decided_by: PlanDecisionActor::System,
-            decided_at_ms: now_ms,
-            reason: Some(reason),
-        };
-        session.append_control(ControlEntry::PlanDecisionRecorded(entry.clone()))?;
-        Ok(Some(entry))
-    }
-
     /// Discards a plan durably.
     ///
     /// # Errors
@@ -4283,21 +3680,6 @@ impl PlanReviewCoordinator {
             &request.expected_plan_hash,
             sigil_kernel::PublicPlanAction::Reject,
         )?;
-        if projection.task_created_for_plan(&plan_id) {
-            bail!("plan {} already created a task", plan_id.as_str());
-        }
-        if let Some(decision) = projection.latest_decision(&plan_id) {
-            match decision.decision {
-                PlanDecision::SavedOnly
-                | PlanDecision::RevisionFailed
-                | PlanDecision::TaskCreationFailed => {}
-                _ => bail!(
-                    "plan {} already has decision {}",
-                    plan_id.as_str(),
-                    decision.decision.as_str()
-                ),
-            }
-        }
         let entry = PlanDecisionRecordedEntry {
             plan_id,
             plan_hash: draft.plan_hash.clone(),
@@ -4312,14 +3694,12 @@ impl PlanReviewCoordinator {
     }
 }
 
-fn invalid_plan_draft_submission_reason(session: &Session) -> Option<String> {
-    session.entries().iter().rev().find_map(|entry| {
+fn invalid_plan_draft_submission_reason(entries: &[SessionLogEntry]) -> Option<String> {
+    entries.iter().rev().find_map(|entry| {
         let SessionLogEntry::ToolResultV3(result) = entry else {
             return None;
         };
-        if result.tool_name != sigil_kernel::SUBMIT_PLAN_DRAFT_TOOL_NAME
-            && result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
-            && result.tool_name != sigil_kernel::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
+        if result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
             || result.facts.status != "error"
         {
             return None;
@@ -4336,46 +3716,38 @@ fn invalid_plan_draft_submission_reason(session: &Session) -> Option<String> {
     })
 }
 
-/// Reads a successful typed `no_plan` result from the child session's durable tool projection.
-/// The result content is a bounded JSON envelope, so recovery never infers the outcome from
-/// natural-language text or from an in-memory disposition alone.
+/// Recovers the latest successful typed result from its exact assistant tool-call batch.
+/// The complete arguments are durable; bounded tool previews may truncate their JSON envelope.
 fn plan_review_no_plan_reason(session: &Session) -> Option<String> {
-    session.entries().iter().rev().find_map(|entry| {
-        let SessionLogEntry::ToolResultV3(result) = entry else {
-            return None;
-        };
-        if result.tool_name != sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
-            || result.facts.status != "ok"
-        {
-            return None;
-        }
-        let envelope =
-            sigil_kernel::decode_plan_review_result(&result.initial_model_view.preview).ok()?;
-        (envelope.outcome == sigil_kernel::PlanReviewResultOutcome::NoPlan)
-            .then_some(envelope.content)
-    })
-}
-
-fn plan_review_candidate_content(
-    session: &Session,
-    request: &PlanReviewRunRequest,
-) -> Result<Option<String>> {
-    let candidate = session.entries().iter().rev().find_map(|entry| {
-        let SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate)) =
-            entry
-        else {
-            return None;
-        };
-        (candidate.plan_review_id == request.plan_review_id
-            && candidate.attempt_id == request.attempt_id
-            && candidate.plan_id == request.plan_id
-            && candidate.completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
-            .then(|| (**candidate).clone())
-    });
-    candidate
-        .as_ref()
-        .map(|candidate| candidate_body_from_record(session, candidate))
-        .transpose()
+    let entries = session.entries();
+    let (result_index, result) = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, entry)| {
+            let SessionLogEntry::ToolResultV3(result) = entry else {
+                return None;
+            };
+            (result.tool_name == sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
+                && result.facts.status == "ok"
+                && result.facts.error.is_none())
+            .then_some((index, result))
+        })?;
+    // Only the immediately preceding assistant batch can own this receipt. Never search an
+    // older batch by call id: a failed or reused id cannot turn unexecuted arguments into success.
+    let batch = entries[..result_index]
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Assistant(message) => Some(message),
+            _ => None,
+        })?;
+    let call = batch
+        .tool_calls
+        .iter()
+        .find(|call| call.id == result.call_id && call.name == result.tool_name)?;
+    let envelope = sigil_kernel::decode_plan_review_result(&call.args_json).ok()?;
+    (envelope.outcome == sigil_kernel::PlanReviewResultOutcome::NoPlan).then_some(envelope.content)
 }
 
 /// Builds the model-resolution receipt when a typed draft confirms a previously preserved
@@ -4596,9 +3968,7 @@ fn record_plan_review_candidate(
             _ => None,
         })
     {
-        return (completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
-            .then(|| candidate_body_from_record(session, &existing))
-            .transpose();
+        return candidate_body_from_record(session, &existing).map(Some);
     }
     let candidate = candidate_record_for_session(
         session,
@@ -4621,9 +3991,7 @@ fn record_plan_review_candidate(
             candidate.clone(),
         )))?;
     }
-    (completeness == sigil_kernel::PlanReviewCandidateCompletenessV1::Complete)
-        .then(|| candidate_body_from_record(session, &candidate))
-        .transpose()
+    candidate_body_from_record(session, &candidate).map(Some)
 }
 
 fn record_plan_review_candidate_in_parent<H>(
@@ -4720,12 +4088,43 @@ impl PlanReviewCoordinator {
         request: &PlanReviewRunRequest,
         now_ms: u64,
     ) -> Result<()> {
-        if request.revision_request_id.is_none() {
-            bail!("non-revision started must use the application control commit hook");
+        let request_id = request
+            .revision_request_id
+            .as_ref()
+            .context("non-revision started must use the application control commit hook")?;
+        let Some(entry) = plan_review_started_attempt_entry(session, request, now_ms)? else {
+            return Ok(());
+        };
+        let reviews = PlanReviewProjection::from_entries(session.entries());
+        let already_recorded = reviews
+            .review(&request.plan_review_id)
+            .is_some_and(|review| {
+                review
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.attempt_id == request.attempt_id)
+            });
+        if !already_recorded {
+            let inputs = session.user_input_projection()?;
+            let current = inputs
+                .public_requests()
+                .into_iter()
+                .filter(|input| input.identity.request_id == *request_id)
+                .max_by_key(|input| input.identity.generation)
+                .context("revision dispatch lost its accepted guidance request")?;
+            let state = inputs
+                .request(&current.identity)
+                .context("revision dispatch lost its durable guidance state")?;
+            let expected = Self::recover_unstarted_revision_request(
+                session,
+                state,
+                request.workspace_snapshot_id.clone(),
+            )?;
+            if expected.as_ref() != Some(request) {
+                bail!("revision dispatch does not bind the current accepted guidance generation");
+            }
         }
-        if let Some(entry) = plan_review_started_attempt_entry(session, request, now_ms)? {
-            session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
-        }
+        session.append_control(ControlEntry::PlanReviewAttempt(entry))?;
         Ok(())
     }
 }
@@ -4867,6 +4266,29 @@ where
         .map(|_| ())
 }
 
+/// New revision dispatch identities include the accepted guidance generation, even when the
+/// preceding generation failed before persisting an attempt. Historical IDs are read unchanged.
+fn plan_review_attempt_id_for_guidance_generation(
+    plan_review_id: &PlanReviewId,
+    request_id: &sigil_kernel::UserInputRequestId,
+    generation: u32,
+    ordinal: u32,
+) -> Result<PlanReviewAttemptId> {
+    if generation == 0 || ordinal == 0 {
+        bail!("revision execution identity requires a non-zero guidance generation and ordinal");
+    }
+    PlanReviewAttemptId::new(stable_event_uuid(
+        "sigil-plan-review-revision-generation-attempt-v1",
+        &format!(
+            "{}|revision-request|{}|generation|{}|attempt|{}",
+            plan_review_id.as_str(),
+            request_id.as_str(),
+            generation,
+            ordinal,
+        ),
+    ))
+}
+
 /// A revision is identified by its accepted guidance request and exact base-plan binding.
 /// Ordinary plan reviews must never carry those fields: allowing that malformed hybrid through
 /// would revive the removed split revision settlement path.
@@ -4879,6 +4301,14 @@ fn validate_plan_review_request_lineage(request: &PlanReviewRunRequest) -> Resul
         (true, true, true) | (false, false, false) => {}
         (true, _, _) => bail!("revision plan review request is missing its base-plan binding"),
         (false, _, _) => bail!("non-revision plan review request carries a revision base binding"),
+    }
+    match (
+        request.revision_request_id.as_ref(),
+        request.revision_generation,
+    ) {
+        (Some(_), Some(generation)) if generation > 0 => {}
+        (None, None) => {}
+        _ => bail!("plan review request has an invalid revision guidance generation binding"),
     }
     match (request.source, request.explicit_objective.as_deref()) {
         (PlanReviewSource::ExplicitPlanCommand, Some(objective))
@@ -5079,10 +4509,8 @@ fn plan_review_run_input(
     draft_context: &sigil_kernel::PlanReviewDraftContext,
     cancellation: &sigil_kernel::RunCancellationHandle,
     parent_context: &[ModelMessage],
-    finalizer_evidence: Option<&str>,
-    candidate_text: Option<&str>,
+    finalizer_ordinal: Option<u32>,
     validation_feedback: Option<&str>,
-    finalizer_ordinal: u32,
 ) -> AgentRunInput {
     let mut transient = vec![ModelMessage::system(
         plan_review_system_prompt_contract_material(),
@@ -5094,37 +4522,25 @@ fn plan_review_run_input(
         ));
         initial_context.extend(parent_context.iter().cloned());
     }
-    // Keep the source objective in the fixed prefix. Subsequent provider turns append retained
-    // child history after this boundary instead of re-inserting the objective at the tail.
+    // Keep the source objective in the fixed prefix, before the retained child conversation.
     initial_context.push(ModelMessage::user(request.objective.clone()));
-    if let Some(evidence) = finalizer_evidence {
+    if finalizer_ordinal.is_some() {
         transient.push(ModelMessage::system(
             plan_review_no_draft_retry_contract_material(),
         ));
-        initial_context.push(ModelMessage::user(format!(
-            "Bounded host evidence bundle (do not perform more research):\n{evidence}"
-        )));
-    }
-    if let Some(candidate) = candidate_text {
-        initial_context.push(ModelMessage::user(format!(
-            "Complete Plan candidate from the read-only research phase (preserve this text exactly while classifying or repairing it):\n{candidate}"
-        )));
     }
     if let Some(feedback) = validation_feedback {
         initial_context.push(ModelMessage::user(format!(
             "Previous submit-only attempt was rejected by host validation. Correct this exact issue and submit one valid typed result; do not use research tools:\n{feedback}"
         )));
     }
+    let logical_run_id = finalizer_ordinal.map_or_else(
+        || request.child_logical_run_id(),
+        |ordinal| format!("{}-finalizer-{ordinal}", request.child_logical_run_id()),
+    );
     let input = AgentRunInput::without_persisted_user_message(transient)
         .with_initial_context(initial_context)
-        .with_logical_run_id(if finalizer_evidence.is_some() {
-            format!(
-                "{}-finalizer-{finalizer_ordinal}",
-                request.child_logical_run_id()
-            )
-        } else {
-            request.child_logical_run_id()
-        })
+        .with_logical_run_id(logical_run_id)
         .with_child_cancellation(cancellation.clone())
         .with_run_purpose(AgentRunPurpose::PlanReview(
             sigil_kernel::PlanReviewPurposeContext {
@@ -5135,12 +4551,8 @@ fn plan_review_run_input(
                 route_decision_id: request.route_decision_id.clone(),
             },
         ))
-        .with_plan_review_draft({
-            let mut context = draft_context.clone();
-            context.candidate_content = candidate_text.map(ToOwned::to_owned);
-            context
-        });
-    if finalizer_evidence.is_some() {
+        .with_plan_review_draft(draft_context.clone());
+    if finalizer_ordinal.is_some() {
         input.with_plan_review_submit_only()
     } else {
         input.with_soft_checkpoint(
@@ -5164,8 +4576,6 @@ fn plan_review_continuation_input(
         parent_context,
         None,
         None,
-        None,
-        0,
     )
     .with_logical_run_id(continuation.continuation_logical_run_id.as_str())
     .with_user_input_continuation_context(
@@ -5195,7 +4605,7 @@ fn plan_review_draft_ready_outcome(
     })
 }
 
-fn complete_plan_review_run(
+pub(crate) fn complete_plan_review_run(
     cancellation: &sigil_kernel::RunCancellationHandle,
     outcome: PlanReviewRunOutcome,
 ) -> Result<PlanReviewRunOutcome> {
@@ -5333,11 +4743,15 @@ fn plan_review_request_from_attempt(
     attempt: &PlanReviewAttemptEntry,
 ) -> Result<PlanReviewRunRequest> {
     let mut objective = plan_review_original_objective_from_attempt(parent_session, attempt)?;
-    if attempt.revision_request_id.is_some() {
-        let guidance = accepted_revision_guidance_for_attempt(parent_session, attempt)?;
+    let revision_generation = if attempt.revision_request_id.is_some() {
+        let (generation, guidance) =
+            accepted_revision_guidance_for_attempt(parent_session, attempt)?;
         objective.push_str("\n\nUser revision guidance:\n");
         objective.push_str(&guidance);
-    }
+        Some(generation)
+    } else {
+        None
+    };
     Ok(PlanReviewRunRequest {
         plan_review_id: attempt.plan_review_id.clone(),
         attempt_id: attempt.attempt_id.clone(),
@@ -5350,6 +4764,7 @@ fn plan_review_request_from_attempt(
             "unsupported Plan attempt format: executable attempt has no finalizer binding",
         )?,
         revision_request_id: attempt.revision_request_id.clone(),
+        revision_generation,
         attempt_ordinal: attempt.attempt_ordinal,
         base_plan_id: attempt.base_plan_id.clone(),
         base_plan_hash: attempt.base_plan_hash.clone(),
@@ -5466,7 +4881,7 @@ fn plan_review_original_objective_from_request(
 fn accepted_revision_guidance_for_attempt(
     parent_session: &Session,
     attempt: &PlanReviewAttemptEntry,
-) -> Result<String> {
+) -> Result<(u32, String)> {
     let request_id = attempt
         .revision_request_id
         .as_ref()
@@ -5482,6 +4897,7 @@ fn accepted_revision_guidance_for_attempt(
     accepted_revision_guidance_for_lineage(
         parent_session,
         &attempt.plan_review_id,
+        &attempt.attempt_id,
         request_id,
         base_plan_id,
         base_plan_hash,
@@ -5504,28 +4920,45 @@ fn accepted_revision_guidance_for_request(
         .base_plan_hash
         .as_deref()
         .context("revision plan review request lost its base plan hash")?;
-    accepted_revision_guidance_for_lineage(
+    let (generation, guidance) = accepted_revision_guidance_for_lineage(
         parent_session,
         &request.plan_review_id,
+        &request.attempt_id,
         request_id,
         base_plan_id,
         base_plan_hash,
-    )
+    )?;
+    if request.revision_generation != Some(generation) {
+        bail!("revision request does not bind its accepted guidance generation");
+    }
+    Ok(guidance)
 }
 
 fn accepted_revision_guidance_for_lineage(
     parent_session: &Session,
     plan_review_id: &PlanReviewId,
+    attempt_id: &PlanReviewAttemptId,
     request_id: &sigil_kernel::UserInputRequestId,
     base_plan_id: &PlanId,
     base_plan_hash: &str,
-) -> Result<String> {
+) -> Result<(u32, String)> {
     let expected_root_logical_run_id = sigil_kernel::LogicalRunId::new(stable_event_uuid(
         "sigil-plan-revision-root-run-v1",
         plan_review_id.as_str(),
     ))?;
-    let requested = parent_session
-        .entries()
+    // Each new guidance generation is accepted before its attempt starts. Use that immutable
+    // prefix so later revision answers cannot rewrite an older attempt's source on replay.
+    let entries = parent_session.entries();
+    let end = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry,
+        SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+        if attempt.attempt_id == *attempt_id)
+        })
+        .unwrap_or(entries.len());
+    let source_entries = &entries[..end];
+    let requested = source_entries
         .iter()
         .rev()
         .find_map(|entry| match entry {
@@ -5548,8 +4981,7 @@ fn accepted_revision_guidance_for_lineage(
             _ => None,
         })
         .context("revision attempt lost its durable guidance request")?;
-    let accepted = parent_session
-        .entries()
+    let accepted = source_entries
         .iter()
         .rev()
         .find_map(|entry| match entry {
@@ -5562,7 +4994,7 @@ fn accepted_revision_guidance_for_lineage(
             _ => None,
         })
         .context("revision attempt lost its accepted durable guidance")?;
-    match accepted.decision {
+    let guidance = match accepted.decision {
         sigil_kernel::UserInputDurableDecisionV1::Submitted {
             answers: Some(answers),
             ..
@@ -5578,107 +5010,8 @@ fn accepted_revision_guidance_for_lineage(
             })
             .context("revision attempt accepted guidance is missing its text value"),
         _ => bail!("revision attempt guidance was not accepted as submitted text"),
-    }
-}
-
-fn build_plan_review_finalizer_session(
-    parent_session: &Session,
-    request: &PlanReviewRunRequest,
-    corrective_ordinal: u32,
-    resource_bundle: Option<&CurrentSchemaPlanReviewChildResourceBundleV1>,
-) -> Result<Session> {
-    if let Some(bundle) = resource_bundle {
-        let store = sigil_kernel::JsonlSessionStore::new(bundle.session_log_path())?;
-        let mut session = Session::load_from_store(
-            parent_session.provider_name(),
-            parent_session.model_name(),
-            store,
-        )?;
-        session.attach_tool_artifact_store_override(bundle.artifact_store());
-        attach_session_url_capability_store(&mut session)?;
-        crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
-        return Ok(session);
-    }
-    if let Some(parent_path) = parent_session.store_path() {
-        let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
-        let child_ref = if corrective_ordinal == 1 {
-            request.finalizer_session_ref.clone()
-        } else {
-            plan_review_finalizer_session_ref(
-                &request.plan_review_id,
-                &request.attempt_id,
-                corrective_ordinal,
-            )
-        };
-        let store = sigil_kernel::JsonlSessionStore::new(child_ref.resolve(parent_dir))?;
-        let mut session = Session::load_from_store(
-            parent_session.provider_name(),
-            parent_session.model_name(),
-            store,
-        )?;
-        attach_session_url_capability_store(&mut session)?;
-        crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
-        return Ok(session);
-    }
-    let mut session = Session::new(parent_session.provider_name(), parent_session.model_name());
-    attach_session_url_capability_store(&mut session)?;
-    crate::session_composition::inherit_session_composition(parent_session, &mut session)?;
-    Ok(session)
-}
-
-fn plan_review_finalizer_evidence_bundle(
-    request: &PlanReviewRunRequest,
-    research_session: &Session,
-) -> String {
-    const MAX_EVIDENCE_BYTES: usize = 24 * 1024;
-    const MAX_RESULTS: usize = 12;
-    let mut lines = vec![
-        format!("plan_review_id: {}", request.plan_review_id.as_str()),
-        format!("attempt_id: {}", request.attempt_id.as_str()),
-        format!("workspace_snapshot: {:?}", request.workspace_snapshot_id),
-    ];
-    if let (Some(base_id), Some(base_hash)) = (
-        request.base_plan_id.as_ref(),
-        request.base_plan_hash.as_ref(),
-    ) {
-        lines.push(format!("base_plan: {} @ {}", base_id.as_str(), base_hash));
-    }
-    let results = research_session
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::ToolResultV3(result) => Some(result),
-            _ => None,
-        })
-        .rev()
-        .take(MAX_RESULTS)
-        .collect::<Vec<_>>();
-    for result in results.into_iter().rev() {
-        let artifact = result
-            .initial_model_view
-            .artifact_ref
-            .as_ref()
-            .map(|reference| format!(" artifact={}", reference.artifact_id))
-            .unwrap_or_default();
-        lines.push(format!(
-            "tool {} call={} hash={}{}\n{}",
-            result.tool_name,
-            result.call_id,
-            result.artifact_hash,
-            artifact,
-            result.initial_model_view.preview
-        ));
-    }
-    let mut evidence = lines.join("\n\n");
-    if evidence.len() > MAX_EVIDENCE_BYTES {
-        let mut end = MAX_EVIDENCE_BYTES.saturating_sub("\n...[evidence truncated]".len());
-        while !evidence.is_char_boundary(end) {
-            end = end.saturating_sub(1);
-        }
-        evidence.truncate(end);
-        evidence.push_str("\n...[evidence truncated]");
-    }
-    evidence
+    }?;
+    Ok((requested.request.identity.generation, guidance))
 }
 
 fn validate_plan_review_child_draft(
@@ -5706,23 +5039,80 @@ fn validate_plan_review_child_draft(
     Ok(())
 }
 
+/// Actions on a readable draft depend on its lifecycle, never on which card is visible.
+/// Historical compile failures do not invalidate readable Plan text.
+pub(crate) fn plan_draft_actions(
+    status: PlanReviewAttemptStatus,
+    decision: Option<PlanDecision>,
+    revision_pending: bool,
+) -> Vec<sigil_kernel::PublicPlanAction> {
+    use sigil_kernel::PublicPlanAction::{Reject, Revise, Run, Save};
+
+    if revision_pending
+        || !matches!(
+            status,
+            PlanReviewAttemptStatus::DraftReady | PlanReviewAttemptStatus::CompileFailed
+        )
+    {
+        return Vec::new();
+    }
+    match decision {
+        None | Some(PlanDecision::RevisionFailed | PlanDecision::TaskCreationFailed) => {
+            vec![Run, Save, Revise, Reject]
+        }
+        Some(PlanDecision::SavedOnly) => vec![Run, Revise, Reject],
+        Some(
+            PlanDecision::Accepted
+            | PlanDecision::Rejected
+            | PlanDecision::RevisionRequested
+            | PlanDecision::RevisionSucceeded,
+        ) => Vec::new(),
+    }
+}
+
 fn ensure_plan_action_allowed(
     session: &Session,
     plan_id: &PlanId,
     expected_plan_hash: &str,
     action: sigil_kernel::PublicPlanAction,
 ) -> Result<()> {
-    let review =
-        crate::conversation_display::public_plan_review_from_entries(session.entries(), None)?
-            .context("plan action has no canonical review projection")?;
-    if review.plan_id != plan_id.as_str()
-        || review.plan_hash.as_deref() != Some(expected_plan_hash)
-        || review.status != sigil_kernel::PublicPlanReviewStatus::DraftReady
-        || !review.allowed_actions.contains(&action)
+    let plans = session.plan_artifact_projection();
+    let draft = plans
+        .plans
+        .get(plan_id)
+        .context("plan action has no durable draft")?;
+    let reviews = PlanReviewProjection::from_entries(session.entries());
+    let attempt = reviews
+        .attempt_for_plan(plan_id)
+        .context("plan action has no bound review attempt")?;
+    let review = reviews
+        .review(&attempt.plan_review_id)
+        .context("plan action has no bound review lifecycle")?;
+    let revision_running = review.latest_attempt().is_some_and(|latest| {
+        latest.base_plan_id.as_ref() == Some(plan_id) && !latest.status.is_terminal()
+    });
+    let guidance_pending = session
+        .user_input_projection()?
+        .public_requests()
+        .iter()
+        .any(|input| {
+            input.status == sigil_kernel::UserInputStatusV1::Requested
+                && matches!(&input.source,
+                sigil_kernel::UserInputSourceV1::PlanRevision { base_plan_id, .. }
+                if base_plan_id == plan_id)
+        });
+    let allowed = plan_draft_actions(
+        attempt.status,
+        plans.latest_decision(plan_id).map(|entry| entry.decision),
+        revision_running || guidance_pending,
+    );
+    if draft.plan_hash != expected_plan_hash
+        || !review.conflicts.is_empty()
+        || plans.task_created_for_plan(plan_id)
+        || !allowed.contains(&action)
     {
         bail!(
-            "plan {} action {} is unavailable in the current review state \
-             (projected_plan={}, projected_hash={}, status={:?}, allowed_actions={:?})",
+            "plan {} action {} is unavailable in its current review state",
             plan_id.as_str(),
             match action {
                 sigil_kernel::PublicPlanAction::Run => "run",
@@ -5732,10 +5122,6 @@ fn ensure_plan_action_allowed(
                 sigil_kernel::PublicPlanAction::AdoptCandidate => "adopt_candidate",
                 sigil_kernel::PublicPlanAction::RetryReview => "retry_review",
             },
-            review.plan_id,
-            review.plan_hash.as_deref().unwrap_or("none"),
-            review.status,
-            review.allowed_actions,
         );
     }
     Ok(())
@@ -5750,34 +5136,30 @@ pub fn plan_handoff_workspace_snapshot_id(
     let scope = root_config
         .verification
         .scope_for_hash(sigil_kernel::DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
-    let snapshot = build_workspace_snapshot(workspace_root, workspace_id, &scope, 0)?;
-    Ok(snapshot.workspace_snapshot_id)
+    match build_workspace_snapshot(workspace_root, workspace_id, &scope, 0) {
+        Ok(snapshot) => Ok(snapshot.workspace_snapshot_id),
+        Err(error) => {
+            tracing::warn!(error = %error, "plan workspace observation unavailable");
+            Ok(None)
+        }
+    }
 }
 
+/// Informational workspace context; never an admission or Plan-decision gate.
 pub fn plan_handoff_stale_reason(
     base_workspace_snapshot_id: Option<&str>,
     current_workspace_snapshot_id: Option<&str>,
 ) -> Option<String> {
     match (base_workspace_snapshot_id, current_workspace_snapshot_id) {
         (Some(base), Some(current)) => (base != current).then(|| {
-            format!(
-                "plan may be stale: workspace changed since plan was created (base={}, current={})",
-                truncate_plan_snapshot_id(base),
-                truncate_plan_snapshot_id(current)
-            )
+            "workspace changed; Run and Save remain available. Execution uses current files."
+                .to_owned()
         }),
-        (Some(base), None) => Some(format!(
-            "plan may be stale: current workspace snapshot is unavailable (base={})",
-            truncate_plan_snapshot_id(base)
-        )),
-        (None, _) => Some(
-            "plan cannot be direct-promoted: its base workspace snapshot is unavailable".to_owned(),
+        _ => Some(
+            "workspace snapshot unavailable; Run and Save remain available. Execution uses current files."
+                .to_owned(),
         ),
     }
-}
-
-fn truncate_plan_snapshot_id(snapshot_id: &str) -> String {
-    snapshot_id.chars().take(24).collect()
 }
 
 pub fn now_ms() -> u64 {
@@ -5904,15 +5286,29 @@ impl PlanExecutionService {
         if projection.plan_is_rejected(&command.plan_id) {
             return Err(sigil_kernel::PlanRunRejectionV1::PlanRejected);
         }
-        // Current Plan approval requires the durable DraftReady review. Advisory precompile
-        // markers do not grant approval authority.
-        let reviewable = PlanReviewProjection::from_entries(session.entries())
-            .attempt_for_plan(&command.plan_id)
-            .is_some_and(|attempt| attempt.status == PlanReviewAttemptStatus::DraftReady);
-        if !reviewable
+        // A historical TaskCreatedFromPlan link without its matching approval is a durable
+        // command prefix, not a fresh reviewable Plan. Report the identity conflict before the
+        // lifecycle gate turns the same state into the less specific "not ready" result.
+        if projection.latest_decision(&command.plan_id).is_none()
             && projection
-                .latest_decision(&command.plan_id)
-                .is_none_or(|decision| decision.decision != PlanDecision::Accepted)
+                .tasks_created
+                .get(&command.plan_id)
+                .is_some_and(|entries| !entries.is_empty())
+        {
+            return Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict);
+        }
+        // The same per-Plan state drives display and decisions. A previously accepted command
+        // is replayed below against its immutable approval identity, independently of progress.
+        if projection
+            .latest_decision(&command.plan_id)
+            .is_none_or(|decision| decision.decision != PlanDecision::Accepted)
+            && ensure_plan_action_allowed(
+                session,
+                &command.plan_id,
+                &command.expected_plan_hash,
+                sigil_kernel::PublicPlanAction::Run,
+            )
+            .is_err()
         {
             return Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady {
                 plan_state: projection.plan_ready_state(&command.plan_id),
@@ -5979,7 +5375,6 @@ impl PlanExecutionService {
                 && existing_link
                     .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
                 && task.direct_execution_admission.as_ref() == Some(&direct_execution)
-                && task.checklist.as_ref() == checklist.as_ref()
                 && projection
                     .permission_grants
                     .get(&command.plan_id)
@@ -6070,7 +5465,6 @@ impl PlanExecutionService {
                     .is_some_and(|link| link.task_id == task_id && link.task_plan_version == 0)
                 && current_task.tasks.get(&task_id).is_some_and(|task| {
                     task.direct_execution_admission.as_ref() == Some(&direct_execution)
-                        && task.checklist.as_ref() == checklist.as_ref()
                 })
                 && current
                     .permission_grants
@@ -6159,144 +5553,6 @@ impl PlanExecutionService {
             already_approved,
         }
     }
-
-    /// Builds historical RFC-0067 adoption fixtures for domain regression tests.
-    ///
-    /// Idempotency: retrying the same `command_id` returns the same receipt; adopting the same
-    /// candidate with another command returns the same Task identity with `already_adopted`.
-    /// Typed rejections leave the Plan actionable.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` only for rejections that are not `PlanRunRejectionV1`-typed (for example an
-    /// adoption payload that cannot be serialized).
-    #[cfg(test)]
-    pub fn adopt(
-        session: &mut Session,
-        parent_session_ref: SessionRef,
-        command: &sigil_kernel::PlanRunCommandV1,
-        now_ms: u64,
-    ) -> std::result::Result<sigil_kernel::PlanRunReceiptV1, sigil_kernel::PlanRunRejectionV1> {
-        // RFC-0067 9.1: the command must be bound to the exact durable session it is executed
-        // against; adapters must not be able to adopt across session boundaries.
-        if command.session_id != session.session_scope_id() {
-            return Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict);
-        }
-        let projection = session.plan_artifact_projection();
-        let draft = projection
-            .plans
-            .get(&command.plan_id)
-            .ok_or(sigil_kernel::PlanRunRejectionV1::PlanMissing)?;
-        if draft.plan_hash != command.expected_plan_hash {
-            return Err(sigil_kernel::PlanRunRejectionV1::PlanHashStale {
-                expected: command.expected_plan_hash.clone(),
-                current: draft.plan_hash.clone(),
-            });
-        }
-        let plan_state = projection.plan_ready_state(&command.plan_id);
-        if plan_state != sigil_kernel::PlanReadyStateV1::Ready {
-            return Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady { plan_state });
-        }
-        if projection.plan_is_rejected(&command.plan_id) {
-            return Err(sigil_kernel::PlanRunRejectionV1::PlanRejected);
-        }
-        let candidate = projection
-            .latest_candidate(&command.plan_id)
-            .cloned()
-            .ok_or(sigil_kernel::PlanRunRejectionV1::CandidateMissing)?;
-        if candidate.candidate_hash != command.expected_candidate_hash {
-            return Err(sigil_kernel::PlanRunRejectionV1::CandidateHashMismatch {
-                expected: command.expected_candidate_hash.clone(),
-                current: candidate.candidate_hash.clone(),
-            });
-        }
-        let permission_grant = match command.permission {
-            sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy => None,
-            sigil_kernel::PlanRunPermissionChoiceV1::GrantScopedEditsOnce => {
-                if candidate.permission_scope_candidate.is_none() {
-                    return Err(
-                        sigil_kernel::PlanRunRejectionV1::PermissionChoiceUnavailable {
-                            reason: "the plan candidate has no concrete target paths".to_owned(),
-                        },
-                    );
-                }
-                Some(PlanApprovalPermission::WorkspaceEdits)
-            }
-        };
-        let adoption = sigil_kernel::PlanExecutionAdoptedV1Entry {
-            command_id: command.command_id.clone(),
-            plan_id: command.plan_id.clone(),
-            plan_hash: command.expected_plan_hash.clone(),
-            candidate_hash: command.expected_candidate_hash.clone(),
-            task_id: candidate.task_id.clone(),
-            task_title: candidate.semantic_title.clone(),
-            parent_session_ref,
-            start_mode: command.start_mode,
-            permission_grant,
-            adopted_candidate: Box::new(candidate),
-            execution_segments: None,
-            initial_phase: sigil_kernel::TaskExecutionPhaseV1::Preparing,
-            adopted_at_ms: now_ms,
-        };
-        let commit = sigil_kernel::append_plan_execution_adoption_at_frontier(
-            session,
-            &adoption,
-            command.expected_durable_frontier,
-        )
-        .map_err(
-            |error| sigil_kernel::PlanRunRejectionV1::SessionWriterUnavailable {
-                reason: format!("{error:#}"),
-            },
-        )?;
-        let projection = session.plan_artifact_projection();
-        match commit {
-            sigil_kernel::PlanExecutionAdoptionCommit::Appended => {
-                Ok(Self::receipt_from_adoption(adoption, now_ms, false))
-            }
-            sigil_kernel::PlanExecutionAdoptionCommit::CasSkipped => {
-                if let Some(existing) = projection.adoption_for_command(&command.command_id) {
-                    return Ok(Self::receipt_from_adoption(existing.clone(), now_ms, true));
-                }
-                if let Some(existing) = projection
-                    .adoptions
-                    .values()
-                    .flatten()
-                    .find(|existing| existing.candidate_hash == command.expected_candidate_hash)
-                {
-                    return Ok(Self::receipt_from_adoption(existing.clone(), now_ms, true));
-                }
-                Err(sigil_kernel::PlanRunRejectionV1::FrontierStale {
-                    expected: command.expected_durable_frontier,
-                    current: session.durable_frontier_sequence(),
-                })
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn receipt_from_adoption(
-        adoption: sigil_kernel::PlanExecutionAdoptedV1Entry,
-        now_ms: u64,
-        already_adopted: bool,
-    ) -> sigil_kernel::PlanRunReceiptV1 {
-        let command_id = adoption.command_id.clone();
-        let candidate_hash = adoption.candidate_hash.clone();
-        sigil_kernel::PlanRunReceiptV1 {
-            command_id: command_id.clone(),
-            receipt_id: sigil_kernel::stable_event_uuid(
-                "sigil-plan-run-receipt-v1",
-                &format!("{command_id}:{candidate_hash}"),
-            ),
-            plan_id: adoption.plan_id,
-            plan_hash: adoption.plan_hash,
-            candidate_hash: adoption.candidate_hash,
-            task_id: adoption.task_id,
-            task_title: adoption.task_title,
-            initial_phase: adoption.initial_phase,
-            accepted_at_ms: now_ms,
-            already_adopted,
-        }
-    }
 }
 
 /// Environment probes supplied by the surface that will actually execute the Task.
@@ -6313,20 +5569,17 @@ pub struct TaskAdmissionProbeContext {
     pub external_writer_active: bool,
 }
 
-/// Minimum free disk bytes admission accepts before reporting `disk_space_exhausted`.
-pub const TASK_ADMISSION_MIN_DISK_SPACE_BYTES: u64 = 64 * 1024 * 1024;
-
 /// Builds honest environment probes for one Task admission attempt (RFC-0067 6.3, 10.3).
 ///
 /// Every probe observes the current environment instead of assuming availability:
 /// - the provider route comes from the configured default connection shape, and credential
 ///   availability resolves the exact credential source (environment variable or stored record)
 ///   the provider build would use;
-/// - free disk space is measured on the workspace filesystem;
+/// - free disk space is measured on the workspace filesystem as an advisory observation;
 /// - the permission profile only blocks when the candidate actually requires workspace writes
 ///   and the mode is `read_only`;
-/// - verification checks require both `verification.auto_run != "never"` and a registered tool
-///   carrying the `verification_run` capability (when the registry is observable);
+/// - verification auto-run availability is recorded; required checks govern completion, not
+///   whether task execution can begin;
 /// - an active exclusive write lease owned by another actor means an external writer holds the
 ///   workspace. Leases owned by this Task's own steps (task:<id>:...) are not external writers.
 ///   Session-local lease evidence cannot observe writers in other sessions/processes; that
@@ -6473,10 +5726,6 @@ pub fn admit_adopted_task(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let requires_verification = candidate
-        .step_contracts
-        .iter()
-        .any(|binding| !binding.contract.check_spec_refs.is_empty());
     let observation = sigil_kernel::TaskAdmissionObservationV1 {
         base_workspace_snapshot_id: base_snapshot.clone(),
         current_workspace_snapshot_id: current_snapshot.clone(),
@@ -6520,31 +5769,10 @@ pub fn admit_adopted_task(
                 resolved_at_ms: None,
             }
         };
-        match workspace_state {
-            sigil_kernel::WorkspaceAdmissionStateV1::ExternalDrift => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceChanged,
-                    "the workspace changed since the plan was created; re-admit after reviewing the drift"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[
-                        sigil_kernel::TaskBlockerActionV1::RetryAdmission,
-                        sigil_kernel::TaskBlockerActionV1::Replan,
-                        sigil_kernel::TaskBlockerActionV1::Cancel,
-                    ],
-                ))
-            }
-            sigil_kernel::WorkspaceAdmissionStateV1::SnapshotUnavailable => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceSnapshotUnavailable,
-                    "the current workspace snapshot is unavailable; the task is held until the workspace can be verified"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
+        // Snapshot drift, free-space estimates, and verification auto-run availability are
+        // observations, not execution authority. Real writes enforce capacity/conflict checks;
+        // required verification remains a completion condition in the task runner.
+        match () {
             _ if !missing_capabilities.is_empty() => {
                 let capability = missing_capabilities.first().copied();
                 sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
@@ -6602,28 +5830,6 @@ pub fn admit_adopted_task(
                 sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
                     sigil_kernel::TaskBlockerReasonCodeV1::ExternalWriterActive,
                     "another writer holds the workspace; retry after it releases the workspace"
-                        .to_owned(),
-                    None,
-                    None,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
-            _ if probes
-                .disk_space_bytes
-                .is_some_and(|bytes| bytes < TASK_ADMISSION_MIN_DISK_SPACE_BYTES) =>
-            {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::DiskSpaceExhausted,
-                    "free disk space is below the task admission threshold".to_owned(),
-                    None,
-                    None,
-                    &[sigil_kernel::TaskBlockerActionV1::RetryAdmission],
-                ))
-            }
-            _ if requires_verification && !probes.verification_runner_available => {
-                sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker(
-                    sigil_kernel::TaskBlockerReasonCodeV1::VerificationRunnerUnavailable,
-                    "the plan requires verification checks but the verification runner is unavailable"
                         .to_owned(),
                     None,
                     None,
@@ -6700,45 +5906,12 @@ pub fn plan_run_rejection_message(rejection: &sigil_kernel::PlanRunRejectionV1) 
 }
 
 pub fn application_plan_decision(
-    root_config: &RootConfig,
-    workspace_root: &Path,
     session_log_path: &Path,
     expected_scope: &str,
     command: &ApplicationPlanDecisionCommand,
 ) -> Result<ApplicationPlanDecisionReceipt> {
-    let effective_config = root_config.with_effective_composition()?;
-    let root_config = &effective_config;
-    anyhow::ensure!(
-        root_config.task.enabled
-            && root_config
-                .composition
-                .allows(sigil_kernel::OptionalCapability::TaskOrchestration),
-        "task orchestration is not selected for this session composition"
-    );
-    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
-    let (_, fallback_route) =
-        crate::provider_connections::resolve_default_model_route(root_config)?;
-    let inspected = crate::provider_connections::inspect_session_for_route_resume(
-        root_config,
-        &fallback_route,
-        store.clone(),
-    )?;
-    if inspected.session.session_scope_id() != expected_scope {
-        bail!("plan decision session scope mismatch");
-    }
-    crate::validate_session_composition(&inspected.session, root_config)?;
     let mut session =
-        crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
-            root_config,
-            &fallback_route,
-            store,
-            None,
-            None,
-            None,
-        )?;
-    if session.session_scope_id() != expected_scope {
-        bail!("plan decision session scope mismatch");
-    }
+        crate::application_run::load_application_control_session(session_log_path, expected_scope)?;
     let plan_id = PlanId::new(command.plan_id.clone())
         .map_err(|error| anyhow!("invalid plan id for decision: {error}"))?;
     let draft = session
@@ -6911,34 +6084,19 @@ pub fn application_plan_decision(
             }
         }
         ApplicationPlanAction::Revise => {
-            let workspace_snapshot_id =
-                plan_handoff_workspace_snapshot_id(root_config, workspace_root)
-                    .ok()
-                    .flatten();
-            let revision_request = PlanReviewCoordinator::retry_plan_revision(
+            let requested = PlanReviewCoordinator::request_plan_revision_guidance(
                 &mut session,
                 &plan_id,
                 &command.expected_plan_hash,
-                workspace_snapshot_id,
                 now_ms(),
             )?;
-            let user_input_request = if revision_request.is_none() {
-                let requested = PlanReviewCoordinator::request_plan_revision_guidance(
-                    &mut session,
-                    &plan_id,
-                    &command.expected_plan_hash,
-                    now_ms(),
-                )?;
-                Some(
-                    session
-                        .user_input_projection()?
-                        .request(&requested.request.identity)
-                        .map(sigil_kernel::UserInputRequestStateV1::public_view)
-                        .context("revision guidance request was not projected")?,
-                )
-            } else {
-                None
-            };
+            let user_input_request = Some(
+                session
+                    .user_input_projection()?
+                    .request(&requested.request.identity)
+                    .map(sigil_kernel::UserInputRequestStateV1::public_view)
+                    .context("revision guidance request was not projected")?,
+            );
             ApplicationPlanDecisionReceipt {
                 plan_id: command.plan_id.clone(),
                 plan_hash: draft.as_ref().expect("validated draft").plan_hash.clone(),
@@ -6949,7 +6107,7 @@ pub fn application_plan_decision(
                 task_phase: None,
                 task_blocker: None,
                 user_input_request,
-                revision_request,
+                revision_request: None,
             }
         }
         ApplicationPlanAction::Reject => {
@@ -6990,36 +6148,8 @@ pub fn application_plan_revision_guidance_decision(
     sigil_kernel::UserInputDecisionReceiptV1,
     Option<PlanReviewRunRequest>,
 )> {
-    let effective_config = root_config.with_effective_composition()?;
-    let root_config = &effective_config;
-    anyhow::ensure!(
-        root_config.task.enabled
-            && root_config
-                .composition
-                .allows(sigil_kernel::OptionalCapability::TaskOrchestration),
-        "task orchestration is not selected for this session composition"
-    );
-    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
-    let (_, fallback_route) =
-        crate::provider_connections::resolve_default_model_route(root_config)?;
-    let inspected = crate::provider_connections::inspect_session_for_route_resume(
-        root_config,
-        &fallback_route,
-        store.clone(),
-    )?;
-    crate::validate_session_composition(&inspected.session, root_config)?;
     let mut session =
-        crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
-            root_config,
-            &fallback_route,
-            store,
-            None,
-            None,
-            None,
-        )?;
-    if session.session_scope_id() != expected_scope {
-        bail!("plan revision guidance session scope mismatch");
-    }
+        crate::application_run::load_application_control_session(session_log_path, expected_scope)?;
     PlanReviewCoordinator::accept_plan_revision_guidance(
         &mut session,
         command,
@@ -7032,7 +6162,6 @@ pub fn application_plan_revision_guidance_decision(
 
 /// Accepts one exact child-owned plan-research question through its bound parent session.
 pub fn application_plan_review_research_input_decision(
-    root_config: &RootConfig,
     session_log_path: &Path,
     expected_scope: &str,
     command: sigil_kernel::UserInputDecisionCommandV1,
@@ -7042,36 +6171,8 @@ pub fn application_plan_review_research_input_decision(
     Option<PlanReviewRunRequest>,
     Option<PublicEventOutboxEntryV1>,
 )> {
-    let effective_config = root_config.with_effective_composition()?;
-    let root_config = &effective_config;
-    anyhow::ensure!(
-        root_config.task.enabled
-            && root_config
-                .composition
-                .allows(sigil_kernel::OptionalCapability::TaskOrchestration),
-        "task orchestration is not selected for this session composition"
-    );
-    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
-    let (_, fallback_route) =
-        crate::provider_connections::resolve_default_model_route(root_config)?;
-    let inspected = crate::provider_connections::inspect_session_for_route_resume(
-        root_config,
-        &fallback_route,
-        store.clone(),
-    )?;
-    crate::validate_session_composition(&inspected.session, root_config)?;
     let mut session =
-        crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
-            root_config,
-            &fallback_route,
-            store,
-            None,
-            None,
-            None,
-        )?;
-    if session.session_scope_id() != expected_scope {
-        bail!("plan-review research input parent scope mismatch");
-    }
+        crate::application_run::load_application_control_session(session_log_path, expected_scope)?;
     PlanReviewCoordinator::accept_plan_review_research_input_with_resources(
         &mut session,
         command,

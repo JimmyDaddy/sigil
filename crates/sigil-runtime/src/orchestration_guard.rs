@@ -108,7 +108,8 @@ impl OrchestrationRouteGuard {
         let any_route_disabled = session.entries().iter().any(|entry| {
             matches!(
                 entry,
-                SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
+                SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(disabled))
+                    if disabled.invariant.blocks_execution()
             )
         });
         exact_route_disabled
@@ -297,14 +298,6 @@ fn first_orchestration_hard_invariant(
         (
             observation.unknown_effect_replays,
             OrchestrationHardInvariant::UnknownEffectReplay,
-        ),
-        (
-            observation.duplicate_parent_child_finals,
-            OrchestrationHardInvariant::ParentChildDuplicateFinal,
-        ),
-        (
-            observation.model_polling_turns,
-            OrchestrationHardInvariant::ModelPollingTurn,
         ),
     ]
     .into_iter()

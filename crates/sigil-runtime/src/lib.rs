@@ -274,7 +274,7 @@ pub use orchestration_rollout::{
     load_orchestration_eval_report_manifest, load_orchestration_rollout_manifest,
     new_install_orchestration_rollout_decision,
     new_install_orchestration_rollout_decision_for_config, orchestration_task_config_digest,
-    route_qualification_evidence, write_orchestration_rollout_manifest,
+    write_orchestration_rollout_manifest,
 };
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_ATTACHMENTS_DIR, DEFAULT_CHANGESETS_DIR,
@@ -290,11 +290,11 @@ pub use plan_review_coordinator::{
     ApplicationPlanAction, ApplicationPlanDecisionCommand, ApplicationPlanDecisionReceipt,
     PlanApprovalReceiptV2, PlanDecisionCommand, PlanExecutionService, PlanReviewCoordinator,
     PlanReviewRetryCommand, PlanReviewRetryReceipt, PlanReviewRunOutcome, PlanReviewRunRequest,
-    RejectPlanRequest, RejectedPlan, TASK_ADMISSION_MIN_DISK_SPACE_BYTES,
-    TaskAdmissionProbeContext, admit_adopted_task, application_plan_decision,
-    application_plan_review_research_input_decision, application_plan_revision_guidance_decision,
-    build_task_admission_probes, now_ms, plan_handoff_workspace_snapshot_id,
-    plan_review_context_digest_for_attempt, plan_run_rejection_message,
+    RejectPlanRequest, RejectedPlan, TaskAdmissionProbeContext, admit_adopted_task,
+    application_plan_decision, application_plan_review_research_input_decision,
+    application_plan_revision_guidance_decision, build_task_admission_probes, now_ms,
+    plan_handoff_workspace_snapshot_id, plan_review_context_digest_for_attempt,
+    plan_run_rejection_message,
 };
 pub use plugins::{
     ManagedPluginHookExecutionPortV1, ManagedPluginHookExecutionRequestV1, PluginDiscoveryReport,

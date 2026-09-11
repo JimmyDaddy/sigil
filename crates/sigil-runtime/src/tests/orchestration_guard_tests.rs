@@ -110,7 +110,7 @@ fn duplicate_handoff_disables_only_the_exact_route_and_build() -> Result<()> {
 #[test]
 fn coordinator_with_disabled_route_exposes_no_automatic_handoff() -> Result<()> {
     let mut session = Session::new("provider", "model");
-    let duplicate = duplicate_final_entry()?;
+    let duplicate = duplicate_handoff_entry(&session)?;
     session.append_control(duplicate.clone())?;
     session.append_control(duplicate)?;
     let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
@@ -147,14 +147,14 @@ fn qualified_route_kill_switch_degrades_direct_task_to_review_first() -> Result<
         .with_orchestration_route_guard(guard.clone())
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     assert_eq!(
         coordinator.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::DirectTask,
         "a clean qualified route starts at the DirectTask tier"
     );
-    let duplicate = duplicate_final_entry()?;
+    let duplicate = duplicate_handoff_entry(&session)?;
     session.append_control(duplicate.clone())?;
     session.append_control(duplicate)?;
     coordinator.enforce_orchestration_route_kill_switch(&mut session, 2)?;
@@ -201,6 +201,70 @@ fn orchestration_observation_never_classifies_user_prompt_text() {
         orchestration_observation(&session),
         sigil_kernel::OrchestrationEvalObservationV1::default()
     );
+}
+
+fn duplicate_handoff_entry(session: &Session) -> Result<ControlEntry> {
+    Ok(ControlEntry::TaskHandoffRequested(
+        TaskHandoffRequestedEntry {
+            handoff_id: TaskHandoffId::new("duplicate-handoff")?,
+            source_turn: sigil_kernel::ConversationTurnRef::new(
+                session.session_scope_id(),
+                "message-1",
+                "run-1",
+            )?,
+            trigger: sigil_kernel::TaskAdmissionTrigger::ModelRequested,
+            reason_codes: vec![sigil_kernel::TaskAdmissionReason::MultiStageChange],
+            recovery_objective: None,
+            policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
+            requested_at_ms: 1,
+        },
+    ))
+}
+
+#[test]
+fn presentation_and_polling_diagnostics_do_not_disable_execution() -> Result<()> {
+    let mut session = Session::new("provider", "model");
+    let duplicate = duplicate_final_entry()?;
+    session.append_control(duplicate.clone())?;
+    session.append_control(duplicate)?;
+    let guard = OrchestrationRouteGuard::new("provider", "model", "build-1");
+    assert!(guard.enforce(&mut session, 2)?.is_none());
+    assert!(!guard.direct_task_blocked(&session));
+    assert!(
+        super::first_orchestration_hard_invariant(&sigil_kernel::OrchestrationEvalObservationV1 {
+            model_polling_turns: 1,
+            duplicate_parent_child_finals: 1,
+            ..sigil_kernel::OrchestrationEvalObservationV1::default()
+        })
+        .is_none()
+    );
+    for invariant in [
+        OrchestrationHardInvariant::ParentChildDuplicateFinal,
+        OrchestrationHardInvariant::ModelPollingTurn,
+    ] {
+        session.append_control(ControlEntry::OrchestrationRouteDisabled(
+            sigil_kernel::OrchestrationRouteDisabledEntry {
+                route_fingerprint: guard.route_fingerprint().to_owned(),
+                sigil_build: guard.sigil_build().to_owned(),
+                invariant,
+                report_handle: "session:diagnostic".to_owned(),
+                disabled_at_ms: 2,
+            },
+        ))?;
+    }
+    assert!(guard.enforce(&mut session, 3)?.is_none());
+    assert!(!guard.direct_task_blocked(&session));
+    assert_eq!(
+        guard.effective_multi_agent_mode(&session, MultiAgentMode::Proactive),
+        MultiAgentMode::Proactive
+    );
+    // A later real duplicate dispatch is still detected after diagnostic-only history.
+    let duplicate = duplicate_handoff_entry(&session)?;
+    session.append_control(duplicate.clone())?;
+    session.append_control(duplicate)?;
+    assert!(guard.enforce(&mut session, 4)?.is_some());
+    assert!(guard.direct_task_blocked(&session));
+    Ok(())
 }
 
 fn duplicate_final_entry() -> Result<ControlEntry> {

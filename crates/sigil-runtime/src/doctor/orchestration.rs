@@ -7,7 +7,7 @@ use super::{DoctorReport, DoctorStatus};
 /// ```text
 /// automatic routing: enabled | disabled | unavailable
 /// automatic plan review: available | blocked
-/// direct task execution: qualified | review-first fallback | unavailable
+/// direct task execution: configured | unavailable
 /// ```
 pub(super) fn check_orchestration_rollout(report: &mut DoctorReport, config: &RootConfig) {
     let manual = config.task.routing_policy == TaskRoutingPolicy::Manual;
@@ -61,7 +61,7 @@ pub(super) fn check_orchestration_rollout(report: &mut DoctorReport, config: &Ro
             report.push(
                 DoctorStatus::Ok,
                 "orchestration:direct-task",
-                format!("direct task execution is qualified for release route {route}"),
+                "direct task execution is configured; dispatch requires routing tools and an attached executor",
             );
         }
         (false, Some(false)) => {
@@ -72,28 +72,25 @@ pub(super) fn check_orchestration_rollout(report: &mut DoctorReport, config: &Ro
             report.push(
                 DoctorStatus::Ok,
                 "orchestration:automatic-routing",
-                "automatic routing is enabled on the review-first baseline",
+                "automatic routing is enabled",
             );
             report.push(
                 DoctorStatus::Ok,
                 "orchestration:plan-review",
                 "automatic plan review is available",
             );
-            report.push_with_remediation(
+            report.push(
                 DoctorStatus::Ok,
                 "orchestration:direct-task",
                 format!(
-                    "direct task execution is on the review-first fallback: {reason}"
-                ),
-                Some(
-                    "install a newly qualified release manifest to enable direct task execution, or set [task].routing_policy=\"manual\" for coarse rollback",
+                    "direct task execution is configured; dispatch requires routing tools and an attached executor; release evaluation: {reason}"
                 ),
             );
             if config.task.multi_agent_mode == MultiAgentMode::Proactive {
                 report.push(
                     DoctorStatus::Warn,
                     "orchestration:proactive-agents",
-                    "proactive multi-agent spawn is configured without a qualified release route; direct task execution stays on the review-first fallback",
+                    "proactive multi-agent spawn is configured without release evaluation evidence; runtime permissions and budgets still apply",
                 );
             }
         }

@@ -82,8 +82,8 @@ pub struct AgentSupervisorTaskChildRunner {
     supervisor: AgentSupervisor,
     planner: Option<Arc<BoxedAgent>>,
     executor: Option<Arc<BoxedAgent>>,
-    subagent_read: Arc<BoxedAgent>,
-    subagent_write: Arc<BoxedAgent>,
+    subagent_read: Option<Arc<BoxedAgent>>,
+    subagent_write: Option<Arc<BoxedAgent>>,
     synthesis: Option<Arc<BoxedAgent>>,
     integration_verification_port: Option<Arc<dyn VerificationExecutionPortV1>>,
     planner_discovery_max_probes: usize,
@@ -101,16 +101,16 @@ impl AgentSupervisorTaskChildRunner {
             supervisor,
             planner: None,
             executor: None,
-            subagent_read: Arc::new(wrap_task_agent_provider(
+            subagent_read: Some(Arc::new(wrap_task_agent_provider(
                 subagent_read,
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::SubagentRead,
-            )),
-            subagent_write: Arc::new(wrap_task_agent_provider(
+            ))),
+            subagent_write: Some(Arc::new(wrap_task_agent_provider(
                 subagent_write,
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::SubagentWrite,
-            )),
+            ))),
             synthesis: None,
             integration_verification_port: None,
             planner_discovery_max_probes: 0,
@@ -139,21 +139,41 @@ impl AgentSupervisorTaskChildRunner {
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::Executor,
             ))),
-            subagent_read: Arc::new(wrap_task_agent_provider(
+            subagent_read: Some(Arc::new(wrap_task_agent_provider(
                 subagent_read,
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::SubagentRead,
-            )),
-            subagent_write: Arc::new(wrap_task_agent_provider(
+            ))),
+            subagent_write: Some(Arc::new(wrap_task_agent_provider(
                 subagent_write,
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::SubagentWrite,
-            )),
+            ))),
             synthesis: Some(Arc::new(wrap_task_agent_provider(
                 synthesis,
                 provider_pressure.clone(),
                 TaskProviderRouteConsumer::Synthesis,
             ))),
+            integration_verification_port: None,
+            planner_discovery_max_probes: 0,
+            provider_pressure,
+        }
+    }
+
+    /// Builds a direct execution runner without constructing unused planning or child roles.
+    pub fn new_with_executor(supervisor: AgentSupervisor, executor: BoxedAgent) -> Self {
+        let provider_pressure = supervisor.provider_pressure().clone();
+        Self {
+            supervisor,
+            planner: None,
+            executor: Some(Arc::new(wrap_task_agent_provider(
+                executor,
+                provider_pressure.clone(),
+                TaskProviderRouteConsumer::Executor,
+            ))),
+            subagent_read: None,
+            subagent_write: None,
+            synthesis: None,
             integration_verification_port: None,
             planner_discovery_max_probes: 0,
             provider_pressure,
@@ -545,8 +565,14 @@ impl AgentSupervisorTaskChildRunner {
                 .executor
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("task executor role is not configured")),
-            AgentRole::SubagentRead => Ok(Arc::clone(&self.subagent_read)),
-            AgentRole::SubagentWrite => Ok(Arc::clone(&self.subagent_write)),
+            AgentRole::SubagentRead => self
+                .subagent_read
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("task subagent_read role is not configured")),
+            AgentRole::SubagentWrite => self
+                .subagent_write
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("task subagent_write role is not configured")),
         }
     }
 
@@ -555,6 +581,7 @@ impl AgentSupervisorTaskChildRunner {
         parent_session: &Session,
         mut request: TaskChildSessionRunRequest,
     ) -> Result<PreflightParallelTaskChild> {
+        validate_task_participant_admission(parent_session, &request)?;
         ParallelTaskBatchKind::for_step(&request.step)?;
         if matches!(
             request.step.effective_isolation(),
@@ -2212,9 +2239,8 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             .executor
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("task executor role is not configured"))?;
-        let task_id = request.task.task_id.clone();
         let attempt_id = request.attempt.attempt_id.clone();
-        let mut output = executor
+        let output = executor
             .run_with_approval_input(
                 parent_session,
                 request.input,
@@ -2223,25 +2249,6 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 approval_handler,
             )
             .await?;
-        if matches!(
-            output.disposition,
-            sigil_kernel::AgentRunDisposition::FinalAnswer
-        ) && parent_session
-            .task_state_projection()
-            .evaluate_root_terminal(
-                &task_id,
-                TaskRunStatus::Completed,
-                Some(&TaskRootTerminalCandidateV1::DirectExecution {
-                    attempt_id: attempt_id.clone(),
-                    status: sigil_kernel::TaskParticipantAttemptStatus::Completed,
-                }),
-            )
-            .is_some_and(|evaluation| !evaluation.allows_completed())
-        {
-            // The kernel runner maps this to a resumable blocked Task terminal instead of
-            // accepting a final prose answer as authority to complete the root.
-            output.disposition = sigil_kernel::AgentRunDisposition::Blocked;
-        }
         Ok(TaskDirectExecutionSessionRunOutput {
             attempt_id,
             final_text: output.result.final_text,
@@ -2565,7 +2572,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     request.task.clone(),
                     request.attempt_id.clone(),
                     child_thread.thread_id.clone(),
-                    Arc::clone(&self.subagent_read),
+                    self.subagent_read
+                        .clone()
+                        .context("task discovery role is not configured")?,
                     request.discovery_options.clone(),
                     self.planner_discovery_max_probes,
                 );
@@ -2898,7 +2907,9 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     request.task.clone(),
                     request.attempt_id.clone(),
                     child_thread.thread_id.clone(),
-                    Arc::clone(&self.subagent_read),
+                    self.subagent_read
+                        .clone()
+                        .context("task discovery role is not configured")?,
                     request.discovery_options.clone(),
                     self.planner_discovery_max_probes,
                 );
@@ -3073,6 +3084,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         A: ApprovalHandler + Send,
     {
         let mut request = request;
+        validate_task_participant_admission(parent_session, &request)?;
         let parent_options = request.options.clone();
         let agent = self.agent_for_step(&request.step)?;
         let grant_registry = effective_task_child_tool_registry(&agent, &request.step);
@@ -3989,7 +4001,6 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_task_child_agent_for_step<H, A>(
     agent: &BoxedAgent,
     child_session: &mut Session,
@@ -4585,6 +4596,44 @@ fn agent_approval_route_binding(
     })
 }
 
+// Request metadata alone does not admit ordinary supervisor calls as Task participants.
+// Explicit participants must retain their exact durable parent, attempt, and child identity.
+fn validate_task_participant_admission(
+    parent: &Session,
+    request: &TaskChildSessionRunRequest,
+) -> Result<()> {
+    let Some(sigil_kernel::AgentRunPurpose::TaskParticipant(context)) =
+        &request.child_input.purpose
+    else {
+        return Ok(());
+    };
+    if context.task_id != request.task.task_id
+        || context.plan_version != request.plan_version
+        || context.step_id != request.step.step_id
+        || context.attempt_id != request.attempt_id
+    {
+        anyhow::bail!("participant input does not match its admitted request");
+    }
+    let projection = parent.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&context.task_id)
+        .context("participant admission lost its parent Task")?;
+    let current = task
+        .participant_attempts
+        .get(&context.attempt_id)
+        .filter(|attempt| {
+            attempt.purpose == sigil_kernel::TaskParticipantPurpose::Step
+                && attempt.plan_version == Some(context.plan_version)
+                && attempt.step_id.as_ref() == Some(&context.step_id)
+        })
+        .context("participant admission lost its admitted attempt")?;
+    if current.child_session_ref != request.child_session_ref {
+        anyhow::bail!("participant current child identity changed");
+    }
+    Ok(())
+}
+
 pub(crate) fn build_child_session(
     parent_session: &Session,
     child_session_ref: &SessionRef,
@@ -4756,3 +4805,7 @@ pub(super) fn usage_summary_from_stats(stats: &SessionStats) -> AgentUsageSummar
 fn main_thread_id() -> Result<AgentThreadId> {
     AgentThreadId::new("main")
 }
+
+#[cfg(test)]
+#[path = "tests/task_runner_admission_tests.rs"]
+mod admission_tests;

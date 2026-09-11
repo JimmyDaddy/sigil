@@ -32,7 +32,7 @@ fn check_names(report: &DoctorReport) -> Vec<&str> {
 }
 
 #[test]
-fn doctor_reports_fresh_auto_default_as_review_first_facts() {
+fn doctor_reports_fresh_auto_default_without_release_permission_gate() {
     let _rollout_lock = crate::tests::rollout_manifest_test_support::rollout_manifest_env_lock();
     let config = root_config();
     let mut report = DoctorReport::default();
@@ -48,17 +48,12 @@ fn doctor_reports_fresh_auto_default_as_review_first_facts() {
         ]
     );
     assert_eq!(report.checks[0].status, DoctorStatus::Ok);
-    assert!(report.checks[0].message.contains("review-first baseline"));
+    assert!(report.checks[0].message.contains("enabled"));
     assert_eq!(report.checks[1].status, DoctorStatus::Ok);
     assert!(report.checks[1].message.contains("available"));
     assert_eq!(report.checks[2].status, DoctorStatus::Ok);
-    assert!(report.checks[2].message.contains("review-first fallback"));
-    assert!(
-        report.checks[2]
-            .remediation
-            .as_deref()
-            .is_some_and(|value| value.contains("routing_policy=\"manual\""))
-    );
+    assert!(report.checks[2].message.contains("configured"));
+    assert!(report.checks[2].remediation.is_none());
 }
 
 #[test]
@@ -106,7 +101,7 @@ fn doctor_reports_qualified_release_route_facts() {
     assert!(report.checks[0].message.contains("qualified release route"));
     assert!(report.checks[1].message.contains("available"));
     assert_eq!(report.checks[2].status, DoctorStatus::Ok);
-    assert!(report.checks[2].message.contains("qualified"));
+    assert!(report.checks[2].message.contains("configured"));
 }
 
 #[test]
@@ -133,6 +128,6 @@ fn doctor_warns_when_proactive_agents_are_configured_without_qualification() {
     assert!(
         report.checks[3]
             .message
-            .contains("without a qualified release route")
+            .contains("without release evaluation evidence")
     );
 }

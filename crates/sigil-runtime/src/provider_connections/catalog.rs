@@ -332,7 +332,10 @@ impl ProviderModelCatalogService {
                 result_with(
                     request,
                     ModelCatalogState::CacheFresh,
-                    configured_warning(cache_entries(cache.entries), configured_model.as_ref()),
+                    configured_reference_unverified(
+                        cache_entries(cache.entries),
+                        configured_model.as_ref(),
+                    ),
                     None,
                 ),
             );
@@ -348,10 +351,11 @@ impl ProviderModelCatalogService {
                     &remote_entries,
                 )
                 .await;
-                let entries = configured_warning(remote_entries, configured_model.as_ref());
+                let entries =
+                    configured_reference_unverified(remote_entries, configured_model.as_ref());
                 if entries
                     .iter()
-                    .all(|entry| entry.availability == ModelAvailability::ConfiguredUnavailable)
+                    .all(|entry| entry.provenance == ModelCatalogProvenance::Configured)
                 {
                     result_with(request, ModelCatalogState::Empty, entries, None)
                 } else {
@@ -871,15 +875,11 @@ fn enrich_remote_entries(connection: &ProviderConnectionConfig, entries: &mut [M
     });
 }
 
-fn configured_warning(
+fn configured_reference_unverified(
     entries: Vec<ModelCatalogEntry>,
     configured: Option<&ModelRef>,
 ) -> Vec<ModelCatalogEntry> {
-    configured_reference(
-        entries,
-        configured,
-        ModelAvailability::ConfiguredUnavailable,
-    )
+    configured_reference(entries, configured, ModelAvailability::Unverified)
 }
 
 fn configured_reference(

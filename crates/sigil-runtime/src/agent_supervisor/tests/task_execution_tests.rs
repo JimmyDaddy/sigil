@@ -14,8 +14,9 @@ use sigil_kernel::{
 
 use super::{
     ResolvedTaskExecutionRoute, TaskExecutionPreflightError, TaskPauseValidationError,
-    TaskStopDisposition, append_explicit_task_run_target, append_task_stop_state,
-    finalize_task_root, prepare_task_run_cancellation, resolve_task_continuation,
+    TaskStopDisposition, append_explicit_task_run_target, append_run_scoped_task_interruption,
+    append_task_stop_state, finalize_task_root, prepare_task_run_cancellation,
+    resolve_task_continuation, task_id_for_cancellation_scope,
     validate_continuation_guidance_authority, validate_task_pause_request,
 };
 
@@ -120,6 +121,176 @@ fn shared_task_cancellation_scope_is_bound_before_dispatch() -> Result<()> {
     );
     let _durable_recorder = prepared.recorder;
     drop(prepared.task_guard);
+    Ok(())
+}
+
+#[test]
+fn run_scoped_task_stop_selects_only_its_durable_binding() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = sigil_kernel::JsonlSessionStore::new(directory.path().join("session.jsonl"))?;
+    let mut session = Session::new("provider", "model").with_store(store);
+    let older_task = TaskId::new("task-older")?;
+    let active_task = TaskId::new("task-active")?;
+    let newer_task = TaskId::new("task-newer")?;
+    for (task_id, scope_id) in [
+        (&older_task, "scope-older"),
+        (&active_task, "scope-active"),
+        (&newer_task, "scope-newer"),
+    ] {
+        session.append_controls(vec![
+            ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "interrupt only the bound task".to_owned(),
+                title: None,
+                status: TaskRunStatus::Running,
+                reason: None,
+            }),
+            ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: scope_id.to_owned(),
+            }),
+        ])?;
+    }
+    let entry_count = session.entries().len();
+    for (target, scope_id) in [
+        (RunCancellationTarget::Run, "scope-unbound"),
+        (
+            RunCancellationTarget::Task {
+                task_id: older_task.as_str().to_owned(),
+            },
+            "scope-active",
+        ),
+        (
+            RunCancellationTarget::AgentThread {
+                thread_id: "agent-thread".to_owned(),
+            },
+            "scope-active",
+        ),
+    ] {
+        assert!(task_id_for_cancellation_scope(session.entries(), &target, scope_id).is_none());
+    }
+    assert_eq!(session.entries().len(), entry_count);
+    let selected = task_id_for_cancellation_scope(
+        session.entries(),
+        &RunCancellationTarget::Run,
+        "scope-active",
+    )
+    .expect("the active root scope should resolve its exact task");
+    assert_eq!(selected, active_task);
+    append_run_scoped_task_interruption(
+        &mut session,
+        &mut NoopEventHandler,
+        "scope-active",
+        "task run stopped after root quiescence",
+    )?;
+    let projection = session.task_state_projection();
+    assert_eq!(
+        projection.tasks[&active_task].status,
+        TaskRunStatus::Interrupted
+    );
+    assert_eq!(projection.tasks[&older_task].status, TaskRunStatus::Running);
+    assert_eq!(projection.tasks[&newer_task].status, TaskRunStatus::Running);
+    Ok(())
+}
+
+#[test]
+fn run_scoped_task_stop_preserves_outcomes_committed_during_cancellation() -> Result<()> {
+    for status in [
+        TaskRunStatus::Paused,
+        TaskRunStatus::Completed,
+        TaskRunStatus::Failed,
+        TaskRunStatus::Cancelled,
+        TaskRunStatus::Interrupted,
+    ] {
+        let mut session = Session::new("provider", "model");
+        let task_id = TaskId::new("task-settled")?;
+        session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "preserve the settled outcome".to_owned(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }))?;
+        if status == TaskRunStatus::Completed {
+            let admission = TaskDirectExecutionAdmittedV1::planner_fallback(
+                task_id.clone(),
+                "preserve the settled outcome",
+                "planner-attempt-settled",
+                1,
+            );
+            let mut attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
+            session.append_controls(vec![
+                ControlEntry::TaskDirectExecutionAdmittedV1(admission),
+                ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone()),
+            ])?;
+            let text = "direct execution completed";
+            let message = sigil_kernel::ModelMessage::assistant_with_kind(
+                Some(text.to_owned()),
+                Vec::new(),
+                sigil_kernel::AssistantMessageKind::FinalAnswer,
+            );
+            attempt.status = TaskParticipantAttemptStatus::Completed;
+            attempt.final_message_id = Some(message.id.clone());
+            attempt.output_hash = Some(format!(
+                "sha256:{}",
+                sigil_kernel::sha256_hex(text.as_bytes())
+            ));
+            session.append_assistant_message(message)?;
+            session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))?;
+        }
+        session.append_controls(vec![
+            ControlEntry::TaskRun(TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "preserve the settled outcome".to_owned(),
+                title: None,
+                status,
+                reason: Some("settled while cancellation drained".to_owned()),
+            }),
+            ControlEntry::TaskRunCancellationScopeBound(TaskRunCancellationScopeBoundEntry {
+                task_id: task_id.clone(),
+                run_scope_id: "scope-stopping".to_owned(),
+            }),
+        ])?;
+        let before = serde_json::to_value(session.entries())?;
+        assert!(
+            append_run_scoped_task_interruption(
+                &mut session,
+                &mut NoopEventHandler,
+                "scope-stopping",
+                "root quiescence confirmed",
+            )?
+            .is_none()
+        );
+        assert_eq!(serde_json::to_value(session.entries())?, before);
+        assert_eq!(
+            session.task_state_projection().tasks[&task_id].status,
+            status
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn run_scoped_task_stop_rejects_a_binding_without_its_task() -> Result<()> {
+    let mut session = Session::new("provider", "model");
+    session.append_control(ControlEntry::TaskRunCancellationScopeBound(
+        TaskRunCancellationScopeBoundEntry {
+            task_id: TaskId::new("task-missing")?,
+            run_scope_id: "scope-stopping".to_owned(),
+        },
+    ))?;
+    assert!(matches!(
+        append_run_scoped_task_interruption(
+            &mut session,
+            &mut NoopEventHandler,
+            "scope-stopping",
+            "root quiescence confirmed",
+        ),
+        Err(super::TaskStopStateError::TaskUnavailable { .. })
+    ));
     Ok(())
 }
 
@@ -588,6 +759,20 @@ fn zero_dispatch_task_preflight_blocker_pauses_without_persisting_private_error(
         Some("task_role_runtime_preflight_blocked")
     );
     assert!(!format!("{task:?}").contains("private endpoint"));
+    let entry_count = session.entries().len();
+    finalize_task_root(
+        &mut session,
+        &task_id,
+        &parent_session_ref,
+        "execute after repairing provider configuration",
+        &cancellation,
+        Err(anyhow::Error::new(
+            TaskExecutionPreflightError::RoleRuntimeConstruction(anyhow!(
+                "the same unavailable executor"
+            )),
+        )),
+    )?;
+    assert_eq!(session.entries().len(), entry_count);
     Ok(())
 }
 
@@ -703,5 +888,109 @@ fn root_finalizer_downgrades_incomplete_direct_completion_to_paused() -> Result<
         task.reason.as_deref(),
         Some("task completion blocked: unfinished_direct_execution")
     );
+    Ok(())
+}
+
+#[test]
+fn unplanned_task_accepts_guidance_without_an_accepted_plan_authority() -> Result<()> {
+    assert!(validate_continuation_guidance_authority(
+        ResolvedTaskExecutionRoute::NeedsPlanning,
+        Some("Inspect the retry boundary first"),
+        None,
+        None,
+    )?);
+    Ok(())
+}
+
+#[test]
+fn task_verification_uses_explicit_and_promoted_checks_without_repository_rediscovery() -> Result<()>
+{
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("package.json"), "{malformed")?;
+    std::fs::create_dir_all(root.path().join(".github/workflows"))?;
+    std::fs::write(root.path().join(".github/workflows/ci.yml"), "[malformed")?;
+    let mut config: sigil_kernel::RootConfig =
+        toml::from_str("config_version = 2\n[agent]\nmodel = \"test-model\"")?;
+    config.verification.checks = vec![sigil_kernel::VerificationCheckConfig {
+        id: "explicit-required".to_owned(),
+        command: "true".to_owned(),
+        args: Vec::new(),
+        cwd: None,
+        effect: sigil_kernel::ToolEffect::ReadOnly,
+    }];
+    let mut session = Session::new("test", "model");
+    let promoted = sigil_kernel::CandidateCheck {
+        source: sigil_kernel::CheckDiscoverySource::PackageScript,
+        command: sigil_kernel::CheckCommand {
+            command: "false".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+        },
+        source_event_id: "approved-package-check".to_owned(),
+        workspace_trust_snapshot_id: "workspace-trust".to_owned(),
+    }
+    .promote(
+        "promoted-required",
+        sigil_kernel::DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        sigil_kernel::ToolEffect::ReadOnly,
+        sigil_kernel::CheckPromotion::UserApproved {
+            approval_event_id: "approval".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        sigil_kernel::CheckSpecRecordedEntry::new(
+            sigil_kernel::EvidenceScope::Workspace(sigil_kernel::stable_workspace_id(root.path())?),
+            promoted.clone(),
+            "approved-package-check",
+        ),
+    ))?;
+    let task_id = TaskId::new("verification-ablation")?;
+    super::materialize_task_verification_config(
+        &mut session,
+        &mut NoopEventHandler,
+        &config,
+        root.path(),
+        &task_id,
+    )?;
+    let entries = session.entries().len();
+    super::materialize_task_verification_config(
+        &mut session,
+        &mut NoopEventHandler,
+        &config,
+        root.path(),
+        &task_id,
+    )?;
+    assert_eq!(session.entries().len(), entries);
+    let projection = session.verification_state_projection();
+    let scope = sigil_kernel::EvidenceScope::Task(task_id.as_str().to_owned());
+    let policy = &projection
+        .latest_policy(&scope)
+        .expect("required Task checks")
+        .policy;
+    assert_eq!(policy.required_checks.len(), 2);
+    assert!(!policy.allow_unverified_completion);
+    assert_eq!(
+        policy.completion_criteria,
+        sigil_kernel::CompletionCriteria::AllRequiredChecks
+    );
+    assert_eq!(
+        projection
+            .check_spec(&scope, "promoted-required")
+            .expect("promoted spec")
+            .trusted_check,
+        promoted
+    );
+    config.verification.checks[0].id.clear();
+    assert!(
+        super::materialize_task_verification_config(
+            &mut session,
+            &mut NoopEventHandler,
+            &config,
+            root.path(),
+            &task_id
+        )
+        .is_err()
+    );
+    assert_eq!(session.entries().len(), entries);
     Ok(())
 }

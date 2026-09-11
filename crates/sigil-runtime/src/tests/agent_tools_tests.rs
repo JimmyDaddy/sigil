@@ -259,7 +259,7 @@ fn permission_test_invocation_grant(
             permission_upper_bound,
             network_upper_bound: NetworkPolicy::Allow,
             tool_contract_fingerprint: "sha256:test-contracts".to_owned(),
-            workspace_snapshot_id: "sha256:test-workspace".to_owned(),
+            workspace_snapshot_id: Some("sha256:test-workspace".to_owned()),
             root_cancellation_scope_id: cancellation.scope_id().to_owned(),
             expires_at_ms: u64::MAX,
         },
@@ -2947,7 +2947,7 @@ async fn route_kill_switch_denies_proactive_spawn_before_provider_build() -> Res
         Arc::new(RejectingProviderFactory),
     );
     let mut session = Session::new("parent", "model");
-    append_duplicate_task_final(&mut session)?;
+    append_duplicate_task_handoff(&mut session)?;
 
     let result = invoke_explore_spawn(&mut runtime, &mut session, "call-killed-proactive").await?;
 
@@ -2987,12 +2987,58 @@ async fn route_kill_switch_preserves_accepted_plan_spawn_authority() -> Result<(
         step_id: TaskStepId::new("step_kill_switch")?,
     });
     let mut session = Session::new("parent", "model");
-    append_duplicate_task_final(&mut session)?;
+    append_duplicate_task_handoff(&mut session)?;
 
     let result = invoke_explore_spawn(&mut runtime, &mut session, "call-killed-plan").await?;
 
     assert!(!result.is_error(), "{}", result.content);
     assert!(!session.agent_thread_state_projection().threads.is_empty());
+    Ok(())
+}
+
+fn append_duplicate_task_handoff(session: &mut Session) -> Result<()> {
+    let entry = ControlEntry::TaskHandoffRequested(sigil_kernel::TaskHandoffRequestedEntry {
+        handoff_id: sigil_kernel::TaskHandoffId::new("duplicate-handoff")?,
+        source_turn: sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            "source-message",
+            "source-run",
+        )?,
+        trigger: sigil_kernel::TaskAdmissionTrigger::ModelRequested,
+        reason_codes: vec![sigil_kernel::TaskAdmissionReason::MultiStageChange],
+        recovery_objective: None,
+        policy_snapshot_hash: format!("sha256:{}", "a".repeat(64)),
+        requested_at_ms: 1,
+    });
+    session.append_control(entry.clone())?;
+    session.append_control(entry)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn presentation_diagnostics_preserve_proactive_spawn() -> Result<()> {
+    let mut config = root_config();
+    config.task.multi_agent_mode = MultiAgentMode::Proactive;
+    let registry = registry_with_contract(
+        &config,
+        contract_test_spec("read_file", ToolAccess::Read),
+        ToolMutationTracking::None,
+    )?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor(&config)?,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    append_duplicate_task_final(&mut session)?;
+    let result = invoke_explore_spawn(&mut runtime, &mut session, "diagnostic-proactive").await?;
+    assert!(!result.is_error(), "{}", result.content);
+    assert!(!session.agent_thread_state_projection().threads.is_empty());
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::OrchestrationRouteDisabled(_))
+    )));
     Ok(())
 }
 
@@ -3747,6 +3793,15 @@ async fn spawn_agents_background_returns_immediately_and_collects_the_whole_batc
 
 #[tokio::test]
 async fn background_child_user_input_routes_to_root_and_resumes_exactly_once() -> Result<()> {
+    background_child_user_input_recovery_scenario(false).await
+}
+
+#[tokio::test]
+async fn background_child_user_input_uncertain_attempt_retires_parent_attention() -> Result<()> {
+    background_child_user_input_recovery_scenario(true).await
+}
+
+async fn background_child_user_input_recovery_scenario(uncertain_attempt: bool) -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -3859,6 +3914,69 @@ async fn background_child_user_input_routes_to_root_and_resumes_exactly_once() -
             }],
         },
     };
+    if uncertain_attempt {
+        let store = JsonlSessionStore::new(route.child_session_ref.resolve(temp.path()))?;
+        let mut child = Session::load_from_store("parent", "model", store.clone())?;
+        sigil_kernel::accept_user_input_decision(
+            &mut child,
+            command.clone(),
+            crate::current_unix_time_ms(),
+        )?;
+        let physical_id = sigil_kernel::new_provider_physical_attempt_id();
+        let prepared = sigil_kernel::prepare_user_input_continuation(
+            &mut child,
+            &command.identity,
+            &command.request_hash,
+            "previous-owner",
+            &physical_id,
+            crate::current_unix_time_ms(),
+        )?;
+        // Persist a structurally valid send barrier and omit its terminal to model owner loss
+        // after dispatch. Reuse this fixture provider's request proof; no network call is made.
+        let mut started = child.provider_physical_attempt_projection()?.attempts()[0]
+            .entry
+            .clone();
+        started.physical_attempt_id = physical_id;
+        started.logical_run_id = prepared
+            .continuation
+            .continuation_logical_run_id
+            .as_str()
+            .to_owned();
+        started.started_at_unix_ms = crate::current_unix_time_ms();
+        let event_id = "background-recovery-provider-started".to_owned();
+        let record = sigil_kernel::DurableAuditRecord::new(
+            sigil_kernel::DurableEventType::ProviderPhysicalAttemptStarted,
+            serde_json::to_value(&started)?,
+            started.physical_attempt_id,
+            Some(event_id.clone()),
+        )?
+        .with_event_id(event_id)?;
+        let _receipt = sigil_kernel::DurableAuditWriter::append_and_sync(&store, record)?;
+        drop(child);
+
+        let error = runtime
+            .apply_background_user_input_decision(&mut session, command, &options, &mut handler)
+            .await
+            .expect_err("uncertain provider consumption must not replay the answer");
+        assert!(error.to_string().contains("continuation"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no second provider stream");
+        assert!(!background_runs.has_any());
+        let projection =
+            sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(session.entries())?;
+        let settled = projection
+            .route(&route.route_id)
+            .expect("resolved parent route");
+        assert_eq!(settled.status, sigil_kernel::AgentRouteStatus::Resolved);
+        assert_eq!(
+            settled.request.status,
+            sigil_kernel::UserInputStatusV1::Resolved
+        );
+        assert!(
+            projection.pending().next().is_none(),
+            "no invalid Resume remains"
+        );
+        return Ok(());
+    }
     let decision = runtime
         .apply_background_user_input_decision(&mut session, command.clone(), &options, &mut handler)
         .await?;
@@ -5653,8 +5771,8 @@ fn final_answer_blocker_ignores_unread_results_from_an_earlier_root_run() -> Res
     Ok(())
 }
 
-#[test]
-fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
+#[tokio::test]
+async fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -5676,21 +5794,22 @@ fn final_answer_blocker_allows_background_agent_and_context_reports_it() -> Resu
     let options = run_options(temp.path().to_path_buf());
     let outcome = AgentRunOutcome::default();
     let context = runtime
-        .final_answer_context(&session, &options, &outcome)?
+        .final_answer_context(&session, &options, &outcome)
+        .await?
         .expect("background agent should be included in final-answer facts");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["type"], "active_run_facts");
-    assert!(
-        payload["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("not a finalization request"))
-    );
+    assert!(payload["message"].as_str().is_some_and(|message| {
+        message.contains("not an exhaustive history or a completion decision")
+            && message.contains("do not imply their work is complete")
+    }));
     assert_eq!(payload["session_facts"]["subagents"]["running"], 1);
     Ok(())
 }
 
-#[test]
-fn final_answer_context_only_reports_unsettled_agents_from_the_active_root_run() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_only_reports_unsettled_agents_from_the_active_root_run() -> Result<()>
+{
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -5717,7 +5836,8 @@ fn final_answer_context_only_reports_unsettled_agents_from_the_active_root_run()
     let options = run_options(temp.path().to_path_buf());
     let outcome = AgentRunOutcome::default();
     let context = runtime
-        .final_answer_context(&session, &options, &outcome)?
+        .final_answer_context(&session, &options, &outcome)
+        .await?
         .expect("current running child should produce active-run facts");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["session_facts"]["subagents"]["total"], 1);
@@ -5737,7 +5857,8 @@ fn final_answer_context_only_reports_unsettled_agents_from_the_active_root_run()
     ))?;
     assert!(
         runtime
-            .final_answer_context(&session, &options, &outcome)?
+            .final_answer_context(&session, &options, &outcome)
+            .await?
             .is_none(),
         "closed current-run and unrelated earlier-run children must not keep reinjecting facts"
     );
@@ -5861,8 +5982,430 @@ fn test_approval_control(
     })
 }
 
-#[test]
-fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_selects_real_v3_producer_facts_after_reload() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let mut runtime = user_authorized_runtime(supervisor(&config)?, config, registry);
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("facts.jsonl"))?;
+    let artifacts = sigil_kernel::ToolArtifactStore::for_session_store(&store);
+    let mut session = Session::load_from_store("parent", "model", store.clone())?;
+    let options = run_options(temp.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let mut outcome = AgentRunOutcome::default();
+    let mut producer_facts = BTreeMap::new();
+    for index in 0..36 {
+        let call_id = format!("facts-list-{index}");
+        let result = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: call_id.clone(),
+                    name: LIST_AGENTS_TOOL_NAME.to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+                &options,
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("list_agents production handler");
+        assert!(!result.is_error());
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &result,
+            Some(&artifacts),
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        producer_facts.insert(call_id.clone(), serde_json::to_value(&recorded.facts)?);
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+        if index > 0 {
+            outcome.tool_call_ids.push(call_id);
+        }
+    }
+    let before = runtime
+        .final_answer_context(&session, &options, &outcome)
+        .await?
+        .expect("V3 evidence context");
+    drop(session);
+    let restored = Session::load_from_store("parent", "model", store)?;
+    let after = runtime
+        .final_answer_context(&restored, &options, &outcome)
+        .await?
+        .expect("restored V3 evidence context");
+    assert_eq!(before.key, after.key);
+    assert_eq!(before.prompt, after.prompt);
+    let payload: serde_json::Value = serde_json::from_str(&after.prompt)?;
+    let evidence = payload["session_facts"]["selected_recorded_evidence"]
+        .as_array()
+        .expect("selected evidence");
+    assert_eq!(evidence.len(), 32);
+    assert_eq!(
+        payload["session_facts"]["evidence_omissions"]["selection_limit"],
+        3
+    );
+    assert_eq!(
+        payload["session_facts"]["evidence_omissions"]["projection_unavailable"],
+        false
+    );
+    let mut sources = std::collections::BTreeSet::new();
+    for item in evidence {
+        let call = item["call_id"].as_str().expect("call identity");
+        assert_ne!(
+            call, "facts-list-0",
+            "an earlier run must not be attributed"
+        );
+        assert_eq!(item["facts"], producer_facts[call]);
+        assert_eq!(item["tool_name"], LIST_AGENTS_TOOL_NAME);
+        assert!(item["source_stream_sequence"].as_u64().expect("sequence") > 0);
+        assert!(sources.insert(item["source_event_id"].as_str().expect("source")));
+    }
+    assert!(payload["session_facts"].get("commands").is_none());
+    assert!(payload["session_facts"].get("gates").is_none());
+    assert!(after.prompt.contains("An omitted result does not mean"));
+    assert!(!after.prompt.contains("Do not claim checks"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_answer_context_includes_same_task_previous_attempt_without_claiming_other_runs()
+-> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let mut runtime = user_authorized_runtime(supervisor(&config)?, config, registry);
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("historic-facts.jsonl"))?;
+    let artifacts = sigil_kernel::ToolArtifactStore::for_session_store(&store);
+    let mut session = Session::load_from_store("parent", "model", store.clone())?;
+    let task_id = sigil_kernel::TaskId::new("facts-task")?;
+    let objective = "finish the original work";
+    let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::planner_fallback(
+        task_id.clone(),
+        objective,
+        "facts-planner",
+        1,
+    );
+    let previous = sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1);
+    let current = sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 2);
+    let old_run = sigil_kernel::task_direct_execution_logical_run_id(&previous.attempt_id);
+    let current_run = sigil_kernel::task_direct_execution_logical_run_id(&current.attempt_id);
+    session.append_control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: sigil_kernel::SessionRef::new_relative("historic-facts.jsonl")?,
+        objective: objective.to_owned(),
+        title: None,
+        status: sigil_kernel::TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
+    let mut previous = previous;
+    previous.status = sigil_kernel::TaskParticipantAttemptStatus::Interrupted;
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(previous))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(current))?;
+    runtime.set_root_logical_run_id(Some(&current_run));
+    let options = run_options(temp.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    for (call_id, run_id) in [
+        ("previous-task-call", Some(old_run.as_str())),
+        ("unrelated-call", Some("unrelated-chat-run")),
+        ("unbound-history-call", None),
+    ] {
+        let call = ToolCall {
+            id: call_id.to_owned(),
+            name: LIST_AGENTS_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        };
+        let mut batch = sigil_kernel::ModelMessage::assistant_with_kind(
+            None,
+            vec![call.clone()],
+            sigil_kernel::AssistantMessageKind::ToolPreamble,
+        );
+        batch.logical_run_id = run_id.map(sigil_kernel::LogicalRunId::new).transpose()?;
+        session.append(SessionLogEntry::Assistant(batch))?;
+        let result = runtime
+            .handle_agent_tool_call(&mut session, &call, &options, &mut handler, &mut approval)
+            .await?
+            .expect("production list_agents result");
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &result,
+            Some(&artifacts),
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+    }
+    let outcome = AgentRunOutcome::default();
+    let before = runtime
+        .final_answer_context(&session, &options, &outcome)
+        .await?
+        .expect("previous task evidence");
+    drop(session);
+    let restored = Session::load_from_store("parent", "model", store)?;
+    let after = runtime
+        .final_answer_context(&restored, &options, &outcome)
+        .await?
+        .expect("restored previous task evidence");
+    assert_eq!(before.prompt, after.prompt);
+    let payload: serde_json::Value = serde_json::from_str(&after.prompt)?;
+    let evidence = payload["session_facts"]["selected_recorded_evidence"]
+        .as_array()
+        .expect("evidence array");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["call_id"], "previous-task-call");
+    assert_eq!(evidence[0]["logical_run_id"], old_run);
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_answer_context_recovers_scoped_retired_sources_after_aging_and_restart() -> Result<()>
+{
+    let config = root_config();
+    let mut runtime = user_authorized_runtime(supervisor(&config)?, config, ToolRegistry::new());
+    runtime.set_root_logical_run_id(Some("archive-selected-run"));
+    let temp = tempfile::tempdir()?;
+    let options = run_options(temp.path().to_path_buf());
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let path = temp.path().join("archived-facts.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let artifacts = sigil_kernel::ToolArtifactStore::for_session_store(&store);
+    let mut session = Session::load_from_store("parent", "model", store)?;
+    // Real owner records make list_agents output large enough to exercise deterministic aging.
+    for index in 0..64 {
+        append_projected_agent_thread(
+            &mut session,
+            &format!("archive-agent-{index}"),
+            sigil_kernel::AgentInvocationMode::Background,
+            AgentThreadStatus::Completed,
+            None,
+        )?;
+    }
+    session.append_user_message(sigil_kernel::ModelMessage::user("initial observations"))?;
+    // read_file previews are capped at 8 KiB (2,048 tokens): exceed the real
+    // 32,768-token recent window before attempting to age either scoped source.
+    for index in 0..24 {
+        let call_id = format!("archive-call-{index}");
+        let run_id = if index == 0 {
+            "archive-selected-run"
+        } else {
+            "archive-other-run"
+        };
+        let tool_name = if index == 0 {
+            LIST_AGENTS_TOOL_NAME
+        } else {
+            "read_file"
+        };
+        let mut message = sigil_kernel::ModelMessage::assistant_with_kind(
+            None,
+            vec![ToolCall {
+                id: call_id.clone(),
+                name: tool_name.to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+            sigil_kernel::AssistantMessageKind::ToolPreamble,
+        );
+        message.logical_run_id = Some(sigil_kernel::LogicalRunId::new(run_id)?);
+        session.append_assistant_message(message)?;
+        let result = if index == 0 {
+            runtime
+                .handle_agent_tool_call(
+                    &mut session,
+                    &ToolCall {
+                        id: call_id,
+                        name: tool_name.to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    &options,
+                    &mut handler,
+                    &mut approval,
+                )
+                .await?
+                .expect("real list_agents producer")
+        } else {
+            ToolResult::ok(
+                call_id,
+                tool_name,
+                format!("source {index} {}", "x".repeat(100_000)),
+                ToolResultMeta::default(),
+            )
+        };
+        if index == 0 {
+            assert!(
+                result.content.len() > 8_192,
+                "real producer must generate an ageable observation"
+            );
+        }
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &result,
+            Some(&artifacts),
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        session.append(SessionLogEntry::ToolResultV3(recorded))?;
+    }
+    session.append_user_message(sigil_kernel::ModelMessage::user(
+        "next independent observations",
+    ))?;
+    let active = session
+        .active_projection_snapshot()?
+        .expect("active projection");
+    let pressure = active.tool_output_pressure();
+    let expected = pressure
+        .items
+        .iter()
+        .find(|item| item.call_id == "archive-call-0")
+        .expect("selected source")
+        .clone();
+    let batch = sigil_kernel::ToolOutputAgingBatchV1::select(
+        &pressure,
+        sigil_kernel::ToolOutputAgingReasonV1::FitRequired,
+    )?
+    .expect("old outputs are ageable");
+    assert!(batch.source_event_ids.contains(&expected.source_event_id));
+    let activation = sigil_kernel::ToolOutputAgingActivatedV1::prepare(&pressure, &batch)?;
+    assert!(
+        session
+            .append_tool_output_aging_activation(active.frontier(), activation)?
+            .is_some()
+    );
+    drop(active);
+    // Cross the production working-set retirement boundary with real V3 records. The fillers
+    // have no scope binding and cannot become selected evidence for the active run.
+    let mut pending = Vec::new();
+    for index in 0..sigil_kernel::session::TOOL_OUTPUT_PRESSURE_MAX_RESULTS {
+        let result = ToolResult::ok(
+            format!("archive-filler-{index}"),
+            "read_file",
+            "small observation",
+            ToolResultMeta::default(),
+        );
+        let (recorded, _) = sigil_kernel::ToolResultRecordedV3::capture(
+            &result,
+            None,
+            sigil_kernel::ToolArtifactSensitivity::Ordinary,
+        )?;
+        pending.push(SessionLogEntry::ToolResultV3(recorded));
+        if pending.len() == 128 {
+            session.append_session_entries(std::mem::take(&mut pending))?;
+        }
+    }
+    if !pending.is_empty() {
+        session.append_session_entries(pending)?;
+    }
+    let retired = session
+        .active_projection_snapshot()?
+        .expect("retired projection")
+        .tool_output_pressure();
+    assert!(
+        retired
+            .archived_artifact_bindings
+            .values()
+            .any(|binding| binding.call_id == "archive-call-0")
+    );
+    assert!(
+        retired
+            .archived_artifact_bindings
+            .values()
+            .any(|binding| binding.call_id == "archive-call-1")
+    );
+    let options = run_options(temp.path().to_path_buf());
+    let outcome = AgentRunOutcome::default();
+    let before = runtime
+        .final_answer_context(&session, &options, &outcome)
+        .await?
+        .expect("retired source context");
+    drop(session);
+    drop(artifacts);
+    let restored = Session::load_from_store("parent", "model", JsonlSessionStore::new(&path)?)?;
+    let after = runtime
+        .final_answer_context(&restored, &options, &outcome)
+        .await?
+        .expect("restored source context");
+    assert_eq!(before.prompt, after.prompt);
+    let payload: serde_json::Value = serde_json::from_str(&after.prompt)?;
+    let evidence = payload["session_facts"]["selected_recorded_evidence"]
+        .as_array()
+        .expect("recovered original facts");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["call_id"], "archive-call-0");
+    assert_eq!(evidence[0]["source_event_id"], expected.source_event_id);
+    assert_eq!(evidence[0]["logical_run_id"], "archive-selected-run");
+    assert_eq!(evidence[0]["facts"], serde_json::to_value(expected.facts)?);
+    let omissions = &payload["session_facts"]["evidence_omissions"];
+    assert_eq!(omissions["archived_not_selected"], 0);
+    assert_eq!(omissions["archived_unavailable"], 0);
+    assert_eq!(omissions["archived_sources"], json!([]));
+    // Repeated access rereads exact original sources without rebuilding the full index.
+    assert_eq!(
+        runtime
+            .final_answer_context(&restored, &options, &outcome)
+            .await?
+            .expect("repeat")
+            .prompt,
+        after.prompt
+    );
+    let binding = retired
+        .archived_artifact_bindings
+        .values()
+        .find(|binding| binding.call_id == "archive-call-0")
+        .expect("archive binding")
+        .clone();
+    // On this current-thread runtime a blocked synchronous reader would prevent the timer
+    // from firing. Dropping the lookup cancels its worker and preserves the reusable index.
+    let locked_file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+    lock_test_file_exclusive_with_retry(&locked_file)?;
+    let blocked = tokio::time::timeout(
+        Duration::from_millis(50),
+        restored.archived_tool_result_facts(std::slice::from_ref(&binding)),
+    )
+    .await;
+    locked_file.unlock()?;
+    assert!(
+        blocked.is_err(),
+        "archive I/O must yield the async executor while blocked"
+    );
+    assert!(
+        restored
+            .archived_tool_result_facts(std::slice::from_ref(&binding))
+            .await?[0]
+            .is_some()
+    );
+    let mut foreign = binding.clone();
+    foreign.logical_run_id = Some(sigil_kernel::LogicalRunId::new("foreign-run")?);
+    assert!(
+        restored
+            .archived_tool_result_facts(&[foreign])
+            .await
+            .is_err()
+    );
+    let mut missing = binding.clone();
+    missing.source_event_id = "missing-original-source".to_owned();
+    assert!(
+        restored
+            .archived_tool_result_facts(&[missing])
+            .await
+            .is_err()
+    );
+    let no_store = Session::new("parent", "model");
+    assert!(no_store.archived_tool_result_facts(&[binding]).await?[0].is_none());
+    // Corruption after the index was warmed must not return cached evidence as successful.
+    let original = std::fs::read_to_string(&path)?;
+    let corrupt = original.replacen("archive-call-0", "archive-call-X", 1);
+    assert_ne!(original, corrupt);
+    std::fs::write(&path, corrupt)?;
+    assert!(
+        runtime
+            .final_answer_context(&restored, &options, &outcome)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -5929,12 +6472,13 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
         ..AgentRunOutcome::default()
     };
     let context = runtime
-        .final_answer_context(&session, &options, &outcome)?
+        .final_answer_context(&session, &options, &outcome)
+        .await?
         .expect("recorded facts should produce final-answer context");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     assert_eq!(payload["type"], "active_run_facts");
-    assert_eq!(payload["session_facts"]["commands"], json!([]));
-    assert_eq!(payload["session_facts"]["gates"], json!([]));
+    assert!(payload["session_facts"].get("commands").is_none());
+    assert!(payload["session_facts"].get("gates").is_none());
     assert_eq!(
         payload["session_facts"]["files_changed"][0],
         "crates/sigil-tui/src/app/key_router.rs"
@@ -5952,8 +6496,8 @@ fn final_answer_context_reports_recorded_session_facts_without_hard_blocking() -
     Ok(())
 }
 
-#[test]
-fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -6021,15 +6565,16 @@ fn final_answer_context_ignores_read_only_tool_executions_and_policy_allow() -> 
 
     assert!(
         runtime
-            .final_answer_context(&session, &options, &outcome)?
+            .final_answer_context(&session, &options, &outcome)
+            .await?
             .is_none(),
         "read-only tool executions and ordinary policy allow should not force a final-answer rerun"
     );
     Ok(())
 }
 
-#[test]
-fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -6067,15 +6612,16 @@ fn final_answer_context_ignores_material_facts_from_an_earlier_run() -> Result<(
 
     assert!(
         runtime
-            .final_answer_context(&session, &options, &outcome)?
+            .final_answer_context(&session, &options, &outcome)
+            .await?
             .is_none(),
         "a command recorded by an earlier run must not alter the current run's final-answer request"
     );
     Ok(())
 }
 
-#[test]
-fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -6103,15 +6649,16 @@ fn final_answer_context_ignores_network_read_policy_allow() -> Result<()> {
     };
     assert!(
         runtime
-            .final_answer_context(&session, &options, &outcome)?
+            .final_answer_context(&session, &options, &outcome)
+            .await?
             .is_none(),
         "an allowed network read is ordinary tool provenance, not a reason to regenerate a completed reply"
     );
     Ok(())
 }
 
-#[test]
-fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() -> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -6141,7 +6688,9 @@ fn final_answer_context_does_not_read_locked_store_for_allowed_network_read() ->
         tool_call_ids: vec!["call-network-read-locked".to_owned()],
         ..AgentRunOutcome::default()
     };
-    let context = runtime.final_answer_context(&session, &options, &outcome);
+    let context = runtime
+        .final_answer_context(&session, &options, &outcome)
+        .await;
 
     locked_file.unlock()?;
     assert!(
@@ -6177,8 +6726,9 @@ fn lock_test_file_exclusive_with_retry(file: &fs::File) -> Result<()> {
         .into())
 }
 
-#[test]
-fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant() -> Result<()> {
+#[tokio::test]
+async fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_grant()
+-> Result<()> {
     let config = root_config();
     let supervisor = supervisor(&config)?;
     let mut runtime = user_authorized_runtime(supervisor, config, ToolRegistry::new());
@@ -6275,7 +6825,8 @@ fn final_answer_context_distinguishes_policy_allow_user_approval_and_session_gra
         ..AgentRunOutcome::default()
     };
     let context = runtime
-        .final_answer_context(&session, &options, &outcome)?
+        .final_answer_context(&session, &options, &outcome)
+        .await?
         .expect("approval facts should produce final-answer context");
     let payload: serde_json::Value = serde_json::from_str(&context.prompt)?;
     let approvals = &payload["session_facts"]["approvals"];
@@ -8345,7 +8896,7 @@ fn append_agent_admission_for_root(
             permission_upper_bound: PermissionConfig::default(),
             network_upper_bound: NetworkPolicy::Deny,
             tool_contract_fingerprint: "sha256:tools".to_owned(),
-            workspace_snapshot_id: "sha256:workspace".to_owned(),
+            workspace_snapshot_id: Some("sha256:workspace".to_owned()),
             root_cancellation_scope_id: format!("scope-{root_logical_run_id}"),
             expires_at_ms: u64::MAX,
         },

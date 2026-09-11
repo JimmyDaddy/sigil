@@ -39,20 +39,19 @@ struct TaskContinuationCandidate {
 /// Host-owned evidence used to derive the automatic route capability tier.
 ///
 /// The model cannot modify this evidence. `provider_supports_routing_tools` reflects the
-/// effective provider/tool capability; `route_qualified` reflects exact-route qualification
-/// evidence from the release manifest. The default is the RFC-0063 baseline: routing enabled at
-/// `ReviewFirst`, never `DirectTask` without exact qualification.
+/// effective provider/tool capability; `task_executor_available` reflects an attached executor.
+/// Release evaluation evidence informs installation defaults, not execution permission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteCapabilityEvidence {
     pub provider_supports_routing_tools: bool,
-    pub route_qualified: bool,
+    pub task_executor_available: bool,
 }
 
 impl Default for RouteCapabilityEvidence {
     fn default() -> Self {
         Self {
             provider_supports_routing_tools: true,
-            route_qualified: false,
+            task_executor_available: false,
         }
     }
 }
@@ -95,7 +94,7 @@ impl ConversationCoordinator {
         self
     }
 
-    /// Binds the exact provider/tool and release-qualification evidence used to derive the
+    /// Binds the actual provider/tool and executor availability used to derive the
     /// automatic route capability tier.
     #[must_use]
     pub fn with_route_capability_evidence(mut self, evidence: RouteCapabilityEvidence) -> Self {
@@ -153,8 +152,8 @@ impl ConversationCoordinator {
     /// Returns the effective automatic route capability for the current session.
     ///
     /// `Manual` configuration, a disabled task mode, or a provider that cannot stream tool calls
-    /// all resolve to `Unsupported`. Without exact-route qualification evidence the capability
-    /// resolves to `ReviewFirst`, never `DirectTask`. A route-local kill switch (hard invariant)
+    /// all resolve to `Unsupported`. Without an attached executor the capability resolves to
+    /// `ReviewFirst`. A route-local kill switch (hard invariant)
     /// degrades `DirectTask` to the `ReviewFirst` baseline but keeps the safe, reviewable
     /// automatic plan review handoff.
     #[must_use]
@@ -171,7 +170,7 @@ impl ConversationCoordinator {
         {
             return AutomaticRouteCapability::Unsupported;
         }
-        if self.route_capability_evidence.route_qualified
+        if self.route_capability_evidence.task_executor_available
             && !self
                 .orchestration_route_guard
                 .as_ref()

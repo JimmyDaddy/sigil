@@ -335,7 +335,6 @@ pub async fn prepare_application_user_input_decision(
                 message: "suspended plan-review request has an invalid source".to_owned(),
             });
         }
-        let root_config = load_application_root_config(&request.config_path)?;
         let child_resource_provisioner = services
             .authority_composition()
             .map(|composition| composition.plan_review_child_resource_provisioner())
@@ -346,7 +345,6 @@ pub async fn prepare_application_user_input_decision(
             })?;
         let (receipt, revision_request, revision_terminal_outbox) =
             crate::application_plan_review_research_input_decision(
-                &root_config,
                 &request.session_path,
                 &request.expected_session_scope_id,
                 sigil_kernel::UserInputDecisionCommandV1 {
@@ -558,6 +556,9 @@ pub async fn prepare_application_user_input_decision(
     let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
+    let managed_plan_review_child_resources = services
+        .authority_composition()
+        .map(|composition| composition.plan_review_child_resource_provisioner());
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             blocking_request,
@@ -567,6 +568,7 @@ pub async fn prepare_application_user_input_decision(
             expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
+            managed_plan_review_child_resources,
         )
     })
     .await

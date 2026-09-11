@@ -31,6 +31,9 @@ use crate::{
     ConversationCoordinator, PlanDecisionCommand, PlanReviewCoordinator, PlanReviewRunRequest,
 };
 
+#[path = "plan_review_finalizer_mixed_tests.rs"]
+mod plan_review_finalizer_mixed_tests;
+
 fn isolated_storage_toml(path: &std::path::Path) -> String {
     let root = path.parent().expect("test config should have a parent");
     let state_root = toml::Value::String(root.join("state").to_string_lossy().into_owned());
@@ -41,7 +44,6 @@ fn isolated_storage_toml(path: &std::path::Path) -> String {
 #[test]
 fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
 
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
@@ -68,7 +70,7 @@ fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> 
     let provisioner = composition.plan_review_child_resource_provisioner();
     let (_, request) = session_with_route_decision()?;
 
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     assert!(!bundle.scope_id().is_empty());
     assert_eq!(
         bundle.authority_generation(),
@@ -80,7 +82,7 @@ fn current_schema_child_resource_bundle_is_scoped_and_explicitly_finalized() -> 
     // Explicit finish settles both the child SessionLog and paired artifact namespaces. Reusing
     // the same deterministic child key is the recovery assertion: a leaked pending lease would
     // poison the next admission instead of closing the child scope.
-    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let recovered = provisioner.provision(&request)?;
     recovered.finish()?;
     Ok(())
 }
@@ -118,13 +120,12 @@ fn child_resource_fixture(
 #[test]
 fn r71_f_csr_001_research_bundle_has_a_scoped_identity() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     assert!(
         bundle
             .scope_id()
@@ -138,13 +139,12 @@ fn r71_f_csr_001_research_bundle_has_a_scoped_identity() -> Result<()> {
 #[test]
 fn r71_f_csr_002_bundle_carries_current_authority_generation() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     assert_eq!(bundle.authority_generation().epoch, 1);
     assert_eq!(
         bundle.authority_generation().instance_hash,
@@ -157,13 +157,12 @@ fn r71_f_csr_002_bundle_carries_current_authority_generation() -> Result<()> {
 #[test]
 fn r71_f_csr_003_bundle_debug_never_exposes_physical_paths() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let debug = format!("{bundle:?}");
     assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
     assert!(!debug.contains("records.jsonl"));
@@ -174,61 +173,47 @@ fn r71_f_csr_003_bundle_debug_never_exposes_physical_paths() -> Result<()> {
 #[test]
 fn r71_f_csr_004_research_finish_releases_the_exact_admissions() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     bundle.finish()?;
-    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let recovered = provisioner.provision(&request)?;
     recovered.finish()?;
     Ok(())
 }
 
 #[test]
-fn r71_f_csr_005_finalizer_finish_releases_the_exact_admissions() -> Result<()> {
+fn r71_f_csr_006_different_attempts_never_share_child_scope() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
-    bundle.finish()?;
-    let recovered = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
-    recovered.finish()?;
-    Ok(())
-}
-
-#[test]
-fn r71_f_csr_006_research_and_finalizer_never_share_scope() -> Result<()> {
-    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-    let (_temp, provisioner, request) = child_resource_fixture(&[
-        Channel::SessionLog,
-        Channel::ArtifactStaging,
-        Channel::ArtifactStore,
-    ])?;
-    let research = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
-    let finalizer = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
-    assert_ne!(research.scope_id(), finalizer.scope_id());
-    assert!(research.scope_id().ends_with("-research"));
-    assert!(finalizer.scope_id().ends_with("-finalizer"));
-    finalizer.finish()?;
-    research.finish()?;
+    let first = provisioner.provision(&request)?;
+    let mut next_request = request.clone();
+    next_request.attempt_id = sigil_kernel::PlanReviewAttemptId::new("next-research-attempt")?;
+    next_request.child_session_ref = sigil_kernel::plan_review_child_session_ref(
+        &next_request.plan_review_id,
+        &next_request.attempt_id,
+    );
+    let next = provisioner.provision(&next_request)?;
+    assert_ne!(first.scope_id(), next.scope_id());
+    assert_ne!(first.session_log_path(), next.session_log_path());
+    next.finish()?;
+    first.finish()?;
     Ok(())
 }
 
 #[test]
 fn r71_f_csr_007_missing_artifact_authority_fails_before_child_bundle() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[Channel::SessionLog])?;
     let error = provisioner
-        .provision(&request, PlanReviewChildResourceKindV1::Research, 0)
+        .provision(&request)
         .expect_err("missing artifact authority");
     assert!(error.to_string().contains("artifact-staging"));
     Ok(())
@@ -237,7 +222,6 @@ fn r71_f_csr_007_missing_artifact_authority_fails_before_child_bundle() -> Resul
 #[test]
 fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
 
     let temp = tempfile::tempdir()?;
     let state = temp.path().join("state");
@@ -273,7 +257,7 @@ fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> 
 
     let provisioner = composition.plan_review_child_resource_provisioner();
     let error = provisioner
-        .provision(&request, PlanReviewChildResourceKindV1::Research, 0)
+        .provision(&request)
         .expect_err("artifact admission should fail on the occupied staging leaf");
     assert!(error.to_string().contains("artifact"));
 
@@ -287,23 +271,19 @@ fn managed_child_partial_artifact_admission_settles_session_log() -> Result<()> 
 }
 
 #[test]
-fn r71_f_csr_008_child_scope_is_retry_stable_and_kind_bound() -> Result<()> {
+fn r71_f_csr_008_child_scope_is_retry_stable() -> Result<()> {
     use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
     let (_temp, provisioner, request) = child_resource_fixture(&[
         Channel::SessionLog,
         Channel::ArtifactStaging,
         Channel::ArtifactStore,
     ])?;
-    let first = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    let first = provisioner.provision(&request)?;
     let first_scope = first.scope_id().to_owned();
     first.finish()?;
-    let retry = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 1)?;
+    let retry = provisioner.provision(&request)?;
     assert_eq!(retry.scope_id(), first_scope);
     retry.finish()?;
-    let next = provisioner.provision(&request, PlanReviewChildResourceKindV1::Finalizer, 2)?;
-    assert_eq!(next.scope_id(), first_scope);
-    next.finish()?;
     Ok(())
 }
 
@@ -378,6 +358,7 @@ fn seed_route_decision_with_prior_context(
             1,
         ),
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -424,29 +405,6 @@ fn draft_entry(request: &PlanReviewRunRequest) -> PlanDraftCreatedEntry {
     }
 }
 
-fn test_plan_compile_input() -> sigil_kernel::PlanCompileInputV1 {
-    sigil_kernel::PlanCompileInputV1 {
-        source_attempt_id: "attempt-1".to_owned(),
-        source_turn_id: "message-1".to_owned(),
-        task_config_contract_hash: sigil_kernel::stable_event_uuid(
-            "sigil-plan-task-config-v1",
-            "test",
-        ),
-        planner_schema_hash: sigil_kernel::stable_event_uuid("sigil-plan-planner-schema-v1", "v2"),
-        task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-            "sigil-task-contract-schema-v1",
-            "v2",
-        ),
-        intent_schema_hash: Some(sigil_kernel::stable_event_uuid(
-            "sigil-intent-schema-v1",
-            "v1",
-        )),
-        max_plan_steps: 64,
-        workspace_id: None,
-        session_scope_id: Some("test-session".to_owned()),
-    }
-}
-
 fn ensure_test_plan_review_attempt_started(
     session: &mut Session,
     request: &PlanReviewRunRequest,
@@ -468,7 +426,6 @@ fn commit_test_plan_review_draft(
     session: &mut Session,
     draft: &PlanDraftCreatedEntry,
     request: &PlanReviewRunRequest,
-    compile_input: &sigil_kernel::PlanCompileInputV1,
     now_ms: u64,
 ) -> Result<()> {
     if PlanReviewProjection::from_entries(session.entries())
@@ -481,7 +438,6 @@ fn commit_test_plan_review_draft(
         session,
         draft,
         request,
-        compile_input,
         &mut NoopEventHandler,
         now_ms,
     )
@@ -620,25 +576,11 @@ fn invalid_draft_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
     ]
 }
 
-fn candidate_confirmation_chunks(call_id: &str, valid: bool) -> Vec<Result<ProviderChunk>> {
-    let args = if valid {
-        r#"{"decision":"accept"}"#
-    } else {
-        r#"{"decision":"accept","content":"candidate replacement is forbidden"}"#
-    };
-    vec![
-        Ok(ProviderChunk::ToolCallComplete(ToolCall {
-            id: call_id.to_owned(),
-            name: sigil_kernel::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME.to_owned(),
-            args_json: args.to_owned(),
-        })),
-        Ok(ProviderChunk::Done),
-    ]
-}
-
-fn no_plan_chunks(call_id: &str) -> Vec<Result<ProviderChunk>> {
-    let args =
-        r#"{"schema_version":1,"outcome":"no_plan","content":"No safe migration is warranted."}"#;
+fn no_plan_chunks(call_id: &str, reason: &str) -> Vec<Result<ProviderChunk>> {
+    let args = serde_json::json!({
+        "schema_version": 1, "outcome": "no_plan", "content": reason,
+    })
+    .to_string();
     vec![
         Ok(ProviderChunk::ToolCallStart {
             id: call_id.to_owned(),
@@ -692,6 +634,7 @@ impl Tool for PlanReviewInspectionTool {
 struct LoopingPlanReviewProvider {
     request_tools: Arc<Mutex<Vec<Vec<String>>>>,
     request_messages: Arc<Mutex<Vec<Vec<ModelMessage>>>>,
+    research_turns: Option<usize>,
 }
 
 #[async_trait]
@@ -726,7 +669,9 @@ impl Provider for LoopingPlanReviewProvider {
             .lock()
             .map_err(|_| anyhow!("plan review message recorder lock poisoned"))?
             .push(request.messages.clone());
-        if tool_names.iter().any(|name| name == "inspect_workspace") && request_index < 8 {
+        if tool_names.iter().any(|name| name == "inspect_workspace")
+            && request_index < self.research_turns.unwrap_or(8)
+        {
             let call_id = format!("inspect-{request_index}");
             return Ok(Box::pin(stream::iter(vec![
                 Ok(ProviderChunk::ToolCallStart {
@@ -831,11 +776,13 @@ struct InvalidThenValidFinalizerProvider {
     request_tools: Arc<Mutex<Vec<Vec<String>>>>,
     request_messages: Arc<Mutex<Vec<Vec<ModelMessage>>>>,
     interrupt_research: bool,
+    research_text: Option<String>,
 }
 
 #[derive(Clone, Default)]
 struct NoPlanPlanReviewProvider {
     request_tools: Arc<Mutex<Vec<Vec<String>>>>,
+    reason: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -937,10 +884,6 @@ impl Provider for InvalidThenValidFinalizerProvider {
             .lock()
             .map_err(|_| anyhow!("plan review message recorder lock poisoned"))?
             .push(request.messages.clone());
-        let confirms_candidate = request
-            .tools
-            .iter()
-            .any(|tool| tool.name == sigil_kernel::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME);
         Ok(Box::pin(stream::iter(match index {
             0 if self.interrupt_research => vec![
                 Ok(ProviderChunk::TextDelta(
@@ -949,13 +892,13 @@ impl Provider for InvalidThenValidFinalizerProvider {
                 Err(anyhow!("simulated TLS unexpected EOF")),
             ],
             0 => vec![
-                Ok(ProviderChunk::TextDelta("research complete".to_owned())),
+                Ok(ProviderChunk::TextDelta(
+                    self.research_text
+                        .clone()
+                        .unwrap_or_else(|| "research complete".to_owned()),
+                )),
                 Ok(ProviderChunk::Done),
             ],
-            1 if confirms_candidate => candidate_confirmation_chunks("invalid-confirmation", false),
-            _ if confirms_candidate => {
-                candidate_confirmation_chunks("corrected-confirmation", true)
-            }
             1 => invalid_draft_chunks("invalid-draft"),
             _ => submitted_draft_chunks("corrected-draft"),
         })))
@@ -982,7 +925,12 @@ impl Provider for NoPlanPlanReviewProvider {
             .map_err(|_| anyhow!("plan review request recorder lock poisoned"))?;
         requests.push(request.tools.iter().map(|tool| tool.name.clone()).collect());
         drop(requests);
-        Ok(Box::pin(stream::iter(no_plan_chunks("no-plan"))))
+        Ok(Box::pin(stream::iter(no_plan_chunks(
+            "no-plan",
+            self.reason
+                .as_deref()
+                .unwrap_or("No safe migration is warranted."),
+        ))))
     }
 }
 
@@ -1346,13 +1294,7 @@ async fn plan_review_waiting_input_case(explicit: bool, compact_child: bool) -> 
     let PlanReviewRunOutcome::DraftReady { draft } = completed else {
         panic!("answered research question must continue to a draft")
     };
-    commit_test_plan_review_draft(
-        &mut parent_session,
-        &draft,
-        &resumed,
-        &test_plan_compile_input(),
-        140,
-    )?;
+    commit_test_plan_review_draft(&mut parent_session, &draft, &resumed, 140)?;
     assert_eq!(
         PlanReviewProjection::from_entries(parent_session.entries())
             .latest_attempt(&request.plan_review_id)
@@ -1524,8 +1466,6 @@ where
 
 #[tokio::test]
 async fn managed_plan_review_research_controls_stay_in_the_child_session() -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let mut handler = RejectForwardedPlanReviewChildControls::default();
     let (_temp, parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture_with_handler(&mut handler).await?;
@@ -1559,7 +1499,7 @@ async fn managed_plan_review_research_controls_stay_in_the_child_session() -> Re
         "the parent must only mirror the waiting attempt, not own the child request"
     );
 
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let child = Session::load_from_store(
         parent.provider_name(),
         parent.model_name(),
@@ -1579,8 +1519,6 @@ async fn managed_plan_review_research_controls_stay_in_the_child_session() -> Re
 
 #[tokio::test]
 async fn managed_plan_review_recovery_reopens_the_exact_child_submitted_receipt() -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let (_temp, parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
     assert!(
@@ -1605,7 +1543,7 @@ async fn managed_plan_review_recovery_reopens_the_exact_child_submitted_receipt(
             .contains("does not match the requested revision lineage"),
         "stale request must fail before a child resume admission: {stale:#}"
     );
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let mut child = Session::load_from_store(
         parent.provider_name(),
         parent.model_name(),
@@ -1654,11 +1592,9 @@ async fn managed_plan_review_recovery_reopens_the_exact_child_submitted_receipt(
 #[tokio::test]
 async fn managed_plan_review_recovery_replays_resolved_child_cancel_for_waiting_parent()
 -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let (_temp, parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let mut child = Session::load_from_store(
         parent.provider_name(),
         parent.model_name(),
@@ -1697,11 +1633,9 @@ async fn managed_plan_review_recovery_replays_resolved_child_cancel_for_waiting_
 #[tokio::test]
 async fn managed_plan_review_declined_research_input_allows_the_same_attempt_to_resume()
 -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let (_temp, parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let mut child = Session::load_from_store(
         parent.provider_name(),
         parent.model_name(),
@@ -1741,11 +1675,9 @@ async fn managed_plan_review_declined_research_input_allows_the_same_attempt_to_
 #[tokio::test]
 async fn managed_plan_review_recovery_fails_closed_without_recreating_a_missing_child_record()
 -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let (_temp, parent, request, _pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let child_path = bundle.session_log_path().to_path_buf();
     bundle.finish()?;
     std::fs::remove_file(&child_path)?;
@@ -1776,11 +1708,9 @@ async fn managed_plan_review_recovery_fails_closed_without_recreating_a_missing_
 #[tokio::test]
 async fn managed_plan_review_input_acceptance_fails_closed_without_recreating_a_missing_child_record()
 -> Result<()> {
-    use crate::plan_review_coordinator::PlanReviewChildResourceKindV1;
-
     let (_temp, mut parent, request, pending, provisioner) =
         managed_plan_review_research_waiting_fixture().await?;
-    let bundle = provisioner.provision(&request, PlanReviewChildResourceKindV1::Research, 0)?;
+    let bundle = provisioner.provision(&request)?;
     let child_path = bundle.session_log_path().to_path_buf();
     bundle.finish()?;
     std::fs::remove_file(&child_path)?;
@@ -2115,7 +2045,7 @@ async fn plan_revision_submit_only_non_submit_is_never_dispatched_and_closes_typ
 }
 
 #[tokio::test]
-async fn plan_review_invalid_typed_finalizer_retries_once_in_a_fresh_session() -> Result<()> {
+async fn plan_review_invalid_typed_finalizer_retries_once_in_the_research_session() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (mut parent_session, request) = seed_route_decision(
         Session::new("plan-review-test", "planned-model").with_store(JsonlSessionStore::new(
@@ -2174,7 +2104,7 @@ async fn plan_review_invalid_typed_finalizer_retries_once_in_a_fresh_session() -
 }
 
 #[tokio::test]
-async fn plan_review_plain_text_finalizer_is_preserved_as_a_candidate_until_explicit_adoption()
+async fn plan_review_plain_text_finalizer_remains_unknown_and_cannot_create_a_ready_plan()
 -> Result<()> {
     let temp = tempfile::tempdir()?;
     let (mut parent_session, request) = seed_route_decision(
@@ -2203,7 +2133,7 @@ async fn plan_review_plain_text_finalizer_is_preserved_as_a_candidate_until_expl
     let PlanReviewRunOutcome::Paused(reason) = outcome else {
         panic!("plain finalizer text must remain a paused review candidate");
     };
-    assert!(reason.contains("awaits explicit confirmation"));
+    assert!(reason.contains("unconfirmed evidence"));
     let review = crate::conversation_display::public_plan_review_from_entries(
         parent_session.entries(),
         None,
@@ -2215,6 +2145,16 @@ async fn plan_review_plain_text_finalizer_is_preserved_as_a_candidate_until_expl
     );
     let candidate = review.candidate.expect("candidate should be projected");
     assert!(candidate.content.contains("Inspect the live call path"));
+    assert_eq!(
+        candidate.completeness,
+        sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown
+    );
+    assert!(parent_session.plan_artifact_projection().plans.is_empty());
+    assert!(
+        sigil_kernel::TaskStateProjection::from_entries(parent_session.entries())
+            .tasks
+            .is_empty()
+    );
     assert_eq!(
         review.allowed_actions,
         Vec::<sigil_kernel::PublicPlanAction>::new()
@@ -2522,7 +2462,7 @@ async fn plan_review_hard_budget_does_not_spawn_an_extra_finalizer() -> Result<(
 }
 
 #[tokio::test]
-async fn plan_review_finalizer_controls_stay_in_the_finalizer_session() -> Result<()> {
+async fn plan_review_finalizer_controls_stay_in_the_research_child_session() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let parent_path = temp.path().join("sessions/session.jsonl");
     let (mut parent_session, request) = seed_route_decision(
@@ -2591,11 +2531,18 @@ async fn plan_review_finalizer_controls_stay_in_the_finalizer_session() -> Resul
         "the coordinator commits a finalizer draft to the parent only after it reads child state"
     );
 
-    let finalizer = Session::load_from_store(
+    assert!(
+        !request
+            .finalizer_session_ref
+            .resolve(parent_path.parent().expect("parent directory"))
+            .exists(),
+        "finalization must not allocate a second session"
+    );
+    let child = Session::load_from_store(
         parent_session.provider_name(),
         parent_session.model_name(),
         JsonlSessionStore::new(
-            request.finalizer_session_ref.resolve(
+            request.child_session_ref.resolve(
                 parent_path
                     .parent()
                     .expect("parent session fixture path must have a directory"),
@@ -2603,12 +2550,12 @@ async fn plan_review_finalizer_controls_stay_in_the_finalizer_session() -> Resul
         )?,
     )?;
     assert!(
-        finalizer.entries().iter().any(|entry| matches!(
+        child.entries().iter().any(|entry| matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft))
                 if draft.plan_id == request.plan_id
         )),
-        "the validated draft source must remain durably owned by the finalizer child"
+        "the validated draft source must remain durably owned by the research child"
     );
     Ok(())
 }
@@ -2908,53 +2855,56 @@ impl crate::application_run::ApplicationRunEventHandler for RecordingRevisionHan
 }
 
 #[test]
-fn application_plan_decisions_reject_disabled_or_changed_composition_without_mutation() -> Result<()>
-{
-    let temp = tempfile::tempdir()?;
-    let config = sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
-    let session_path = temp.path().join("composition-plan.jsonl");
-    let request = seed_revision_decision(&config, temp.path(), &session_path)?;
-    let (_, route) = crate::provider_connections::resolve_default_model_route(&config)?;
-    let inspected = crate::provider_connections::inspect_session_for_route_resume(
-        &config,
-        &route,
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    let scope = inspected.session.session_scope_id().to_owned();
-    let baseline = std::fs::read(&session_path)?;
-    let mut core = config.clone();
-    core.composition = sigil_kernel::RuntimeCompositionConfig::core();
-    let mut changed = config.clone();
-    changed.composition = sigil_kernel::RuntimeCompositionConfig::new(
-        sigil_kernel::RuntimeCompositionProfile::Core,
-        [sigil_kernel::OptionalCapability::TaskOrchestration],
-    );
-    for (selected, expected) in [
-        (core, "task orchestration is not selected"),
-        (changed, "session capability composition differs"),
+fn plan_control_ablation_local_decisions_need_only_the_durable_session() -> Result<()> {
+    for action in [
+        crate::ApplicationPlanAction::Run,
+        crate::ApplicationPlanAction::Save,
+        crate::ApplicationPlanAction::Revise,
+        crate::ApplicationPlanAction::Reject,
     ] {
-        for action in [
-            crate::ApplicationPlanAction::Run,
-            crate::ApplicationPlanAction::Revise,
-            crate::ApplicationPlanAction::RetryReview,
-        ] {
-            let error = crate::application_plan_decision(
-                &selected,
-                temp.path(),
-                &session_path,
-                &scope,
-                &crate::ApplicationPlanDecisionCommand {
-                    plan_id: request.plan_id.as_str().to_owned(),
-                    expected_plan_hash: "unused-after-composition-rejection".to_owned(),
-                    action,
-                    expected_candidate_hash: None,
-                    permission_grant: None,
-                },
-            )
-            .expect_err("composition must be checked before plan mutation");
-            assert!(error.to_string().contains(expected), "{error:#}");
-            assert_eq!(std::fs::read(&session_path)?, baseline);
+        let (_temp, session, _request, draft) = durable_session_with_ready_plan()?;
+        // This durable provider/model has no configured connection. Local decisions must not
+        // require provider construction, credential lookup or a current composition match.
+        assert_eq!(session.provider_name(), "plan-review-test");
+        let session_path = session.store_path().context("durable fixture")?.to_owned();
+        let scope = session.session_scope_id().to_owned();
+        drop(session);
+        let command = crate::ApplicationPlanDecisionCommand {
+            plan_id: draft.plan_id.as_str().to_owned(),
+            expected_plan_hash: draft.plan_hash.clone(),
+            action,
+            expected_candidate_hash: None,
+            permission_grant: None,
+        };
+        let baseline = std::fs::read(&session_path)?;
+        assert!(
+            crate::application_plan_decision(&session_path, "another-session", &command).is_err()
+        );
+        let mut stale = command.clone();
+        stale.expected_plan_hash = "stale".to_owned();
+        assert!(crate::application_plan_decision(&session_path, &scope, &stale).is_err());
+        assert_eq!(std::fs::read(&session_path)?, baseline);
+
+        let receipt = crate::application_plan_decision(&session_path, &scope, &command)?;
+        assert_eq!(receipt.action, action);
+        let committed = std::fs::read(&session_path)?;
+        let replay = crate::application_plan_decision(&session_path, &scope, &command)?;
+        assert_eq!(replay.task_id, receipt.task_id);
+        assert_eq!(replay.user_input_request, receipt.user_input_request);
+        assert_eq!(std::fs::read(&session_path)?, committed);
+        if matches!(
+            action,
+            crate::ApplicationPlanAction::Run | crate::ApplicationPlanAction::Reject
+        ) {
+            let mut forbidden = command.clone();
+            forbidden.action = crate::ApplicationPlanAction::Save;
+            assert!(crate::application_plan_decision(&session_path, &scope, &forbidden).is_err());
+        } else if action == crate::ApplicationPlanAction::Revise {
+            let mut forbidden = command.clone();
+            forbidden.action = crate::ApplicationPlanAction::Run;
+            assert!(crate::application_plan_decision(&session_path, &scope, &forbidden).is_err());
         }
+        assert_eq!(std::fs::read(&session_path)?, committed);
     }
     Ok(())
 }
@@ -2975,8 +2925,6 @@ fn candidate_adoption_rejects_the_old_plan_hash_alias_without_mutating_the_sessi
     drop(inspected);
     let before = std::fs::read(&session_path)?;
     let error = crate::application_plan_decision(
-        &config,
-        temp.path(),
         &session_path,
         &scope,
         &crate::ApplicationPlanDecisionCommand {
@@ -2994,6 +2942,58 @@ fn candidate_adoption_rejects_the_old_plan_hash_alias_without_mutating_the_sessi
             .contains("requires an exact candidate hash")
     );
     assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
+#[test]
+fn plan_control_ablation_targets_the_selected_plan_instead_of_the_latest_card() -> Result<()> {
+    for action in [
+        crate::ApplicationPlanAction::Save,
+        crate::ApplicationPlanAction::Reject,
+        crate::ApplicationPlanAction::Revise,
+    ] {
+        let (_temp, mut session, _request, draft) = durable_session_with_ready_plan()?;
+        let newer = PlanReviewCoordinator::prepare_explicit_plan_review(
+            &mut session,
+            "Review another change",
+            "newer-plan-run",
+            None,
+            30,
+        )?;
+        ensure_test_plan_review_attempt_started(&mut session, &newer, 31)?;
+        let newer_draft = draft_entry(&newer);
+        commit_test_plan_review_draft(&mut session, &newer_draft, &newer, 32)?;
+        assert_eq!(
+            public_plan_review_from_session(&session)?.plan_id,
+            newer.plan_id.as_str()
+        );
+        let path = session.store_path().context("durable fixture")?.to_owned();
+        let scope = session.session_scope_id().to_owned();
+        drop(session);
+        let receipt = crate::application_plan_decision(
+            &path,
+            &scope,
+            &crate::ApplicationPlanDecisionCommand {
+                plan_id: draft.plan_id.as_str().to_owned(),
+                expected_plan_hash: draft.plan_hash.clone(),
+                action,
+                expected_candidate_hash: None,
+                permission_grant: None,
+            },
+        )?;
+        assert_eq!(receipt.plan_id, draft.plan_id.as_str());
+        let current = crate::application_run::load_application_control_session(&path, &scope)?;
+        assert_eq!(
+            current.plan_artifact_projection().plans.get(&newer.plan_id),
+            Some(&newer_draft)
+        );
+        assert!(
+            current
+                .plan_artifact_projection()
+                .latest_decision(&newer.plan_id)
+                .is_none()
+        );
+    }
     Ok(())
 }
 
@@ -3073,19 +3073,11 @@ fn seed_revision_decision(
         risk: None,
         notes: Vec::new(),
     }];
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 110)?;
     let session_scope_id = session.session_scope_id().to_owned();
     drop(session);
 
     let receipt = crate::application_plan_decision(
-        root_config,
-        workspace_root,
         session_path,
         &session_scope_id,
         &crate::ApplicationPlanDecisionCommand {
@@ -3126,13 +3118,7 @@ fn session_with_ready_plan() -> Result<(Session, PlanReviewRunRequest, PlanDraft
     let (mut session, request) = session_with_route_decision()?;
     ensure_test_plan_review_attempt_started(&mut session, &request, 10)?;
     let draft = draft_entry(&request);
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        11,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 11)?;
     Ok((session, request, draft))
 }
 
@@ -3172,13 +3158,7 @@ fn durable_session_with_ready_plan() -> Result<(
     let (mut session, request) = seed_route_decision(session)?;
     ensure_test_plan_review_attempt_started(&mut session, &request, 10)?;
     let draft = draft_entry(&request);
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        11,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 11)?;
     Ok((temp, session, request, draft))
 }
 
@@ -3248,8 +3228,7 @@ fn public_plan_review_from_session(session: &Session) -> Result<sigil_kernel::Pu
 }
 
 #[test]
-fn plan_revision_guidance_is_durable_before_dispatch_and_retry_uses_a_fresh_attempt() -> Result<()>
-{
+fn plan_control_ablation_revision_accepts_new_guidance_after_failure() -> Result<()> {
     let (_temp, mut session, _base_request, base) = durable_session_with_ready_plan()?;
     let requested = PlanReviewCoordinator::request_plan_revision_guidance(
         &mut session,
@@ -3309,7 +3288,7 @@ fn plan_revision_guidance_is_durable_before_dispatch_and_retry_uses_a_fresh_atte
 
     let (replayed, recovered_before_spawn) = PlanReviewCoordinator::accept_plan_revision_guidance(
         &mut session,
-        guidance_command,
+        guidance_command.clone(),
         None,
         22,
     )?;
@@ -3350,17 +3329,65 @@ fn plan_revision_guidance_is_durable_before_dispatch_and_retry_uses_a_fresh_atte
         PlanDecision::RevisionFailed
     );
 
-    let retry = PlanReviewCoordinator::retry_plan_revision(
+    let old_attempt = PlanReviewProjection::from_entries(session.entries())
+        .attempt_for_plan(&first.plan_id)
+        .context("old attempt")?
+        .clone();
+    let old_context_digest =
+        crate::plan_review_coordinator::plan_review_context_digest_for_attempt(
+            &session,
+            &old_attempt,
+        )?;
+    let next_guidance = PlanReviewCoordinator::request_plan_revision_guidance(
         &mut session,
         &base.plan_id,
         &base.plan_hash,
-        None,
         25,
-    )?
-    .expect("retry request");
+    )?;
+    assert_eq!(
+        next_guidance.request.identity.generation,
+        requested.request.identity.generation + 1
+    );
+    let next_command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: next_guidance.request.identity.clone(),
+        request_hash: next_guidance.request_hash,
+        command_id: sigil_kernel::UserInputCommandId::new("revision-guidance-second")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "revision_guidance".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "Use a smaller migration with an explicit rollback step.".to_owned(),
+                },
+            }],
+        },
+    };
+    let (_, retry) = PlanReviewCoordinator::accept_plan_revision_guidance(
+        &mut session,
+        next_command.clone(),
+        None,
+        26,
+    )?;
+    let retry = retry.expect("new guidance prepares a new revision");
+    assert!(retry.objective.contains("explicit rollback step"));
+    assert!(!retry.objective.contains("Preserve compatibility."));
     assert_eq!(retry.attempt_ordinal, 2);
     assert_ne!(retry.attempt_id, first.attempt_id);
     assert_eq!(retry.revision_request_id, first.revision_request_id);
+    let before_replay = std::fs::read(session.store_path().context("durable fixture")?)?;
+    let (_, old_replay) = PlanReviewCoordinator::accept_plan_revision_guidance(
+        &mut session,
+        guidance_command,
+        None,
+        27,
+    )?;
+    assert!(old_replay.is_none());
+    let (_, recovered) =
+        PlanReviewCoordinator::accept_plan_revision_guidance(&mut session, next_command, None, 28)?;
+    assert_eq!(recovered, Some(retry.clone()));
+    assert_eq!(
+        std::fs::read(session.store_path().context("durable fixture")?)?,
+        before_replay
+    );
     let queued = public_plan_review_from_session(&session)?;
     assert!(queued.allowed_actions.is_empty());
     assert_eq!(
@@ -3373,7 +3400,14 @@ fn plan_revision_guidance_is_durable_before_dispatch_and_retry_uses_a_fresh_atte
             .as_ref()
             .is_some_and(|revision| revision.attempt_id.is_none())
     );
-    ensure_test_plan_review_attempt_started(&mut session, &retry, 26)?;
+    ensure_test_plan_review_attempt_started(&mut session, &retry, 29)?;
+    assert_eq!(
+        crate::plan_review_coordinator::plan_review_context_digest_for_attempt(
+            &session,
+            &old_attempt,
+        )?,
+        old_context_digest
+    );
     Ok(())
 }
 
@@ -3445,6 +3479,237 @@ fn plan_revision_queued_disables_save_until_confirmed_start_failure() -> Result<
     assert_eq!(
         PlanReviewCoordinator::record_plan_decision(&mut session, &save, 33)?.decision,
         PlanDecision::SavedOnly
+    );
+    Ok(())
+}
+
+#[test]
+fn unstarted_revision_failure_cannot_settle_or_dispatch_identical_new_guidance() -> Result<()> {
+    let (_temp, mut session, _base_request, base) = durable_session_with_ready_plan()?;
+    let first = submit_revision_guidance(&mut session, &base)?;
+    PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+        &mut session,
+        &first,
+        "first dispatch rejected before its attempt existed",
+        30,
+    )?;
+    let failed_bytes = std::fs::read(session.store_path().context("durable fixture")?)?;
+    assert!(
+        PlanReviewCoordinator::ensure_revision_attempt_started(&mut session, &first, 31).is_err()
+    );
+    assert_eq!(
+        std::fs::read(session.store_path().context("durable fixture")?)?,
+        failed_bytes
+    );
+
+    let guidance = PlanReviewCoordinator::request_plan_revision_guidance(
+        &mut session,
+        &base.plan_id,
+        &base.plan_hash,
+        32,
+    )?;
+    let command = sigil_kernel::UserInputDecisionCommandV1 {
+        identity: guidance.request.identity.clone(),
+        request_hash: guidance.request_hash,
+        command_id: sigil_kernel::UserInputCommandId::new("same-guidance-second-generation")?,
+        decision: sigil_kernel::UserInputDecisionV1::Submitted {
+            answers: vec![sigil_kernel::UserInputAnswerV1 {
+                question_id: "revision_guidance".to_owned(),
+                value: sigil_kernel::UserInputAnswerValueV1::Text {
+                    value: "Keep the public contract stable and split migration steps.".to_owned(),
+                },
+            }],
+        },
+    };
+    let (_, second) = PlanReviewCoordinator::accept_plan_revision_guidance(
+        &mut session,
+        command.clone(),
+        first.workspace_snapshot_id.clone(),
+        33,
+    )?;
+    let second = second.context("second generation must retain run authority")?;
+    assert_eq!(first.objective, second.objective);
+    assert_eq!(first.workspace_snapshot_id, second.workspace_snapshot_id);
+    assert_eq!(first.revision_request_id, second.revision_request_id);
+    assert_eq!(
+        first.attempt_ordinal, second.attempt_ordinal,
+        "no attempt was persisted between generations"
+    );
+    assert_eq!(
+        second.revision_generation,
+        first.revision_generation.map(|generation| generation + 1)
+    );
+    assert_ne!(first.attempt_id, second.attempt_id);
+    assert_ne!(first.plan_id, second.plan_id);
+    assert_ne!(first.child_session_ref, second.child_session_ref);
+    assert_ne!(first.child_logical_run_id(), second.child_logical_run_id());
+
+    let before_stale = std::fs::read(session.store_path().context("durable fixture")?)?;
+    assert!(
+        PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+            &mut session,
+            &first,
+            "delayed first-generation failure",
+            34,
+        )
+        .is_err()
+    );
+    assert!(
+        PlanReviewCoordinator::ensure_revision_attempt_started(&mut session, &first, 35).is_err()
+    );
+    assert!(
+        commit_revision_terminal_for_test(
+            &mut session,
+            &first,
+            &PlanReviewRunOutcome::Failed("delayed terminal".to_owned()),
+            36,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(session.store_path().context("durable fixture")?)?,
+        before_stale
+    );
+    assert_eq!(
+        session
+            .plan_artifact_projection()
+            .latest_decision(&base.plan_id)
+            .context("queued base decision")?
+            .decision,
+        PlanDecision::RevisionRequested
+    );
+
+    // Reload recovers the same accepted generation before worker admission.
+    let store = JsonlSessionStore::new(session.store_path().context("durable fixture")?)?;
+    let mut loaded = Session::load_from_store("plan-review-test", "planned-model", store)?;
+    let (_, recovered) = PlanReviewCoordinator::accept_plan_revision_guidance(
+        &mut loaded,
+        command,
+        second.workspace_snapshot_id.clone(),
+        37,
+    )?;
+    assert_eq!(recovered, Some(second.clone()));
+    PlanReviewCoordinator::ensure_revision_attempt_started(&mut loaded, &second, 38)?;
+    let started_bytes = std::fs::read(loaded.store_path().context("durable fixture")?)?;
+    assert!(
+        PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+            &mut loaded,
+            &first,
+            "stale failure after current dispatch",
+            39,
+        )
+        .is_err()
+    );
+    assert!(
+        PlanReviewCoordinator::ensure_revision_attempt_started(&mut loaded, &first, 40).is_err()
+    );
+    assert!(
+        commit_revision_terminal_for_test(
+            &mut loaded,
+            &first,
+            &PlanReviewRunOutcome::Failed("stale terminal after dispatch".to_owned()),
+            41,
+        )
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read(loaded.store_path().context("durable fixture")?)?,
+        started_bytes
+    );
+    let reviews = PlanReviewProjection::from_entries(loaded.entries());
+    assert_eq!(
+        reviews
+            .latest_attempt(&second.plan_review_id)
+            .context("current started attempt")?
+            .attempt_id,
+        second.attempt_id
+    );
+    commit_revision_terminal_for_test(
+        &mut loaded,
+        &second,
+        &PlanReviewRunOutcome::Failed("current generation finished".to_owned()),
+        42,
+    )?;
+    assert_eq!(
+        loaded
+            .plan_artifact_projection()
+            .latest_decision(&base.plan_id)
+            .context("current terminal decision")?
+            .decision,
+        PlanDecision::RevisionFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn historical_revision_attempt_recovers_generation_without_rewriting_its_identity() -> Result<()> {
+    let (_temp, mut session, _base_request, base) = durable_session_with_ready_plan()?;
+    let mut historical = submit_revision_guidance(&mut session, &base)?;
+    historical.attempt_id = sigil_kernel::PlanReviewAttemptId::new("historical-revision-attempt")?;
+    historical.plan_id = sigil_kernel::PlanId::new("historical-revision-plan")?;
+    historical.child_session_ref = SessionRef::new_relative("historical-revision-research.jsonl")?;
+    historical.finalizer_session_ref =
+        SessionRef::new_relative("historical-revision-finalizer.jsonl")?;
+    let historical_entry = sigil_kernel::PlanReviewAttemptEntry {
+        plan_review_id: historical.plan_review_id.clone(),
+        attempt_id: historical.attempt_id.clone(),
+        plan_id: historical.plan_id.clone(),
+        source: historical.source,
+        source_turn: historical.source_turn.clone(),
+        route_decision_id: historical.route_decision_id.clone(),
+        child_session_ref: historical.child_session_ref.clone(),
+        finalizer_session_ref: Some(historical.finalizer_session_ref.clone()),
+        revision_request_id: historical.revision_request_id.clone(),
+        attempt_ordinal: historical.attempt_ordinal,
+        base_plan_id: historical.base_plan_id.clone(),
+        base_plan_hash: historical.base_plan_hash.clone(),
+        explicit_objective: historical.explicit_objective.clone(),
+        workspace_snapshot_id: historical.workspace_snapshot_id.clone(),
+        pending_user_input: None,
+        status: PlanReviewAttemptStatus::Started,
+        terminal_reason: None,
+        recorded_at_ms: 30,
+    };
+    assert!(
+        serde_json::to_value(&historical_entry)?
+            .get("revision_generation")
+            .is_none()
+    );
+    session.append_control(ControlEntry::PlanReviewAttempt(historical_entry.clone()))?;
+    let store = JsonlSessionStore::new(session.store_path().context("durable fixture")?)?;
+    // A concurrent control reader must preserve this active attempt; startup loading would
+    // intentionally reconcile it as interrupted before the historical replay assertions.
+    let mut loaded = Session::load_from_store_for_control(store)?;
+    let before = std::fs::read(loaded.store_path().context("durable fixture")?)?;
+    PlanReviewCoordinator::ensure_revision_attempt_started(&mut loaded, &historical, 31)?;
+    let digest = crate::plan_review_coordinator::plan_review_context_digest_for_attempt(
+        &loaded,
+        &historical_entry,
+    )?;
+    assert_eq!(
+        std::fs::read(loaded.store_path().context("durable fixture")?)?,
+        before
+    );
+    commit_revision_terminal_for_test(
+        &mut loaded,
+        &historical,
+        &PlanReviewRunOutcome::Failed("historical failure".to_owned()),
+        32,
+    )?;
+    let new_guidance = PlanReviewCoordinator::request_plan_revision_guidance(
+        &mut loaded,
+        &base.plan_id,
+        &base.plan_hash,
+        33,
+    )?;
+    assert_eq!(new_guidance.request.identity.generation, 2);
+    assert_eq!(
+        crate::plan_review_coordinator::plan_review_context_digest_for_attempt(
+            &loaded,
+            &historical_entry,
+        )?,
+        digest,
+        "later guidance cannot rebind the historical attempt prefix"
     );
     Ok(())
 }
@@ -3751,8 +4016,90 @@ credential = {{ source = "none" }}
 }
 
 #[tokio::test]
-async fn revision_provider_construction_failure_commits_confirmed_interrupted_terminal()
+async fn plan_control_ablation_removed_connection_settles_revision_and_restores_base_actions()
 -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = write_admission_test_config(temp.path());
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await?;
+    let original = std::fs::read_to_string(&config_path)?.replace(
+        "http://127.0.0.1:1",
+        &format!("http://{}", listener.local_addr()?),
+    );
+    let config: sigil_kernel::RootConfig = toml::from_str(&original)?;
+    let session_path = temp.path().join("revision-removed-connection.jsonl");
+    let request = seed_revision_decision(&config, temp.path(), &session_path)?;
+    let changed: sigil_kernel::RootConfig =
+        toml::from_str(&original.replace("local-test", "replacement"))?;
+    let mut handler = RecordingRevisionHandler(Vec::new());
+    let execution = crate::application_run::execute_plan_review_revision_with_managed_execution(
+        &changed,
+        temp.path(),
+        &session_path,
+        &request,
+        &mut handler,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert!(matches!(execution.outcome, PlanReviewRunOutcome::Failed(_)));
+    assert!(execution.terminal_outbox.is_some());
+    let session = crate::application_run::load_application_control_session(
+        &session_path,
+        &request.source_turn.session_scope_id,
+    )?;
+    let public = public_plan_review_from_session(&session)?;
+    assert_eq!(
+        public.plan_id,
+        request.base_plan_id.as_ref().context("base plan")?.as_str()
+    );
+    for action in [
+        sigil_kernel::PublicPlanAction::Run,
+        sigil_kernel::PublicPlanAction::Save,
+        sigil_kernel::PublicPlanAction::Revise,
+        sigil_kernel::PublicPlanAction::Reject,
+    ] {
+        assert!(public.allowed_actions.contains(&action));
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept(),)
+            .await
+            .is_err(),
+        "missing original connection must not dispatch to the replacement route"
+    );
+    let before = std::fs::read(&session_path)?;
+    let replay = crate::application_run::execute_plan_review_revision_with_managed_execution(
+        &changed,
+        temp.path(),
+        &session_path,
+        &request,
+        &mut handler,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        serde_json::to_value(&replay.terminal_outbox)?,
+        serde_json::to_value(&execution.terminal_outbox)?,
+    );
+    assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn revision_provider_construction_failure_commits_confirmed_failed_terminal() -> Result<()> {
+    assert_revision_provider_construction_failure(false).await
+}
+
+#[tokio::test]
+async fn revision_provider_construction_failure_preserves_requested_cancellation() -> Result<()> {
+    assert_revision_provider_construction_failure(true).await
+}
+
+async fn assert_revision_provider_construction_failure(cancel_requested: bool) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -3796,19 +4143,59 @@ credential = {{ source = "none" }}
 
     let mut recorded = Vec::new();
     let mut handler = RecordingRevisionHandler(std::mem::take(&mut recorded));
-    let outcome = crate::application_run::execute_plan_review_revision(
+    let cancellation = RunCancellationOwner::new();
+    if cancel_requested {
+        assert!(cancellation.request_cancel());
+    }
+    let execution = crate::application_run::execute_plan_review_revision_with_managed_execution(
         &root_config,
         &workspace_root,
         &session_path,
         &revision_request,
         &mut handler,
+        Some(cancellation.handle()),
+        None,
+        None,
         None,
     )
     .await?;
-    assert!(matches!(outcome, PlanReviewRunOutcome::Interrupted(_)));
+    let outcome = execution.outcome;
+    if cancel_requested {
+        assert!(matches!(outcome, PlanReviewRunOutcome::Cancelled));
+        let terminal = execution
+            .terminal_outbox
+            .context("durable cancellation terminal")?;
+        assert!(matches!(
+            terminal.event.event,
+            PublicRunEventKind::RunCancelled
+        ));
+        let records = JsonlSessionStore::new(&session_path)?.read_event_records_writer()?;
+        let outbox = sigil_kernel::PublicEventOutboxProjectionV1::from_records(&records)?;
+        let events = outbox.events_in_order();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|entry| entry.run_id == revision_request.child_logical_run_id())
+                .filter(|entry| matches!(entry.event.event, PublicRunEventKind::RunCancelled))
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .filter(|entry| entry.run_id == revision_request.child_logical_run_id())
+                .any(|entry| matches!(entry.event.event, PublicRunEventKind::RunFailed { .. }))
+        );
+    } else {
+        assert!(matches!(outcome, PlanReviewRunOutcome::Failed(_)));
+        assert!(cancellation.handle().is_naturally_finalized());
+        assert!(
+            !cancellation.request_cancel(),
+            "a settled failure cannot become cancelled"
+        );
+    }
 
-    // The execution future ended and writer recovery found no prior finalizer, so this is a
-    // confirmed Interrupted outcome—not a fabricated Failed fallback.
+    // Provider construction failed before dispatch; the exact cause is a confirmed failure.
     let store = sigil_kernel::JsonlSessionStore::new(&session_path)?;
     let (_, fallback_route) =
         crate::provider_connections::resolve_default_model_route(&root_config)?;
@@ -3827,12 +4214,20 @@ credential = {{ source = "none" }}
         .expect("revision attempt");
     assert_eq!(
         attempt.status,
-        PlanReviewAttemptStatus::Interrupted,
-        "provider-construction failure must settle as Interrupted, never Failed"
+        if cancel_requested {
+            PlanReviewAttemptStatus::Cancelled
+        } else {
+            PlanReviewAttemptStatus::Failed
+        },
+        "confirmed zero-dispatch failure must use the same cancellation arbitration as a run"
     );
     assert_eq!(
         attempt.terminal_reason,
-        Some(sigil_kernel::PlanReviewTerminalReason::RunInterrupted)
+        Some(if cancel_requested {
+            sigil_kernel::PlanReviewTerminalReason::UserCancelled
+        } else {
+            sigil_kernel::PlanReviewTerminalReason::RunFailed
+        })
     );
     Ok(())
 }
@@ -4329,13 +4724,7 @@ fn commit_draft_is_idempotent_and_conflicts_fail_closed() -> Result<()> {
     PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
     let draft = draft_entry(&request);
 
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 110)?;
     let projection = PlanReviewProjection::from_entries(session.entries());
     let attempt = projection
         .latest_attempt(&request.plan_review_id)
@@ -4350,13 +4739,7 @@ fn commit_draft_is_idempotent_and_conflicts_fail_closed() -> Result<()> {
     );
 
     // Identical re-commit is idempotent.
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        111,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 111)?;
     let projection = PlanReviewProjection::from_entries(session.entries());
     assert_eq!(
         projection
@@ -4375,7 +4758,6 @@ fn commit_draft_is_idempotent_and_conflicts_fail_closed() -> Result<()> {
             &mut session,
             &conflicting,
             &request,
-            &test_plan_compile_input(),
             &mut NoopEventHandler,
             112,
         )
@@ -4403,7 +4785,6 @@ fn commit_draft_keeps_parent_draft_and_attempt_in_one_handler_batch() -> Result<
         &mut session,
         &draft,
         &request,
-        &test_plan_compile_input(),
         &mut handler,
         102,
     )?;
@@ -4467,13 +4848,7 @@ fn record_plan_decision_is_typed_idempotent_and_stale_safe() -> Result<()> {
     };
     PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
     let draft = draft_entry(&request);
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 110)?;
 
     let saved = PlanDecisionCommand {
         plan_id: request.plan_id.as_str().to_owned(),
@@ -4562,292 +4937,26 @@ fn saved_plan_remains_revisable_and_rejectable_through_durable_transitions() -> 
 }
 
 #[test]
-fn create_task_from_plan_promotes_valid_draft_and_is_idempotent() -> Result<()> {
-    let (mut session, request) = session_with_route_decision()?;
-    let action = sigil_kernel::StartPlanReviewAction {
-        decision_id: request.route_decision_id.clone().expect("decision id"),
-        plan_review_id: request.plan_review_id.clone(),
-        plan_id: request.plan_id.clone(),
-        source_turn: request.source_turn.clone(),
+fn historical_task_creation_failure_remains_reviewable_after_reload() -> Result<()> {
+    let (mut session, _request, draft) = session_with_ready_plan()?;
+    let failure = sigil_kernel::PlanDecisionRecordedEntry {
+        plan_id: draft.plan_id.clone(),
+        plan_hash: draft.plan_hash.clone(),
+        decision: PlanDecision::TaskCreationFailed,
+        decided_by: sigil_kernel::PlanDecisionActor::System,
+        decided_at_ms: 120,
+        reason: Some("plan has no concrete target paths for scoped edits".to_owned()),
     };
-    PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
-    let draft = draft_entry(&request);
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
-
-    let root_config: sigil_kernel::RootConfig = toml::from_str(
-        r#"
-config_version = 2
-
-[agent]
-connection = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
-    let temp = tempfile::tempdir()?;
-    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
-    let create = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: request.plan_id.as_str().to_owned(),
-        expected_plan_hash: draft.plan_hash.clone(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: None,
-    };
-    let created = PlanReviewCoordinator::create_task_from_plan(
-        &mut session,
-        &root_config,
-        temp.path(),
-        parent_session_ref.clone(),
-        &create,
-    )?;
-    assert_eq!(created.entry.plan_id, request.plan_id);
-    assert_eq!(
-        created.entry.task_plan_version, 0,
-        "incomplete draft uses compatibility planner"
-    );
-    let task = session
-        .task_state_projection()
-        .tasks
-        .get(&created.task_id)
-        .cloned()
-        .expect("task exists");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert_eq!(
-        session
-            .plan_artifact_projection()
-            .latest_decision(&request.plan_id)
-            .map(|entry| entry.decision),
-        Some(PlanDecision::Accepted)
-    );
-
-    // Idempotent retry reconciles the deterministic prefix.
-    let again = PlanReviewCoordinator::create_task_from_plan(
-        &mut session,
-        &root_config,
-        temp.path(),
-        parent_session_ref,
-        &create,
-    )?;
-    assert_eq!(again.task_id, created.task_id);
-
-    // A draft bound to the exact current workspace snapshot is direct-promoted.
-    let (mut bound_session, unbound_request) = session_with_route_decision()?;
-    let bound_action = sigil_kernel::StartPlanReviewAction {
-        decision_id: unbound_request
-            .route_decision_id
-            .clone()
-            .expect("decision id"),
-        plan_review_id: unbound_request.plan_review_id.clone(),
-        plan_id: unbound_request.plan_id.clone(),
-        source_turn: unbound_request.source_turn.clone(),
-    };
-    let snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?
-        .expect("workspace snapshot");
-    let bound_request = PlanReviewCoordinator::prepare_automatic_plan_review(
-        &mut bound_session,
-        &bound_action,
-        Some(snapshot),
-        100,
-    )?;
-    let mut bound_draft = draft_entry(&bound_request);
-    bound_draft.steps = vec![sigil_kernel::PlanDraftStep {
-        step_id: "migrate_1".to_owned(),
-        title: "Migrate coordinator".to_owned(),
-        display_name: None,
-        detail: None,
-        role: Some(sigil_kernel::AgentRole::Executor),
-        depends_on: Vec::new(),
-        intent_aliases: Vec::new(),
-        mode: Some(sigil_kernel::TaskStepMode::Write),
-        isolation: Some(sigil_kernel::TaskIsolationMode::SequentialWorkspaceWrite),
-        target_paths: vec!["src/coordinator.rs".to_owned()],
-        required_capabilities: Vec::new(),
-        deliverables: Vec::new(),
-        acceptance_criteria: Vec::new(),
-        suggested_checks: Vec::new(),
-        risk: None,
-        notes: Vec::new(),
-    }];
-    commit_test_plan_review_draft(
-        &mut bound_session,
-        &bound_draft,
-        &bound_request,
-        &test_plan_compile_input(),
-        110,
-    )?;
-    let bound_create = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: bound_request.plan_id.as_str().to_owned(),
-        expected_plan_hash: bound_draft.plan_hash.clone(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: None,
-    };
-    let promoted = PlanReviewCoordinator::create_task_from_plan(
-        &mut bound_session,
-        &root_config,
-        temp.path(),
-        SessionRef::new_relative("session.jsonl")?,
-        &bound_create,
-    )?;
-    assert_eq!(
-        promoted.entry.task_plan_version, 1,
-        "a draft bound to the unchanged workspace snapshot must direct-promote without the compatibility planner"
-    );
-    assert_eq!(
-        promoted.entry.stale_reason, None,
-        "the bound draft must not be reported stale"
-    );
-
-    // A changed workspace snapshot on a fresh session degrades to the compatibility planner
-    // with a durable stale reason (the same-session retry after a direct promotion fails closed).
-    let (mut drift_session, unbound_drift_request) = session_with_route_decision()?;
-    let drift_action = sigil_kernel::StartPlanReviewAction {
-        decision_id: unbound_drift_request
-            .route_decision_id
-            .clone()
-            .expect("decision id"),
-        plan_review_id: unbound_drift_request.plan_review_id.clone(),
-        plan_id: unbound_drift_request.plan_id.clone(),
-        source_turn: unbound_drift_request.source_turn.clone(),
-    };
-    let drift_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?
-        .expect("workspace snapshot");
-    let drift_request = PlanReviewCoordinator::prepare_automatic_plan_review(
-        &mut drift_session,
-        &drift_action,
-        Some(drift_snapshot),
-        100,
-    )?;
-    let mut drift_draft = draft_entry(&drift_request);
-    drift_draft.steps = bound_draft.steps.clone();
-    commit_test_plan_review_draft(
-        &mut drift_session,
-        &drift_draft,
-        &drift_request,
-        &test_plan_compile_input(),
-        110,
-    )?;
-    let changed_root = tempfile::tempdir()?;
-    std::fs::write(changed_root.path().join("marker.txt"), b"changed")?;
-    let drift_create = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: drift_request.plan_id.as_str().to_owned(),
-        expected_plan_hash: drift_draft.plan_hash.clone(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: None,
-    };
-    let stale_promoted = PlanReviewCoordinator::create_task_from_plan(
-        &mut drift_session,
-        &root_config,
-        changed_root.path(),
-        SessionRef::new_relative("session.jsonl")?,
-        &drift_create,
-    )?;
-    assert_eq!(
-        stale_promoted.entry.task_plan_version, 0,
-        "a changed workspace must fall back to the compatibility planner"
-    );
-    assert!(
-        stale_promoted.entry.stale_reason.is_some(),
-        "a changed workspace must surface the stale reason durably"
-    );
-
-    // Stale hash fails closed.
-    let stale = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: request.plan_id.as_str().to_owned(),
-        expected_plan_hash: "sha256:old".to_owned(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: None,
-    };
-    assert!(
-        PlanReviewCoordinator::create_task_from_plan(
-            &mut session,
-            &root_config,
-            temp.path(),
-            SessionRef::new_relative("session.jsonl")?,
-            &stale,
-        )
-        .is_err()
-    );
-    Ok(())
-}
-
-#[test]
-fn failed_task_creation_is_durable_and_the_same_plan_can_retry() -> Result<()> {
-    let (mut session, request) = session_with_route_decision()?;
-    let action = sigil_kernel::StartPlanReviewAction {
-        decision_id: request.route_decision_id.clone().expect("decision id"),
-        plan_review_id: request.plan_review_id.clone(),
-        plan_id: request.plan_id.clone(),
-        source_turn: request.source_turn.clone(),
-    };
-    PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
-    let mut draft = draft_entry(&request);
-    draft.target_paths.clear();
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
-
-    let root_config: sigil_kernel::RootConfig = toml::from_str(
-        r#"
-config_version = 2
-
-[agent]
-connection = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
-    let temp = tempfile::tempdir()?;
-    let mut create = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: request.plan_id.as_str().to_owned(),
-        expected_plan_hash: draft.plan_hash.clone(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: Some(sigil_kernel::PlanApprovalPermission::WorkspaceEdits),
-    };
-    let error = PlanReviewCoordinator::create_task_from_plan(
-        &mut session,
-        &root_config,
-        temp.path(),
-        SessionRef::new_relative("session.jsonl")?,
-        &create,
-    )
-    .expect_err("a scoped edit grant needs concrete target paths");
-    assert!(error.to_string().contains("no concrete target paths"));
-
-    let projection = session.plan_artifact_projection();
-    let failure = projection
-        .latest_decision(&request.plan_id)
-        .expect("failure settlement");
-    assert_eq!(failure.decision, PlanDecision::TaskCreationFailed);
-    assert!(
-        failure
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("no concrete target paths"))
-    );
+    session.append_control(ControlEntry::PlanDecisionRecorded(failure.clone()))?;
+    let entries: Vec<SessionLogEntry> =
+        serde_json::from_str(&serde_json::to_string(session.entries())?)?;
+    let projection = sigil_kernel::PlanArtifactProjection::from_entries(&entries);
+    assert_eq!(projection.latest_decision(&draft.plan_id), Some(&failure));
     assert_eq!(projection.latest_pending_plan(), Some(&draft));
-
-    create.permission_grant = None;
-    let retried = PlanReviewCoordinator::create_task_from_plan(
-        &mut session,
-        &root_config,
-        temp.path(),
-        SessionRef::new_relative("session.jsonl")?,
-        &create,
-    )?;
-    assert_eq!(retried.entry.plan_id, request.plan_id);
-    assert_eq!(
-        session
-            .plan_artifact_projection()
-            .latest_decision(&request.plan_id)
-            .map(|decision| decision.decision),
-        Some(PlanDecision::Accepted)
+    assert!(
+        sigil_kernel::TaskStateProjection::from_entries(&entries)
+            .tasks
+            .is_empty()
     );
     Ok(())
 }
@@ -4863,13 +4972,7 @@ fn reject_plan_is_durable_and_prevents_task_creation() -> Result<()> {
     };
     PlanReviewCoordinator::prepare_automatic_plan_review(&mut session, &action, None, 100)?;
     let draft = draft_entry(&request);
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        110,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 110)?;
 
     let rejected = PlanReviewCoordinator::reject_plan(
         &mut session,
@@ -4885,32 +4988,28 @@ fn reject_plan_is_durable_and_prevents_task_creation() -> Result<()> {
             .plan_is_rejected(&request.plan_id)
     );
 
-    let create = crate::plan_review_coordinator::CreateTaskFromPlanRequest {
-        plan_id: request.plan_id.as_str().to_owned(),
-        expected_plan_hash: draft.plan_hash.clone(),
+    let command = sigil_kernel::PlanRunCommandV1 {
+        command_id: "rejected-plan-run".to_owned(),
+        session_id: session.session_scope_id().to_owned(),
+        plan_id: draft.plan_id.clone(),
+        expected_plan_hash: draft.plan_hash,
+        expected_candidate_hash: String::new(),
+        expected_durable_frontier: session.durable_frontier_sequence(),
         start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission_grant: None,
+        permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
+        source: sigil_kernel::PlanRunCommandSource::Http,
     };
-    let root_config: sigil_kernel::RootConfig = toml::from_str(
-        r#"
-config_version = 2
-
-[agent]
-connection = "deepseek"
-model = "deepseek-v4-flash"
-"#,
-    )?;
-    let temp = tempfile::tempdir()?;
-    assert!(
-        PlanReviewCoordinator::create_task_from_plan(
+    assert!(matches!(
+        crate::PlanExecutionService::approve(
             &mut session,
-            &root_config,
-            temp.path(),
             SessionRef::new_relative("session.jsonl")?,
-            &create,
-        )
-        .is_err()
-    );
+            &command,
+            120,
+        ),
+        Err(sigil_kernel::PlanRunRejectionV1::PlanRejected)
+            | Err(sigil_kernel::PlanRunRejectionV1::PlanNotReady { .. })
+    ));
+    assert!(session.task_state_projection().tasks.is_empty());
     Ok(())
 }
 
@@ -5044,22 +5143,49 @@ fn spine_session(
     Ok((session, draft, temp))
 }
 
-fn make_ready(session: &mut Session, draft: &PlanDraftCreatedEntry) -> Result<String> {
-    let candidate =
-        sigil_kernel::compile_executable_plan_candidate(draft, &test_plan_compile_input())
-            .expect("fixture must compile");
-    let marker = sigil_kernel::PlanReadyCommittedV1Entry {
-        plan_id: draft.plan_id.clone(),
-        plan_hash: draft.plan_hash.clone(),
-        candidate_hash: candidate.candidate_hash.clone(),
-        attempt_id: "attempt-1".to_owned(),
-        committed_at_ms: 20,
-    };
-    session.append_control(ControlEntry::ExecutablePlanCandidatePreparedV1(Box::new(
-        candidate.clone(),
+#[derive(serde::Deserialize)]
+struct HistoricalPlanExecutionFixture {
+    draft: PlanDraftCreatedEntry,
+    adoption: sigil_kernel::PlanExecutionAdoptedV1Entry,
+    ready_marker: sigil_kernel::PlanReadyCommittedV1Entry,
+}
+
+fn historical_plan_execution_fixture() -> Result<HistoricalPlanExecutionFixture> {
+    Ok(serde_json::from_str(include_str!(
+        "../../../sigil-kernel/src/tests/fixtures/historical_plan_execution_v1.json"
+    ))?)
+}
+
+fn session_with_historical_candidate()
+-> Result<(Session, HistoricalPlanExecutionFixture, tempfile::TempDir)> {
+    let fixture = historical_plan_execution_fixture()?;
+    fixture.adoption.validate()?;
+    fixture.ready_marker.validate()?;
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("historical-plan.jsonl"))?;
+    let mut session = Session::load_from_store("mock", "model", store)?;
+    session.append_controls(vec![
+        ControlEntry::PlanDraftCreated(fixture.draft.clone()),
+        ControlEntry::ExecutablePlanCandidatePreparedV1(fixture.adoption.adopted_candidate.clone()),
+        ControlEntry::PlanReadyCommittedV1(fixture.ready_marker.clone()),
+    ])?;
+    Ok((session, fixture, temp))
+}
+
+fn session_with_historical_adoption(
+    start_mode: sigil_kernel::PlanTaskStartMode,
+) -> Result<(
+    Session,
+    sigil_kernel::ExecutablePlanCandidateV1,
+    tempfile::TempDir,
+)> {
+    let (mut session, mut fixture, temp) = session_with_historical_candidate()?;
+    fixture.adoption.start_mode = start_mode;
+    let candidate = *fixture.adoption.adopted_candidate.clone();
+    session.append_control(ControlEntry::PlanExecutionAdoptedV1(Box::new(
+        fixture.adoption,
     )))?;
-    session.append_control(ControlEntry::PlanReadyCommittedV1(marker))?;
-    Ok(candidate.candidate_hash)
+    Ok((session, candidate, temp))
 }
 
 fn mark_r69_plan_reviewable(session: &mut Session, draft: &PlanDraftCreatedEntry) -> Result<()> {
@@ -5103,8 +5229,9 @@ fn mark_r69_plan_reviewable(session: &mut Session, draft: &PlanDraftCreatedEntry
 #[test]
 fn current_plan_approval_rejects_old_ready_markers_and_keeps_exact_replay_idempotent() -> Result<()>
 {
-    let (mut session, draft, _temp) = spine_session("plan_current_only", "Current approval")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
+    let (mut session, fixture, _temp) = session_with_historical_candidate()?;
+    let draft = fixture.draft;
+    let candidate_hash = fixture.adoption.candidate_hash;
     let mut command = sigil_kernel::PlanRunCommandV1 {
         command_id: "current-plan-approval".to_owned(),
         session_id: session.session_scope_id().to_owned(),
@@ -5144,91 +5271,103 @@ fn current_plan_approval_rejects_old_ready_markers_and_keeps_exact_replay_idempo
 }
 
 #[test]
-fn plan_execution_service_adopts_atomically_and_idempotently() -> Result<()> {
-    let (mut session, draft, _temp) = spine_session("plan_spine_1", "Adopt atomically")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
-    let parent_ref = SessionRef::new_relative("parent.jsonl")?;
+fn historical_execution_records_reload_the_same_task_identity() -> Result<()> {
+    let (session, candidate, _temp) =
+        session_with_historical_adoption(sigil_kernel::PlanTaskStartMode::CreateAndRun)?;
+    let artifacts = session.plan_artifact_projection();
+    assert_eq!(artifacts.adoptions[&candidate.plan_id].len(), 1);
+    let adoption = artifacts
+        .adoption_for_task(&candidate.task_id)
+        .expect("historical adoption");
+    assert_eq!(adoption.candidate_hash, candidate.candidate_hash);
+    let tasks = session.task_state_projection();
+    let task = tasks
+        .tasks
+        .get(&candidate.task_id)
+        .expect("historical Task");
+    assert_eq!(task.status, TaskRunStatus::Started);
+    assert!(task.direct_execution_admission.is_none());
+    assert_eq!(task.latest_plan_version, Some(1));
+    assert_eq!(
+        tasks.execution_phase(&candidate.task_id),
+        Some(sigil_kernel::TaskExecutionPhaseV1::Preparing)
+    );
+    let store = JsonlSessionStore::new(session.store_path().context("durable fixture")?)?;
+    let loaded = Session::load_from_store("mock", "model", store)?;
+    assert_eq!(loaded.plan_artifact_projection(), artifacts);
+    assert_eq!(
+        loaded.task_state_projection().current_task_id,
+        Some(candidate.task_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn plan_control_ablation_approval_replay_preserves_execution_progress() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("approval-progress.jsonl"))?;
+    let (mut session, request) =
+        seed_route_decision(Session::load_from_store("test", "model", store)?)?;
+    ensure_test_plan_review_attempt_started(&mut session, &request, 10)?;
+    let mut draft = draft_entry(&request);
+    let mut second = draft.steps[0].clone();
+    second.step_id = "verify".to_owned();
+    second.title = "Verify the result".to_owned();
+    draft.steps.push(second);
+    commit_test_plan_review_draft(&mut session, &draft, &request, 11)?;
+    let parent = SessionRef::new_relative("approval-progress.jsonl")?;
     let command = sigil_kernel::PlanRunCommandV1 {
-        command_id: "run-command-1".to_owned(),
+        command_id: "approval-progress".to_owned(),
         session_id: session.session_scope_id().to_owned(),
         plan_id: draft.plan_id.clone(),
         expected_plan_hash: draft.plan_hash.clone(),
-        expected_candidate_hash: candidate_hash.clone(),
+        expected_candidate_hash: String::new(),
         expected_durable_frontier: session.durable_frontier_sequence(),
         start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
         permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
-        source: sigil_kernel::PlanRunCommandSource::TuiKeyboard,
+        source: sigil_kernel::PlanRunCommandSource::Http,
     };
-    let receipt =
-        match crate::PlanExecutionService::adopt(&mut session, parent_ref.clone(), &command, 30) {
-            Ok(receipt) => receipt,
-            Err(rejection) => anyhow::bail!(
-                "adoption rejected: {}",
-                crate::plan_run_rejection_message(&rejection)
-            ),
-        };
-    assert!(!receipt.already_adopted);
-    assert_eq!(receipt.plan_id, draft.plan_id);
-    assert_eq!(receipt.candidate_hash, candidate_hash);
+    let approved = crate::PlanExecutionService::approve(&mut session, parent.clone(), &command, 12)
+        .map_err(|error| anyhow!(crate::plan_run_rejection_message(&error)))?;
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&approved.task_id)
+        .context("approved task")?
+        .clone();
+    let update = sigil_kernel::task_checklist_started_update(
+        task.checklist.as_ref().context("two-step checklist")?,
+    )
+    .context("execution advances checklist")?;
+    session.append_control(ControlEntry::TaskChecklistUpdatedV1(update.clone()))?;
+    let before = std::fs::read(session.store_path().context("durable fixture")?)?;
+    let replay = crate::PlanExecutionService::approve(&mut session, parent.clone(), &command, 13)
+        .map_err(|error| anyhow!(crate::plan_run_rejection_message(&error)))?;
+    assert_eq!(replay.task_id, approved.task_id);
+    assert!(replay.already_approved);
     assert_eq!(
-        receipt.initial_phase,
-        sigil_kernel::TaskExecutionPhaseV1::Preparing
+        session.task_state_projection().tasks[&approved.task_id]
+            .checklist
+            .as_ref(),
+        Some(&update)
     );
-
-    let artifacts = session.plan_artifact_projection();
-    assert_eq!(artifacts.adoptions.len(), 1);
+    let mut changed_permission = command.clone();
+    changed_permission.permission = sigil_kernel::PlanRunPermissionChoiceV1::GrantScopedEditsOnce;
+    assert!(matches!(
+        crate::PlanExecutionService::approve(&mut session, parent, &changed_permission, 14),
+        Err(sigil_kernel::PlanRunRejectionV1::CommandIdentityConflict)
+    ));
     assert_eq!(
-        artifacts
-            .adoptions
-            .get(&draft.plan_id)
-            .expect("adoption must be recorded")
-            .len(),
-        1
+        std::fs::read(session.store_path().context("durable fixture")?)?,
+        before
     );
-    // The task is visible immediately from the adoption event.
-    let tasks = session.task_state_projection();
-    let task = tasks.tasks.get(&receipt.task_id).expect("adopted task");
-    assert_eq!(task.status, sigil_kernel::TaskRunStatus::Started);
-    assert_eq!(
-        tasks.execution_phase(&receipt.task_id),
-        Some(sigil_kernel::TaskExecutionPhaseV1::Preparing)
-    );
-
-    // Same command retry returns the same receipt idempotently.
-    let retried =
-        match crate::PlanExecutionService::adopt(&mut session, parent_ref.clone(), &command, 31) {
-            Ok(receipt) => receipt,
-            Err(rejection) => anyhow::bail!(
-                "adoption rejected: {}",
-                crate::plan_run_rejection_message(&rejection)
-            ),
-        };
-    assert!(retried.already_adopted);
-    assert_eq!(retried.task_id, receipt.task_id);
-    assert_eq!(retried.receipt_id, receipt.receipt_id);
-    // Only one adoption event exists.
-    assert_eq!(session.plan_artifact_projection().adoptions.len(), 1);
-
-    // A different command for the same candidate returns the same task with already_adopted.
-    let mut other = command.clone();
-    other.command_id = "run-command-2".to_owned();
-    let adopted_again =
-        match crate::PlanExecutionService::adopt(&mut session, parent_ref, &other, 32) {
-            Ok(receipt) => receipt,
-            Err(rejection) => anyhow::bail!(
-                "adoption rejected: {}",
-                crate::plan_run_rejection_message(&rejection)
-            ),
-        };
-    assert!(adopted_again.already_adopted);
-    assert_eq!(adopted_again.task_id, receipt.task_id);
     Ok(())
 }
 
 #[test]
 fn approved_plan_is_directly_executable_without_legacy_materialization() -> Result<()> {
     let (mut session, draft, _temp) = spine_session("plan_r69_materialization", "Materialize")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
+    let candidate_hash = String::new();
     let mut review_attempt = sigil_kernel::PlanReviewAttemptEntry {
         plan_review_id: sigil_kernel::PlanReviewId::new("review-r69-materialization")?,
         attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-r69-materialization")?,
@@ -5298,7 +5437,8 @@ fn approved_plan_is_directly_executable_without_legacy_materialization() -> Resu
 #[test]
 fn plan_execution_service_rejects_typed_without_consuming_the_plan() -> Result<()> {
     let (mut session, draft, _temp) = spine_session("plan_spine_2", "Reject typed")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
+    mark_r69_plan_reviewable(&mut session, &draft)?;
+    let candidate_hash = String::new();
     let parent_ref = SessionRef::new_relative("parent.jsonl")?;
     let base = sigil_kernel::PlanRunCommandV1 {
         command_id: "run-command-reject".to_owned(),
@@ -5311,20 +5451,23 @@ fn plan_execution_service_rejects_typed_without_consuming_the_plan() -> Result<(
         permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
         source: sigil_kernel::PlanRunCommandSource::Http,
     };
-    // Stale candidate hash is rejected; the plan stays actionable.
+    // A stale approved Plan hash leaves the current Plan actionable.
     let mut stale_hash = base.clone();
-    stale_hash.expected_candidate_hash = "sha256:stale".to_owned();
-    let rejection =
-        match crate::PlanExecutionService::adopt(&mut session, parent_ref.clone(), &stale_hash, 30)
-        {
-            Ok(_) => panic!("stale candidate must be rejected"),
-            Err(rejection) => rejection,
-        };
-    assert_eq!(rejection.reason_code(), "candidate_hash_mismatch");
+    stale_hash.expected_plan_hash = "sha256:stale".to_owned();
+    let rejection = match crate::PlanExecutionService::approve(
+        &mut session,
+        parent_ref.clone(),
+        &stale_hash,
+        30,
+    ) {
+        Ok(_) => panic!("stale plan must be rejected"),
+        Err(rejection) => rejection,
+    };
+    assert_eq!(rejection.reason_code(), "plan_hash_stale");
     // Stale frontier is rejected.
     let mut stale_frontier = base.clone();
     stale_frontier.expected_durable_frontier = 0;
-    let rejection = match crate::PlanExecutionService::adopt(
+    let rejection = match crate::PlanExecutionService::approve(
         &mut session,
         parent_ref.clone(),
         &stale_frontier,
@@ -5334,8 +5477,7 @@ fn plan_execution_service_rejects_typed_without_consuming_the_plan() -> Result<(
         Err(rejection) => rejection,
     };
     assert_eq!(rejection.reason_code(), "frontier_stale");
-    // The legacy candidate-bound adoption API still rejects a reviewable Plan without a
-    // candidate. New Run paths use PlanExecutionService::approve and do not call this API.
+    // A Plan without its current review completion cannot be approved.
     let (mut not_ready, other_draft, _temp) = spine_session("plan_spine_3", "Not ready")?;
     let parent_ref = SessionRef::new_relative("parent.jsonl")?;
     let not_ready_command = sigil_kernel::PlanRunCommandV1 {
@@ -5349,16 +5491,16 @@ fn plan_execution_service_rejects_typed_without_consuming_the_plan() -> Result<(
         permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
         source: sigil_kernel::PlanRunCommandSource::Http,
     };
-    let rejection = match crate::PlanExecutionService::adopt(
+    let rejection = match crate::PlanExecutionService::approve(
         &mut not_ready,
         parent_ref,
         &not_ready_command,
         30,
     ) {
-        Ok(_) => panic!("candidate-less plan must be rejected by legacy adoption"),
+        Ok(_) => panic!("unfinished review must be rejected"),
         Err(rejection) => rejection,
     };
-    assert_eq!(rejection.reason_code(), "candidate_missing");
+    assert_eq!(rejection.reason_code(), "plan_not_ready");
     // The plan is not consumed by rejections.
     assert!(session.plan_artifact_projection().adoptions.is_empty());
     Ok(())
@@ -5383,6 +5525,7 @@ fn commit_draft_from_child_records_reviewable_text_without_execution_candidate()
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -5392,13 +5535,7 @@ fn commit_draft_from_child_records_reviewable_text_without_execution_candidate()
     };
     let draft = draft_entry(&request);
     ensure_test_plan_review_attempt_started(&mut session, &request, 25)?;
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        30,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 30)?;
     let artifacts = session.plan_artifact_projection();
     assert!(artifacts.latest_candidate(&request.plan_id).is_none());
     assert!(!artifacts.ready_markers.contains_key(&request.plan_id));
@@ -5413,13 +5550,7 @@ fn commit_draft_from_child_records_reviewable_text_without_execution_candidate()
             if attempt.status == PlanReviewAttemptStatus::DraftReady
     )));
     // Retry is idempotent and does not invent candidate/compiler records.
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        31,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 31)?;
     let artifacts = session.plan_artifact_projection();
     assert!(artifacts.candidates.is_empty());
     assert!(artifacts.ready_markers.is_empty());
@@ -5446,6 +5577,7 @@ fn incomplete_structured_fields_do_not_trigger_execution_compile() -> Result<()>
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -5456,13 +5588,7 @@ fn incomplete_structured_fields_do_not_trigger_execution_compile() -> Result<()>
     let mut draft = draft_entry(&request);
     draft.steps[0].isolation = None;
     ensure_test_plan_review_attempt_started(&mut session, &request, 25)?;
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        30,
-    )?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 30)?;
     let artifacts = session.plan_artifact_projection();
     assert_eq!(
         artifacts.plan_ready_state(&request.plan_id),
@@ -5493,39 +5619,10 @@ fn incomplete_structured_fields_do_not_trigger_execution_compile() -> Result<()>
 fn admit_adopted_task_produces_typed_blockers_and_recovers_on_retry() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root_config = sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
-    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?
-        .expect("base snapshot");
-    let (mut session, draft, _temp) = spine_session("plan_spine_6", "Admission flows")?;
-    let store_draft = sigil_kernel::PlanDraftCreatedEntry {
-        workspace_snapshot_id: Some(base_snapshot.clone()),
-        ..draft.clone()
-    };
-    let candidate_hash = make_ready(&mut session, &store_draft)?;
-    let parent_ref = SessionRef::new_relative("parent.jsonl")?;
-    let command = sigil_kernel::PlanRunCommandV1 {
-        command_id: "run-command-admission".to_owned(),
-        session_id: session.session_scope_id().to_owned(),
-        plan_id: draft.plan_id.clone(),
-        expected_plan_hash: draft.plan_hash.clone(),
-        expected_candidate_hash: candidate_hash.clone(),
-        expected_durable_frontier: session.durable_frontier_sequence(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-        permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
-        source: sigil_kernel::PlanRunCommandSource::TuiKeyboard,
-    };
-    let receipt = match crate::PlanExecutionService::adopt(&mut session, parent_ref, &command, 30) {
-        Ok(receipt) => receipt,
-        Err(rejection) => anyhow::bail!(
-            "adoption rejected: {}",
-            crate::plan_run_rejection_message(&rejection)
-        ),
-    };
-    let candidate = session
-        .plan_artifact_projection()
-        .latest_candidate(&draft.plan_id)
-        .cloned()
-        .expect("candidate must remain durable");
-    // Workspace drift blocks the task.
+    let (mut session, candidate, _temp) =
+        session_with_historical_adoption(sigil_kernel::PlanTaskStartMode::CreateAndRun)?;
+    let task_id = candidate.task_id.clone();
+    // Workspace drift remains visible without masking the actual missing capability.
     std::fs::write(temp.path().join("marker.txt"), b"drift")?;
     let probes = crate::TaskAdmissionProbeContext {
         tool_contracts: Some(Vec::new()),
@@ -5540,27 +5637,26 @@ fn admit_adopted_task_produces_typed_blockers_and_recovers_on_retry() -> Result<
         &mut session,
         &root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &probes,
         40,
     )?;
     let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &outcome else {
-        panic!("workspace drift must block the task");
+        panic!("missing capabilities must still block the task");
     };
     assert_eq!(
         blocker.reason_code,
-        sigil_kernel::TaskBlockerReasonCodeV1::WorkspaceChanged
+        sigil_kernel::TaskBlockerReasonCodeV1::MissingRequiredCapability
     );
     assert!(blocker.retryable);
     let tasks = session.task_state_projection();
     assert_eq!(
-        tasks.execution_phase(&receipt.task_id),
+        tasks.execution_phase(&task_id),
         Some(sigil_kernel::TaskExecutionPhaseV1::Blocked)
     );
-    assert_eq!(tasks.next_admission_ordinal(&receipt.task_id), 2);
+    assert_eq!(tasks.next_admission_ordinal(&task_id), 2);
     // Missing required capability blocks with the exact capability.
-    std::fs::remove_file(temp.path().join("marker.txt"))?;
     let probes = crate::TaskAdmissionProbeContext {
         tool_contracts: Some(Vec::new()),
         provider_route_available: true,
@@ -5574,7 +5670,7 @@ fn admit_adopted_task_produces_typed_blockers_and_recovers_on_retry() -> Result<
         &mut session,
         &root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &probes,
         41,
@@ -5593,7 +5689,7 @@ fn admit_adopted_task_produces_typed_blockers_and_recovers_on_retry() -> Result<
         &mut session,
         &root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &crate::TaskAdmissionProbeContext {
             tool_contracts: Some(registry.contracts()),
@@ -5612,55 +5708,72 @@ fn admit_adopted_task_produces_typed_blockers_and_recovers_on_retry() -> Result<
     ));
     let tasks = session.task_state_projection();
     assert_eq!(
-        tasks.execution_phase(&receipt.task_id),
+        tasks.execution_phase(&task_id),
         Some(sigil_kernel::TaskExecutionPhaseV1::Ready)
     );
     assert_eq!(
         tasks
             .admission_attempts
-            .get(&receipt.task_id)
+            .get(&task_id)
             .expect("admission attempt must be recorded")
             .len(),
         3
     );
+    assert_eq!(
+        tasks.admission_attempts[&task_id]
+            .last()
+            .expect("admission attempt is recorded")
+            .observed_environment
+            .workspace_state,
+        sigil_kernel::WorkspaceAdmissionStateV1::ExternalDrift,
+    );
+    let mut candidate_without_snapshot = candidate.clone();
+    candidate_without_snapshot
+        .compile_binding
+        .base_workspace_snapshot_id = None;
+    let outcome = crate::admit_adopted_task(
+        &mut session,
+        &root_config,
+        temp.path(),
+        &task_id,
+        &candidate_without_snapshot,
+        &crate::TaskAdmissionProbeContext {
+            tool_contracts: Some(registry.contracts()),
+            provider_route_available: true,
+            credential_available: true,
+            permission_profile_ok: true,
+            ..crate::TaskAdmissionProbeContext::default()
+        },
+        43,
+    )?;
+    assert!(matches!(
+        outcome,
+        sigil_kernel::TaskAdmissionOutcomeV1::Ready(_)
+    ));
+    assert_eq!(
+        session.task_state_projection().admission_attempts[&task_id]
+            .last()
+            .expect("admission attempt is recorded")
+            .observed_environment
+            .workspace_state,
+        sigil_kernel::WorkspaceAdmissionStateV1::SnapshotUnavailable,
+    );
+
     Ok(())
 }
 
 #[test]
 fn create_paused_adoption_stays_paused_without_probing() -> Result<()> {
-    let (mut session, draft, _temp) = spine_session("plan_spine_7", "Create paused")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
-    let parent_ref = SessionRef::new_relative("parent.jsonl")?;
-    let command = sigil_kernel::PlanRunCommandV1 {
-        command_id: "run-command-paused".to_owned(),
-        session_id: session.session_scope_id().to_owned(),
-        plan_id: draft.plan_id.clone(),
-        expected_plan_hash: draft.plan_hash.clone(),
-        expected_candidate_hash: candidate_hash.clone(),
-        expected_durable_frontier: session.durable_frontier_sequence(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreatePaused,
-        permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
-        source: sigil_kernel::PlanRunCommandSource::TuiMouse,
-    };
-    let receipt = match crate::PlanExecutionService::adopt(&mut session, parent_ref, &command, 30) {
-        Ok(receipt) => receipt,
-        Err(rejection) => anyhow::bail!(
-            "adoption rejected: {}",
-            crate::plan_run_rejection_message(&rejection)
-        ),
-    };
-    let candidate = session
-        .plan_artifact_projection()
-        .latest_candidate(&draft.plan_id)
-        .cloned()
-        .expect("candidate must remain durable");
+    let (mut session, candidate, _temp) =
+        session_with_historical_adoption(sigil_kernel::PlanTaskStartMode::CreatePaused)?;
+    let task_id = candidate.task_id.clone();
     let temp = tempfile::tempdir()?;
     let root_config = sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
     let outcome = crate::admit_adopted_task(
         &mut session,
         &root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &crate::TaskAdmissionProbeContext::default(),
         40,
@@ -5671,13 +5784,13 @@ fn create_paused_adoption_stays_paused_without_probing() -> Result<()> {
     );
     let tasks = session.task_state_projection();
     assert_eq!(
-        tasks.execution_phase(&receipt.task_id),
+        tasks.execution_phase(&task_id),
         Some(sigil_kernel::TaskExecutionPhaseV1::Paused)
     );
     assert_eq!(
         tasks
             .tasks
-            .get(&receipt.task_id)
+            .get(&task_id)
             .expect("paused task must project")
             .status,
         TaskRunStatus::Paused
@@ -5709,45 +5822,16 @@ max_plan_steps = 64
 "#,
     )?;
     let root_config = sigil_kernel::RootConfig::load(&config_path)?;
-    let (mut session, draft, _temp) = spine_session("plan_spine_probe", "Probe environment")?;
-    // Bind a real base snapshot so the workspace probe passes and the route probe decides.
-    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
-    let store_draft = sigil_kernel::PlanDraftCreatedEntry {
-        workspace_snapshot_id: base_snapshot,
-        ..draft
-    };
-    let candidate_hash = make_ready(&mut session, &store_draft)?;
-    let parent_ref = SessionRef::new_relative("parent.jsonl")?;
-    let command = sigil_kernel::PlanRunCommandV1 {
-        command_id: "run-command-probe".to_owned(),
-        session_id: session.session_scope_id().to_owned(),
-        plan_id: store_draft.plan_id.clone(),
-        expected_plan_hash: store_draft.plan_hash.clone(),
-        expected_candidate_hash: candidate_hash.clone(),
-        expected_durable_frontier: session.durable_frontier_sequence(),
-        start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-        permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
-        source: sigil_kernel::PlanRunCommandSource::TuiKeyboard,
-    };
-    let receipt = match crate::PlanExecutionService::adopt(&mut session, parent_ref, &command, 30) {
-        Ok(receipt) => receipt,
-        Err(rejection) => anyhow::bail!(
-            "adoption rejected: {}",
-            crate::plan_run_rejection_message(&rejection)
-        ),
-    };
-    let candidate = session
-        .plan_artifact_projection()
-        .latest_candidate(&store_draft.plan_id)
-        .cloned()
-        .expect("candidate must remain durable");
+    let (mut session, candidate, _temp) =
+        session_with_historical_adoption(sigil_kernel::PlanTaskStartMode::CreateAndRun)?;
+    let task_id = candidate.task_id.clone();
     // The test config has no connections: the honest route probe must block.
     let probes = crate::build_task_admission_probes(
         &root_config,
         temp.path(),
         None,
         &session,
-        &receipt.task_id,
+        &task_id,
         &candidate,
     );
     assert!(!probes.provider_route_available);
@@ -5758,7 +5842,7 @@ max_plan_steps = 64
         &mut session,
         &root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &probes,
         40,
@@ -5784,7 +5868,7 @@ max_plan_steps = 64
         temp.path(),
         None,
         &session,
-        &receipt.task_id,
+        &task_id,
         &candidate,
     );
     assert!(probes.provider_route_available);
@@ -5793,7 +5877,7 @@ max_plan_steps = 64
         &mut session,
         &readonly_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &probes,
         41,
@@ -5806,7 +5890,7 @@ max_plan_steps = 64
         sigil_kernel::TaskBlockerReasonCodeV1::PermissionRequired
     );
 
-    // Tiny free-disk probe blocks with disk_space_exhausted.
+    // Capacity estimates and disabled automatic verification do not block task admission.
     let low_disk = crate::TaskAdmissionProbeContext {
         disk_space_bytes: Some(1024),
         provider_route_available: true,
@@ -5818,23 +5902,27 @@ max_plan_steps = 64
         &mut session,
         &routed_root_config,
         temp.path(),
-        &receipt.task_id,
+        &task_id,
         &candidate,
         &low_disk,
         42,
     )?;
-    let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &outcome else {
-        panic!("low disk must block the task");
-    };
-    assert_eq!(
-        blocker.reason_code,
-        sigil_kernel::TaskBlockerReasonCodeV1::DiskSpaceExhausted
-    );
+    assert!(matches!(
+        outcome,
+        sigil_kernel::TaskAdmissionOutcomeV1::Ready(_)
+    ));
+    let tasks = session.task_state_projection();
+    let observed = &tasks.admission_attempts[&task_id]
+        .last()
+        .expect("durable observation")
+        .observed_environment;
+    assert_eq!(observed.disk_space_bytes, Some(1024));
+    assert!(!observed.verification_runner_available);
     Ok(())
 }
 
 #[test]
-fn commit_draft_ignores_advisory_compile_input_drift() -> Result<()> {
+fn commit_draft_repeated_commit_is_idempotent_without_a_compile_contract() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let session = Session::new("mock", "model");
     let mut session = session.with_store(JsonlSessionStore::new(temp.path().join("spine.jsonl"))?);
@@ -5852,6 +5940,7 @@ fn commit_draft_ignores_advisory_compile_input_drift() -> Result<()> {
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -5861,19 +5950,10 @@ fn commit_draft_ignores_advisory_compile_input_drift() -> Result<()> {
     };
     let draft = draft_entry(&request);
     ensure_test_plan_review_attempt_started(&mut session, &request, 25)?;
-    commit_test_plan_review_draft(
-        &mut session,
-        &draft,
-        &request,
-        &test_plan_compile_input(),
-        30,
-    )?;
-    // Compile input is not execution authority, so drift cannot invalidate the same exact draft.
-    let mut drifted_input = test_plan_compile_input();
-    drifted_input.source_attempt_id = "attempt-drifted".to_owned();
-    drifted_input.task_config_contract_hash =
-        sigil_kernel::stable_event_uuid("sigil-plan-task-config-v1", "drifted");
-    commit_test_plan_review_draft(&mut session, &draft, &request, &drifted_input, 31)?;
+    commit_test_plan_review_draft(&mut session, &draft, &request, 30)?;
+    let committed_entries = session.entries().len();
+    commit_test_plan_review_draft(&mut session, &draft, &request, 31)?;
+    assert_eq!(session.entries().len(), committed_entries);
     // The durable draft remains unique and no candidate/marker is written.
     let artifacts = session.plan_artifact_projection();
     assert!(artifacts.candidates.is_empty());
@@ -5932,9 +6012,10 @@ fn durable_spine_records_validate_bounded_shapes() -> Result<()> {
 }
 
 #[test]
-fn adopt_rejects_commands_bound_to_another_session() -> Result<()> {
+fn approve_rejects_commands_bound_to_another_session() -> Result<()> {
     let (mut session, draft, _temp) = spine_session("plan_spine_scope", "Session scope")?;
-    let candidate_hash = make_ready(&mut session, &draft)?;
+    mark_r69_plan_reviewable(&mut session, &draft)?;
+    let candidate_hash = String::new();
     let parent_ref = SessionRef::new_relative("parent.jsonl")?;
     let command = sigil_kernel::PlanRunCommandV1 {
         command_id: "run-command-scope".to_owned(),
@@ -5947,7 +6028,7 @@ fn adopt_rejects_commands_bound_to_another_session() -> Result<()> {
         permission: sigil_kernel::PlanRunPermissionChoiceV1::KeepCurrentPolicy,
         source: sigil_kernel::PlanRunCommandSource::Http,
     };
-    let rejection = crate::PlanExecutionService::adopt(&mut session, parent_ref, &command, 30)
+    let rejection = crate::PlanExecutionService::approve(&mut session, parent_ref, &command, 30)
         .expect_err("cross-session command must be rejected");
     assert_eq!(rejection.reason_code(), "command_identity_conflict");
     assert!(session.plan_artifact_projection().adoptions.is_empty());
@@ -5982,15 +6063,8 @@ credential = { source = "environment", name = "SIGIL_OPENAI_COMPATIBLE_API_KEY" 
 "#,
     )?;
     let root_config = sigil_kernel::RootConfig::load(&config_path)?;
-    let (session, draft, _temp) = spine_session("plan_spine_cred", "Credential probe")?;
-    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
-    let store_draft = sigil_kernel::PlanDraftCreatedEntry {
-        workspace_snapshot_id: base_snapshot,
-        ..draft
-    };
-    let candidate =
-        sigil_kernel::compile_executable_plan_candidate(&store_draft, &test_plan_compile_input())
-            .expect("fixture must compile");
+    let (session, fixture, _temp) = session_with_historical_candidate()?;
+    let candidate = *fixture.adoption.adopted_candidate;
     let task_id = candidate.task_id.clone();
     let probes = crate::build_task_admission_probes(
         &root_config,
@@ -6028,16 +6102,8 @@ fn admission_permission_probe_considers_candidate_write_need() -> Result<()> {
     let mut root_config =
         sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
     root_config.permission.mode = sigil_kernel::PermissionMode::ReadOnly;
-    let (session, draft, _temp) = spine_session("plan_spine_perm", "Permission probe")?;
-    let base_snapshot = crate::plan_handoff_workspace_snapshot_id(&root_config, temp.path())?;
-    let store_draft = sigil_kernel::PlanDraftCreatedEntry {
-        workspace_snapshot_id: base_snapshot,
-        ..draft
-    };
-    // Write task under ReadOnly: blocked.
-    let write_candidate =
-        sigil_kernel::compile_executable_plan_candidate(&store_draft, &test_plan_compile_input())
-            .expect("fixture must compile");
+    let (session, fixture, _temp) = session_with_historical_candidate()?;
+    let write_candidate = *fixture.adoption.adopted_candidate;
     let probes = crate::build_task_admission_probes(
         &root_config,
         temp.path(),
@@ -6048,14 +6114,21 @@ fn admission_permission_probe_considers_candidate_write_need() -> Result<()> {
     );
     assert!(!probes.permission_profile_ok);
     // Read-only task under ReadOnly: allowed.
-    let mut read_draft = store_draft.clone();
-    read_draft.steps[0].mode = Some(sigil_kernel::TaskStepMode::Read);
-    read_draft.steps[0].isolation = Some(sigil_kernel::TaskIsolationMode::SharedReadOnly);
-    read_draft.steps[0].required_capabilities = Vec::new();
-    read_draft.plan_hash = sigil_kernel::plan_text_hash("Read-only probe plan");
-    let read_candidate =
-        sigil_kernel::compile_executable_plan_candidate(&read_draft, &test_plan_compile_input())
-            .expect("read-only fixture must compile");
+    let mut read_candidate = write_candidate.clone();
+    read_candidate.required_capabilities = vec![sigil_kernel::TaskCapabilityV2::WorkspaceRead];
+    read_candidate.task_plan.steps[0].mode = Some(sigil_kernel::TaskStepMode::Read);
+    read_candidate.task_plan.steps[0].isolation =
+        Some(sigil_kernel::TaskIsolationMode::SharedReadOnly);
+    read_candidate.step_contracts[0]
+        .contract
+        .required_capabilities = read_candidate.required_capabilities.clone();
+    read_candidate.contract_set_digest = sigil_kernel::TaskPlanContractSetCommittedV2::new(
+        &read_candidate.task_plan,
+        &read_candidate.step_contracts,
+    )?
+    .contract_set_sha256;
+    read_candidate.candidate_hash = sigil_kernel::candidate_canonical_hash(&read_candidate)?;
+    read_candidate.validate()?;
     assert!(
         read_candidate
             .required_capabilities
@@ -6081,10 +6154,8 @@ fn admission_permission_probe_considers_candidate_write_need() -> Result<()> {
 fn admission_external_writer_probe_ignores_self_leases() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root_config = sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
-    let (mut session, draft, _temp) = spine_session("plan_spine_lease", "Lease probe")?;
-    let candidate =
-        sigil_kernel::compile_executable_plan_candidate(&draft, &test_plan_compile_input())
-            .expect("fixture must compile");
+    let (mut session, fixture, _temp) = session_with_historical_candidate()?;
+    let candidate = *fixture.adoption.adopted_candidate;
     let workspace_id = sigil_kernel::stable_workspace_id(temp.path())?;
     let task_id = candidate.task_id.clone();
     // A lease owned by this Task's own steps is not an external writer.
@@ -6133,10 +6204,8 @@ fn admission_external_writer_probe_ignores_self_leases() -> Result<()> {
 fn admission_verification_probe_requires_runner_capability() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let root_config = sigil_kernel::RootConfig::load(&write_admission_test_config(temp.path()))?;
-    let (session, draft, _temp) = spine_session("plan_spine_verify", "Verify probe")?;
-    let candidate =
-        sigil_kernel::compile_executable_plan_candidate(&draft, &test_plan_compile_input())
-            .expect("fixture must compile");
+    let (session, fixture, _temp) = session_with_historical_candidate()?;
+    let candidate = *fixture.adoption.adopted_candidate;
     let task_id = candidate.task_id.clone();
     // No registry evidence: falls back to the config policy only.
     let probes = crate::build_task_admission_probes(
@@ -6211,7 +6280,7 @@ fn compact_plan_input_fixture(session: &Session, tag: &str) -> Result<()> {
             initiation: CompactionInitiation::Manual,
             base_projection_revision: format!("{tag}-revision"),
             branch_id: None,
-            valid_for_snapshot: format!("{tag}-snapshot"),
+            valid_for_snapshot: Some(format!("{tag}-snapshot")),
             objective: None,
             language: "en".to_owned(),
             plan,
@@ -6356,52 +6425,33 @@ async fn plan_review_raw_parent_source_survives_compaction_before_first_started(
 }
 
 #[tokio::test]
-async fn plan_review_finalizer_fixed_evidence_precedes_compacted_child_history() -> Result<()> {
+async fn plan_review_finalizer_retains_full_research_text_and_compacted_child_history() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
+    let parent_path = temp.path().join("sessions/parent.jsonl");
     let (mut parent, request) = seed_route_decision(
-        Session::new("plan-review-test", "planned-model").with_store(JsonlSessionStore::new(
-            temp.path().join("sessions/parent.jsonl"),
-        )?),
+        Session::new("plan-review-test", "planned-model")
+            .with_store(JsonlSessionStore::new(&parent_path)?),
     )?;
-    for ordinal in 1..=2 {
-        let reference = sigil_kernel::plan_review_finalizer_session_ref(
-            &request.plan_review_id,
-            &request.attempt_id,
-            ordinal,
-        );
-        let store =
-            JsonlSessionStore::new(reference.resolve(temp.path().join("sessions").as_path()))?;
-        let mut child = Session::new("plan-review-test", "planned-model").with_store(store);
-        child.ensure_identity_entry()?;
-        seed_completed_plan_input_history(&mut child, "finalizer retained")?;
-        compact_plan_input_fixture(&child, &format!("finalizer-{ordinal}"))?;
-    }
-    let mut research =
-        Session::new("plan-review-test", "planned-model").with_store(JsonlSessionStore::new(
-            request
-                .child_session_ref
-                .resolve(temp.path().join("sessions").as_path()),
-        )?);
-    research.ensure_identity_entry()?;
-    research.append_control(ControlEntry::PlanReviewCandidateRecordedV1(Box::new(
-        sigil_kernel::plan_review_candidate_recorded_entry(
-            request.plan_review_id.clone(),
-            request.attempt_id.clone(),
-            request.plan_id.clone(),
-            request.plan_source_ref(),
-            None,
-            "# Bounded plan review\n\n1. Implement the bounded change.",
-            sigil_kernel::PlanReviewCandidateCompletenessV1::Complete,
-            50,
-        )?,
-    )))?;
-    drop(research);
+    let child_path = request
+        .child_session_ref
+        .resolve(parent_path.parent().expect("parent directory"));
+    let mut child = Session::new("plan-review-test", "planned-model")
+        .with_store(JsonlSessionStore::new(&child_path)?);
+    child.ensure_identity_entry()?;
+    seed_completed_plan_input_history(&mut child, "retained research")?;
+    compact_plan_input_fixture(&child, "research")?;
+    drop(child);
+    let full_research = format!(
+        "research head\n{}\nresearch tail",
+        "complete research evidence ".repeat(1500)
+    );
+    assert!(full_research.len() > 24 * 1024);
     let provider = InvalidThenValidFinalizerProvider {
-        interrupt_research: true,
+        research_text: Some(full_research.clone()),
         ..Default::default()
     };
     let messages = provider.request_messages.clone();
-    let recorded_tools = provider.request_tools.clone();
     let agent = Agent::new(provider, ToolRegistry::new());
     let outcome = PlanReviewCoordinator::run_plan_review(
         &mut parent,
@@ -6414,73 +6464,74 @@ async fn plan_review_finalizer_fixed_evidence_precedes_compacted_child_history()
         RunCancellationOwner::new().handle(),
     )
     .await?;
-    assert!(
-        matches!(&outcome, PlanReviewRunOutcome::DraftReady { .. }),
-        "unexpected finalizer outcome: {outcome:?}; advertised tools: {:?}; validation feedback: {:?}",
-        recorded_tools.lock().expect("recorded tools"),
-        messages
-            .lock()
-            .expect("recorded messages")
-            .iter()
-            .flat_map(|messages| messages.iter())
-            .filter_map(|message| message.content.as_deref())
-            .filter(|text| text.starts_with("Previous submit-only attempt"))
-            .collect::<Vec<_>>()
-    );
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
     let messages = messages
         .lock()
         .map_err(|_| anyhow!("messages lock poisoned"))?;
     assert_eq!(messages.len(), 3);
-    for (ordinal, message_set) in messages.iter().enumerate().skip(1) {
-        let checkpoint = message_set
-            .iter()
-            .position(|message| {
-                message
-                    .content
-                    .as_deref()
-                    .is_some_and(|text| text.contains("finalizer retained"))
-            })
-            .context("child checkpoint missing")?;
-        let objective = message_set
-            .iter()
-            .position(|message| message.content.as_deref() == Some(request.objective.as_str()))
-            .context("objective missing")?;
-        let evidence = message_set
-            .iter()
-            .position(|message| {
-                message
-                    .content
-                    .as_deref()
-                    .is_some_and(|text| text.starts_with("Bounded host evidence bundle"))
-            })
-            .context("evidence missing")?;
-        let candidate = message_set
-            .iter()
-            .position(|message| {
-                message
-                    .content
-                    .as_deref()
-                    .is_some_and(|text| text.starts_with("Complete Plan candidate"))
-            })
-            .context("candidate missing")?;
-        assert!(objective < evidence && evidence < candidate && candidate < checkpoint);
-        if ordinal == 2 {
-            let feedback = message_set
+    for message_set in messages.iter().skip(1) {
+        assert!(
+            message_set
                 .iter()
-                .position(|message| {
-                    message
-                        .content
-                        .as_deref()
-                        .is_some_and(|text| text.starts_with("Previous submit-only attempt"))
-                })
-                .context("feedback missing")?;
-            assert!(candidate < feedback && feedback < checkpoint);
-            assert!(message_set[feedback].content.as_deref().is_some_and(|text| {
-                text.contains("confirm_plan_review_candidate requires decision accept and no other fields")
-            }), "candidate confirmation validation must enter the bounded corrective path");
-        }
-        assert!(!message_set.iter().any(|message| message.content.as_deref() == Some("finalizer retained assistant 0")), "folded child raw messages must not return");
+                .any(|message| message.content.as_deref() == Some(full_research.as_str())),
+            "each continuation must receive the exact complete research answer"
+        );
+        assert!(
+            message_set.iter().any(|message| message
+                .content
+                .as_deref()
+                .is_some_and(|text| text.contains("retained research"))),
+            "the original research checkpoint remains available"
+        );
+        assert!(
+            !message_set
+                .iter()
+                .any(|message| message.content.as_deref() == Some("retained research assistant 0")),
+            "compaction must not resurrect folded raw messages"
+        );
     }
+    assert!(
+        messages[2].iter().any(|message| message
+            .tool_calls
+            .iter()
+            .any(|call| call.id == "invalid-draft")),
+        "the exact rejected tool arguments remain in the correction history"
+    );
+    assert!(
+        messages[2].iter().any(|message| message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("Previous submit-only attempt was rejected"))),
+        "the correction retains host validation feedback"
+    );
+    let candidate =
+        parent
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(
+                    candidate,
+                )) if candidate.content == full_research => Some(candidate),
+                _ => None,
+            })
+            .context("the complete research answer must also be mirrored to the parent")?;
+    assert_eq!(
+        candidate.completeness,
+        sigil_kernel::PlanReviewCandidateCompletenessV1::Unknown
+    );
+    assert!(
+        !request
+            .finalizer_session_ref
+            .resolve(parent_path.parent().expect("parent directory"))
+            .exists()
+    );
+    let child = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(&child_path)?,
+    )?;
+    assert!(child.entries().iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)) if draft.plan_id == request.plan_id)));
     Ok(())
 }
 
@@ -6601,5 +6652,529 @@ async fn plan_review_input_rejects_missing_conflicting_and_cross_session_sources
         error.downcast_ref::<sigil_kernel::SessionContextPrefixError>(),
         Some(&sigil_kernel::SessionContextPrefixError::ConflictingBoundary)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_finalizer_preserves_early_tools_beyond_twelve_results() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (mut parent, request) = seed_route_decision(
+        Session::new("plan-review-test", "planned-model").with_store(JsonlSessionStore::new(
+            temp.path().join("sessions/parent.jsonl"),
+        )?),
+    )?;
+    let provider = LoopingPlanReviewProvider {
+        research_turns: Some(13),
+        ..Default::default()
+    };
+    let messages = Arc::clone(&provider.request_messages);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(PlanReviewInspectionTool));
+    let outcome = PlanReviewCoordinator::run_plan_review(
+        &mut parent,
+        &request,
+        &Agent::new(provider, ToolRegistry::new()),
+        plan_review_test_options(temp.path()),
+        tools,
+        &mut NoopEventHandler,
+        &mut AutoApproveHandler,
+        RunCancellationOwner::new().handle(),
+    )
+    .await?;
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
+    let messages = messages
+        .lock()
+        .map_err(|_| anyhow!("messages lock poisoned"))?;
+    assert_eq!(messages.len(), 15);
+    let finalization = messages.last().context("finalization request missing")?;
+    assert!(
+        finalization
+            .iter()
+            .any(|message| message.tool_calls.iter().any(|call| call.id == "inspect-0")),
+        "the earliest research tool must survive finalization"
+    );
+    assert!(
+        finalization
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("inspect-0")),
+        "the earliest paired result must survive finalization"
+    );
+    assert!(
+        finalization
+            .iter()
+            .any(|message| message.content.as_deref() == Some("research did not converge"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_long_typed_no_plan_does_not_depend_on_truncated_preview() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let (mut parent, request) = seed_route_decision(
+        Session::new("plan-review-test", "planned-model").with_store(JsonlSessionStore::new(
+            temp.path().join("sessions/parent.jsonl"),
+        )?),
+    )?;
+    let reason = format!(
+        "No change is justified.\n{}\nNo remaining migration is warranted.",
+        "The current evidence already satisfies the request. ".repeat(800)
+    );
+    let provider = NoPlanPlanReviewProvider {
+        reason: Some(reason.clone()),
+        ..Default::default()
+    };
+    let calls = Arc::clone(&provider.request_tools);
+    let outcome = PlanReviewCoordinator::run_plan_review(
+        &mut parent,
+        &request,
+        &Agent::new(provider, ToolRegistry::new()),
+        plan_review_test_options(temp.path()),
+        ToolRegistry::new(),
+        &mut NoopEventHandler,
+        &mut AutoApproveHandler,
+        RunCancellationOwner::new().handle(),
+    )
+    .await?;
+    assert!(matches!(
+        outcome,
+        PlanReviewRunOutcome::CompletedWithoutDraft
+    ));
+    assert_eq!(
+        calls
+            .lock()
+            .map_err(|_| anyhow!("request lock poisoned"))?
+            .len(),
+        1
+    );
+    assert!(parent.plan_artifact_projection().plans.is_empty());
+    assert!(parent.entries().iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::PlanReviewCandidateRecordedV1(candidate))
+            if candidate.content == reason)));
+    let child = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(
+            request
+                .child_session_ref
+                .resolve(temp.path().join("sessions").as_path()),
+        )?,
+    )?;
+    let result = child
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::ToolResultV3(result) if result.call_id == "no-plan" => Some(result),
+            _ => None,
+        })
+        .context("successful no_plan receipt missing")?;
+    assert_eq!(result.facts.status, "ok");
+    assert!(
+        sigil_kernel::decode_plan_review_result(&result.initial_model_view.preview).is_err(),
+        "this fixture must cross the tool preview bound"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn r71_f_csr_005_submit_only_continuation_reuses_the_admitted_research_bundle() -> Result<()>
+{
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let (temp, provisioner, _) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let (mut parent, request) = seed_route_decision(
+        Session::new("plan-review-test", "planned-model")
+            .with_store(JsonlSessionStore::new(temp.path().join("parent.jsonl"))?),
+    )?;
+    let outcome = PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+        &mut parent,
+        &request,
+        &Agent::new(ResearchThenDraftProvider::default(), ToolRegistry::new()),
+        plan_review_test_options(temp.path()),
+        ToolRegistry::new(),
+        &mut NoopEventHandler,
+        &mut AutoApproveHandler,
+        RunCancellationOwner::new().handle(),
+        Arc::clone(&provisioner),
+    )
+    .await?;
+    assert!(matches!(outcome, PlanReviewRunOutcome::DraftReady { .. }));
+    let bundle = provisioner.provision(&request)?;
+    let entries = JsonlSessionStore::read_entries(bundle.session_log_path())?;
+    assert!(entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::Assistant(message) if message.content.as_deref() == Some("research complete"))));
+    assert!(entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)) if draft.plan_id == request.plan_id)),
+        "the confirmed draft belongs to the same research child, not a second finalizer scope");
+    assert!(
+        entries.iter().any(|entry| matches!(entry,
+        SessionLogEntry::ToolResultV3(result)
+            if result.tool_name == sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME
+                && result.facts.status == "ok" && result.artifact.descriptor().is_some())),
+        "typed finalization uses the original managed artifact backend"
+    );
+    bundle.finish()?;
+    assert!(!request.finalizer_session_ref.resolve(temp.path()).exists());
+    Ok(())
+}
+
+async fn managed_plan_review_uncommitted_draft_fixture(
+    revision: bool,
+) -> Result<(
+    tempfile::TempDir,
+    Session,
+    PlanReviewRunRequest,
+    PlanDraftCreatedEntry,
+    Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
+    std::path::PathBuf,
+)> {
+    use crate::managed_storage_writer::StorageWriterChannelV1 as Channel;
+    let (temp, provisioner, _) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let parent_store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let parent = Session::load_from_store("plan-review-test", "planned-model", parent_store)?;
+    let (mut parent, mut request) = seed_route_decision(parent)?;
+    if revision {
+        ensure_test_plan_review_attempt_started(&mut parent, &request, 10)?;
+        let base = draft_entry(&request);
+        commit_test_plan_review_draft(&mut parent, &base, &request, 11)?;
+        request = submit_revision_guidance(&mut parent, &base)?;
+        // Application dispatch records revision Started before the first managed admission.
+        ensure_test_plan_review_attempt_started(&mut parent, &request, 22)?;
+    }
+    let PlanReviewRunOutcome::DraftReady { draft } =
+        PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+            &mut parent,
+            &request,
+            &Agent::new(ResearchThenDraftProvider::default(), ToolRegistry::new()),
+            plan_review_test_options(temp.path()),
+            ToolRegistry::new(),
+            &mut NoopEventHandler,
+            &mut AutoApproveHandler,
+            RunCancellationOwner::new().handle(),
+            Arc::clone(&provisioner),
+        )
+        .await?
+    else {
+        bail!("fixture must durably submit a typed draft");
+    };
+    assert!(
+        !parent
+            .plan_artifact_projection()
+            .plans
+            .contains_key(&request.plan_id),
+        "fixture stops after child completion and before its parent commit"
+    );
+    assert_eq!(
+        PlanReviewProjection::from_entries(parent.entries())
+            .latest_attempt(&request.plan_review_id)
+            .map(|attempt| attempt.status),
+        Some(PlanReviewAttemptStatus::Finalizing)
+    );
+    let bundle = provisioner.provision(&request)?;
+    let child_path = bundle.session_log_path().to_path_buf();
+    bundle.finish()?;
+    assert_ne!(child_path, request.child_session_ref.resolve(temp.path()));
+    assert!(!request.child_session_ref.resolve(temp.path()).exists());
+    assert!(!request.finalizer_session_ref.resolve(temp.path()).exists());
+    Ok((temp, parent, request, *draft, provisioner, child_path))
+}
+
+#[tokio::test]
+async fn managed_plan_review_recovers_completed_finalizer_without_redispatch() -> Result<()> {
+    let (temp, parent, request, draft, provisioner, child_path) =
+        managed_plan_review_uncommitted_draft_fixture(false).await?;
+    let parent_path = parent.store_path().context("durable parent")?.to_path_buf();
+    let child_bytes = std::fs::read(&child_path)?;
+    drop(parent);
+    let mut parent = Session::load_from_store_for_control(JsonlSessionStore::new(&parent_path)?)?;
+    let parent_before_recovery = std::fs::read(&parent_path)?;
+    let provider = PlainTextFinalizerProvider::default();
+    let calls = Arc::clone(&provider.request_tools);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    for _ in 0..2 {
+        let PlanReviewRunOutcome::DraftReady { draft: recovered } =
+            PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
+                &mut parent,
+                &request,
+                &agent,
+                plan_review_test_options(temp.path()),
+                ToolRegistry::new(),
+                &mut NoopEventHandler,
+                &mut AutoApproveHandler,
+                RunCancellationOwner::new().handle(),
+                Arc::clone(&provisioner),
+            )
+            .await?
+        else {
+            bail!("the original typed draft must recover without another run");
+        };
+        assert_eq!(*recovered, draft);
+    }
+    assert!(
+        calls
+            .lock()
+            .map_err(|_| anyhow!("calls lock poisoned"))?
+            .is_empty()
+    );
+    assert_eq!(std::fs::read(&child_path)?, child_bytes);
+    assert_eq!(std::fs::read(&parent_path)?, parent_before_recovery);
+    drop(parent);
+
+    assert_eq!(
+        PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            JsonlSessionStore::new(&parent_path)?,
+            provisioner.as_ref(),
+            100,
+        )?,
+        1
+    );
+    let parent = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(&parent_path)?,
+    )?;
+    assert_eq!(
+        parent
+            .plan_artifact_projection()
+            .plans
+            .get(&request.plan_id),
+        Some(&draft)
+    );
+    assert_eq!(
+        PlanReviewProjection::from_entries(parent.entries())
+            .latest_attempt(&request.plan_review_id)
+            .map(|attempt| attempt.status),
+        Some(PlanReviewAttemptStatus::DraftReady)
+    );
+    let committed_bytes = std::fs::read(&parent_path)?;
+    assert_eq!(
+        PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            JsonlSessionStore::new(&parent_path)?,
+            provisioner.as_ref(),
+            101,
+        )?,
+        0
+    );
+    assert_eq!(std::fs::read(&parent_path)?, committed_bytes);
+    assert_eq!(std::fs::read(&child_path)?, child_bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_plan_review_revision_recovery_commits_exact_terminal_outbox() -> Result<()> {
+    let (_temp, parent, request, draft, provisioner, child_path) =
+        managed_plan_review_uncommitted_draft_fixture(true).await?;
+    let parent_path = parent.store_path().context("durable parent")?.to_path_buf();
+    let child_bytes = std::fs::read(&child_path)?;
+    drop(parent);
+    assert_eq!(
+        PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            JsonlSessionStore::new(&parent_path)?,
+            provisioner.as_ref(),
+            100,
+        )?,
+        1
+    );
+    let mut parent = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(&parent_path)?,
+    )?;
+    let outbox = parent
+        .reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
+        .context("recovered revision must own its exact terminal outbox")?;
+    let PlanReviewRunOutcome::DraftReady { draft: recovered } =
+        PlanReviewCoordinator::revision_outcome_from_terminal(&parent, &request, &outbox)?
+    else {
+        bail!("recovered revision must retain its exact draft");
+    };
+    assert_eq!(*recovered, draft);
+    assert_eq!(
+        parent
+            .plan_artifact_projection()
+            .latest_decision(request.base_plan_id.as_ref().context("revision base")?)
+            .context("revision decision")?
+            .decision,
+        PlanDecision::RevisionSucceeded
+    );
+    assert_eq!(
+        PlanReviewCoordinator::recover_managed_plan_review_drafts(
+            &mut parent,
+            provisioner.as_ref(),
+            101,
+        )?,
+        0
+    );
+    assert_eq!(std::fs::read(&child_path)?, child_bytes);
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_plan_review_recovery_keeps_cancelled_parent_terminal() -> Result<()> {
+    let (_temp, mut parent, request, _draft, provisioner, child_path) =
+        managed_plan_review_uncommitted_draft_fixture(false).await?;
+    PlanReviewCoordinator::close_plan_review_run(
+        &mut parent,
+        &request,
+        &PlanReviewRunOutcome::Cancelled,
+        &mut NoopEventHandler,
+        100,
+    )?;
+    let parent_path = parent.store_path().context("durable parent")?.to_path_buf();
+    let parent_bytes = std::fs::read(&parent_path)?;
+    let child_bytes = std::fs::read(&child_path)?;
+    assert!(
+        PlanReviewCoordinator::recover_managed_plan_review_draft(
+            &parent,
+            &request,
+            provisioner.as_ref(),
+        )?
+        .is_none()
+    );
+    assert_eq!(
+        PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            JsonlSessionStore::new(&parent_path)?,
+            provisioner.as_ref(),
+            101,
+        )?,
+        0
+    );
+    assert!(
+        !parent
+            .plan_artifact_projection()
+            .plans
+            .contains_key(&request.plan_id)
+    );
+    assert_eq!(std::fs::read(parent_path)?, parent_bytes);
+    assert_eq!(std::fs::read(child_path)?, child_bytes);
+    Ok(())
+}
+
+#[test]
+fn managed_plan_review_missing_namespace_does_not_block_or_initialize_startup() -> Result<()> {
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterErrorV1, StorageWriterChannelV1 as Channel,
+    };
+    let (temp, provisioner, _) = child_resource_fixture(&[
+        Channel::SessionLog,
+        Channel::ArtifactStaging,
+        Channel::ArtifactStore,
+    ])?;
+    let parent_path = temp.path().join("parent.jsonl");
+    let parent = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(&parent_path)?,
+    )?;
+    let (mut parent, request) = seed_route_decision(parent)?;
+    ensure_test_plan_review_attempt_started(&mut parent, &request, 10)?;
+    let parent_bytes = std::fs::read(&parent_path)?;
+    for _ in 0..2 {
+        let error = provisioner
+            .recover_research_session(&request)
+            .expect_err("required-child recovery must retain typed namespace absence");
+        assert_eq!(
+            error.downcast_ref::<ManagedStorageWriterErrorV1>(),
+            Some(&ManagedStorageWriterErrorV1::ExistingNamespaceMissing)
+        );
+        assert_eq!(
+            PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+                JsonlSessionStore::new(&parent_path)?,
+                provisioner.as_ref(),
+                20,
+            )?,
+            0
+        );
+        assert_eq!(std::fs::read(&parent_path)?, parent_bytes);
+        assert!(!request.child_session_ref.resolve(temp.path()).exists());
+    }
+    drop(parent);
+    let parent = Session::load_from_store(
+        "plan-review-test",
+        "planned-model",
+        JsonlSessionStore::new(&parent_path)?,
+    )?;
+    assert_eq!(
+        PlanReviewProjection::from_entries(parent.entries())
+            .latest_attempt(&request.plan_review_id)
+            .map(|attempt| attempt.status),
+        Some(PlanReviewAttemptStatus::Interrupted),
+        "generic startup retains its existing interrupted-attempt recovery"
+    );
+    Ok(())
+}
+
+#[test]
+fn managed_plan_review_uninitialized_child_keeps_startup_and_retry_available() -> Result<()> {
+    use crate::managed_storage_writer::{
+        ManagedStorageWriterErrorV1, StorageWriterChannelV1 as Channel,
+    };
+    for empty_record in [false, true] {
+        let (temp, provisioner, _) = child_resource_fixture(&[
+            Channel::SessionLog,
+            Channel::ArtifactStaging,
+            Channel::ArtifactStore,
+        ])?;
+        let parent_path = temp.path().join("parent.jsonl");
+        let parent = Session::load_from_store(
+            "plan-review-test",
+            "planned-model",
+            JsonlSessionStore::new(&parent_path)?,
+        )?;
+        let (mut parent, request) = seed_route_decision(parent)?;
+        let bundle = provisioner.provision(&request)?;
+        let child_path = bundle.session_log_path().to_path_buf();
+        bundle.finish()?;
+        ensure_test_plan_review_attempt_started(&mut parent, &request, 10)?;
+        assert!(!child_path.exists());
+        if empty_record {
+            std::fs::File::create(&child_path)?;
+            sigil_kernel::secure_private_path_permissions(&child_path)?;
+        }
+        let parent_bytes = std::fs::read(&parent_path)?;
+        let error = provisioner
+            .recover_research_session(&request)
+            .expect_err("required-child read must reject an unpublished stream");
+        assert_eq!(
+            error.downcast_ref::<ManagedStorageWriterErrorV1>(),
+            Some(&ManagedStorageWriterErrorV1::ExistingSessionLogUninitialized)
+        );
+        assert_eq!(
+            PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+                JsonlSessionStore::new(&parent_path)?,
+                provisioner.as_ref(),
+                20,
+            )?,
+            0
+        );
+        assert_eq!(std::fs::read(&parent_path)?, parent_bytes);
+        assert_eq!(child_path.exists(), empty_record);
+        if empty_record {
+            assert!(std::fs::read(&child_path)?.is_empty());
+        }
+        drop(parent);
+        let parent = Session::load_from_store(
+            "plan-review-test",
+            "planned-model",
+            JsonlSessionStore::new(&parent_path)?,
+        )?;
+        assert_eq!(
+            PlanReviewProjection::from_entries(parent.entries())
+                .latest_attempt(&request.plan_review_id)
+                .map(|attempt| attempt.status),
+            Some(PlanReviewAttemptStatus::Interrupted)
+        );
+        assert!(
+            public_plan_review_from_session(&parent)?
+                .allowed_actions
+                .contains(&sigil_kernel::PublicPlanAction::RetryReview)
+        );
+    }
     Ok(())
 }

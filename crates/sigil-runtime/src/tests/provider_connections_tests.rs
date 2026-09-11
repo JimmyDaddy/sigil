@@ -1395,7 +1395,7 @@ async fn catalog_is_connection_scoped_single_flight_and_uses_exact_offline_cache
         }));
         assert!(result.entries.iter().any(|entry| {
             entry.model_ref.model_id == "configured-only"
-                && entry.availability == ModelAvailability::ConfiguredUnavailable
+                && entry.availability == ModelAvailability::Unverified
         }));
         assert!(
             result

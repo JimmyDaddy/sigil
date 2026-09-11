@@ -695,9 +695,6 @@ pub struct ApplicationRunServices {
     /// RFC-0062 14.1: process-scoped scratch lease registry shared by every run surface so
     /// tool/terminal leases, session-delete cleanup and TTL GC observe the same authority.
     scratch_control: Option<sigil_tools_builtin::ScratchNamespaceControl>,
-    /// Release-candidate model eval may exercise DirectTask before a rollout sidecar exists.
-    /// Production adapters cannot set this crate-private evidence override.
-    model_eval_route_qualified: bool,
     /// RFC-0071 R71.6: the one application-global cutover decision. The boot owner selects the
     /// epoch exactly once; an unattached decision is unavailable and cannot start a run.
     cutover: Option<Arc<crate::r71_global_cutover::RuntimeGlobalCutoverV1>>,
@@ -791,7 +788,6 @@ impl ApplicationRunServices {
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
-            model_eval_route_qualified: false,
             cutover: None,
             authority_composition: None,
         }
@@ -810,7 +806,6 @@ impl ApplicationRunServices {
             task_role_provider_builder: None,
             terminal_lifecycle_handler: None,
             scratch_control: None,
-            model_eval_route_qualified: false,
             cutover: None,
             authority_composition: None,
         }
@@ -823,11 +818,6 @@ impl ApplicationRunServices {
         builder: Arc<dyn crate::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder>,
     ) -> Self {
         self.task_role_provider_builder = Some(builder);
-        self
-    }
-
-    pub(crate) fn with_model_eval_route_qualification(mut self) -> Self {
-        self.model_eval_route_qualified = true;
         self
     }
 
@@ -1824,19 +1814,7 @@ impl ApplicationRunControl {
     }
 
     fn load_control_session(&self) -> Result<Session> {
-        let entries =
-            application_bound_session_entries(&self._session_lease.path, &self.events.session_id)?;
-        let (provider_name, model_name) = application_session_identity(&entries)
-            .context("application control session has no durable provider/model identity")?;
-        let session = Session::load_from_store(
-            provider_name,
-            model_name,
-            JsonlSessionStore::new(&self._session_lease.path)?,
-        )?;
-        if session.session_scope_id() != self.events.session_id {
-            bail!("application control session identity changed");
-        }
-        Ok(session)
+        load_application_control_session(&self._session_lease.path, &self.events.session_id)
     }
 }
 
@@ -2182,7 +2160,6 @@ struct ApplicationTaskExecutionRuntime {
 /// Runtime facts used to execute a read-only plan review after an automatic route decision.
 struct ApplicationPlanReviewRuntime {
     options: AgentRunOptions,
-    root_config: RootConfig,
     agent: Box<Agent<Box<dyn sigil_kernel::Provider>>>,
     tool_registry: sigil_kernel::ToolRegistry,
     workspace_snapshot_id: Option<String>,
@@ -2835,7 +2812,8 @@ where
         .await;
     }
     if let AgentRunDisposition::ContinueDurableTask(action) = output.disposition.clone() {
-        return continue_application_existing_task(
+        // Keep the nested continuation state machine off the caller's executor stack.
+        return Box::pin(continue_application_existing_task(
             session,
             output,
             *action,
@@ -2843,7 +2821,7 @@ where
             handler,
             approval_handler,
             cancellation_handle,
-        )
+        ))
         .await;
     }
     let AgentRunDisposition::StartDurableTask(action) = output.disposition.clone() else {
@@ -3021,6 +2999,7 @@ where
                     },
                     guidance_promotion: None,
                     continuation_guidance_receipt: Some(action.guidance_receipt),
+                    explicit_guidance_run_id: None,
                     root_config,
                     options,
                     base_registry,
@@ -3118,13 +3097,11 @@ where
     }
     let ApplicationPlanReviewRuntime {
         options,
-        root_config,
         agent,
         tool_registry,
         child_resource_provisioner,
         ..
     } = runtime;
-    let plan_review_workspace_root = options.workspace_root.clone();
     let outcome = match child_resource_provisioner {
         Some(provisioner) => {
             crate::PlanReviewCoordinator::run_plan_review_with_resource_provisioner(
@@ -3213,12 +3190,6 @@ where
             })
         }
         crate::PlanReviewRunOutcome::DraftReady { draft } => {
-            let compile_input = crate::PlanReviewCoordinator::plan_compile_input(
-                session,
-                &root_config,
-                &plan_review_workspace_root,
-                &request,
-            )?;
             let final_text = format!("Plan ready: {}", draft.summary);
             let recorded_at_ms = current_unix_time_ms();
             let controls = crate::PlanReviewCoordinator::plan_review_draft_terminal_controls(
@@ -3262,7 +3233,6 @@ where
                     session,
                     &draft,
                     &request,
-                    &compile_input,
                     handler,
                     recorded_at_ms,
                 )?;
@@ -3929,6 +3899,9 @@ async fn prepare_application_run_internal(
     let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
+    let managed_plan_review_child_resources = services
+        .authority_composition()
+        .map(|composition| composition.plan_review_child_resource_provisioner());
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             request,
@@ -3938,6 +3911,7 @@ async fn prepare_application_run_internal(
             expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
+            managed_plan_review_child_resources,
         )
     })
     .await
@@ -4126,9 +4100,7 @@ async fn prepare_application_run_internal(
             provider_supports_routing_tools: provider.capabilities().supports_tool_stream,
             // DirectTask additionally requires an attached task executor; without one the route
             // stays at the ReviewFirst baseline so plan review remains usable.
-            route_qualified: (crate::route_qualification_evidence(&root_config)
-                || services.model_eval_route_qualified)
-                && task_execution.is_some(),
+            task_executor_available: task_execution.is_some(),
         })
     });
     if queued_first_request.is_none()
@@ -4295,7 +4267,6 @@ async fn prepare_application_run_internal(
                     crate::build_plan_review_tool_registry(&registry, &root_config).into_registry();
                 Some(ApplicationPlanReviewRuntime {
                     options: options.clone(),
-                    root_config: root_config.clone(),
                     workspace_snapshot_id: plan_review_workspace_snapshot_id,
                     agent: Box::new(
                         crate::configured_agent(
@@ -4487,20 +4458,6 @@ pub fn bind_application_session_with_model_ref_and_projection_owner(
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let sigil_paths =
         resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    if connection_id.is_some()
-        && !application_model_ref_is_selectable(
-            &root_config,
-            &selected_route.model_ref,
-            &sigil_paths.cache_root,
-        )
-    {
-        return Err(ApplicationRunPrepareError::InvalidInvocation {
-            message: format!(
-                "model {}/{} is not admitted by the exact connection catalog",
-                selected_route.model_ref.connection_id, selected_route.model_ref.model_id
-            ),
-        });
-    }
     let requested_path = session_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_application_session_path(&sigil_paths.session_log_dir));
@@ -4573,32 +4530,6 @@ pub fn bind_application_session_with_model_ref_and_projection_owner(
     ))
 }
 
-fn application_model_ref_is_selectable(
-    root_config: &RootConfig,
-    requested: &ModelRef,
-    cache_root: &Path,
-) -> bool {
-    let loaded = crate::provider_connections::load_provider_connections(root_config);
-    let Some(connection) = loaded.connections.get(&requested.connection_id) else {
-        return false;
-    };
-    if let Some(cached) = crate::provider_connections::fresh_cached_model_entries_native(
-        cache_root,
-        root_config,
-        &requested.connection_id,
-    ) {
-        return cached.iter().any(|entry| {
-            entry.model_ref == *requested
-                && entry.availability
-                    != crate::provider_connections::ModelAvailability::ConfiguredUnavailable
-        });
-    }
-    crate::provider_connections::bundled_model_entries(&connection.config)
-        .iter()
-        .any(|entry| entry.model_ref == *requested)
-        || loaded.default_model.as_ref() == Some(requested)
-}
-
 fn application_model_catalog_entries(
     root_config: &RootConfig,
     current_model: &ModelRef,
@@ -4612,7 +4543,6 @@ fn application_model_catalog_entries(
             root_config,
             &connection.config.id,
         );
-        let cache_proved_absence = cached.is_some();
         let mut connection_entries = cached.unwrap_or_else(|| {
             crate::provider_connections::bundled_model_entries(&connection.config)
         });
@@ -4628,11 +4558,7 @@ fn application_model_catalog_entries(
                 connection_entries.push(crate::provider_connections::ModelCatalogEntry {
                     model_ref: required.clone(),
                     display_name: required.model_id.clone(),
-                    availability: if cache_proved_absence {
-                        crate::provider_connections::ModelAvailability::ConfiguredUnavailable
-                    } else {
-                        crate::provider_connections::ModelAvailability::Unverified
-                    },
+                    availability: crate::provider_connections::ModelAvailability::Unverified,
                     recommendation: crate::provider_connections::ModelRecommendation::Standard,
                     provenance: crate::provider_connections::ModelCatalogProvenance::Configured,
                 });
@@ -4669,26 +4595,13 @@ fn application_model_catalog_entries(
     entries
 }
 
-fn application_model_selection_binding(
-    current_model: &ModelRef,
-    model_options: &[ApplicationModelOptionView],
-) -> String {
-    let mut material = format!(
-        "sigil-application-model-selection-v3\n{}/{}\n",
+// Bind the source selection, not the changing catalog, cache provenance, or recommendations.
+// The requested destination is resolved against live connection configuration at admission.
+fn application_model_selection_binding(current_model: &ModelRef) -> String {
+    let material = format!(
+        "sigil-application-model-selection-v4\n{}/{}\n",
         current_model.connection_id, current_model.model_id,
     );
-    for option in model_options {
-        use std::fmt::Write as _;
-        let _ = writeln!(
-            material,
-            "{}/{}|{:?}|{:?}|{:?}",
-            option.model_ref.connection_id,
-            option.model_ref.model_id,
-            option.availability,
-            option.recommendation,
-            option.provenance,
-        );
-    }
     format!("{:x}", Sha256::digest(material.as_bytes()))
 }
 
@@ -5220,8 +5133,7 @@ pub(crate) fn application_run_context_view_from_records(
     let catalog_entries =
         application_model_catalog_entries(&root_config, &route.model_ref, &sigil_paths.cache_root);
     let model_options = application_model_option_views(&root_config, catalog_entries);
-    let model_selection_binding =
-        application_model_selection_binding(&route.model_ref, &model_options);
+    let model_selection_binding = application_model_selection_binding(&route.model_ref);
     Ok(ApplicationRunContextView {
         model_ref: effective_route.model_ref,
         provider_name,
@@ -5306,6 +5218,19 @@ pub(crate) fn application_session_route(entries: &[SessionLogEntry]) -> Option<R
         }
     }
     route
+}
+
+/// Loads an existing session for local control decisions without resolving or changing a
+/// provider route. Execution readiness belongs to the runner that actually uses the provider.
+pub(crate) fn load_application_control_session(
+    session_path: &Path,
+    expected_session_scope_id: &str,
+) -> Result<Session> {
+    let session = Session::load_from_store_for_control(JsonlSessionStore::new(session_path)?)?;
+    if session.session_scope_id() != expected_session_scope_id {
+        bail!("application control session identity changed");
+    }
+    Ok(session)
 }
 
 fn application_session_identity(entries: &[SessionLogEntry]) -> Option<(String, String)> {
@@ -6085,9 +6010,11 @@ fn prepare_application_run_blocking(
         Some(expected_composition),
         None,
         None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_application_run_blocking_with_writer(
     request: ApplicationRunRequest,
     session_leases: Arc<ApplicationSessionLeaseManager>,
@@ -6099,6 +6026,9 @@ fn prepare_application_run_blocking_with_writer(
     >,
     managed_artifact_store_writer: Option<
         Arc<crate::managed_storage_writer::ManagedStorageWriterAdapterV1>,
+    >,
+    managed_plan_review_child_resources: Option<
+        Arc<dyn crate::plan_review_coordinator::PlanReviewChildResourceProvisionerV1>,
     >,
 ) -> std::result::Result<BlockingApplicationRunPreparation, ApplicationRunPrepareError> {
     if let Some(constraints) = request.constraints.as_ref()
@@ -6160,6 +6090,14 @@ fn prepare_application_run_blocking_with_writer(
             })?,
     );
     let mutation_recorder = MutationEventRecorder::new(session_store.clone());
+    if let Some(provisioner) = managed_plan_review_child_resources.as_deref() {
+        crate::PlanReviewCoordinator::recover_managed_plan_review_drafts_from_store(
+            session_store.clone(),
+            provisioner,
+            current_unix_time_ms(),
+        )
+        .map_err(ApplicationRunPrepareError::execution)?;
+    }
     let (_, fallback_route) = application_selected_model_route(
         &root_config,
         request.model_connection_id.as_ref(),
@@ -6287,12 +6225,7 @@ fn prepare_application_run_blocking_with_writer(
     conversation_lifecycle
         .reconcile_unfinished(current_unix_time_ms())
         .map_err(ApplicationRunPrepareError::execution)?;
-    let selected_model = admit_application_model_selection(
-        &request,
-        &root_config,
-        &session,
-        &sigil_paths.cache_root,
-    )?;
+    let selected_model = admit_application_model_selection(&request, &root_config, &session)?;
     let session_route = selected_model
         .as_ref()
         .map(|(_, route)| route.clone())
@@ -6704,7 +6637,6 @@ fn admit_application_model_selection(
     request: &ApplicationRunRequest,
     root_config: &RootConfig,
     session: &Session,
-    cache_root: &Path,
 ) -> std::result::Result<Option<(String, ResolvedModelRoute)>, ApplicationRunPrepareError> {
     match (
         request.model_connection_id.as_ref(),
@@ -6717,14 +6649,6 @@ fn admit_application_model_selection(
                     message: error.to_string(),
                 }
             })?;
-            if !application_model_ref_is_selectable(root_config, &model_ref, cache_root) {
-                return Err(ApplicationRunPrepareError::InvalidInvocation {
-                    message: format!(
-                        "model {}/{} is not admitted by the exact connection catalog",
-                        model_ref.connection_id, model_ref.model_id
-                    ),
-                });
-            }
             let selected =
                 crate::provider_connections::resolve_model_route(root_config, &model_ref)
                     .map_err(ApplicationRunPrepareError::configuration)?;
@@ -6735,14 +6659,7 @@ fn admit_application_model_selection(
             let current_route = session.resolved_model_route().ok_or_else(|| {
                 ApplicationRunPrepareError::execution(anyhow!("session_route_missing"))
             })?;
-            let catalog_entries = application_model_catalog_entries(
-                root_config,
-                &current_route.model_ref,
-                cache_root,
-            );
-            let available_models = application_model_option_views(root_config, catalog_entries);
-            let expected_binding =
-                application_model_selection_binding(&current_route.model_ref, &available_models);
+            let expected_binding = application_model_selection_binding(&current_route.model_ref);
             if binding != expected_binding {
                 return Err(ApplicationRunPrepareError::InvalidInvocation {
                     message: "model selection capability binding is stale".to_owned(),
@@ -6753,18 +6670,6 @@ fn admit_application_model_selection(
                     message: error.to_string(),
                 }
             })?;
-            if !available_models.iter().any(|option| {
-                option.model_ref == model_ref
-                    && option.availability
-                        != crate::provider_connections::ModelAvailability::ConfiguredUnavailable
-            }) {
-                return Err(ApplicationRunPrepareError::InvalidInvocation {
-                    message: format!(
-                        "model {}/{} is not available for the configured provider connection",
-                        model_ref.connection_id, model_ref.model_id
-                    ),
-                });
-            }
             let selected =
                 crate::provider_connections::resolve_model_route(root_config, &model_ref)
                     .map_err(ApplicationRunPrepareError::configuration)?;
@@ -7439,6 +7344,29 @@ pub struct PlanReviewRevisionExecution {
     pub waiting_public_event: Option<PublicRunEvent>,
 }
 
+/// Restores a Plan after its owner confirms an accepted revision never started.
+///
+/// The adapter must exclude an active dispatch for this exact request before calling.
+///
+/// # Errors
+///
+/// Rejects another session, stale guidance, and any already-started revision.
+pub fn record_application_plan_revision_dispatch_failure(
+    session_log_path: &Path,
+    expected_scope: &str,
+    request: &crate::PlanReviewRunRequest,
+    reason: &str,
+) -> Result<()> {
+    let mut session = load_application_control_session(session_log_path, expected_scope)?;
+    crate::PlanReviewCoordinator::record_unstarted_plan_revision_failure(
+        &mut session,
+        request,
+        reason,
+        current_unix_time_ms(),
+    )?;
+    Ok(())
+}
+
 /// Executes one prepared plan review revision on an application-surface session.
 ///
 /// HTTP/Desktop use this so `Revise` actually runs the new read-only plan review instead of
@@ -7464,18 +7392,18 @@ pub async fn execute_plan_review_revision_with_managed_execution<H>(
 where
     H: ApplicationRunEventHandler + Send,
 {
-    let store = sigil_kernel::JsonlSessionStore::new(session_log_path)?;
-    let (_, fallback_route) =
-        crate::provider_connections::resolve_default_model_route(root_config)?;
+    let cancellation_handle = cancellation.unwrap_or_else(|| RunCancellationOwner::new().handle());
     let mut session =
-        crate::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
-            root_config,
-            &fallback_route,
-            store,
-            None,
-            None,
-            None,
+        load_application_control_session(session_log_path, &request.source_turn.session_scope_id)?;
+    if !cancellation_handle.is_cancel_requested()
+        && let Some(provisioner) = child_resource_provisioner.as_deref()
+    {
+        crate::PlanReviewCoordinator::recover_managed_plan_review_drafts(
+            &mut session,
+            provisioner,
+            current_unix_time_ms(),
         )?;
+    }
     if let Some(outbox) =
         session.reconcile_plan_review_revision_terminal(&request.child_logical_run_id())?
     {
@@ -7512,16 +7440,11 @@ where
             waiting_public_event: Some(outbox.event),
         });
     }
-    let model_ref = session
-        .resolved_model_route()
-        .map(|route| route.model_ref.clone())
-        .unwrap_or_else(|| fallback_route.model_ref.clone());
     crate::PlanReviewCoordinator::ensure_revision_attempt_started(
         &mut session,
         request,
         current_unix_time_ms(),
     )?;
-    let cancellation_handle = cancellation.unwrap_or_else(|| RunCancellationOwner::new().handle());
     let mut bridge = PublicApplicationEventBridge::new(
         ApplicationRunEventSequence::with_outbox(
             session.session_scope_id().to_owned(),
@@ -7537,7 +7460,28 @@ where
         prompt: "plan review revision".to_owned(),
     })?;
     let execution = (async {
-        let provider = crate::build_provider_for_model_ref_async(root_config, &model_ref).await?;
+        // Route and provider readiness belong to this admitted execution so a removed
+        // connection restores the base Plan through the same durable terminal path.
+        let preparation = (async {
+            let route = session.resolved_model_route().context(
+                "plan review session has no model route; select a model before retrying",
+            )?;
+            crate::provider_connections::validate_persisted_model_route(root_config, route)?;
+            crate::build_provider_for_model_ref_async(root_config, &route.model_ref).await
+        }).await;
+        let provider = match preparation {
+            Ok(provider) => provider,
+            Err(error) => {
+                let redactor = secret_redactor_for_root_config(root_config);
+                let reason = sigil_kernel::safe_persistence_text(&redactor.redact_text(
+                    &format!("plan review revision could not start: {error:#}"),
+                ));
+                return crate::plan_review_coordinator::complete_plan_review_run(
+                    &cancellation_handle,
+                    crate::PlanReviewRunOutcome::Failed(reason),
+                );
+            }
+        };
         let mut base_registry = sigil_kernel::ToolRegistry::new();
         let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
         let builtin_paths = sigil_tools_builtin::BuiltinToolPaths {

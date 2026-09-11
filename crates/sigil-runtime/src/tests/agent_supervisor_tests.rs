@@ -2558,6 +2558,7 @@ fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()>
         .expect("cancelled thread projected");
     assert_eq!(thread.status, sigil_kernel::AgentThreadStatus::Interrupted);
     assert_eq!(thread.reason.as_deref(), Some("run cancelled from test"));
+    assert_eq!(thread.duplicate_terminal_entries, 0);
 
     supervisor.begin_task_child_thread(
         &mut session,
@@ -2565,6 +2566,140 @@ fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()>
         child_start(step("two")?, temp.path().to_path_buf())?,
     )?;
     assert_eq!(supervisor.active_profile_ids().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn foreground_cancel_audit_preserves_child_outcomes_and_is_idempotent() -> Result<()> {
+    use sigil_kernel::{
+        AgentThreadStatus, ProviderTurnRecoveryTerminalDispositionV1,
+        ProviderTurnRecoveryTerminalError,
+    };
+
+    for expected_status in [
+        AgentThreadStatus::Completed,
+        AgentThreadStatus::Failed,
+        AgentThreadStatus::Cancelled,
+    ] {
+        let temp = tempfile::tempdir()?;
+        let supervisor =
+            supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+        let mut session = Session::new("deepseek", "deepseek-v4-flash");
+        let mut handler = RecordingEventHandler::default();
+        let child = supervisor.begin_task_child_thread(
+            &mut session,
+            &mut handler,
+            child_start(step("one")?, temp.path().to_path_buf())?,
+        )?;
+        let impact = supervisor.cancel_foreground_run();
+        match expected_status {
+            AgentThreadStatus::Completed => supervisor.record_task_child_result(
+                &mut session,
+                &mut handler,
+                &child,
+                SessionRef::new_relative("children/task_1/one.jsonl")?,
+                TaskChildSessionStatus::Completed,
+                &AgentResultMaterialization::inline("completed before stop", None),
+                &AgentRunOutcome::default(),
+                None,
+            )?,
+            AgentThreadStatus::Cancelled => supervisor
+                .record_task_child_error(
+                    &mut session,
+                    &mut handler,
+                    &child,
+                    &anyhow!(ProviderTurnRecoveryTerminalError {
+                        disposition: ProviderTurnRecoveryTerminalDispositionV1::Cancelled,
+                        reason_code: "provider_recovery_cancelled",
+                    })
+                    .context("discovery probe stopped"),
+                )
+                .map(|_| ())?,
+            AgentThreadStatus::Failed => supervisor
+                .record_task_child_error(
+                    &mut session,
+                    &mut handler,
+                    &child,
+                    &anyhow!("provider-turn recovery Cancelled: provider_recovery_cancelled"),
+                )
+                .map(|_| ())?,
+            _ => unreachable!("the fixture only covers settled outcomes"),
+        }
+        let settled = session.agent_thread_state_projection().threads[&child.thread_id].clone();
+        assert_eq!(settled.status, expected_status);
+        for _ in 0..2 {
+            AgentSupervisor::append_foreground_cancel_audit(
+                &mut session,
+                &mut handler,
+                impact.clone(),
+                "root cancellation drained",
+            )?;
+        }
+        let projection = session.agent_thread_state_projection();
+        let thread = &projection.threads[&child.thread_id];
+        assert_eq!(thread.status, settled.status);
+        assert_eq!(thread.reason, settled.reason);
+        assert_eq!(thread.result, settled.result);
+        assert_eq!(thread.duplicate_terminal_entries, 0);
+        assert_eq!(
+            thread.attempts[&child.attempt_id].interrupted.as_deref(),
+            Some("root cancellation drained")
+        );
+        assert_eq!(
+            session
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interrupted))
+                        if interrupted.thread_id == child.thread_id
+                            && interrupted.attempt_id == child.attempt_id
+                ))
+                .count(),
+            1
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn foreground_cancel_audit_rejects_a_replaced_attempt_without_mutating_it() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let child = supervisor.begin_task_child_thread(
+        &mut session,
+        &mut handler,
+        child_start(step("one")?, temp.path().to_path_buf())?,
+    )?;
+    let impact = supervisor.cancel_foreground_run();
+    let replacement_id = sigil_kernel::AgentRunAttemptId::new("replacement-attempt")?;
+    session.append_control(ControlEntry::AgentRunAttemptStarted(
+        sigil_kernel::AgentRunAttemptStartedEntry {
+            thread_id: child.thread_id.clone(),
+            attempt_id: replacement_id.clone(),
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            background: false,
+            provider_background_handle_ref: None,
+        },
+    ))?;
+    let before = serde_json::to_value(session.entries())?;
+    assert!(
+        AgentSupervisor::append_foreground_cancel_audit(
+            &mut session,
+            &mut handler,
+            impact,
+            "stale cancellation snapshot",
+        )
+        .is_err()
+    );
+    assert_eq!(serde_json::to_value(session.entries())?, before);
+    let projection = session.agent_thread_state_projection();
+    let thread = &projection.threads[&child.thread_id];
+    assert!(thread.attempts[&replacement_id].interrupted.is_none());
+    assert!(!thread.status.is_terminal());
     Ok(())
 }
 
@@ -3308,6 +3443,30 @@ async fn planner_user_input_suspends_and_resumes_the_exact_child_session() -> Re
     let attempt_id =
         task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
     let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    // This direct runner fixture needs the same Task and participant admission that the
+    // orchestrator persists before dispatching a planner in production.
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: task.parent_session_ref.clone(),
+            objective: task.objective.clone(),
+            title: None,
+            status: TaskRunStatus::Started,
+            reason: None,
+        }),
+        ControlEntry::TaskParticipantAttempt(TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        }),
+    ])?;
     let planner_context = TaskPlanUpdateContext {
         task_id: task_id.clone(),
         max_plan_steps: 4,
@@ -3612,6 +3771,30 @@ async fn planner_discovery_runs_bounded_probes_in_parallel_and_resumes_without_p
     let attempt_id =
         task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
     let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    // Direct runner fixtures must provide the Task and participant admission owned by the
+    // orchestrator in production before the planner can durably commit its accepted plan.
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect kernel and runtime before implementation".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
     let cancellation = RunCancellationOwner::new();
     let planner_input =
         AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])
@@ -3775,6 +3958,30 @@ async fn planner_discovery_rejects_overlapping_batch_without_consuming_valid_ret
     let attempt_id =
         task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
     let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    // Direct runner fixtures must provide the Task and participant admission owned by the
+    // orchestrator in production before the planner can durably commit its accepted plan.
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect runtime before implementation".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
     let cancellation = RunCancellationOwner::new();
     let planner_input =
         AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])
@@ -3885,6 +4092,30 @@ async fn planner_discovery_allows_only_one_batch_per_planning_attempt() -> Resul
     let attempt_id =
         task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
     let child_session_ref = task_participant_session_ref(&task_id, &attempt_id)?;
+    // Direct runner fixtures must provide the Task and participant admission owned by the
+    // orchestrator in production before the planner can durably commit its accepted plan.
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect runtime before implementation".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskParticipantAttempt(
+        TaskParticipantAttemptEntry {
+            attempt_id: attempt_id.clone(),
+            task_id: task_id.clone(),
+            purpose: TaskParticipantPurpose::Planner,
+            ordinal: 1,
+            plan_version: None,
+            step_id: None,
+            role: AgentRole::Planner,
+            child_session_ref: child_session_ref.clone(),
+            status: TaskParticipantAttemptStatus::Started,
+            reason: None,
+        },
+    ))?;
     let cancellation = RunCancellationOwner::new();
     let planner_input =
         AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("plan the task")])

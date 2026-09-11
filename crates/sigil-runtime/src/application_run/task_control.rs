@@ -194,6 +194,9 @@ pub async fn prepare_application_task_continuation(
     let expected_composition = current_schema_boot_composition(services);
     let managed_session_log_writer = current_schema_managed_session_log_writer(services);
     let managed_artifact_store_writer = current_schema_managed_artifact_store_writer(services);
+    let managed_plan_review_child_resources = services
+        .authority_composition()
+        .map(|composition| composition.plan_review_child_resource_provisioner());
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_application_run_blocking_with_writer(
             blocking_request,
@@ -203,6 +206,7 @@ pub async fn prepare_application_task_continuation(
             expected_composition,
             managed_session_log_writer,
             managed_artifact_store_writer,
+            managed_plan_review_child_resources,
         )
     })
     .await
@@ -242,13 +246,6 @@ pub async fn prepare_application_task_continuation(
         Some(request.task_id.as_str()),
     )
     .map_err(ApplicationRunPrepareError::execution)?;
-    if task.needs_planning() && request.guidance.is_some() {
-        return Err(ApplicationRunPrepareError::InvalidInvocation {
-            message:
-                "recovered Task has no accepted plan; continue it without guidance to rerun the planner"
-                    .to_owned(),
-        });
-    }
     let task_agent_registry =
         task_agent_registry.ok_or_else(|| ApplicationRunPrepareError::InvalidInvocation {
             message: "Task execution is disabled for this application session".to_owned(),
@@ -467,6 +464,7 @@ impl ApplicationTaskContinuationExecution {
             crate::agent_supervisor::task_execution::ContinuedTaskExecution {
                 requested_task_id: Some(self.task.task_id.clone()),
                 guidance: self.guidance,
+                explicit_guidance_run_id: Some(self.run_id.clone()),
                 guidance_promotion: None,
                 continuation_guidance_receipt: None,
                 root_config,

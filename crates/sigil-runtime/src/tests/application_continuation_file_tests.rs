@@ -37,6 +37,9 @@ fn blocking_prepare_rejects_missing_boot_composition_before_namespace_admission(
         None,
         current_schema_managed_session_log_writer(&services),
         current_schema_managed_artifact_store_writer(&services),
+        services
+            .authority_composition()
+            .map(|composition| composition.plan_review_child_resource_provisioner()),
     ) {
         Ok(_) => anyhow::bail!("missing boot composition must be rejected in every build"),
         Err(error) => error,
@@ -244,7 +247,9 @@ fn install_question_provider(
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction reads the process CA environment.
 async fn submitted_answer_continuation_executes_real_managed_write_and_read() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
     let root = tempfile::tempdir()?;
     let (config_path, services) = continuation_services(root.path(), false)?;
     let stage = Arc::new(AtomicUsize::new(0));
@@ -309,7 +314,9 @@ async fn submitted_answer_continuation_executes_real_managed_write_and_read() ->
     .await?;
     assert_eq!(
         output.terminal_status,
-        ApplicationRunTerminalStatus::Succeeded
+        ApplicationRunTerminalStatus::Succeeded,
+        "continuation outcome: {:?}",
+        output.agent_output
     );
     assert_eq!(
         std::fs::read_to_string(root.path().join("answer.txt"))?,
@@ -394,7 +401,9 @@ impl Provider for ReadingTaskProvider {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider construction reads the process CA environment.
 async fn task_continuation_executes_real_managed_file_read() -> Result<()> {
+    let _environment_guard = crate::test_env::lock();
     let root = tempfile::tempdir()?;
     let (config_path, services) = continuation_services(root.path(), true)?;
     std::fs::write(root.path().join("task.txt"), TASK_TEXT)?;

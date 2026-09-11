@@ -249,42 +249,68 @@ pub async fn build_task_role_runtime(
     role_provider_builder: &dyn TaskRoleProviderBuilder,
     verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
 ) -> Result<TaskRoleRuntime> {
-    let planner_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
+    build_task_role_runtime_for_route(
+        root_config,
+        options,
+        base_registry,
+        agent_supervisor,
+        role_provider_builder,
+        verification_execution_port,
+        super::task_execution::ResolvedTaskExecutionRoute::Planned,
+    )
+    .await
+}
+
+pub(super) async fn build_task_role_runtime_for_route(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    base_registry: &ToolRegistry,
+    agent_supervisor: AgentSupervisor,
+    role_provider_builder: &dyn TaskRoleProviderBuilder,
+    verification_execution_port: Arc<dyn VerificationExecutionPortV1>,
+    route: super::task_execution::ResolvedTaskExecutionRoute,
+) -> Result<TaskRoleRuntime> {
     let executor_provider =
         build_role_provider(role_provider_builder, root_config, AgentRole::Executor).await?;
-    let synthesis_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
-    let subagent_read_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentRead).await?;
-    let subagent_write_provider =
-        build_role_provider(role_provider_builder, root_config, AgentRole::SubagentWrite).await?;
-    let planner_registry =
-        crate::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
-            .into_registry();
     let executor_registry =
         crate::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
             .into_registry();
-    let subagent_read_registry =
-        crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentRead)
-            .into_registry();
-    let subagent_write_registry =
-        crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentWrite)
-            .into_registry();
-    let workspace_root = options.workspace_root.clone();
-    let interaction_mode = options.interaction_mode;
-    let child_runner = AgentSupervisorTaskChildRunner::new_with_task_roles(
-        agent_supervisor,
-        crate::configured_agent(root_config, planner_provider, planner_registry)?,
-        crate::configured_agent(root_config, executor_provider, executor_registry)?,
-        crate::configured_agent(root_config, subagent_read_provider, subagent_read_registry)?,
-        crate::configured_agent(
-            root_config,
-            subagent_write_provider,
-            subagent_write_registry,
-        )?,
-        crate::configured_agent(root_config, synthesis_provider, ToolRegistry::new())?,
-    )
+    let executor = crate::configured_agent(root_config, executor_provider, executor_registry)?;
+    let child_runner = if route == super::task_execution::ResolvedTaskExecutionRoute::Direct {
+        AgentSupervisorTaskChildRunner::new_with_executor(agent_supervisor, executor)
+    } else {
+        let planner_provider =
+            build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
+        let synthesis_provider =
+            build_role_provider(role_provider_builder, root_config, AgentRole::Planner).await?;
+        let subagent_read_provider =
+            build_role_provider(role_provider_builder, root_config, AgentRole::SubagentRead)
+                .await?;
+        let subagent_write_provider =
+            build_role_provider(role_provider_builder, root_config, AgentRole::SubagentWrite)
+                .await?;
+        let planner_registry =
+            crate::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
+                .into_registry();
+        let subagent_read_registry =
+            crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentRead)
+                .into_registry();
+        let subagent_write_registry =
+            crate::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentWrite)
+                .into_registry();
+        AgentSupervisorTaskChildRunner::new_with_task_roles(
+            agent_supervisor,
+            crate::configured_agent(root_config, planner_provider, planner_registry)?,
+            executor,
+            crate::configured_agent(root_config, subagent_read_provider, subagent_read_registry)?,
+            crate::configured_agent(
+                root_config,
+                subagent_write_provider,
+                subagent_write_registry,
+            )?,
+            crate::configured_agent(root_config, synthesis_provider, ToolRegistry::new())?,
+        )
+    }
     .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
         &root_config.task,
     ))
@@ -293,6 +319,8 @@ pub async fn build_task_role_runtime(
         root_config.task.max_planning_research_agents,
     )
     .with_integration_verification_port(verification_execution_port.clone());
+    let workspace_root = options.workspace_root.clone();
+    let interaction_mode = options.interaction_mode;
     // Role-specific options are derived from the persisted role configuration, but the
     // authority attachments belong to the already-admitted root run.  Dropping this field here
     // makes a direct Task look correctly bootstrapped until its first managed file tool reaches

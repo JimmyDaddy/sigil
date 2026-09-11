@@ -2378,25 +2378,12 @@ impl PlanReviewDisplayProjection {
                 actions.push(sigil_kernel::PublicPlanAction::Revise);
             }
             actions
-        } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::DraftReady
-            && draft.is_some()
-            && !revision_running
-            && !guidance_pending
-        {
-            match latest_decision {
-                Some(sigil_kernel::PlanDecision::RevisionRequested) => Vec::new(),
-                Some(sigil_kernel::PlanDecision::SavedOnly) => vec![
-                    sigil_kernel::PublicPlanAction::Run,
-                    sigil_kernel::PublicPlanAction::Revise,
-                    sigil_kernel::PublicPlanAction::Reject,
-                ],
-                _ => vec![
-                    sigil_kernel::PublicPlanAction::Run,
-                    sigil_kernel::PublicPlanAction::Save,
-                    sigil_kernel::PublicPlanAction::Revise,
-                    sigil_kernel::PublicPlanAction::Reject,
-                ],
-            }
+        } else if draft.is_some() {
+            crate::plan_review_coordinator::plan_draft_actions(
+                active_attempt.status,
+                latest_decision,
+                revision_running || guidance_pending,
+            )
         } else if matches!(
             active_attempt.status,
             sigil_kernel::PlanReviewAttemptStatus::Paused
@@ -2411,16 +2398,6 @@ impl PlanReviewDisplayProjection {
                 actions.push(sigil_kernel::PublicPlanAction::AdoptCandidate);
             }
             actions
-        } else if active_attempt.status == sigil_kernel::PlanReviewAttemptStatus::CompileFailed
-            && draft.is_some()
-            && !revision_running
-            && !guidance_pending
-        {
-            // RFC-0067 13.1: a compile-failed plan needs changes; it cannot be run or saved.
-            vec![
-                sigil_kernel::PublicPlanAction::Revise,
-                sigil_kernel::PublicPlanAction::Reject,
-            ]
         } else {
             Vec::new()
         };

@@ -75,6 +75,18 @@ use super::{
 #[path = "application_continuation_file_tests.rs"]
 mod continuation_file_tests;
 
+#[path = "application_write_transport_recovery_tests.rs"]
+mod write_transport_recovery_tests;
+
+#[path = "application_direct_turn_limit_tests.rs"]
+mod direct_turn_limit_tests;
+
+#[path = "application_git_five_batch_tests.rs"]
+mod git_five_batch_tests;
+
+#[path = "application_verification_guard_tests.rs"]
+mod verification_guard_tests;
+
 fn application_conversation_lifecycle(
     path: &Path,
 ) -> Result<Vec<ConversationRunLifecycleRecordV1>> {
@@ -1110,7 +1122,7 @@ async fn verification_view_uses_durable_truth_and_rerun_shares_the_foreground_le
         "cargo-test".to_owned(),
         "check-hash".to_owned(),
         "policy-hash".to_owned(),
-        "snapshot-1".to_owned(),
+        Some("snapshot-1".to_owned()),
     );
 
     let error = rerun_application_verification(
@@ -1369,17 +1381,21 @@ fn adapter_session_binding_accepts_connection_models_and_rejects_unknown_connect
     assert_eq!(manual_context.model_name, "unknown-model");
 
     let connection_id = sigil_kernel::ConnectionId::new("deepseek-default")?;
-    let rejected_unadmitted_model = bind_application_session_with_model_ref(
+    let explicit_model = bind_application_session_with_model_ref(
         &config_path,
         temp.path(),
-        Some(&temp.path().join("state/sessions/unadmitted-model.jsonl")),
+        Some(&temp.path().join("state/sessions/explicit-model.jsonl")),
         Some(&connection_id),
         Some("unknown-model"),
-    );
-    assert!(matches!(
-        rejected_unadmitted_model,
-        Err(ApplicationRunPrepareError::InvalidInvocation { .. })
-    ));
+    )?;
+    let explicit_context = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &explicit_model.session_log_path,
+        &explicit_model.session_scope_id,
+    )?;
+    assert_eq!(explicit_context.model_ref.connection_id, connection_id);
+    assert_eq!(explicit_context.model_name, "unknown-model");
 
     let missing_connection = sigil_kernel::ConnectionId::new("missing-connection")?;
     let rejected = bind_application_session_with_model_ref(
@@ -1951,13 +1967,9 @@ fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilit
 
     let store = JsonlSessionStore::new(&binding.session_log_path)?;
     let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
-    let (selected_provider, selected_route) = admit_application_model_selection(
-        &request,
-        &root_config,
-        &session,
-        &temp.path().join("cache"),
-    )?
-    .expect("explicit model selection should resolve a route");
+    let (selected_provider, selected_route) =
+        admit_application_model_selection(&request, &root_config, &session)?
+            .expect("explicit model selection should resolve a route");
     assert_eq!(selected_provider, "deepseek");
     assert_eq!(selected_route.model_ref.model_id, "deepseek-v4-pro");
     admit_application_reasoning_effort(&request, "deepseek", "deepseek-v4-pro")?;
@@ -2015,12 +2027,7 @@ fn run_model_selection_switches_the_existing_session_and_rejects_stale_capabilit
     let pro_store = JsonlSessionStore::new(&binding.session_log_path)?;
     let pro_session = Session::load_from_store("deepseek", "deepseek-v4-pro", pro_store)?;
     assert!(matches!(
-        admit_application_model_selection(
-            &stale,
-            &root_config,
-            &pro_session,
-            &temp.path().join("cache"),
-        ),
+        admit_application_model_selection(&stale, &root_config, &pro_session,),
         Err(ApplicationRunPrepareError::InvalidInvocation { .. })
     ));
     Ok(())
@@ -2320,6 +2327,63 @@ credential = {{ source = "none" }}
     assert_eq!(
         option.provenance,
         crate::provider_connections::ModelCatalogProvenance::Cache
+    );
+    // A refreshed catalog can omit a usable configured alias and change unrelated metadata.
+    // It must not invalidate the already displayed source-route selection.
+    crate::provider_connections::seed_unauthenticated_catalog_cache_for_test(
+        &cache_root,
+        connection,
+        &[],
+    )?;
+    let refreshed = application_run_context_view(
+        &config_path,
+        temp.path(),
+        &binding.session_log_path,
+        &binding.session_scope_id,
+    )?;
+    assert_eq!(
+        context.model_selection_binding,
+        refreshed.model_selection_binding
+    );
+    assert_eq!(
+        refreshed.model_options[0].availability,
+        crate::provider_connections::ModelAvailability::Unverified
+    );
+    let mut request = ApplicationRunRequest::non_interactive(
+        &config_path,
+        temp.path(),
+        "use this model alias",
+        "run-unlisted-model",
+    );
+    request.session_path = Some(binding.session_log_path.clone());
+    request.model_connection_id = Some(connection.id.clone());
+    request.model_name = Some("unlisted-alias".to_owned());
+    request.model_selection_binding = Some(context.model_selection_binding);
+    let prepared = prepare_application_run_blocking(
+        request,
+        Arc::new(ApplicationSessionLeaseManager::new()),
+        false,
+        None,
+    )?;
+    assert_eq!(prepared.session.model_name(), "unlisted-alias");
+    drop(prepared);
+    let manual = bind_application_session_with_model_ref(
+        &config_path,
+        temp.path(),
+        None,
+        Some(&connection.id),
+        Some("another-unlisted-alias"),
+    )?;
+    assert!(!manual.session_scope_id.is_empty());
+    assert!(
+        bind_application_session_with_model_ref(
+            &config_path,
+            temp.path(),
+            None,
+            Some(&sigil_kernel::ConnectionId::new("missing-connection")?),
+            Some("unlisted-alias"),
+        )
+        .is_err()
     );
     Ok(())
 }
@@ -4734,7 +4798,7 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn application_preparation_enables_model_owned_auto_handoff_without_host_classification()
+async fn application_preparation_enables_auto_handoff_without_rollout_manifest_or_host_classification()
 -> Result<()> {
     // Attaching the task-role provider constructs the configured DeepSeek route during
     // preparation. Keep that credential lookup hermetic instead of inheriting a developer key or
@@ -4779,9 +4843,10 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     let services = ApplicationRunServices::new(Arc::new(RejectingDisclosurePresenter))
         .with_task_role_provider_builder(Arc::new(ApplicationTaskRoleProviderBuilder));
 
-    let root_config: RootConfig = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
-    let _rollout_guard =
-        crate::tests::rollout_manifest_test_support::qualified_rollout_manifest_guard(&root_config);
+    let _rollout_guard = crate::test_env::EnvScope::set(
+        "SIGIL_ORCHESTRATION_ROLLOUT_MANIFEST",
+        temp.path().join("missing-rollout.json").as_os_str(),
+    );
     let services = crate::r71_authority_composition::attach_boot_authority_to_services(
         services,
         &config_path,
@@ -5455,7 +5520,16 @@ async fn task_continuation_public_append_failure_does_not_finalize_the_task_or_r
 
     impl ApplicationRunEventHandler for ConflictingTaskAdapter {
         fn handle_public_event(&mut self, event: PublicRunEvent) -> Result<()> {
-            if !self.inserted && matches!(event.event, PublicRunEventKind::TaskPlanUpdated { .. }) {
+            if !self.inserted
+                && matches!(
+                    &event.event,
+                    PublicRunEventKind::TaskPhaseChanged {
+                        phase: sigil_kernel::PublicTaskPhase::Execution,
+                        status,
+                        ..
+                    } if status == "running"
+                )
+            {
                 let next = event.sequence + 1;
                 let foreign_id = format!("task-conflicting-public:{next}");
                 let foreign = PublicRunEvent::new(
@@ -7814,7 +7888,7 @@ credential = {{ source = "environment", name = "SIGIL_API_KEY" }}
     );
     let runtime = super::ApplicationPlanReviewRuntime {
         options,
-        root_config: root_config.clone(),
+
         agent: Box::new(sigil_kernel::Agent::new(
             Box::new(PlanReviewDraftProvider),
             sigil_kernel::ToolRegistry::new(),
@@ -8280,7 +8354,7 @@ async fn explicit_plan_review_finalizing_publication_failure_preserves_its_start
     );
     let runtime = super::ApplicationPlanReviewRuntime {
         options,
-        root_config: root_config.clone(),
+
         agent: Box::new(sigil_kernel::Agent::new(
             Box::new(PlanReviewFinalizingDraftProvider(AtomicUsize::new(0))),
             ToolRegistry::new(),
@@ -8418,6 +8492,7 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -8425,7 +8500,6 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         objective: "inspect the pending plan route".to_owned(),
         workspace_snapshot_id: base_snapshot.clone(),
     };
-    let session_scope_id = session.session_scope_id().to_owned();
     let mut plan_review_handler = NoopEventHandler;
     crate::PlanReviewCoordinator::ensure_attempt_started(
         &mut session,
@@ -8447,26 +8521,6 @@ async fn run_pending_plan_route_drives_adoption_admission_and_terminal_synthesis
         &mut session,
         &draft,
         &request,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: request.attempt_id.as_str().to_owned(),
-            source_turn_id: request.source_turn.message_id.clone(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some(session_scope_id.clone()),
-        },
         &mut plan_review_handler,
         2,
     )?;
@@ -8610,6 +8664,7 @@ max_plan_steps = 64
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
         finalizer_session_ref: SessionRef::new_relative("finalizer.jsonl")?,
         revision_request_id: None,
+        revision_generation: None,
         attempt_ordinal: 1,
         base_plan_id: None,
         base_plan_hash: None,
@@ -8617,7 +8672,6 @@ max_plan_steps = 64
         objective: "inspect the blocked pending plan route".to_owned(),
         workspace_snapshot_id: base_snapshot.clone(),
     };
-    let session_scope_id = session.session_scope_id().to_owned();
     let mut plan_review_handler = NoopEventHandler;
     crate::PlanReviewCoordinator::ensure_attempt_started(
         &mut session,
@@ -8639,26 +8693,6 @@ max_plan_steps = 64
         &mut session,
         &draft,
         &request,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: request.attempt_id.as_str().to_owned(),
-            source_turn_id: request.source_turn.message_id.clone(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some(session_scope_id.clone()),
-        },
         &mut plan_review_handler,
         2,
     )?;
@@ -8850,3 +8884,6 @@ async fn r71_application_prepare_rejects_legacy_composition() -> Result<()> {
     assert!(!managed_path.exists());
     Ok(())
 }
+
+#[path = "application_task_ablation_tests.rs"]
+mod application_task_ablation_tests;

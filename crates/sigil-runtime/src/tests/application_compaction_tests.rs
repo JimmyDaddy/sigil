@@ -186,6 +186,36 @@ fn local_preview_builds_continuity_without_provider_or_durable_mutation() -> Res
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn local_compaction_preview_accepts_an_incomplete_workspace_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let session_path = temp.path().join("session.jsonl");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::os::unix::fs::symlink("missing-target", workspace.join("unreadable.rs"))?;
+    write_config(&config_path, true)?;
+    let config = RootConfig::load(&config_path)?;
+    assert!(compaction_workspace_snapshot_id(&config, &workspace).is_none());
+    let history = "conversation history ".repeat(4_000);
+    let scope = session_with_messages(
+        &session_path,
+        &config_path,
+        &[&history, &history, &history, &history],
+    )?;
+    let before = std::fs::read(&session_path)?;
+    let (review, pending) =
+        preview_application_compaction(&config_path, &workspace, &session_path, &scope)?;
+    assert!(pending.is_some());
+    assert!(matches!(
+        review.admission,
+        ApplicationCompactionAdmission::Prepared { .. }
+    ));
+    assert_eq!(std::fs::read(&session_path)?, before);
+    Ok(())
+}
+
 #[test]
 fn local_preview_exposes_bounded_recoverable_and_redacted_tool_artifact_details() -> Result<()> {
     let _env_guard = crate::test_env::lock();

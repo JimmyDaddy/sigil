@@ -209,12 +209,51 @@ impl AgentSupervisor {
     where
         H: EventHandler + Send + ?Sized,
     {
+        self.record_task_child_stop(session, handler, thread, AgentThreadStatus::Failed, reason)
+    }
+
+    pub(crate) fn record_task_child_error<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        thread: &AgentTaskChildThread,
+        error: &anyhow::Error,
+    ) -> Result<AgentThreadStatus>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        // A root cancellation flag does not erase a real child failure. Only the provider's
+        // structured cancellation terminal proves this error represents a cancelled turn.
+        let status = match error.downcast_ref::<sigil_kernel::ProviderTurnRecoveryTerminalError>() {
+            Some(terminal)
+                if terminal.disposition
+                    == sigil_kernel::ProviderTurnRecoveryTerminalDispositionV1::Cancelled =>
+            {
+                AgentThreadStatus::Cancelled
+            }
+            _ => AgentThreadStatus::Failed,
+        };
+        self.record_task_child_stop(session, handler, thread, status, format!("{error:#}"))?;
+        Ok(status)
+    }
+
+    fn record_task_child_stop<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        thread: &AgentTaskChildThread,
+        status: AgentThreadStatus,
+        reason: String,
+    ) -> Result<()>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
         append_control(
             session,
             handler,
             ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
                 thread_id: thread.thread_id.clone(),
-                status: AgentThreadStatus::Failed,
+                status,
                 reason: Some(reason),
                 updated_at_ms: None,
             }),

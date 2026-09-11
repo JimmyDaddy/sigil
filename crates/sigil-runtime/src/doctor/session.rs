@@ -914,7 +914,8 @@ fn route_disablement_from_records(
             anyhow::bail!("event payload is not an orchestration route disablement");
         };
         disabled.validate()?;
-        if disabled.route_fingerprint == guard.route_fingerprint()
+        if disabled.invariant.blocks_execution()
+            && disabled.route_fingerprint == guard.route_fingerprint()
             && disabled.sigil_build == guard.sigil_build()
         {
             return Ok(Some(disabled));

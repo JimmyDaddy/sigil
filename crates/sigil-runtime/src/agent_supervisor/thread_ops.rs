@@ -1,10 +1,9 @@
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use sigil_kernel::{
     AgentInvocationMode, AgentProfileId, AgentRole, AgentRunAttemptId, AgentRunInterruptedEntry,
-    AgentThreadId, AgentThreadStatus, AgentThreadStatusChangedEntry, ControlEntry, EventHandler,
-    Session, TaskId,
+    AgentThreadId, ControlEntry, EventHandler, Session, SessionLogEntry, TaskId,
 };
 
 use super::{
@@ -172,6 +171,37 @@ impl AgentSupervisor {
         H: EventHandler + Send + ?Sized,
     {
         for interrupted in impact.foreground_children_interrupted {
+            let projection = session.agent_thread_state_projection();
+            let thread = projection
+                .threads
+                .get(&interrupted.thread_id)
+                .ok_or_else(|| anyhow!("foreground cancellation thread is missing"))?;
+            let attempt = thread
+                .attempts
+                .get(&interrupted.attempt_id)
+                .ok_or_else(|| anyhow!("foreground cancellation attempt is missing"))?;
+            let current_attempt = session
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    SessionLogEntry::Control(ControlEntry::AgentRunAttemptStarted(started))
+                        if started.thread_id == interrupted.thread_id =>
+                    {
+                        Some(&started.attempt_id)
+                    }
+                    _ => None,
+                });
+            if current_attempt != Some(&interrupted.attempt_id) {
+                return Err(anyhow!(
+                    "foreground cancellation attempt is no longer current"
+                ));
+            }
+            if attempt.interrupted.is_some() {
+                continue;
+            }
+            // This exact-attempt audit already interrupts a nonterminal thread in the shared
+            // reducer, while preserving an outcome committed during the cancellation drain.
             append_control(
                 session,
                 handler,
@@ -179,16 +209,6 @@ impl AgentSupervisor {
                     thread_id: interrupted.thread_id.clone(),
                     attempt_id: interrupted.attempt_id,
                     reason: reason.to_owned(),
-                }),
-            )?;
-            append_control(
-                session,
-                handler,
-                ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
-                    thread_id: interrupted.thread_id,
-                    status: AgentThreadStatus::Interrupted,
-                    reason: Some(reason.to_owned()),
-                    updated_at_ms: None,
                 }),
             )?;
         }

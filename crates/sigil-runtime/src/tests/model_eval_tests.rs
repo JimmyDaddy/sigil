@@ -1058,11 +1058,11 @@ corpus_version = "rfc-0063-v1"
         );
         let requests = requests.lock().expect("requests lock");
         assert_eq!(requests.len(), 2);
-        // Custom eval endpoints are never release-qualified, so the automatic route stays at the
-        // ReviewFirst baseline: no direct task decision is exposed.
+        // Evaluation uses the same runtime capability as user routes: an attached executor
+        // exposes direct task routing even without a release-qualified endpoint.
         assert!(requests[0].contains(r#""name":"request_plan_review""#));
         assert!(requests[0].contains(r#""name":"continue_without_task_planning""#));
-        assert!(!requests[0].contains(r#""name":"request_task_planning""#));
+        assert!(requests[0].contains(r#""name":"request_task_planning""#));
         assert!(requests[0].contains("Writable memory tools are unavailable"));
         assert!(!requests[0].contains("Writable memory is available"));
         assert!(!requests[1].contains(r#""name":"request_plan_review""#));

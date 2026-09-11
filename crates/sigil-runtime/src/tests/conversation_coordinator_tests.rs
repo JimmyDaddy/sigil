@@ -110,7 +110,7 @@ fn coordinator_binds_stable_host_owned_ids_for_direct_auto_input() -> Result<()>
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let input = AgentRunInput::user("implement across crates");
     let message_id = input
@@ -145,7 +145,7 @@ fn auto_routing_exposes_model_handoff_without_classifying_prompt_text() -> Resul
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
 
     for (index, prompt) in [
@@ -205,26 +205,6 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
         &mut session,
         &draft,
         &review,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: "attempt-1".to_owned(),
-            source_turn_id: "message-1".to_owned(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some("test-session".to_owned()),
-        },
         &mut handler,
         3,
     )?;
@@ -232,7 +212,7 @@ fn draft_ready_plan_replaces_ordinary_route_surface_with_typed_decisions() -> Re
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let input = AgentRunInput::user("the model decides the semantics of this entire request");
     let bound = coordinator.bind_conversation_input(
@@ -280,7 +260,7 @@ fn coordinator_uses_the_exact_durable_url_and_attachment_projection() -> Result<
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let input = AgentRunInput::user("inspect https://example.com/private?q=secret")
         .with_image_attachments(vec![ImageAttachment::from_bytes(
@@ -1507,7 +1487,7 @@ fn direct_task_capability_binds_both_handoff_authorities() -> Result<()> {
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let mut session = Session::new("direct-task", "planned-model");
     let input = AgentRunInput::user("ship the cross-layer change in reviewed batches");
@@ -1529,11 +1509,11 @@ fn direct_task_capability_binds_both_handoff_authorities() -> Result<()> {
     );
     assert!(
         context.task_handoff.is_some(),
-        "qualified route binds direct task handoff"
+        "available executor binds direct task handoff"
     );
     assert!(
         context.plan_review.is_some(),
-        "qualified route also binds plan review"
+        "available executor also binds plan review"
     );
     session.append_user_message(ModelMessage::user(
         "ship the cross-layer change in reviewed batches",
@@ -1547,15 +1527,15 @@ fn capability_resolution_is_host_owned_and_fail_closed() -> Result<()> {
     let unsupported_tools = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: false,
-            route_qualified: true,
+            task_executor_available: true,
         });
     assert_eq!(
         unsupported_tools.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::Unsupported
     );
-    let unqualified = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
+    let without_executor = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto);
     assert_eq!(
-        unqualified.resolve_route_capability(&session),
+        without_executor.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::ReviewFirst
     );
     let manual = ConversationCoordinator::new(true, TaskRoutingPolicy::Manual);
@@ -1568,13 +1548,13 @@ fn capability_resolution_is_host_owned_and_fail_closed() -> Result<()> {
         disabled.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::Unsupported
     );
-    let qualified = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
+    let with_executor = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     assert_eq!(
-        qualified.resolve_route_capability(&session),
+        with_executor.resolve_route_capability(&session),
         sigil_kernel::AutomaticRouteCapability::DirectTask
     );
     Ok(())
@@ -1755,7 +1735,7 @@ fn coordinator_keeps_latest_resumable_task_as_a_typed_continuation_candidate() -
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let mut session = Session::new("continuation-route", "model");
     let task_id = seed_current_resumable_task(&mut session)?;
@@ -1803,7 +1783,7 @@ fn coordinator_recovers_direct_continuation_after_chat_clears_focus() -> Result<
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     let mut session = Session::new("direct-continuation-route", "model");
     let task_id = seed_current_resumable_direct_task(&mut session)?;
@@ -2052,7 +2032,7 @@ fn continuation_dispatch_accepts_reused_pending_selection_after_new_user_clears_
     let coordinator = ConversationCoordinator::new(true, TaskRoutingPolicy::Auto)
         .with_route_capability_evidence(crate::RouteCapabilityEvidence {
             provider_supports_routing_tools: true,
-            route_qualified: true,
+            task_executor_available: true,
         });
     assert!(
         coordinator

@@ -211,6 +211,10 @@ pub enum ManagedStorageWriterErrorV1 {
     LeafIsSymlink,
     #[error("writer leaf is not owner-only")]
     LeafNotOwnerOnly,
+    #[error("managed recovery namespace is missing")]
+    ExistingNamespaceMissing,
+    #[error("managed recovery session log is missing or empty")]
+    ExistingSessionLogUninitialized,
     #[error("writer io failed: {0}")]
     Io(String),
     #[error("artifact retire authority is unavailable")]
@@ -594,15 +598,14 @@ impl ManagedStorageWriterAdapterV1 {
         let path = self.leaf_path(leaf)?.join(namespace_hash.to_hex());
         reject_existing_reparse_components(&path)?;
         ensure_existing_private_recovery_directory(&path)?;
+        ensure_existing_private_recovery_file(&path.join(".authority-storage.lock"), "lock")?;
+        let original = self.existing_session_log_marker_binding(&path)?;
         let record_file = path.join("records.jsonl");
-        ensure_existing_private_recovery_file(&record_file, "record")?;
         ensure_existing_nonempty_session_log(&record_file)?;
         ensure_existing_private_recovery_file(
             &existing_session_writer_lock_path(&record_file)?,
             "session writer lock",
         )?;
-        ensure_existing_private_recovery_file(&path.join(".authority-storage.lock"), "lock")?;
-        let original = self.existing_session_log_marker_binding(&path)?;
 
         let capability = match &self.storage_issuer {
             Some(broker) => {
@@ -1012,7 +1015,6 @@ impl ManagedStorageWriterAdapterV1 {
         lease: &ManagedExistingSessionLogMutationLeaseV1,
     ) -> Result<sigil_kernel::JsonlSessionStore, ManagedStorageWriterErrorV1> {
         ensure_existing_private_recovery_directory(&lease.admission.path)?;
-        ensure_existing_private_recovery_file(&lease.admission.session_log_path(), "record")?;
         ensure_existing_nonempty_session_log(&lease.admission.session_log_path())?;
         ensure_existing_private_recovery_file(
             &existing_session_writer_lock_path(&lease.admission.session_log_path())?,
@@ -1322,7 +1324,7 @@ fn ensure_existing_private_recovery_directory(
     reject_existing_reparse_components(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ManagedStorageWriterErrorV1::Io("managed recovery namespace is missing".to_owned())
+            ManagedStorageWriterErrorV1::ExistingNamespaceMissing
         } else {
             ManagedStorageWriterErrorV1::Io(error.to_string())
         }
@@ -1379,12 +1381,18 @@ fn existing_session_writer_lock_path(
 }
 
 fn ensure_existing_nonempty_session_log(path: &Path) -> Result<(), ManagedStorageWriterErrorV1> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| ManagedStorageWriterErrorV1::Io(error.to_string()))?;
+    reject_existing_reparse_components(path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ManagedStorageWriterErrorV1::ExistingSessionLogUninitialized
+        } else {
+            ManagedStorageWriterErrorV1::Io(error.to_string())
+        }
+    })?;
+    // Empty data may be an unpublished crash prefix, but unsafe metadata is still an error.
+    ensure_existing_private_recovery_file(path, "record")?;
     if metadata.len() == 0 {
-        return Err(ManagedStorageWriterErrorV1::Io(
-            "managed existing session-log record is empty and must not be reseeded".to_owned(),
-        ));
+        return Err(ManagedStorageWriterErrorV1::ExistingSessionLogUninitialized);
     }
     Ok(())
 }

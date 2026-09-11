@@ -118,7 +118,32 @@ impl AgentToolRuntime {
             "agent-background-supervisor",
             &physical_attempt_id,
             unix_time_ms(),
-        )?;
+        );
+        let preparation = match preparation {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                // Preparation can settle an old physical attempt without starting a new one.
+                // Publish that authoritative terminal state before returning its failure so the
+                // parent's attention route cannot keep offering an invalid Resume action.
+                if let Some(request) = child
+                    .user_input_projection()?
+                    .request(&route.request.identity)
+                    .filter(|request| {
+                        request.is_terminal()
+                            && request.requested.request_hash == route.request.request_hash
+                    })
+                {
+                    self.supervisor.update_chat_child_user_input_route(
+                        parent,
+                        handler,
+                        &route,
+                        request.public_view(),
+                        AgentRouteStatus::Resolved,
+                    )?;
+                }
+                return Err(error);
+            }
+        };
         if preparation.continuation.physical_attempt_id != physical_attempt_id {
             bail!("background child continuation is owned by another physical attempt");
         }

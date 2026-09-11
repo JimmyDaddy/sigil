@@ -2448,6 +2448,7 @@ fn validate_export_provenance(
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     assistant_kind: message.assistant_kind,
+                    logical_run_id: None,
                     image_attachments: message.image_attachments.clone(),
                     tool_result_payload: None,
                 },

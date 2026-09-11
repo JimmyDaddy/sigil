@@ -1,27 +1,28 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use sigil_kernel::verification::VerificationExecutionPortV1;
 use sigil_kernel::{
-    AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, RecoverableTaskGuidanceReviewAuthority,
-    RootConfig, RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
-    RunCancellationTarget, RunTaskGuard, SandboxProfileRequirement, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskContinuationSelectedEntry,
-    TaskExecutionBindingV1, TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptEntry,
-    TaskParticipantAttemptStatus, TaskPauseRequest, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus,
-    ToolRegistry, VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrustRequirement,
-    discover_candidate_checks_with_user_config, recoverable_task_guidance,
-    recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
-    safe_persistence_text, stable_workspace_id,
+    AgentRunOptions, ApprovalHandler, CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry,
+    CompletionCriteria, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler,
+    EvidenceScope, RecoverableTaskGuidanceReviewAuthority, RootConfig, RunCancellationHandle,
+    RunCancellationOwner, RunCancellationRecorder, RunCancellationTarget, RunTaskGuard,
+    SandboxProfileRequirement, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    TaskChildSessionStatus, TaskContinuationSelectedEntry, TaskExecutionBindingV1,
+    TaskGuidancePromotedEntry, TaskId, TaskParticipantAttemptEntry, TaskParticipantAttemptStatus,
+    TaskPauseRequest, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStepEntry, TaskStepStatus, ToolRegistry, VerificationPolicy,
+    VerificationPolicyChangedEntry, WorkspaceTrustRequirement, check_specs_from_user_config,
+    recoverable_task_guidance, recoverable_task_guidance_review,
+    recoverable_task_guidance_review_retry_controls, safe_persistence_text, stable_workspace_id,
 };
 use thiserror::Error;
 
 use super::{
     AgentSupervisor,
-    task_role_runtime::{TaskRoleProviderBuilder, TaskRoleRuntime, build_task_role_runtime},
+    task_role_runtime::{
+        TaskRoleProviderBuilder, TaskRoleRuntime, build_task_role_runtime_for_route,
+    },
 };
 
 /// Complete host-owned material needed to execute one already-admitted durable task.
@@ -75,6 +76,8 @@ impl ResolvedTaskContinuation {
 pub struct ContinuedTaskExecution<'a, H> {
     pub requested_task_id: Option<TaskId>,
     pub guidance: Option<String>,
+    /// Real root conversation run owning an explicit guidance command, when no routed receipt exists.
+    pub explicit_guidance_run_id: Option<String>,
     pub guidance_promotion: Option<TaskGuidancePromotedEntry>,
     pub continuation_guidance_receipt: Option<TaskContinuationSelectedEntry>,
     pub root_config: RootConfig,
@@ -339,6 +342,42 @@ pub(crate) fn task_id_for_cancellation_scope(
             _ => None,
         }),
         RunCancellationTarget::AgentThread { .. } => None,
+    }
+}
+
+/// Interrupts only the Task bound to this root scope after its caller has proven quiescence.
+///
+/// An already settled Task retains its durable outcome; cancellation may race with a pause or
+/// terminal append before the root run joins. An unbound ordinary run does not select any Task.
+///
+/// # Errors
+///
+/// Returns an error when a bound Task is absent or its append-only stop transition cannot persist.
+pub fn append_run_scoped_task_interruption<H>(
+    session: &mut Session,
+    handler: &mut H,
+    active_scope_id: &str,
+    reason: &str,
+) -> std::result::Result<Option<AppendedTaskStopState>, TaskStopStateError>
+where
+    H: EventHandler + ?Sized,
+{
+    let Some(task_id) = task_id_for_cancellation_scope(
+        session.entries(),
+        &RunCancellationTarget::Run,
+        active_scope_id,
+    ) else {
+        return Ok(None);
+    };
+    match append_task_stop_state(
+        session,
+        handler,
+        Some(&task_id),
+        TaskStopDisposition::Interrupted,
+        reason,
+    ) {
+        Err(TaskStopStateError::TaskNotRunning { .. }) => Ok(None),
+        result => result,
     }
 }
 
@@ -627,13 +666,14 @@ where
         executor_options,
         subagent_read_options,
         subagent_write_options,
-    } = build_task_role_runtime(
+    } = build_task_role_runtime_for_route(
         &root_config,
         &options,
         &base_registry,
         agent_supervisor,
         role_provider_builder,
         verification_execution_port,
+        resolve_task_continuation(session, Some(task_id.as_str()))?.execution_route,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
@@ -680,6 +720,7 @@ where
     let ContinuedTaskExecution {
         requested_task_id,
         guidance,
+        explicit_guidance_run_id,
         guidance_promotion,
         continuation_guidance_receipt,
         root_config,
@@ -819,13 +860,14 @@ where
         executor_options,
         subagent_read_options,
         subagent_write_options,
-    } = build_task_role_runtime(
+    } = build_task_role_runtime_for_route(
         &root_config,
         &options,
         &base_registry,
         agent_supervisor,
         role_provider_builder,
         verification_execution_port,
+        task.execution_route,
     )
     .await
     .map_err(TaskExecutionPreflightError::RoleRuntimeConstruction)?;
@@ -839,39 +881,142 @@ where
         Some(budget) => orchestrator.with_tool_artifact_read_budget(budget),
         None => orchestrator,
     };
-    let output = if task.execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
-        if guidance_promotion.is_some() || continuation_guidance_receipt.is_some() {
-            return Err(anyhow!(
-                "recovered task has no accepted plan; guidance receipt is not applicable"
-            ));
-        }
-        orchestrator
-            .run(
+    let guidance_source = if task.execution_route == ResolvedTaskExecutionRoute::Planned {
+        None
+    } else if let Some(receipt) = continuation_guidance_receipt.as_ref() {
+        Some(receipt.source_turn.clone())
+    } else if let Some(run_id) = explicit_guidance_run_id.as_ref() {
+        let source_id = sigil_kernel::stable_event_hash(serde_json::to_vec(&(
+            session.session_scope_id(),
+            run_id,
+        ))?);
+        Some(sigil_kernel::ConversationTurnRef::new(
+            session.session_scope_id(),
+            format!("task-guidance-{source_id}"),
+            run_id.clone(),
+        )?)
+    } else {
+        None
+    };
+    let direct_guidance = if task.execution_route != ResolvedTaskExecutionRoute::Planned {
+        guidance
+            .as_deref()
+            .map(|text| {
+                guidance_source
+                    .as_ref()
+                    .map(|source| (text, source))
+                    .context("unplanned Task guidance requires its real source turn")
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let output = continued_task_dispatch(
+        &orchestrator,
+        session,
+        ContinuedTaskDispatch {
+            execution_route: task.execution_route,
+            task_request,
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            max_plan_steps: root_config.task.max_plan_steps,
+            guidance: guidance.clone(),
+            guidance_promotion,
+            continuation_guidance_receipt,
+            recoverable_materialization,
+            recoverable_review,
+        },
+        direct_guidance,
+        handler,
+        approval_handler,
+    )?
+    .await?;
+    Ok(output.status)
+}
+
+struct ContinuedTaskDispatch {
+    execution_route: ResolvedTaskExecutionRoute,
+    task_request: SequentialTaskRequest,
+    planner_options: AgentRunOptions,
+    executor_options: AgentRunOptions,
+    subagent_read_options: AgentRunOptions,
+    subagent_write_options: AgentRunOptions,
+    max_plan_steps: usize,
+    guidance: Option<String>,
+    guidance_promotion: Option<TaskGuidancePromotedEntry>,
+    continuation_guidance_receipt: Option<TaskContinuationSelectedEntry>,
+    recoverable_materialization: Option<sigil_kernel::RecoverableTaskGuidance>,
+    recoverable_review: Option<sigil_kernel::RecoverableTaskGuidanceReview>,
+}
+
+// Construct the selected large orchestration future outside every polling frame. In debug
+// builds, constructing these futures inside `continue_task_execution` reserves hundreds of KiB
+// of temporary stack slots that remain live while all nested agent futures are polled.
+// This synchronous frame exits before polling begins; cancellation remains owned by the caller.
+#[inline(never)]
+fn continued_task_dispatch<'a, H, A>(
+    orchestrator: &'a sigil_kernel::SequentialTaskOrchestrator<
+        super::task_runner::AgentSupervisorTaskChildRunner,
+    >,
+    session: &'a mut Session,
+    dispatch: ContinuedTaskDispatch,
+    direct_guidance: Option<(&'a str, &'a sigil_kernel::ConversationTurnRef)>,
+    handler: &'a mut H,
+    approval_handler: &'a mut A,
+) -> Result<futures::future::BoxFuture<'a, Result<sigil_kernel::SequentialTaskRunOutput>>>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    let ContinuedTaskDispatch {
+        execution_route,
+        task_request,
+        planner_options,
+        executor_options,
+        subagent_read_options,
+        subagent_write_options,
+        max_plan_steps,
+        guidance,
+        guidance_promotion,
+        continuation_guidance_receipt,
+        recoverable_materialization,
+        recoverable_review,
+    } = dispatch;
+    let future: futures::future::BoxFuture<'a, Result<sigil_kernel::SequentialTaskRunOutput>> =
+        if execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
+            if let Some(receipt) = continuation_guidance_receipt.as_ref() {
+                receipt.validate_for_session(session.session_scope_id())?;
+                if receipt.task_id != task_request.task_id || !session.entries().iter().any(|entry| {
+                    matches!(entry, SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(recorded)) if recorded == receipt)
+                }) {
+                    return Err(anyhow!("initial task guidance requires its exact durable selection"));
+                }
+            }
+            Box::pin(orchestrator.run_with_initial_guidance(
                 session,
                 task_request,
                 planner_options,
                 executor_options,
                 subagent_read_options,
                 subagent_write_options,
-                root_config.task.max_plan_steps,
+                max_plan_steps,
+                direct_guidance,
                 handler,
                 approval_handler,
-            )
-            .await
-    } else if task.execution_route == ResolvedTaskExecutionRoute::Direct {
-        orchestrator
-            .continue_direct_run(
+            ))
+        } else if execution_route == ResolvedTaskExecutionRoute::Direct {
+            Box::pin(orchestrator.continue_direct_run(
                 session,
                 task_request,
                 executor_options,
-                guidance.as_deref(),
+                direct_guidance,
                 handler,
                 approval_handler,
-            )
-            .await
-    } else if let Some(recovered) = recoverable_materialization {
-        orchestrator
-            .continue_run(
+            ))
+        } else if let Some(recovered) = recoverable_materialization {
+            Box::pin(orchestrator.continue_run(
                 session,
                 task_request,
                 executor_options,
@@ -880,117 +1025,89 @@ where
                 Some(recovered.guidance),
                 handler,
                 approval_handler,
-            )
-            .await
-    } else if let Some(recovered) = recoverable_review {
-        match recovered.authority {
-            RecoverableTaskGuidanceReviewAuthority::Promoted(promotion) => {
-                orchestrator
-                    .continue_run_with_guidance_review(
+            ))
+        } else if let Some(recovered) = recoverable_review {
+            match recovered.authority {
+                RecoverableTaskGuidanceReviewAuthority::Promoted(promotion) => {
+                    Box::pin(orchestrator.continue_run_with_guidance_review(
                         session,
                         task_request,
                         planner_options,
                         executor_options,
                         subagent_read_options,
                         subagent_write_options,
-                        root_config.task.max_plan_steps,
+                        max_plan_steps,
                         recovered.guidance,
                         *promotion,
                         handler,
                         approval_handler,
-                    )
-                    .await
-            }
-            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selection) => {
-                orchestrator
-                    .continue_run_with_conversation_guidance_review(
+                    ))
+                }
+                RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selection) => {
+                    Box::pin(orchestrator.continue_run_with_conversation_guidance_review(
                         session,
                         task_request,
                         planner_options,
                         executor_options,
                         subagent_read_options,
                         subagent_write_options,
-                        root_config.task.max_plan_steps,
+                        max_plan_steps,
                         recovered.guidance,
                         *selection,
                         handler,
                         approval_handler,
-                    )
-                    .await
+                    ))
+                }
             }
-        }
-    } else {
-        match (guidance, guidance_promotion, continuation_guidance_receipt) {
-            (Some(guidance), Some(promotion), None) => {
-                orchestrator
-                    .continue_run_with_guidance_review(
+        } else {
+            match (guidance, guidance_promotion, continuation_guidance_receipt) {
+                (Some(guidance), Some(promotion), None) => {
+                    Box::pin(orchestrator.continue_run_with_guidance_review(
                         session,
                         task_request,
                         planner_options,
                         executor_options,
                         subagent_read_options,
                         subagent_write_options,
-                        root_config.task.max_plan_steps,
+                        max_plan_steps,
                         guidance,
                         promotion,
                         handler,
                         approval_handler,
-                    )
-                    .await
-            }
-            (Some(guidance), None, Some(selection)) => {
-                orchestrator
-                    .continue_run_with_conversation_guidance_review(
+                    ))
+                }
+                (Some(guidance), None, Some(selection)) => {
+                    Box::pin(orchestrator.continue_run_with_conversation_guidance_review(
                         session,
                         task_request,
                         planner_options,
                         executor_options,
                         subagent_read_options,
                         subagent_write_options,
-                        root_config.task.max_plan_steps,
+                        max_plan_steps,
                         guidance,
                         selection,
                         handler,
                         approval_handler,
-                    )
-                    .await
-            }
-            (guidance, None, None) => {
-                orchestrator
-                    .continue_run(
-                        session,
-                        task_request,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        guidance,
-                        handler,
-                        approval_handler,
-                    )
-                    .await
-            }
-            (None, Some(_), None) => Err(anyhow!(
-                "task guidance promotion is missing its guidance material"
-            )),
-            (None, None, Some(receipt)) if receipt.guidance.trim().is_empty() => {
-                orchestrator
-                    .continue_run(
-                        session,
-                        task_request,
-                        executor_options,
-                        subagent_read_options,
-                        subagent_write_options,
-                        None,
-                        handler,
-                        approval_handler,
-                    )
-                    .await
-            }
-            (None, None, Some(_)) => {
-                // A recovered selection may carry only the safe durable projection. Resume from
-                // that projection instead of requiring the process-local exact source prompt.
-                orchestrator
-                    .continue_run(
+                    ))
+                }
+                (guidance, None, None) => Box::pin(orchestrator.continue_run(
+                    session,
+                    task_request,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    guidance,
+                    handler,
+                    approval_handler,
+                )),
+                (None, Some(_), None) => {
+                    return Err(anyhow!(
+                        "task guidance promotion is missing its guidance material"
+                    ));
+                }
+                (None, None, Some(receipt)) if receipt.guidance.trim().is_empty() => {
+                    Box::pin(orchestrator.continue_run(
                         session,
                         task_request,
                         executor_options,
@@ -999,15 +1116,30 @@ where
                         None,
                         handler,
                         approval_handler,
-                    )
-                    .await
+                    ))
+                }
+                (None, None, Some(_)) => {
+                    // A recovered selection may carry only the safe durable projection. Resume from
+                    // that projection instead of requiring the process-local exact source prompt.
+                    Box::pin(orchestrator.continue_run(
+                        session,
+                        task_request,
+                        executor_options,
+                        subagent_read_options,
+                        subagent_write_options,
+                        None,
+                        handler,
+                        approval_handler,
+                    ))
+                }
+                (_, Some(_), Some(_)) => {
+                    return Err(anyhow!(
+                        "task continuation supplied conflicting guidance authorities"
+                    ));
+                }
             }
-            (_, Some(_), Some(_)) => Err(anyhow!(
-                "task continuation supplied conflicting guidance authorities"
-            )),
-        }
-    }?;
-    Ok(output.status)
+        };
+    Ok(future)
 }
 
 fn validate_continuation_guidance_authority(
@@ -1017,17 +1149,16 @@ fn validate_continuation_guidance_authority(
     continuation_guidance_receipt: Option<&TaskContinuationSelectedEntry>,
 ) -> Result<bool> {
     if execution_route == ResolvedTaskExecutionRoute::NeedsPlanning {
-        if guidance.is_some() {
+        if guidance_promotion.is_some()
+            || continuation_guidance_receipt.is_some_and(|receipt| {
+                receipt.plan_version.is_some() || receipt.plan_status.is_some()
+            })
+        {
             return Err(anyhow!(
-                "recovered task has no accepted plan; continue it without guidance to rerun the planner"
+                "initial task guidance cannot use an accepted-plan authority"
             ));
         }
-        if guidance_promotion.is_some() || continuation_guidance_receipt.is_some() {
-            return Err(anyhow!(
-                "recovered task has no accepted plan; guidance receipt is not applicable"
-            ));
-        }
-        return Ok(true);
+        return Ok(continuation_guidance_receipt.is_none());
     }
     match (guidance, guidance_promotion, continuation_guidance_receipt) {
         (Some(_), Some(_), None) | (Some(_), None, Some(_)) => Ok(false),
@@ -1198,15 +1329,13 @@ pub fn finalize_task_root(
     // provider request or tool effect has started. Keep the admitted Task resumable so repairing
     // configuration or credentials and pressing Continue can retry the same durable authority.
     if let Some(preflight) = error.downcast_ref::<TaskExecutionPreflightError>() {
-        let current_status = session
-            .task_state_projection()
-            .tasks
-            .get(task_id)
-            .map(|task| task.status);
-        if matches!(
-            current_status,
-            Some(TaskRunStatus::Started | TaskRunStatus::Running)
-        ) {
+        let projection = session.task_state_projection();
+        let needs_pause = projection.tasks.get(task_id).is_some_and(|task| {
+            matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running)
+                || (task.status == TaskRunStatus::Paused
+                    && task.reason.as_deref() != Some(preflight.reason_code()))
+        });
+        if needs_pause {
             session.append_control(ControlEntry::TaskRun(TaskRunEntry {
                 task_id: task_id.clone(),
                 parent_session_ref: parent_session_ref.clone(),
@@ -1350,41 +1479,29 @@ where
     let source_event_id = format!("config:verification:{}", task_id.as_str());
     let projection = session.verification_state_projection();
     let workspace_id = stable_workspace_id(workspace_root)?;
-    let trust_entry = projection.workspace_trust.get(&workspace_id);
-    let workspace_trust_snapshot_id = trust_entry
-        .map(|entry| entry.workspace_trust_snapshot_id.clone())
-        .unwrap_or_else(|| format!("workspace-trust:unknown:{workspace_id}"));
     let workspace_scope = EvidenceScope::Workspace(workspace_id);
-    let discovered = discover_candidate_checks_with_user_config(
+    let mut entries = check_specs_from_user_config(
         workspace_root,
-        workspace_trust_snapshot_id,
-        source_event_id.clone(),
         &root_config.verification,
+        scope.clone(),
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        source_event_id.clone(),
     )?;
-    let mut entries = Vec::new();
-    for candidate in discovered {
-        let source = candidate.candidate.source;
-        let candidate_source_event_id = candidate.candidate.source_event_id.clone();
-        let promoted = match source {
-            CheckDiscoverySource::UserExplicitConfig => {
-                let promotion = CheckPromotion::ExplicitUserConfig {
-                    config_event_id: source_event_id.clone(),
-                };
-                candidate.promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
-            }
-            _ => match workspace_promoted_check_for_candidate(
-                &projection,
-                &workspace_scope,
-                &candidate,
-            ) {
-                Some(trusted) => Ok(trusted),
-                None => continue,
-            },
-        }?;
+    for promoted in projection.check_specs_for_scopes(&[workspace_scope]) {
+        if promoted.trusted_check.source == CheckDiscoverySource::UserExplicitConfig
+            || promoted.trusted_check.check_spec.verification_scope_hash
+                != DEFAULT_TASK_VERIFICATION_SCOPE_HASH
+            || entries.iter().any(|entry| {
+                entry.trusted_check.check_spec.check_spec_id
+                    == promoted.trusted_check.check_spec.check_spec_id
+            })
+        {
+            continue;
+        }
         entries.push(CheckSpecRecordedEntry::new(
             scope.clone(),
-            promoted,
-            candidate_source_event_id,
+            promoted.trusted_check.clone(),
+            promoted.source_event_id.clone(),
         ));
     }
     if entries.is_empty() {
@@ -1434,27 +1551,6 @@ where
         handler.commit_controls(session, controls)?;
     }
     Ok(())
-}
-
-fn workspace_promoted_check_for_candidate(
-    projection: &sigil_kernel::VerificationStateProjection,
-    workspace_scope: &EvidenceScope,
-    candidate: &DiscoveredCheck,
-) -> Option<sigil_kernel::TrustedCheckSpec> {
-    let entry = projection.check_spec(workspace_scope, &candidate.suggested_check_spec_id)?;
-    let expected = CheckSpec::new(
-        candidate.suggested_check_spec_id.clone(),
-        candidate.candidate.command.clone(),
-        candidate.effect,
-        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    );
-    let trusted = &entry.trusted_check;
-    if trusted.source != candidate.candidate.source
-        || trusted.check_spec.check_spec_hash != expected.check_spec_hash
-    {
-        return None;
-    }
-    Some(trusted.clone())
 }
 
 fn check_spec_entries_workspace_trust_requirement(

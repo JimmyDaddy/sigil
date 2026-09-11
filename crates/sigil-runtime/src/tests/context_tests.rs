@@ -120,7 +120,7 @@ fn runtime_task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
         memory_id: "runtime-memory".to_owned(),
         branch_id: None,
-        valid_for_snapshot: "snapshot-runtime".to_owned(),
+        valid_for_snapshot: Some("snapshot-runtime".to_owned()),
         supersedes: None,
         source_event_ids: vec!["event-objective".to_owned()],
         objective: "Keep context provenance inspectable".to_owned(),
