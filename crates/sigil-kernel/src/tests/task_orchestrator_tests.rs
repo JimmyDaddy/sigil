@@ -6277,6 +6277,20 @@ fn blocked_step_is_reprojected_from_completed_participant_evidence() -> Result<(
         summary: None,
         reason: Some("stale historical permission denial".to_owned()),
     }))?;
+    session.append_control(ControlEntry::ReadinessEvaluated(
+        crate::ReadinessEvaluatedEntry {
+            scope: EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step_1.step_id.as_str())),
+            evaluation: crate::ReadinessEvaluation {
+                run_status: crate::RunStatus::Completed,
+                verification_verdict: VerificationVerdict::NotApplicable,
+                visible_state: VisibleCompletionState::Completed,
+                reasons: vec![crate::ReadinessReason::NoVerificationRequired],
+                required_actions: Vec::new(),
+            },
+            policy_hash: None,
+            workspace_snapshot_id: None,
+        },
+    ))?;
 
     let attempt_id = task_participant_attempt_id(
         &task_id,

@@ -4443,9 +4443,9 @@ pub fn reconcile_task_step_projections(session: &mut Session, task_id: &TaskId) 
 /// only when the durable readiness projection has no required action and has a non-failing
 /// verification verdict; a final answer by itself must not erase a current readiness blocker.
 fn participant_result_proves_completed_step(
-    _verification: &crate::VerificationStateProjection,
-    _task_id: &TaskId,
-    _step: &TaskStepSpec,
+    verification: &crate::VerificationStateProjection,
+    task_id: &TaskId,
+    step: &TaskStepSpec,
     _attempt: &TaskParticipantAttemptEntry,
     result: &TaskParticipantResultEntry,
 ) -> bool {
@@ -4454,7 +4454,21 @@ fn participant_result_proves_completed_step(
     {
         return false;
     }
-    result.terminal_status == Some(TaskParticipantAttemptStatus::Completed)
+    let scope = EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step.step_id.as_str()));
+    let Some(readiness) = verification.latest_readiness(&scope) else {
+        return false;
+    };
+    if readiness.evaluation.run_status != RunStatus::Completed
+        || !readiness.evaluation.required_actions.is_empty()
+    {
+        return false;
+    }
+    matches!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Passed
+            | VerificationVerdict::NotApplicable
+            | VerificationVerdict::Skipped
+    ) && result.terminal_status == Some(TaskParticipantAttemptStatus::Completed)
 }
 
 fn append_reprojected_readiness_if_needed(
