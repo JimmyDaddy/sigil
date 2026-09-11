@@ -1,5 +1,11 @@
 use super::*;
 use crate::McpToolAnnotations;
+use crate::output::{
+    attach_mcp_artifact, bounded_mcp_json, bounded_mcp_text_segments,
+    bounded_mcp_tool_result_with_identity, capture_mcp_result_artifact,
+};
+use anyhow::Result;
+use sigil_kernel::{McpServerTrustPolicy, SecretRedactor, ToolContext, ToolErrorKind, ToolResult};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct McpRemoteTool {
@@ -89,8 +95,24 @@ pub struct McpCallToolResult {
     pub is_error: bool,
 }
 
+/// Inputs owned by a concrete MCP tool adapter when it turns a validated remote result into the
+/// kernel's transport-neutral [`ToolResult`]. The wire result and its redaction/artifact policy
+/// remain in this crate so stdio and Streamable HTTP cannot drift in content or `isError` semantics.
+pub struct McpCallToolResultContext<'a> {
+    pub call_id: &'a str,
+    pub provider_tool_name: &'a str,
+    pub server_name: &'a str,
+    pub remote_tool_name: &'a str,
+    pub trust: &'a McpServerTrustPolicy,
+    pub server_identity: Value,
+    pub redactor: &'a SecretRedactor,
+    pub tool_context: &'a ToolContext,
+    pub surface_kind: &'a str,
+    pub operation: &'a str,
+}
+
 impl McpCallToolResult {
-    pub(super) fn parse(value: &Value) -> Result<Self, McpStreamableHttpError> {
+    pub(crate) fn parse(value: &Value) -> Result<Self, McpStreamableHttpError> {
         let content = value
             .get("content")
             .and_then(Value::as_array)
@@ -132,5 +154,62 @@ impl McpCallToolResult {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         })
+    }
+
+    /// Converts one validated MCP result using the shared bounded, redacted output contract.
+    pub fn into_tool_result(
+        &self,
+        raw_result: &Value,
+        context: McpCallToolResultContext<'_>,
+    ) -> Result<ToolResult> {
+        let artifact = capture_mcp_result_artifact(
+            context.tool_context,
+            context.call_id,
+            context.provider_tool_name,
+            context.redactor,
+            raw_result,
+        );
+        let budget = if self
+            .content
+            .iter()
+            .any(|item| item.get("text").and_then(Value::as_str).is_some())
+        {
+            bounded_mcp_text_segments(
+                context.redactor,
+                self.content
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(Value::as_str)),
+                "\n",
+            )
+        } else {
+            bounded_mcp_json(context.redactor, raw_result)?
+        };
+        let (content, metadata) = bounded_mcp_tool_result_with_identity(
+            context.redactor,
+            context.server_name,
+            context.remote_tool_name,
+            context.trust,
+            context.server_identity,
+            context.surface_kind,
+            context.operation,
+            budget,
+        );
+        let result = if self.is_error {
+            ToolResult::error(
+                context.call_id,
+                context.provider_tool_name,
+                ToolErrorKind::Protocol,
+                content,
+            )
+            .with_error_details(false, metadata.details)
+        } else {
+            ToolResult::ok(
+                context.call_id,
+                context.provider_tool_name,
+                content,
+                metadata,
+            )
+        };
+        Ok(attach_mcp_artifact(result, artifact))
     }
 }

@@ -10,7 +10,10 @@ use std::{
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, WWW_AUTHENTICATE};
 use serde_json::json;
-use sigil_kernel::{RunCancellationOwner, SecretString};
+use sigil_kernel::{
+    McpServerTrustPolicy, RunCancellationOwner, SecretRedactor, SecretString, ToolContext,
+    ToolResultStatus,
+};
 
 use super::*;
 use crate::McpToolAnnotations;
@@ -666,6 +669,39 @@ fn streamable_http_sse_caps_eof_and_id_convergence_are_strict() {
         framing::parse_sse_response(eof.as_bytes(), 7, tiny),
         Err(McpStreamableHttpError::SseLimitExceeded)
     ));
+}
+
+#[test]
+fn streamable_http_call_result_conversion_preserves_redacted_error_content() {
+    let raw = json!({
+        "content": [{"type":"text","text":"action required: top-secret-value"}],
+        "structuredContent": {"next":"retry"},
+        "isError": true
+    });
+    let parsed = McpCallToolResult::parse(&raw).expect("valid result");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let redactor = SecretRedactor::from_values(["top-secret-value"]);
+    let result = parsed
+        .into_tool_result(
+            &raw,
+            McpCallToolResultContext {
+                call_id: "call-1",
+                provider_tool_name: "mcp__fixture__tool",
+                server_name: "fixture",
+                remote_tool_name: "tool",
+                trust: &McpServerTrustPolicy::default(),
+                server_identity: json!({"server_name":"fixture","server_version":"1"}),
+                redactor: &redactor,
+                tool_context: &ToolContext::new(temp.path().to_path_buf(), 5),
+                surface_kind: "tool",
+                operation: "tools/call",
+            },
+        )
+        .expect("conversion");
+    assert!(matches!(result.status, ToolResultStatus::Error(_)));
+    assert!(result.content.contains("action required"));
+    assert!(result.content.contains("[redacted]"));
+    assert!(!result.content.contains("top-secret-value"));
 }
 
 #[tokio::test]

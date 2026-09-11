@@ -9,16 +9,16 @@ use sigil_kernel::{
     McpRemoteClientCapability, McpServerConfig, NetworkPolicy, RootConfig, SecretString, Tool,
     ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolLifecycleOwner,
     ToolMutationTracking, ToolPermissionPlanDraft, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, WebTaskTreeBudgetLimits, safe_persistence_text,
+    ToolSpec, ToolSubject, WebTaskTreeBudgetLimits,
 };
 use sigil_mcp::{
-    McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpPermissionBinding,
-    McpPermissionTransport, McpRemoteClientCapabilities, McpRemoteFormHandler,
-    McpRemoteFormResponse, McpRemoteRoot, McpRemoteTool, McpStreamableHttpBearerProvider,
-    McpStreamableHttpClient, McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment,
-    McpStreamableHttpLimits, McpToolName, PreparedMcpStreamableHttpHeaders,
-    ValidatedMcpFormRequest, classify_mcp_permission, mcp_permission_fingerprint,
-    mcp_tool_permission_plan,
+    McpCallToolResultContext, McpElicitationAction, McpElicitationHandler, McpElicitationRequest,
+    McpPermissionBinding, McpPermissionTransport, McpRemoteClientCapabilities,
+    McpRemoteFormHandler, McpRemoteFormResponse, McpRemoteRoot, McpRemoteServerIdentity,
+    McpRemoteTool, McpStreamableHttpBearerProvider, McpStreamableHttpClient,
+    McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment, McpStreamableHttpLimits,
+    McpToolName, PreparedMcpStreamableHttpHeaders, ValidatedMcpFormRequest,
+    classify_mcp_permission, mcp_permission_fingerprint, mcp_tool_permission_plan,
 };
 use url::Url;
 
@@ -466,6 +466,7 @@ async fn prepare_remote_mcp_generation(
             remote_tool,
             provider_name: name.provider_name,
             server_name: server.name.clone(),
+            server_identity: remote_identity.clone(),
             trust: server.trust.clone(),
             lifecycle_owner: lifecycle_owner.clone(),
             permission_binding: permission_binding.clone(),
@@ -532,6 +533,7 @@ struct RemoteMcpTool {
     remote_tool: McpRemoteTool,
     provider_name: String,
     server_name: String,
+    server_identity: McpRemoteServerIdentity,
     trust: sigil_kernel::McpServerTrustPolicy,
     lifecycle_owner: ToolLifecycleOwner,
     permission_binding: McpPermissionBinding,
@@ -636,29 +638,32 @@ impl Tool for RemoteMcpTool {
             .call_tool(&self.remote_tool, args, cancellation.as_ref(), &|| true)
             .await;
         match result {
-            Ok(result) if !result.is_error => {
-                let raw = json!({
-                    "content": result.content,
-                    "structured_content": result.structured_content,
+            Ok(result) => {
+                let raw_result = json!({
+                    "content": result.content.clone(),
+                    "structuredContent": result.structured_content.clone(),
+                    "isError": result.is_error,
                 });
-                let encoded = serde_json::to_string(&raw)?;
-                let safe = safe_persistence_text(&self.redactor.redact_text(&encoded));
-                let metadata = ToolResultMeta {
-                    details: json!({
-                        "provenance": "external_untrusted",
-                        "transport": "streamable_http",
-                        "server": self.server_name,
-                    }),
-                    ..ToolResultMeta::default()
-                };
-                Ok(ToolResult::ok(call_id, &self.provider_name, safe, metadata))
+                Ok(result.into_tool_result(
+                    &raw_result,
+                    McpCallToolResultContext {
+                        call_id: &call_id,
+                        provider_tool_name: &self.provider_name,
+                        server_name: &self.server_name,
+                        remote_tool_name: &self.remote_tool.name,
+                        trust: &self.trust,
+                        server_identity: json!({
+                            "server_name": self.server_identity.name,
+                            "server_version": self.server_identity.version,
+                            "fingerprint": self.server_identity.fingerprint,
+                        }),
+                        redactor: &self.redactor,
+                        tool_context: &ctx,
+                        surface_kind: "tool",
+                        operation: "tools/call",
+                    },
+                )?)
             }
-            Ok(_) => Ok(ToolResult::error(
-                call_id,
-                &self.provider_name,
-                ToolErrorKind::Protocol,
-                "remote MCP tool returned isError=true",
-            )),
             Err(error) => Ok(ToolResult::error(
                 call_id,
                 &self.provider_name,

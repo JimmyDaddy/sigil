@@ -11,14 +11,15 @@ use async_trait::async_trait;
 use sigil_kernel::{
     DisclosurePresentationError, DisclosurePresentationReceipt, EgressBindingOrigin,
     EgressDataCategory, EgressDisclosureKind, EgressDisclosurePresenter, EgressNetworkRoute,
-    JsonlSessionStore, McpTransportAuthorization, PreEgressDisclosure, SecretString, Session,
-    WebBudgetReservationKind, WebBudgetReservationRequest, WebTaskTreeBudget,
-    WebTaskTreeBudgetLimits,
+    JsonlSessionStore, McpServerTrustPolicy, McpTransportAuthorization, PreEgressDisclosure,
+    SecretRedactor, SecretString, Session, ToolContext, ToolResultStatus, WebBudgetReservationKind,
+    WebBudgetReservationRequest, WebTaskTreeBudget, WebTaskTreeBudgetLimits,
 };
 use sigil_mcp::{
-    McpStreamableHttpDestinationAuthorizer, McpStreamableHttpDestinationError,
-    McpStreamableHttpHeaderConfig, McpStreamableHttpHeaderEnvironment,
-    McpStreamableHttpRouteEvidence, PreparedMcpStreamableHttpHeaders,
+    McpCallToolResult, McpCallToolResultContext, McpStreamableHttpDestinationAuthorizer,
+    McpStreamableHttpDestinationError, McpStreamableHttpHeaderConfig,
+    McpStreamableHttpHeaderEnvironment, McpStreamableHttpRouteEvidence,
+    PreparedMcpStreamableHttpHeaders,
 };
 use tempfile::tempdir;
 use url::Url;
@@ -427,4 +428,40 @@ async fn streamable_http_runtime_reauthorizes_and_rejects_public_to_private_rebi
         Err(McpStreamableHttpDestinationError::DestinationRejected)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn streamable_http_runtime_result_conversion_keeps_actionable_error_content() {
+    let raw = serde_json::json!({
+        "content": [{"type":"text","text":"remote action failed: secret-value"}],
+        "isError": true
+    });
+    let result = McpCallToolResult {
+        content: raw["content"].as_array().cloned().expect("content"),
+        structured_content: None,
+        is_error: true,
+    };
+    let temp = tempdir().expect("temp");
+    let redactor = SecretRedactor::from_values(["secret-value"]);
+    let converted = result
+        .into_tool_result(
+            &raw,
+            McpCallToolResultContext {
+                call_id: "remote-call",
+                provider_tool_name: "mcp__remote__tool",
+                server_name: "remote",
+                remote_tool_name: "tool",
+                trust: &McpServerTrustPolicy::default(),
+                server_identity: serde_json::json!({"server_name":"remote"}),
+                redactor: &redactor,
+                tool_context: &ToolContext::new(temp.path().to_path_buf(), 5),
+                surface_kind: "tool",
+                operation: "tools/call",
+            },
+        )
+        .expect("shared conversion");
+    assert!(matches!(converted.status, ToolResultStatus::Error(_)));
+    assert!(converted.content.contains("remote action failed"));
+    assert!(converted.content.contains("[redacted]"));
+    assert!(!converted.content.contains("secret-value"));
 }

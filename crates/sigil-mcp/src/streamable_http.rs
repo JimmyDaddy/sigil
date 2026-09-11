@@ -103,7 +103,7 @@ pub use oauth_credential::{
     SystemMcpOAuthCredentialStore, refresh_oauth_credential, revoke_oauth_credential,
 };
 pub use schema::CompiledMcpSchema;
-pub use tools::{McpCallToolResult, McpRemoteTool};
+pub use tools::{McpCallToolResult, McpCallToolResultContext, McpRemoteTool};
 use transport::{build_client, safe_origin, validate_endpoint, validate_safe_destination};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

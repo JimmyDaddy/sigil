@@ -79,9 +79,9 @@ use framing::{
 };
 use output::{
     attach_mcp_artifact, bounded_mcp_destination, bounded_mcp_identity_projection,
-    bounded_mcp_json, bounded_mcp_metadata_text, bounded_mcp_protocol_error, bounded_mcp_text,
-    bounded_mcp_text_segments, bounded_mcp_tool_result, capture_mcp_result_artifact,
-    secret_safe_mcp_metadata, summarize_egress_json,
+    bounded_mcp_json, bounded_mcp_metadata_text, bounded_mcp_protocol_error,
+    bounded_mcp_tool_result, capture_mcp_result_artifact, secret_safe_mcp_metadata,
+    summarize_egress_json,
 };
 use process::{
     McpProcessCleanupSummary, McpStderrFault, McpStderrSummary, drain_mcp_stderr,
@@ -104,7 +104,7 @@ use name::{
     fit_provider_name_with_hash, provider_name_with_hash, sanitize_provider_name_part, stable_hash,
 };
 #[cfg(test)]
-use output::{append_utf8_prefix, json_type_label, to_u64, truncate_text_budget};
+use output::{append_utf8_prefix, bounded_mcp_text, json_type_label, to_u64, truncate_text_budget};
 
 pub use elicitation::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -138,8 +138,8 @@ pub use search_binding::{
 };
 pub use sigil_kernel::ExtensionProcessNetworkAdmission;
 pub use streamable_http::{
-    CompiledMcpSchema, McpCallToolResult, McpOAuthAuthorizationCode, McpOAuthChallenge,
-    McpOAuthClientIntent, McpOAuthClientRegistration, McpOAuthCredentialError,
+    CompiledMcpSchema, McpCallToolResult, McpCallToolResultContext, McpOAuthAuthorizationCode,
+    McpOAuthChallenge, McpOAuthClientIntent, McpOAuthClientRegistration, McpOAuthCredentialError,
     McpOAuthCredentialLocatorStore, McpOAuthCredentialLookup, McpOAuthCredentialRecord,
     McpOAuthCredentialScope, McpOAuthCredentialSnapshot, McpOAuthCredentialStatus,
     McpOAuthCredentialStore, McpOAuthDiscovery, McpOAuthHttpExecutor, McpOAuthHttpMethod,

@@ -145,6 +145,7 @@ fn json_wire_bytes(value: &Value) -> usize {
     writer.0
 }
 
+#[cfg(test)]
 pub(super) fn bounded_mcp_text(secret_redactor: &SecretRedactor, text: &str) -> TextBudgetResult {
     bounded_mcp_text_segments(secret_redactor, [text], "")
 }
@@ -193,15 +194,37 @@ pub(super) fn bounded_mcp_tool_result(
     operation: &str,
     budget: TextBudgetResult,
 ) -> (String, ToolResultMeta) {
-    let server = bounded_mcp_metadata_text(secret_redactor, &tool_name.server_name);
-    let tool = bounded_mcp_metadata_text(secret_redactor, &tool_name.original_name);
+    bounded_mcp_tool_result_with_identity(
+        secret_redactor,
+        &tool_name.server_name,
+        &tool_name.original_name,
+        trust,
+        bounded_mcp_identity_projection(secret_redactor, identity),
+        surface_kind,
+        operation,
+        budget,
+    )
+}
+
+pub(super) fn bounded_mcp_tool_result_with_identity(
+    secret_redactor: &SecretRedactor,
+    server_name: &str,
+    tool_name: &str,
+    trust: &McpServerTrustPolicy,
+    identity: Value,
+    surface_kind: &str,
+    operation: &str,
+    budget: TextBudgetResult,
+) -> (String, ToolResultMeta) {
+    let server = bounded_mcp_metadata_text(secret_redactor, server_name);
+    let tool = bounded_mcp_metadata_text(secret_redactor, tool_name);
     let mut mcp_details = json!({
         "server": server.value,
         "tool": tool.value,
         "trust_class": trust.trust_class.as_str(),
         "kind": surface_kind,
         "operation": operation,
-        "server_identity": bounded_mcp_identity_projection(secret_redactor, identity),
+        "server_identity": identity,
         "rendered_bytes": budget.content.len(),
     });
     add_bounded_text_evidence(&mut mcp_details, "server", &server);

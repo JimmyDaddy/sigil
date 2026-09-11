@@ -208,60 +208,25 @@ impl Tool for McpTool {
         let result = response
             .get("result")
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
-        let is_error_result = result
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let artifact = capture_mcp_result_artifact(
-            &ctx,
-            &call_id,
-            &self.spec.name,
-            &self.client.secret_redactor,
+        let parsed = McpCallToolResult::parse(result)?;
+        Ok(parsed.into_tool_result(
             result,
-        );
-        let budget = match result.get("content") {
-            Some(Value::Array(items)) => {
-                if items
-                    .iter()
-                    .any(|item| item.get("text").and_then(Value::as_str).is_some())
-                {
-                    bounded_mcp_text_segments(
-                        &self.client.secret_redactor,
-                        items
-                            .iter()
-                            .filter_map(|item| item.get("text").and_then(Value::as_str)),
-                        "\n",
-                    )
-                } else {
-                    bounded_mcp_json(&self.client.secret_redactor, result)?
-                }
-            }
-            Some(Value::String(value)) => bounded_mcp_text(&self.client.secret_redactor, value),
-            _ => bounded_mcp_json(&self.client.secret_redactor, result)?,
-        };
-        let (content, metadata) = bounded_mcp_tool_result(
-            &self.client.secret_redactor,
-            &self.tool_name,
-            &self.trust,
-            self.client.identity(),
-            "tool",
-            "tools/call",
-            budget,
-        );
-        // RFC-0062 13: JSON-RPC success with result-level isError is a tool execution error that
-        // still carries the server's actionable content; it never becomes a protocol error.
-        let result = if is_error_result {
-            ToolResult::error(
-                call_id,
-                self.spec.name.clone(),
-                ToolErrorKind::Protocol,
-                content,
-            )
-            .with_error_details(false, metadata.details)
-        } else {
-            ToolResult::ok(call_id, self.spec.name.clone(), content, metadata)
-        };
-        Ok(attach_mcp_artifact(result, artifact))
+            McpCallToolResultContext {
+                call_id: &call_id,
+                provider_tool_name: &self.spec.name,
+                server_name: &self.tool_name.server_name,
+                remote_tool_name: &self.tool_name.original_name,
+                trust: &self.trust,
+                server_identity: bounded_mcp_identity_projection(
+                    &self.client.secret_redactor,
+                    self.client.identity(),
+                ),
+                redactor: &self.client.secret_redactor,
+                tool_context: &ctx,
+                surface_kind: "tool",
+                operation: "tools/call",
+            },
+        )?)
     }
 }
 
