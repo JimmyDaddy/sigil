@@ -169,18 +169,10 @@ pub(super) fn child_status_from_outcome(
     final_text: &str,
     outcome: &sigil_kernel::AgentRunOutcome,
 ) -> TaskChildSessionStatus {
-    if outcome.terminal_reason == sigil_kernel::AgentRunTerminalReason::MaxTurns
-        || !outcome.interrupted_tool_calls.is_empty()
-    {
-        TaskChildSessionStatus::Interrupted
-    } else if outcome.terminal_reason.blocks_successful_completion()
-        || outcome.approval_denials > 0
-        || (!outcome.tool_errors.is_empty() && final_text.trim().is_empty())
-    {
-        TaskChildSessionStatus::Failed
-    } else {
-        TaskChildSessionStatus::Completed
-    }
+    // Child execution classification has one runtime owner.  Chat and background adapters only
+    // map their materialized result into that shared decision; they must not maintain a second
+    // error-kind policy that can drift from task supervision.
+    crate::agent_supervisor::task_child_status_from_outcome(final_text, outcome)
 }
 
 pub(super) fn bounded_summary(summary: &str, max_chars: usize) -> String {

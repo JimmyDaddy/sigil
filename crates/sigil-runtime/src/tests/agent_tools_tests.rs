@@ -62,6 +62,24 @@ fn final_answer_blocked_child_is_not_reported_as_completed() {
     );
 }
 
+#[test]
+fn child_status_uses_shared_policy_for_blocking_tool_errors_even_with_text() {
+    let outcome = AgentRunOutcome {
+        tool_errors: vec![sigil_kernel::ToolError {
+            kind: sigil_kernel::ToolErrorKind::PermissionDenied,
+            message: "write was denied".to_owned(),
+            retryable: false,
+            details: serde_json::Value::Null,
+        }],
+        ..AgentRunOutcome::default()
+    };
+
+    assert_eq!(
+        child_status_from_outcome("the requested change is complete", &outcome),
+        sigil_kernel::TaskChildSessionStatus::Failed
+    );
+}
+
 struct CompletionReadySink {
     sender: tokio::sync::mpsc::UnboundedSender<(AgentThreadId, bool)>,
     background_runs: Mutex<Option<AgentToolBackgroundRuns>>,
