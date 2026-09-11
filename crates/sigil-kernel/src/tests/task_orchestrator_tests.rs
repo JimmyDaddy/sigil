@@ -56,11 +56,12 @@ use super::{
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskIntegrationRunOutput,
     append_integration_run_output, child_status_from_output, decode_changeset_only_child_output,
     durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
-    participant_result_entry, planner_prompt, reconcile_task_final_answer_prefix,
-    reconcile_task_step_projections, record_isolated_child_output, relevant_verification_receipts,
-    rerun_task_verification_check, route_id_for_call, run_status_from_step_status,
-    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, subagent_step_prompt, task_guidance_review_settlement_controls,
+    participant_result_entry, planner_prompt, reconcile_result_backed_participant_attempts,
+    reconcile_task_final_answer_prefix, reconcile_task_step_projections,
+    record_isolated_child_output, relevant_verification_receipts, rerun_task_verification_check,
+    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
+    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
+    subagent_step_prompt, task_guidance_review_settlement_controls,
     task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
     task_planner_system_prompt_contract_material, task_status_from_step_status,
     task_step_auto_run_policy, task_step_default_policy, task_step_dependency_result_context,
@@ -6323,9 +6324,16 @@ fn blocked_step_is_reprojected_from_completed_participant_evidence() -> Result<(
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
-    let mut completed_attempt = attempt;
-    completed_attempt.status = TaskParticipantAttemptStatus::Completed;
-    session.append_control(ControlEntry::TaskParticipantAttempt(completed_attempt))?;
+    assert!(reconcile_result_backed_participant_attempts(&mut session)?.is_empty());
+    assert_eq!(
+        session
+            .task_state_projection()
+            .tasks
+            .get(&task_id)
+            .and_then(|task| task.participant_attempts.get(&attempt_id))
+            .map(|attempt| attempt.status),
+        Some(TaskParticipantAttemptStatus::Completed)
+    );
 
     assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 1);
     assert_eq!(reconcile_task_step_projections(&mut session, &task_id)?, 0);

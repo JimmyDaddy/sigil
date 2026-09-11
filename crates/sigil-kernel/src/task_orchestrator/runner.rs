@@ -4363,6 +4363,113 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
     Ok(true)
 }
 
+/// Reconciles participant results that were durably written before their terminal attempt or
+/// step marker. The kernel owns the resulting participant/step/task facts; the host only needs to
+/// release any physical write leases returned by this function.
+pub fn reconcile_result_backed_participant_attempts(session: &mut Session) -> Result<Vec<TaskId>> {
+    let result_backed_attempts = session
+        .task_state_projection()
+        .tasks
+        .values()
+        .filter(|task| {
+            matches!(
+                task.status,
+                TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Paused
+            )
+        })
+        .flat_map(|task| {
+            task.participant_attempts
+                .values()
+                .filter_map(|attempt| {
+                    task.participant_results
+                        .get(&attempt.attempt_id)
+                        .map(|result| {
+                            (
+                                task.parent_session_ref.clone(),
+                                task.objective.clone(),
+                                attempt.clone(),
+                                result.clone(),
+                                attempt.step_id.as_ref().and_then(|step_id| {
+                                    attempt.plan_version.and_then(|plan_version| {
+                                        task.steps.get(&(plan_version, step_id.clone())).cloned()
+                                    })
+                                }),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut lease_release_task_ids = BTreeSet::new();
+    for (parent_session_ref, objective, mut attempt, result, step) in result_backed_attempts {
+        if attempt.status == TaskParticipantAttemptStatus::Started {
+            let terminal_status = result
+                .terminal_status
+                .or_else(|| {
+                    (attempt.purpose == TaskParticipantPurpose::Synthesis
+                        && result.final_answer_ref.is_some())
+                    .then_some(TaskParticipantAttemptStatus::Completed)
+                })
+                .or_else(|| {
+                    (attempt.purpose == TaskParticipantPurpose::Step)
+                        .then_some(TaskParticipantAttemptStatus::Interrupted)
+                });
+            if let Some(terminal_status) = terminal_status {
+                attempt.status = terminal_status;
+                attempt.reason = Some(
+                    "reconciled participant result persisted before its terminal marker".to_owned(),
+                );
+                session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
+            }
+        }
+
+        if attempt.purpose != TaskParticipantPurpose::Step {
+            continue;
+        }
+        let Some(step) = step else {
+            continue;
+        };
+        if step.status.is_terminal() {
+            continue;
+        }
+        session.append_control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: attempt.task_id.clone(),
+            plan_version: step.plan_version,
+            step_id: step.step_id,
+            role: step.role,
+            status: TaskStepStatus::Blocked,
+            title: step.title,
+            summary: Some(result.summary),
+            reason: Some(
+                "participant result was committed before readiness and step status; manual review is required before replanning"
+                    .to_owned(),
+            ),
+        }))?;
+        lease_release_task_ids.insert(attempt.task_id.clone());
+        let task_status = session
+            .task_state_projection()
+            .tasks
+            .get(&attempt.task_id)
+            .map(|task| task.status);
+        if task_status
+            .is_some_and(|status| matches!(status, TaskRunStatus::Started | TaskRunStatus::Running))
+        {
+            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+                task_id: attempt.task_id.clone(),
+                parent_session_ref,
+                objective: objective.clone(),
+                title: Some(crate::task_semantic_title(&objective)),
+                status: TaskRunStatus::Paused,
+                reason: Some(
+                    "step result recovery stopped before readiness commit; manual review or replan is required"
+                        .to_owned(),
+                ),
+            }))?;
+        }
+    }
+    Ok(lease_release_task_ids.into_iter().collect())
+}
+
 /// Reprojects blocked task steps when their durable participant evidence already proves a
 /// successful completion. This is append-only and uses the normal task-step writer; callers never
 /// edit the session JSONL representation directly.

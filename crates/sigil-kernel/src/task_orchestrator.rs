@@ -87,9 +87,9 @@ pub use child_session::TaskChildSessionRunner;
 pub use runner::{
     RecoverableTaskGuidance, RecoverableTaskGuidanceReview, RecoverableTaskGuidanceReviewAuthority,
     SequentialTaskOrchestrator, commit_task_planner_output, reconcile_completed_step,
-    reconcile_task_final_answer_prefix, reconcile_task_step_projections, recoverable_task_guidance,
-    recoverable_task_guidance_review, recoverable_task_guidance_review_retry_controls,
-    retry_blocked_step,
+    reconcile_result_backed_participant_attempts, reconcile_task_final_answer_prefix,
+    reconcile_task_step_projections, recoverable_task_guidance, recoverable_task_guidance_review,
+    recoverable_task_guidance_review_retry_controls, retry_blocked_step,
 };
 #[cfg(test)]
 use runner::{

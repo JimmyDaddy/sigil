@@ -16,10 +16,10 @@ use sigil_kernel::{
     conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
     durable_task_cancellation_requested, plan_review_attempt_id_for_review,
     plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
-    reconcile_task_final_answer_prefix, reconcile_task_step_projections,
-    recoverable_task_guidance_review, route_surface_tool_specs_for_bound_context,
-    route_surface_tool_specs_with_memory, safe_persistence_text, task_participant_logical_run_id,
-    task_planner_logical_run_id,
+    reconcile_result_backed_participant_attempts, reconcile_task_final_answer_prefix,
+    reconcile_task_step_projections, recoverable_task_guidance_review,
+    route_surface_tool_specs_for_bound_context, route_surface_tool_specs_with_memory,
+    safe_persistence_text, task_participant_logical_run_id, task_planner_logical_run_id,
 };
 
 const TASK_HANDOFF_ID_DOMAIN: &str = "sigil-task-handoff-v1";
@@ -541,7 +541,9 @@ impl ConversationCoordinator {
         if projection.has_conflicts() {
             bail!("task handoff projection contains conflicting durable facts");
         }
-        reconcile_result_backed_participant_attempts(session)?;
+        for task_id in reconcile_result_backed_participant_attempts(session)? {
+            release_active_task_write_leases(session, &task_id)?;
+        }
         interrupt_durably_cancelled_active_tasks(session)?;
         let states = projection.handoffs.into_iter().collect::<Vec<_>>();
         let mut actions = Vec::new();
@@ -924,109 +926,6 @@ fn interrupt_durably_cancelled_active_tasks(session: &mut Session) -> Result<()>
     for task_id in active_task_ids {
         if durable_task_cancellation_requested(session, task_id.as_str())? {
             interrupt_task_after_durable_cancellation(session, &task_id)?;
-        }
-    }
-    Ok(())
-}
-
-fn reconcile_result_backed_participant_attempts(session: &mut Session) -> Result<()> {
-    let result_backed_attempts = session
-        .task_state_projection()
-        .tasks
-        .values()
-        .filter(|task| {
-            matches!(
-                task.status,
-                TaskRunStatus::Started | TaskRunStatus::Running | TaskRunStatus::Paused
-            )
-        })
-        .flat_map(|task| {
-            task.participant_attempts
-                .values()
-                .filter_map(|attempt| {
-                    task.participant_results
-                        .get(&attempt.attempt_id)
-                        .map(|result| {
-                            (
-                                task.parent_session_ref.clone(),
-                                task.objective.clone(),
-                                attempt.clone(),
-                                result.clone(),
-                                attempt.step_id.as_ref().and_then(|step_id| {
-                                    attempt.plan_version.and_then(|plan_version| {
-                                        task.steps.get(&(plan_version, step_id.clone())).cloned()
-                                    })
-                                }),
-                            )
-                        })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    for (parent_session_ref, objective, mut attempt, result, step) in result_backed_attempts {
-        if attempt.status == TaskParticipantAttemptStatus::Started {
-            let terminal_status = result
-                .terminal_status
-                .or_else(|| {
-                    (attempt.purpose == TaskParticipantPurpose::Synthesis
-                        && result.final_answer_ref.is_some())
-                    .then_some(TaskParticipantAttemptStatus::Completed)
-                })
-                .or_else(|| {
-                    (attempt.purpose == TaskParticipantPurpose::Step)
-                        .then_some(TaskParticipantAttemptStatus::Interrupted)
-                });
-            if let Some(terminal_status) = terminal_status {
-                attempt.status = terminal_status;
-                attempt.reason = Some(
-                    "reconciled participant result persisted before its terminal marker".to_owned(),
-                );
-                session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
-            }
-        }
-
-        if attempt.purpose != TaskParticipantPurpose::Step {
-            continue;
-        }
-        let Some(step) = step else {
-            continue;
-        };
-        if step.status.is_terminal() {
-            continue;
-        }
-        session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-            task_id: attempt.task_id.clone(),
-            plan_version: step.plan_version,
-            step_id: step.step_id,
-            role: step.role,
-            status: TaskStepStatus::Blocked,
-            title: step.title,
-            summary: Some(result.summary),
-            reason: Some(
-                "participant result was committed before readiness and step status; manual review is required before replanning"
-                    .to_owned(),
-            ),
-        }))?;
-        release_active_task_write_leases(session, &attempt.task_id)?;
-        let task_status = session
-            .task_state_projection()
-            .tasks
-            .get(&attempt.task_id)
-            .map(|task| task.status);
-        if task_status
-            .is_some_and(|status| matches!(status, TaskRunStatus::Started | TaskRunStatus::Running))
-        {
-            session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-                task_id: attempt.task_id.clone(),
-                parent_session_ref,
-                objective: objective.clone(),
-                title: Some(sigil_kernel::task_semantic_title(&objective)),
-                status: TaskRunStatus::Paused,
-                reason: Some(
-                    "step result recovery stopped before readiness commit; manual review or replan is required"
-                        .to_owned(),
-                ),
-            }))?;
         }
     }
     Ok(())

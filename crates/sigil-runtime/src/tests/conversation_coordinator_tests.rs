@@ -1036,6 +1036,12 @@ fn step_result_only_crash_prefix_blocks_without_replaying_side_effects() -> Resu
         TaskStepStatus::Blocked
     );
     assert!(
+        task.steps
+            .get(&(1, TaskStepId::new("write-once")?))
+            .and_then(|step| step.reason.as_deref())
+            .is_some_and(|reason| reason.contains("participant result was committed"))
+    );
+    assert!(
         !session
             .write_isolation_projection()
             .leases
