@@ -467,8 +467,16 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
       rememberOpenWorkspace(selection.workspace);
       setNavigationOpen(false);
       setLoadState("ready");
-      const readyMessage = t("workspaceReady", { name: selection.workspace.displayName });
-      setMessage(readyMessage);
+      if (selection.recentPersistenceDegraded === true) {
+        const degradedMessage = t("workspaceReadyRecentPersistenceDegraded", {
+          name: selection.workspace.displayName,
+        });
+        setMessage(degradedMessage);
+        notify({ message: degradedMessage, tone: "warning" });
+      } else {
+        const readyMessage = t("workspaceReady", { name: selection.workspace.displayName });
+        setMessage(readyMessage);
+      }
     } catch (error) {
       setLoadState("error");
       const recovery = workspaceRecoveryFromError(

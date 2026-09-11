@@ -454,6 +454,7 @@ pub(crate) async fn desktop_pick_workspace(
         return Ok(DesktopWorkspaceSelection {
             cancelled: true,
             workspace: None,
+            recent_persistence_degraded: None,
         });
     };
     let workspace_root = selection.into_path().map_err(|_| {
@@ -478,7 +479,7 @@ pub(crate) async fn desktop_pick_workspace(
         .open(request)
         .await
         .map_err(project_manager_error)?;
-    state
+    let recent_persistence_degraded = state
         .recent_workspaces
         .lock()
         .await
@@ -488,10 +489,12 @@ pub(crate) async fn desktop_pick_workspace(
             &workspace_root,
         )
         .await
-        .map_err(project_recent_error)?;
+        .err()
+        .map(|_| true);
     Ok(DesktopWorkspaceSelection {
         cancelled: false,
         workspace: Some(workspace),
+        recent_persistence_degraded,
     })
 }
 
@@ -527,7 +530,10 @@ pub(crate) async fn desktop_open_recent_workspace(
         ))
         .await
         .map_err(project_manager_error)?;
-    state
+    // Recent-workspace persistence is an auxiliary index. A successful server open remains
+    // usable when this best-effort upsert fails; the next bootstrap can still display the
+    // already-open workspace without tearing it down.
+    let _recent_persistence_degraded = state
         .recent_workspaces
         .lock()
         .await
@@ -537,7 +543,7 @@ pub(crate) async fn desktop_open_recent_workspace(
             &workspace_root,
         )
         .await
-        .map_err(project_recent_error)?;
+        .err();
     Ok(workspace)
 }
 

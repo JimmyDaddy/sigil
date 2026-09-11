@@ -90,6 +90,24 @@ fn agent_display_name_falls_back_to_profile_id_for_empty_token() {
 }
 
 #[test]
+fn workspace_selection_keeps_recent_index_degradation_separate_from_open_success() {
+    let selection = DesktopWorkspaceSelection {
+        cancelled: false,
+        workspace: Some(DesktopWorkspaceSummary {
+            id: "workspace-1".to_owned(),
+            display_name: "Workspace".to_owned(),
+            server_version: "0.0.1".to_owned(),
+            state: sigil_desktop::DesktopConnectionState::Ready,
+        }),
+        recent_persistence_degraded: Some(true),
+    };
+    let projected = serde_json::to_value(selection).expect("workspace selection serializes");
+    assert_eq!(projected["cancelled"], false);
+    assert_eq!(projected["workspace"]["id"], "workspace-1");
+    assert_eq!(projected["recentPersistenceDegraded"], true);
+}
+
+#[test]
 fn run_start_input_preserves_the_exact_same_session_model_route() {
     let input = serde_json::from_value::<DesktopRunStartInput>(serde_json::json!({
         "sessionId": "session-1",

@@ -585,6 +585,11 @@ pub(crate) struct DesktopWorkspaceSelection {
     pub(crate) cancelled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) workspace: Option<DesktopWorkspaceSummary>,
+    /// Opening a workspace remains successful when the advisory recent-workspace index cannot
+    /// be updated. The renderer can surface this independent degradation without treating the
+    /// healthy workspace process as failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recent_persistence_degraded: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

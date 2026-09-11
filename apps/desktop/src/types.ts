@@ -42,6 +42,7 @@ export interface DesktopUpdateSnapshot {
 export interface WorkspaceSelection {
   cancelled: boolean;
   workspace?: WorkspaceSummary;
+  recentPersistenceDegraded?: boolean;
 }
 
 export type SupportStatus = "ok" | "warn" | "error";
