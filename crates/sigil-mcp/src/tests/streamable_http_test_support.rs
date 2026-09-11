@@ -27,6 +27,7 @@ pub struct FixtureResponse {
     body: String,
     headers: Vec<(String, String)>,
     delay: Duration,
+    chunks: Option<Vec<(String, Duration)>>,
     disconnect: bool,
 }
 
@@ -38,6 +39,7 @@ impl FixtureResponse {
             body: body.into(),
             headers: Vec::new(),
             delay: Duration::ZERO,
+            chunks: None,
             disconnect: false,
         }
     }
@@ -49,6 +51,7 @@ impl FixtureResponse {
             body: body.into(),
             headers: Vec::new(),
             delay: Duration::ZERO,
+            chunks: None,
             disconnect: false,
         }
     }
@@ -60,6 +63,7 @@ impl FixtureResponse {
             body: body.into(),
             headers: Vec::new(),
             delay: Duration::ZERO,
+            chunks: None,
             disconnect: false,
         }
     }
@@ -71,6 +75,7 @@ impl FixtureResponse {
             body: String::new(),
             headers: Vec::new(),
             delay: Duration::ZERO,
+            chunks: None,
             disconnect: false,
         }
     }
@@ -82,6 +87,7 @@ impl FixtureResponse {
             body: String::new(),
             headers: Vec::new(),
             delay: Duration::ZERO,
+            chunks: None,
             disconnect: true,
         }
     }
@@ -93,6 +99,12 @@ impl FixtureResponse {
 
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    pub fn with_chunks(mut self, chunks: Vec<(String, Duration)>) -> Self {
+        self.body = chunks.iter().map(|(chunk, _)| chunk.as_str()).collect();
+        self.chunks = Some(chunks);
         self
     }
 }
@@ -140,34 +152,47 @@ impl FixtureServer {
                     .lock()
                     .expect("requests lock")
                     .push(String::from_utf8_lossy(&buffer).into_owned());
-                tokio::time::sleep(response.delay).await;
-                if response.disconnect {
-                    continue;
-                }
-                let reason = match response.status {
-                    200 => "OK",
-                    202 => "Accepted",
-                    307 => "Temporary Redirect",
-                    405 => "Method Not Allowed",
-                    _ => "Fixture",
-                };
-                let mut head = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-                    response.status,
-                    reason,
-                    response.body.len()
-                );
-                if let Some(content_type) = response.content_type {
-                    head.push_str(&format!("Content-Type: {content_type}\r\n"));
-                }
-                for (name, value) in response.headers {
-                    head.push_str(&format!("{name}: {value}\r\n"));
-                }
-                head.push_str("\r\n");
-                if socket.write_all(head.as_bytes()).await.is_err() {
-                    continue;
-                }
-                let _ = socket.write_all(response.body.as_bytes()).await;
+                tokio::spawn(async move {
+                    tokio::time::sleep(response.delay).await;
+                    if response.disconnect {
+                        return;
+                    }
+                    let reason = match response.status {
+                        200 => "OK",
+                        202 => "Accepted",
+                        307 => "Temporary Redirect",
+                        405 => "Method Not Allowed",
+                        _ => "Fixture",
+                    };
+                    let mut head = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        response.status,
+                        reason,
+                        response.body.len()
+                    );
+                    if let Some(content_type) = response.content_type {
+                        head.push_str(&format!("Content-Type: {content_type}\r\n"));
+                    }
+                    for (name, value) in response.headers {
+                        head.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    head.push_str("\r\n");
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if let Some(chunks) = response.chunks {
+                        for (index, (chunk, delay)) in chunks.into_iter().enumerate() {
+                            if index > 0 {
+                                tokio::time::sleep(delay).await;
+                            }
+                            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    } else {
+                        let _ = socket.write_all(response.body.as_bytes()).await;
+                    }
+                });
             }
         });
         Self { address, requests }

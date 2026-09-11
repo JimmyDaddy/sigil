@@ -10,7 +10,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{StreamExt, future::BoxFuture};
 use hmac::{Hmac, Mac};
 use regex::Regex;
 use reqwest::{
@@ -83,8 +83,8 @@ mod transport;
 use auth::{normalize_status, resolve_headers, validate_session_header};
 pub use elicitation::{McpRemoteFormField, McpRemoteFormFieldKind, ValidatedMcpFormRequest};
 use framing::{
-    matches_content_type, parse_sse_messages, parse_sse_response, read_bounded_body, rpc_result,
-    single_header, validate_response_envelope,
+    SseDecoder, matches_content_type, parse_sse_response, read_bounded_body, rpc_result,
+    single_header, validate_response_body_headers, validate_response_envelope,
 };
 pub use lifecycle::McpStreamableHttpClient;
 pub(super) use lifecycle::RpcResponse;

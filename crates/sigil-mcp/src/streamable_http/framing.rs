@@ -6,15 +6,7 @@ pub(super) async fn read_bounded_body(
     budget: &mut WebBudgetReservation,
 ) -> Result<Vec<u8>, McpStreamableHttpError> {
     tokio::time::timeout(limits.response_timeout, async {
-        validate_response_headers(response.headers(), limits.max_header_bytes)?;
-        if let Some(length) = single_header(response.headers(), CONTENT_LENGTH)? {
-            let length = length
-                .parse::<usize>()
-                .map_err(|_| McpStreamableHttpError::HeaderLimitExceeded)?;
-            if length > limits.max_body_bytes {
-                return Err(McpStreamableHttpError::BodyLimitExceeded);
-            }
-        }
+        validate_response_body_headers(response.headers(), limits)?;
         let mut stream = response.bytes_stream();
         let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -34,6 +26,22 @@ pub(super) async fn read_bounded_body(
     .map_err(|_| McpStreamableHttpError::Timeout)?
 }
 
+pub(super) fn validate_response_body_headers(
+    headers: &HeaderMap,
+    limits: McpStreamableHttpLimits,
+) -> Result<(), McpStreamableHttpError> {
+    validate_response_headers(headers, limits.max_header_bytes)?;
+    if let Some(length) = single_header(headers, CONTENT_LENGTH)? {
+        let length = length
+            .parse::<usize>()
+            .map_err(|_| McpStreamableHttpError::HeaderLimitExceeded)?;
+        if length > limits.max_body_bytes {
+            return Err(McpStreamableHttpError::BodyLimitExceeded);
+        }
+    }
+    Ok(())
+}
+
 fn validate_response_headers(
     headers: &HeaderMap,
     limit: usize,
@@ -47,6 +55,83 @@ fn validate_response_headers(
     if total > limit {
         Err(McpStreamableHttpError::HeaderLimitExceeded)
     } else {
+        Ok(())
+    }
+}
+
+pub(super) struct SseDecoder {
+    line: Vec<u8>,
+    data: String,
+    events: usize,
+}
+
+impl SseDecoder {
+    pub(super) fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            data: String::new(),
+            events: 0,
+        }
+    }
+
+    pub(super) fn push(
+        &mut self,
+        chunk: &[u8],
+        limits: McpStreamableHttpLimits,
+    ) -> Result<Vec<Value>, McpStreamableHttpError> {
+        let mut messages = Vec::new();
+        for byte in chunk {
+            self.line.push(*byte);
+            if self.line.len() > limits.max_sse_line_bytes {
+                return Err(McpStreamableHttpError::SseLimitExceeded);
+            }
+            if *byte == b'\n' {
+                self.finish_line(&mut messages, limits)?;
+            }
+        }
+        Ok(messages)
+    }
+
+    pub(super) fn finish(
+        &mut self,
+        limits: McpStreamableHttpLimits,
+    ) -> Result<Vec<Value>, McpStreamableHttpError> {
+        let mut messages = Vec::new();
+        if !self.line.is_empty() {
+            self.finish_line(&mut messages, limits)?;
+        }
+        finish_sse_event(&mut self.data, &mut self.events, &mut messages, limits)?;
+        Ok(messages)
+    }
+
+    fn finish_line(
+        &mut self,
+        messages: &mut Vec<Value>,
+        limits: McpStreamableHttpLimits,
+    ) -> Result<(), McpStreamableHttpError> {
+        let line = std::str::from_utf8(&self.line)
+            .map_err(|_| McpStreamableHttpError::MalformedEnvelope)?
+            .trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            finish_sse_event(&mut self.data, &mut self.events, messages, limits)?;
+        } else if let Some(value) = line.strip_prefix("data:") {
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            if self
+                .data
+                .len()
+                .saturating_add(value.len())
+                .saturating_add(1)
+                > limits.max_sse_event_bytes
+            {
+                return Err(McpStreamableHttpError::SseLimitExceeded);
+            }
+            self.data.push_str(value);
+            self.data.push('\n');
+        } else if !line.starts_with(':') && !line.starts_with("event:") && !line.starts_with("id:")
+        {
+            return Err(McpStreamableHttpError::MalformedEnvelope);
+        }
+        self.line.clear();
         Ok(())
     }
 }
@@ -134,33 +219,9 @@ pub(super) fn parse_sse_messages(
     body: &[u8],
     limits: McpStreamableHttpLimits,
 ) -> Result<Vec<Value>, McpStreamableHttpError> {
-    let text = std::str::from_utf8(body).map_err(|_| McpStreamableHttpError::MalformedEnvelope)?;
-    let mut data = String::new();
-    let mut events = 0usize;
-    let mut messages = Vec::new();
-    for line in text.split_inclusive('\n') {
-        if line.len() > limits.max_sse_line_bytes {
-            return Err(McpStreamableHttpError::SseLimitExceeded);
-        }
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            finish_sse_event(&mut data, &mut events, &mut messages, limits)?;
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("data:") {
-            let value = value.strip_prefix(' ').unwrap_or(value);
-            if data.len().saturating_add(value.len()).saturating_add(1) > limits.max_sse_event_bytes
-            {
-                return Err(McpStreamableHttpError::SseLimitExceeded);
-            }
-            data.push_str(value);
-            data.push('\n');
-        } else if !line.starts_with(':') && !line.starts_with("event:") && !line.starts_with("id:")
-        {
-            return Err(McpStreamableHttpError::MalformedEnvelope);
-        }
-    }
-    finish_sse_event(&mut data, &mut events, &mut messages, limits)?;
+    let mut decoder = SseDecoder::new();
+    let mut messages = decoder.push(body, limits)?;
+    messages.extend(decoder.finish(limits)?);
     Ok(messages)
 }
 

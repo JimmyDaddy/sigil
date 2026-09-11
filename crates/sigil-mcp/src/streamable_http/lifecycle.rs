@@ -43,6 +43,17 @@ struct ClientState {
     active_form: bool,
 }
 
+enum StreamedSseMode {
+    Listener {
+        session: Option<LiveSession>,
+    },
+    Request {
+        expected_id: u64,
+        session: Option<LiveSession>,
+        initialize: bool,
+    },
+}
+
 /// Internal-only MCP Streamable HTTP state machine. No root config or registry constructor exposes
 /// this type; E21.17 owns public cutover.
 pub struct McpStreamableHttpClient {
@@ -519,13 +530,16 @@ impl McpStreamableHttpClient {
     pub async fn probe_get_listener(&self) -> Result<bool, McpStreamableHttpError> {
         let session = self.live_session_snapshot().await?;
         let response = self
-            .send(
+            .send_with_sse_mode(
                 Method::GET,
                 None,
                 session.as_ref(),
                 Some("text/event-stream"),
                 None,
                 None,
+                Some(StreamedSseMode::Listener {
+                    session: session.clone(),
+                }),
             )
             .await?;
         if response.status == StatusCode::METHOD_NOT_ALLOWED {
@@ -547,9 +561,6 @@ impl McpStreamableHttpClient {
             .ok_or(McpStreamableHttpError::UnexpectedContentType)?;
         if !matches_content_type(&content_type, "text/event-stream")? {
             return Err(McpStreamableHttpError::UnexpectedContentType);
-        }
-        for message in parse_sse_messages(&response.body, self.limits)? {
-            self.handle_inbound_message(&message, None).await?;
         }
         Ok(true)
     }
@@ -749,13 +760,18 @@ impl McpStreamableHttpClient {
     ) -> Result<RpcResponse, McpStreamableHttpError> {
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let response = self
-            .send(
+            .send_with_sse_mode(
                 Method::POST,
                 Some(body),
                 session,
                 None,
                 request_started,
                 body_observer,
+                Some(StreamedSseMode::Request {
+                    expected_id: id,
+                    session: session.cloned(),
+                    initialize: method == "initialize",
+                }),
             )
             .await?;
         self.normalize_response_status(response.status, &response.headers, session.is_some())
@@ -810,9 +826,11 @@ impl McpStreamableHttpClient {
         } else {
             None
         };
-        for message in inbound {
-            self.handle_inbound_message(&message, staged_inbound_session.as_ref())
-                .await?;
+        if !response.sse_streamed {
+            for message in inbound {
+                self.handle_inbound_message(&message, staged_inbound_session.as_ref())
+                    .await?;
+            }
         }
         Ok(RpcResponse {
             value: envelope,
@@ -924,7 +942,27 @@ impl McpStreamableHttpClient {
         Ok(())
     }
 
-    async fn send(
+    fn send<'a>(
+        &'a self,
+        method: Method,
+        body: Option<Value>,
+        session: Option<&'a LiveSession>,
+        accept_override: Option<&'a str>,
+        request_started: Option<Arc<AtomicBool>>,
+        body_observer: Option<Arc<dyn McpRequestBodyObserver>>,
+    ) -> BoxFuture<'a, Result<McpHttpResponse, McpStreamableHttpError>> {
+        Box::pin(self.send_with_sse_mode(
+            method,
+            body,
+            session,
+            accept_override,
+            request_started,
+            body_observer,
+            None,
+        ))
+    }
+
+    async fn send_with_sse_mode(
         &self,
         method: Method,
         body: Option<Value>,
@@ -932,6 +970,7 @@ impl McpStreamableHttpClient {
         accept_override: Option<&str>,
         request_started: Option<Arc<AtomicBool>>,
         body_observer: Option<Arc<dyn McpRequestBodyObserver>>,
+        sse_mode: Option<StreamedSseMode>,
     ) -> Result<McpHttpResponse, McpStreamableHttpError> {
         let bearer_snapshot = match self.bearer_provider.as_ref() {
             Some(provider) => Some(
@@ -1046,17 +1085,139 @@ impl McpStreamableHttpClient {
             };
         let status = response.status();
         let headers = response.headers().clone();
-        let body = match read_bounded_body(response, self.limits, &mut budget).await {
-            Ok(body) => body,
-            Err(error) => {
-                return Err(error);
-            }
+        let content_type = single_header(&headers, CONTENT_TYPE)?;
+        let is_sse = content_type
+            .as_deref()
+            .map(|value| matches_content_type(value, "text/event-stream"))
+            .transpose()?
+            .unwrap_or(false);
+        let (body, sse_streamed) = match (is_sse, sse_mode) {
+            (true, Some(mode)) => (
+                self.read_streamed_sse_body(response, &headers, &mut budget, mode)
+                    .await?,
+                true,
+            ),
+            _ => (
+                read_bounded_body(response, self.limits, &mut budget).await?,
+                false,
+            ),
         };
         Ok(McpHttpResponse {
             status,
             headers,
             body,
+            sse_streamed,
         })
+    }
+
+    async fn read_streamed_sse_body(
+        &self,
+        response: reqwest::Response,
+        headers: &HeaderMap,
+        budget: &mut WebBudgetReservation,
+        mode: StreamedSseMode,
+    ) -> Result<Vec<u8>, McpStreamableHttpError> {
+        validate_response_body_headers(headers, self.limits)?;
+        let initialize_session_id = match &mode {
+            StreamedSseMode::Request {
+                initialize: true, ..
+            } => validate_session_header(headers)?,
+            _ => None,
+        };
+        let mut stream = response.bytes_stream();
+        let mut decoder = SseDecoder::new();
+        let mut body = Vec::new();
+        let mut response_seen = false;
+        let result = tokio::time::timeout(self.limits.response_timeout, async {
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| McpStreamableHttpError::Transport)?;
+                budget
+                    .charge_chunk(WebBudgetByteKind::Wire, chunk.len() as u64)
+                    .and_then(|()| {
+                        budget.charge_chunk(WebBudgetByteKind::Decoded, chunk.len() as u64)
+                    })
+                    .map_err(|_| McpStreamableHttpError::BudgetExhausted)?;
+                if body.len().saturating_add(chunk.len()) > self.limits.max_body_bytes {
+                    return Err(McpStreamableHttpError::BodyLimitExceeded);
+                }
+                body.extend_from_slice(&chunk);
+                for message in decoder.push(&chunk, self.limits)? {
+                    self.handle_streamed_sse_message(
+                        message,
+                        &mode,
+                        initialize_session_id.as_ref(),
+                        &mut response_seen,
+                    )
+                    .await?;
+                }
+            }
+            for message in decoder.finish(self.limits)? {
+                self.handle_streamed_sse_message(
+                    message,
+                    &mode,
+                    initialize_session_id.as_ref(),
+                    &mut response_seen,
+                )
+                .await?;
+            }
+            Ok::<_, McpStreamableHttpError>(())
+        })
+        .await
+        .map_err(|_| McpStreamableHttpError::Timeout)?;
+        result?;
+        Ok(body)
+    }
+
+    async fn handle_streamed_sse_message(
+        &self,
+        message: Value,
+        mode: &StreamedSseMode,
+        initialize_session_id: Option<&SecretString>,
+        response_seen: &mut bool,
+    ) -> Result<(), McpStreamableHttpError> {
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Err(McpStreamableHttpError::MalformedEnvelope);
+        }
+        match mode {
+            StreamedSseMode::Listener { session } => {
+                self.handle_inbound_message(&message, session.as_ref())
+                    .await
+            }
+            StreamedSseMode::Request {
+                expected_id,
+                session,
+                initialize,
+            } => {
+                if message.get("method").and_then(Value::as_str).is_some() {
+                    let staged = if *initialize {
+                        // The initialize request advertises the latest protocol version. This
+                        // provisional session lets server requests be answered before the final
+                        // initialize result arrives; the negotiated version replaces it below.
+                        Some(LiveSession {
+                            id: session
+                                .as_ref()
+                                .map(|session| session.id.clone())
+                                .or_else(|| initialize_session_id.cloned())
+                                .unwrap_or_else(|| SecretString::new(String::new())),
+                            version: McpRemoteProtocolVersion::V2025_11_25,
+                            tools_list_changed: false,
+                            server_identity: None,
+                        })
+                    } else {
+                        session.clone()
+                    };
+                    self.handle_inbound_message(&message, staged.as_ref()).await
+                } else if message.get("id").and_then(Value::as_u64) == Some(*expected_id) {
+                    if *response_seen {
+                        return Err(McpStreamableHttpError::ResponseIdMismatch);
+                    }
+                    *response_seen = true;
+                    Ok(())
+                } else {
+                    Err(McpStreamableHttpError::ResponseIdMismatch)
+                }
+            }
+        }
     }
 
     async fn next_id(&self) -> Result<u64, McpStreamableHttpError> {
@@ -1136,4 +1297,5 @@ struct McpHttpResponse {
     status: StatusCode,
     headers: HeaderMap,
     body: Vec<u8>,
+    sse_streamed: bool,
 }

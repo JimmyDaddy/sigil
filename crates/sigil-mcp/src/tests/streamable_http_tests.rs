@@ -205,6 +205,99 @@ async fn streamable_http_json_and_sse_responses_converge_by_id() {
 }
 
 #[tokio::test]
+async fn streamable_http_post_sse_dispatches_inbound_request_before_eof() {
+    let ping = json!({"jsonrpc":"2.0","id":"ping-before-eof","method":"ping","params":{}});
+    let result = json!({"jsonrpc":"2.0","id":2,"result":{"content":[]}});
+    let ping_event = format!("data: {ping}\n\n");
+    let result_event = format!("data: {result}\n\n");
+    let ping_split = ping_event.len() / 2;
+    let (client, server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false))
+                .with_header("Mcp-Session-Id", "live-session"),
+            FixtureResponse::empty(202),
+            FixtureResponse::sse(200, format!("{ping_event}{result_event}")).with_chunks(vec![
+                (ping_event[..ping_split].to_owned(), Duration::ZERO),
+                (ping_event[ping_split..].to_owned(), Duration::ZERO),
+                (result_event, Duration::from_millis(200)),
+            ]),
+            FixtureResponse::empty(202),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    let call = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move {
+            client
+                .call_tool(&empty_tool("streamed"), json!({}), None, &|| true)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_millis(150), async {
+        loop {
+            if server
+                .requests()
+                .iter()
+                .any(|request| request.contains("ping-before-eof"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("ping response must be posted before the SSE response reaches EOF");
+    call.await
+        .expect("join")
+        .expect("streamed call should converge");
+}
+
+#[tokio::test]
+async fn streamable_http_get_sse_dispatches_inbound_request_before_eof() {
+    let ping = json!({"jsonrpc":"2.0","id":"get-ping-before-eof","method":"ping","params":{}});
+    let ping_event = format!("data: {ping}\n\n");
+    let (client, server) = connect_fixture(
+        vec![
+            FixtureResponse::json(200, initialize_json(1, LATEST_PROTOCOL_VERSION, false))
+                .with_header("Mcp-Session-Id", "live-session"),
+            FixtureResponse::empty(202),
+            FixtureResponse::sse(200, ping_event.clone()).with_chunks(vec![
+                (ping_event, Duration::ZERO),
+                (String::new(), Duration::from_millis(200)),
+            ]),
+            FixtureResponse::empty(202),
+        ],
+        McpRemoteClientCapabilities::empty(),
+    )
+    .await;
+    let probe = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.probe_get_listener().await }
+    });
+    tokio::time::timeout(Duration::from_millis(150), async {
+        loop {
+            if server
+                .requests()
+                .iter()
+                .any(|request| request.contains("get-ping-before-eof"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("GET ping response must be posted before the SSE response reaches EOF");
+    assert!(
+        probe
+            .await
+            .expect("join")
+            .expect("GET listener should converge")
+    );
+}
+
+#[tokio::test]
 async fn streamable_http_get_405_and_delete_405_are_tolerated() {
     let (client, server) = connect_fixture(
         vec![
