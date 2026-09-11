@@ -348,6 +348,22 @@ fn seed_completed_synthesis_prefix(
         message.id = crate::task_final_message_id(&task_id, &attempt_id);
         session.append_assistant_message(message)?;
     }
+    if complete_inspect_step {
+        session.append_control(ControlEntry::ReadinessEvaluated(
+            crate::ReadinessEvaluatedEntry {
+                scope: EvidenceScope::Step(format!("{}:inspect", task_id.as_str())),
+                evaluation: crate::ReadinessEvaluation {
+                    run_status: crate::RunStatus::Completed,
+                    verification_verdict: VerificationVerdict::NotApplicable,
+                    visible_state: VisibleCompletionState::Completed,
+                    reasons: vec![crate::ReadinessReason::NoVerificationRequired],
+                    required_actions: Vec::new(),
+                },
+                policy_hash: None,
+                workspace_snapshot_id: None,
+            },
+        ))?;
+    }
     Ok(task_id)
 }
 struct MutatingTool;
@@ -3894,6 +3910,43 @@ fn final_answer_recovery_does_not_close_an_unfinished_plan() -> Result<()> {
         .get(&task_id)
         .cloned()
         .expect("task projection");
+    assert_eq!(task.status, TaskRunStatus::Running);
+    assert!(task.final_answer.is_none());
+    Ok(())
+}
+
+#[test]
+fn final_answer_recovery_keeps_a_verification_blocker_open() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("parent.jsonl"))?;
+    let mut session = Session::load_from_store("planner", "model", store)?;
+    let task_id = seed_completed_synthesis_prefix(&mut session, false, true)?;
+    session.append_control(ControlEntry::ReadinessEvaluated(
+        crate::ReadinessEvaluatedEntry {
+            scope: EvidenceScope::Step(format!("{}:inspect", task_id.as_str())),
+            evaluation: crate::ReadinessEvaluation {
+                run_status: crate::RunStatus::Completed,
+                verification_verdict: VerificationVerdict::Missing,
+                visible_state: VisibleCompletionState::CompletedUnverified,
+                reasons: vec![crate::ReadinessReason::MissingRequiredCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+                required_actions: vec![crate::RequiredAction::RunCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+            },
+            policy_hash: None,
+            workspace_snapshot_id: None,
+        },
+    ))?;
+
+    assert!(!reconcile_task_final_answer_prefix(&mut session, &task_id)?);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&task_id)
+        .expect("task projection")
+        .clone();
     assert_eq!(task.status, TaskRunStatus::Running);
     assert!(task.final_answer.is_none());
     Ok(())

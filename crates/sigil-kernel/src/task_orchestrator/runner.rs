@@ -4338,6 +4338,9 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
     if !completion.allows_completed() {
         return Ok(false);
     }
+    if !task_step_readiness_allows_final_answer(session, &task) {
+        return Ok(false);
+    }
     let request = SequentialTaskRequest {
         task_id: task.task_id.clone(),
         parent_session_ref: task.parent_session_ref.clone(),
@@ -4361,6 +4364,34 @@ pub fn reconcile_task_final_answer_prefix(session: &mut Session, task_id: &TaskI
         )),
     )?;
     Ok(true)
+}
+
+fn task_step_readiness_allows_final_answer(session: &Session, task: &TaskRunProjection) -> bool {
+    let Some(plan_version) = task.latest_plan_version else {
+        return false;
+    };
+    let Some(plan) = task.plans.get(&plan_version) else {
+        return false;
+    };
+    let verification = session.verification_state_projection();
+    plan.steps.iter().all(|step| {
+        let scope = EvidenceScope::Step(format!(
+            "{}:{}",
+            task.task_id.as_str(),
+            step.step_id.as_str()
+        ));
+        let Some(readiness) = verification.latest_readiness(&scope) else {
+            return false;
+        };
+        readiness.evaluation.run_status == RunStatus::Completed
+            && readiness.evaluation.required_actions.is_empty()
+            && matches!(
+                readiness.evaluation.verification_verdict,
+                VerificationVerdict::Passed
+                    | VerificationVerdict::NotApplicable
+                    | VerificationVerdict::Skipped
+            )
+    })
 }
 
 /// Reconciles participant results that were durably written before their terminal attempt or
