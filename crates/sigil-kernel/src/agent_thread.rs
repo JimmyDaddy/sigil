@@ -879,7 +879,7 @@ impl AgentInvocationGrant {
         root_cancellation_scope_id: &str,
         now_ms: u64,
     ) -> Result<AgentInvocationWorkspaceObservationV1> {
-        if now_ms >= self.binding.expires_at_ms {
+        if self.binding.expires_at_ms != u64::MAX && now_ms >= self.binding.expires_at_ms {
             bail!("agent invocation grant expired");
         }
         if &self.binding.source != source
@@ -910,7 +910,7 @@ impl AgentInvocationGrant {
         root_cancellation_scope_id: &str,
         now_ms: u64,
     ) -> Result<AgentInvocationWorkspaceObservationV1> {
-        if now_ms >= self.binding.expires_at_ms {
+        if self.binding.expires_at_ms != u64::MAX && now_ms >= self.binding.expires_at_ms {
             bail!("agent invocation grant expired before tool execution");
         }
         if self.binding.tool_contract_fingerprint != tool_contract_fingerprint {
@@ -1084,7 +1084,7 @@ fn validate_invocation_grant_binding(
     {
         bail!("agent invocation grant binding is incomplete");
     }
-    if now_ms >= binding.expires_at_ms {
+    if binding.expires_at_ms != u64::MAX && now_ms >= binding.expires_at_ms {
         bail!("agent invocation grant expiry must be in the future");
     }
     match (&binding.source, &binding.authority) {

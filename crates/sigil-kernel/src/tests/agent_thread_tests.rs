@@ -1971,6 +1971,33 @@ fn invocation_grant_revalidation_rebases_workspace_but_fails_on_authority_drift(
 }
 
 #[test]
+fn host_owned_invocation_grant_remains_valid_for_long_running_parent_lifecycle() -> Result<()> {
+    let mut binding = sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?;
+    binding.expires_at_ms = u64::MAX;
+    let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;
+
+    grant.validate_invocation(
+        &binding.source,
+        &binding.authority,
+        &binding.root_logical_run_id,
+        &binding.profile_id,
+        binding.role,
+        binding.isolation,
+        &binding.tool_contract_fingerprint,
+        &binding.workspace_snapshot_id,
+        &binding.root_cancellation_scope_id,
+        30 * 60 * 1_000 + 1,
+    )?;
+    grant.validate_tool_effect(
+        &binding.tool_contract_fingerprint,
+        &binding.workspace_snapshot_id,
+        &binding.root_cancellation_scope_id,
+        u64::MAX - 1,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn readonly_invocation_settles_only_complete_unchanged_workspace_effects() -> Result<()> {
     let binding = sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?;
     let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;

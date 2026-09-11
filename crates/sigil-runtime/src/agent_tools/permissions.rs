@@ -1,7 +1,5 @@
 use super::*;
 
-const AGENT_INVOCATION_GRANT_TTL_MS: u64 = 30 * 60 * 1_000;
-
 pub(super) fn tool_scope_summary(scope: &sigil_kernel::ToolRegistryScope) -> String {
     if scope.allow_all {
         return "all tools".to_owned();
@@ -158,7 +156,11 @@ pub(crate) fn mint_agent_invocation_grant(
                 &options.workspace_root,
             )?,
             root_cancellation_scope_id: root_cancellation.scope_id().to_owned(),
-            expires_at_ms: now_ms.saturating_add(AGENT_INVOCATION_GRANT_TTL_MS),
+            // Child authority is owned by the parent invocation lifecycle.  It must not expire
+            // merely because a long-running task crossed an arbitrary wall-clock interval; the
+            // root cancellation scope and per-effect checks remain authoritative.  A finite
+            // expiry is still honored when a caller supplies one to the kernel directly.
+            expires_at_ms: u64::MAX,
         },
         now_ms,
     )
