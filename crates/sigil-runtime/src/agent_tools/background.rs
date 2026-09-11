@@ -215,6 +215,59 @@ pub(super) struct BackgroundChatAgentResult {
     pub(super) consumed_mailbox_route_ids: Vec<AgentRouteId>,
 }
 
+/// Promotes queued background follow-ups through the kernel's active conversation invocation.
+///
+/// The receiver is shared behind an async mutex because the kernel owns the provider trait for
+/// the lifetime of one run. Route ids are retained separately so the supervisor can append their
+/// durable consumed entries after the same invocation reaches a terminal disposition.
+struct BackgroundMailboxPendingInputProvider {
+    mailbox_rx: tokio::sync::Mutex<mpsc::Receiver<AgentMailboxMessage>>,
+    consumed_route_ids: Arc<tokio::sync::Mutex<Vec<AgentRouteId>>>,
+}
+
+#[async_trait]
+impl sigil_kernel::PendingConversationInputProvider for BackgroundMailboxPendingInputProvider {
+    async fn promote_next_pending_input(
+        &self,
+        session: &mut Session,
+        logical_run_id: &str,
+    ) -> Result<Option<sigil_kernel::PromotedConversationInput>> {
+        let mailbox = self.mailbox_rx.lock().await;
+        let mut messages = Vec::new();
+        while let Ok(message) = mailbox.try_recv() {
+            self.consumed_route_ids
+                .lock()
+                .await
+                .push(message.route_id.clone());
+            messages.push(message);
+        }
+        drop(mailbox);
+        if messages.is_empty() {
+            return Ok(None);
+        }
+        let prompt = messages
+            .iter()
+            .map(|message| {
+                format!(
+                    "route {}:\n{}",
+                    message.route_id.as_str(),
+                    message.prompt.trim()
+                )
+            })
+            .collect::<Vec<_>>();
+        let prompt = format!(
+            "Parent agent sent follow-up instructions while this child agent was active (run {logical_run_id}).\n\n{}",
+            prompt.join("\n\n")
+        );
+        let prompt = sigil_kernel::safe_persistence_text(&prompt);
+        session.append_user_message(sigil_kernel::ModelMessage::user(prompt.clone()))?;
+        Ok(Some(sigil_kernel::PromotedConversationInput {
+            prompt,
+            runtime_context: Default::default(),
+        }))
+    }
+}
+
 impl AgentToolBackgroundRuns {
     #[must_use]
     pub fn with_event_sink(event_sink: Arc<dyn AgentToolBackgroundEventSink>) -> Self {
@@ -458,15 +511,19 @@ pub(super) async fn run_background_chat_agent(
     event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
     let thread_id = thread.thread_id.clone();
-    let web_task_tree_budget = initial_input.web_task_tree_budget();
-    let tool_artifact_read_budget = initial_input.tool_artifact_read_budget();
+    let consumed_route_ids = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let pending_input_provider = Arc::new(BackgroundMailboxPendingInputProvider {
+        mailbox_rx: tokio::sync::Mutex::new(mailbox_rx),
+        consumed_route_ids: Arc::clone(&consumed_route_ids),
+    });
+    let initial_input = initial_input.with_pending_input_provider(pending_input_provider);
     let mut handler = BackgroundChatChildEventHandler {
         thread_id: thread_id.clone(),
         sink: event_sink.clone(),
     };
     let mut approval_handler =
         BackgroundApprovalHandler::new(thread, &child_options.workspace_root)?;
-    let mut latest_output = match child_agent
+    let latest_output = match child_agent
         .run_with_approval_input(
             &mut child_session,
             initial_input,
@@ -483,14 +540,12 @@ pub(super) async fn run_background_chat_agent(
             return Err(error);
         }
     };
-    let mut consumed_mailbox_route_ids = Vec::new();
-
     resolve_started_background_user_input_continuations(&mut child_session)?;
 
     if let Some(result) = background_user_input_result(
         &child_session,
         &latest_output,
-        consumed_mailbox_route_ids.clone(),
+        consumed_route_ids.lock().await.clone(),
     )? {
         emit_background_agent_status(
             event_sink.as_ref(),
@@ -499,63 +554,6 @@ pub(super) async fn run_background_chat_agent(
             Some("blocked_needs_user_input".to_owned()),
         );
         return Ok(result);
-    }
-
-    loop {
-        let mut prompts = Vec::new();
-        while let Ok(message) = mailbox_rx.try_recv() {
-            consumed_mailbox_route_ids.push(message.route_id.clone());
-            prompts.push(format!(
-                "route {}:\n{}",
-                message.route_id.as_str(),
-                message.prompt.trim()
-            ));
-        }
-        if prompts.is_empty() {
-            break;
-        }
-        let followup_prompt = format!(
-            "Parent agent sent follow-up instructions while this child agent was active.\n\n{}",
-            prompts.join("\n\n")
-        );
-        let mut followup_input = sigil_kernel::AgentRunInput::user(followup_prompt);
-        if let Some(budget) = web_task_tree_budget.as_ref() {
-            followup_input = followup_input.with_web_task_tree_budget(Arc::clone(budget));
-        }
-        if let Some(budget) = tool_artifact_read_budget.as_ref() {
-            followup_input = followup_input.with_tool_artifact_read_budget(budget.clone());
-        }
-        latest_output = match child_agent
-            .run_with_approval_input(
-                &mut child_session,
-                followup_input,
-                child_options.clone(),
-                &mut handler,
-                &mut approval_handler,
-            )
-            .await
-        {
-            Ok(output) => output,
-            Err(error) => {
-                reconcile_failed_background_user_input_continuations(&mut child_session)?;
-                emit_background_agent_error_status(event_sink.as_ref(), &thread_id, &error);
-                return Err(error);
-            }
-        };
-        resolve_started_background_user_input_continuations(&mut child_session)?;
-        if let Some(result) = background_user_input_result(
-            &child_session,
-            &latest_output,
-            consumed_mailbox_route_ids.clone(),
-        )? {
-            emit_background_agent_status(
-                event_sink.as_ref(),
-                &thread_id,
-                AgentThreadStatus::Blocked,
-                Some("blocked_needs_user_input".to_owned()),
-            );
-            return Ok(result);
-        }
     }
 
     let materialized = materialize_child_agent_final_answer(
@@ -581,7 +579,7 @@ pub(super) async fn run_background_chat_agent(
         },
         outcome,
         usage,
-        consumed_mailbox_route_ids,
+        consumed_mailbox_route_ids: consumed_route_ids.lock().await.clone(),
     })
 }
 

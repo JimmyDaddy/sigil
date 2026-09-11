@@ -1037,6 +1037,7 @@ impl Provider for ParallelBarrierChildProvider {
 struct DelayedFollowupProvider {
     delay: Duration,
     observed_followup: Arc<Mutex<bool>>,
+    invocation_count: Option<Arc<AtomicUsize>>,
 }
 
 #[async_trait]
@@ -1053,6 +1054,9 @@ impl Provider for DelayedFollowupProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        if let Some(invocation_count) = self.invocation_count.as_ref() {
+            invocation_count.fetch_add(1, Ordering::SeqCst);
+        }
         tokio::time::sleep(self.delay).await;
         let followup_seen = request
             .messages
@@ -1962,6 +1966,7 @@ impl AgentToolProviderFactory for ParallelBarrierProviderFactory {
 
 struct DelayedFollowupProviderFactory {
     observed_followup: Arc<Mutex<bool>>,
+    invocation_count: Option<Arc<AtomicUsize>>,
 }
 
 #[async_trait]
@@ -1975,6 +1980,7 @@ impl AgentToolProviderFactory for DelayedFollowupProviderFactory {
         Ok(Box::new(DelayedFollowupProvider {
             delay: Duration::from_millis(20),
             observed_followup: self.observed_followup.clone(),
+            invocation_count: self.invocation_count.clone(),
         }))
     }
 }
@@ -4970,12 +4976,14 @@ async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
     let observed_followup = Arc::new(Mutex::new(false));
+    let invocation_count = Arc::new(AtomicUsize::new(0));
     let mut runtime = user_authorized_runtime_with_provider_factory(
         supervisor,
         config,
         registry,
         Arc::new(DelayedFollowupProviderFactory {
             observed_followup: observed_followup.clone(),
+            invocation_count: Some(invocation_count.clone()),
         }),
     );
     let mut session = Session::new("parent", "model");
@@ -5088,6 +5096,7 @@ async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
             .lock()
             .expect("followup observation lock should not be poisoned")
     );
+    assert_eq!(invocation_count.load(Ordering::SeqCst), 2);
     let projection = session.agent_thread_state_projection();
     let thread = projection
         .threads
@@ -5313,7 +5322,10 @@ async fn background_agent_returns_running_handle_and_wait_collects_result() -> R
         supervisor,
         config,
         registry,
-        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+        Arc::new(DelayedFollowupProviderFactory {
+            observed_followup,
+            invocation_count: None,
+        }),
     );
     let mut session = Session::new("parent", "model");
     let mut handler = RecordingEventHandler::default();
@@ -5422,7 +5434,10 @@ async fn background_spawns_do_not_wait_for_previous_child_completion() -> Result
         supervisor,
         config,
         registry,
-        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+        Arc::new(DelayedFollowupProviderFactory {
+            observed_followup,
+            invocation_count: None,
+        }),
     );
     let mut session = Session::new("parent", "model");
     let mut handler = RecordingEventHandler::default();
@@ -6862,7 +6877,10 @@ async fn background_agent_can_be_collected_by_later_runtime() -> Result<()> {
         supervisor.clone(),
         config.clone(),
         registry.clone(),
-        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+        Arc::new(DelayedFollowupProviderFactory {
+            observed_followup,
+            invocation_count: None,
+        }),
     )
     .with_background_runs(background_runs.clone());
     let mut session = Session::new("parent", "model");
@@ -7170,7 +7188,10 @@ async fn wait_agent_waits_for_running_background_result() -> Result<()> {
         supervisor,
         config,
         registry,
-        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+        Arc::new(DelayedFollowupProviderFactory {
+            observed_followup,
+            invocation_count: None,
+        }),
     );
     let mut session = Session::new("parent", "model");
     let mut handler = RecordingEventHandler::default();

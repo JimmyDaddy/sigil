@@ -2855,10 +2855,10 @@ where
 
             // Safe-point follow-up injection: after the first provider turn, a queued
             // follow-up is promoted into the session and answered by the same run, without
-            // interrupting it. Routing microturns and non-conversation runs are exempt.
+            // interrupting it. The provider is an explicit opt-in from the runtime owner;
+            // routing microturns remain exempt.
             if model_turns >= 2
                 && !task_routing_decision_pending
-                && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
                 && let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
@@ -4456,7 +4456,6 @@ where
             // The pending assistant text is persisted so the follow-up answer continues the
             // transcript instead of replacing it.
             if !task_routing_decision_pending
-                && matches!(purpose.as_ref(), Some(AgentRunPurpose::Conversation(_)))
                 && let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
