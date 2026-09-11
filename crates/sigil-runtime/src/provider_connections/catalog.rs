@@ -13,6 +13,9 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{ConnectionId, ModelRef, RootConfig};
+use sigil_provider_http::{
+    ProviderHttpClientOptions, ProviderHttpRedirectPolicy, build_provider_http_client_with_options,
+};
 use tokio::sync::Mutex;
 
 use super::catalog_cache::{
@@ -201,11 +204,11 @@ impl ProviderModelCatalogService {
         environment: Arc<dyn CredentialEnvironment>,
     ) -> anyhow::Result<Self> {
         let _ = sweep_catalog_cache(&cache_root);
-        let client = Client::builder()
-            .timeout(CATALOG_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .build()?;
+        let client = build_provider_http_client_with_options(ProviderHttpClientOptions {
+            timeout: Some(CATALOG_TIMEOUT),
+            redirect: ProviderHttpRedirectPolicy::None,
+            referer: false,
+        })?;
         Ok(Self {
             cache_root,
             client,

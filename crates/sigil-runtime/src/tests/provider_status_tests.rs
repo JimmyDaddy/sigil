@@ -66,6 +66,13 @@ fn provider_config(api_key: Option<&str>) -> ProviderStatusConfig {
 }
 
 #[test]
+fn provider_status_client_uses_shared_transport_builder() {
+    let client = super::build_provider_status_client(1, "status-test")
+        .expect("shared provider HTTP builder should construct status client");
+    drop(client);
+}
+
+#[test]
 fn parse_remote_model_ids_keeps_order_and_deduplicates() {
     let payload = json!({
         "data": [

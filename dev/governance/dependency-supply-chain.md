@@ -216,6 +216,14 @@ R40.3 没有引入新版本或来源；该切片完成时的两项显式例外�
 R56.2 没有引入新的版本或来源。provider credential store 与 MCP OAuth store 使用不同 service、
 record schema 和 public trait，避免把 API key、OAuth token 与 continuation key 的 scope/lifecycle 合并。
 
+## Provider HTTP trust and usage-specific transport options
+
+| 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |
+|---|---|---|---|---|---|
+| `sigil-provider-http` | workspace path crate；无新增第三方版本或 feature | `sigil-runtime/provider_connections/catalog`、`sigil-runtime/provider_status` | 复用同一 CA-aware、TLS 校验不降级的 reqwest builder；catalog 仅设置 bounded timeout、禁止 redirect、关闭 referer，provider status 保留其用途的 timeout 与默认 bounded redirect，协议和鉴权仍由 runtime 各 owner 持有 | Sigil first-party crate；本仓库维护 | runtime 新增直接 path 依赖；不从 provider crate 的传递依赖间接调用。选项只影响传输边界，不改变证书链/hostname 校验；catalog/status 的真实私有 CA、错误证据和 timeout/redirect 回归仍需随各自批次验证 |
+
+该复用不把 catalog 或 status 提升为 provider 协议 owner；两者继续各自维护 endpoint、credential、响应解析和用途 timeout。任何后续 transport 选项扩展都必须保持显式 CA bundle、证书链及 hostname 校验。
+
 ## Context Compaction V2 portable tokenizer（K25.10/K25.13）
 
 | 依赖 | 锁定版本 / feature | Owner | 用途与安全理由 | 许可 / 维护来源 | 当前结论 |

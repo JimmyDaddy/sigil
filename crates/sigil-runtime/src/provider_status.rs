@@ -8,6 +8,9 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 use reqwest::Client;
 use sigil_kernel::RootConfig;
+use sigil_provider_http::{
+    ProviderHttpClientOptions, ProviderHttpRedirectPolicy, build_provider_http_client_with_options,
+};
 use tokio::{runtime::Runtime, task::JoinHandle};
 
 use crate::{
@@ -417,10 +420,12 @@ fn provider_status_url(config: &ProviderStatusConfig, path_suffix: &str) -> Stri
 }
 
 fn build_provider_status_client(timeout_secs: u64, label: &str) -> Result<Client> {
-    Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|error| anyhow!("failed to build {label} client: {error}"))
+    build_provider_http_client_with_options(ProviderHttpClientOptions {
+        timeout: Some(Duration::from_secs(timeout_secs)),
+        redirect: ProviderHttpRedirectPolicy::Default,
+        referer: true,
+    })
+    .map_err(|error| anyhow!("failed to build {label} client: {error}"))
 }
 
 fn parse_balance_snapshot(payload: &serde_json::Value) -> Result<BalanceSnapshot> {

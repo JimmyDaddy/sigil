@@ -17,6 +17,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 
 #[test]
+fn catalog_service_uses_shared_provider_http_builder() {
+    let cache_root = tempfile::tempdir().expect("cache root");
+    let _service = ProviderModelCatalogService::new(
+        cache_root.path().to_path_buf(),
+        Arc::new(FakeCredentialStore::default()),
+        Arc::new(ProcessCredentialEnvironment),
+    )
+    .expect("shared provider HTTP builder should construct catalog service");
+}
+
+#[test]
 fn default_setup_root_config_selects_core_and_preserves_optional_memory_preferences() {
     let config = default_setup_root_config();
 

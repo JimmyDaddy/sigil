@@ -5937,6 +5937,7 @@ dependencies = [
  "sigil-provider-anthropic",
  "sigil-provider-deepseek",
  "sigil-provider-gemini",
+ "sigil-provider-http",
  "sigil-provider-openai-compat",
  "sigil-provider-openai-responses",
  "sigil-resource-authority",
