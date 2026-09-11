@@ -6026,6 +6026,7 @@ dependencies = [
 name = "sigil-tui-app"
 version = "0.0.1-beta.4"
 dependencies = [
+ "futures",
  "sigil-application",
  "sigil-tui",
 ]
