@@ -68,6 +68,13 @@ fn queued_conversation_input_entry_with_target(
 }
 
 fn sync_child_agent(app: &mut AppState) -> Result<()> {
+    sync_child_agent_with_status(app, sigil_kernel::AgentThreadStatus::Completed)
+}
+
+fn sync_child_agent_with_status(
+    app: &mut AppState,
+    child_status: sigil_kernel::AgentThreadStatus,
+) -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;
     let child_session_ref =
@@ -165,7 +172,7 @@ fn sync_child_agent(app: &mut AppState) -> Result<()> {
         SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
             sigil_kernel::AgentThreadStatusChangedEntry {
                 thread_id,
-                status: sigil_kernel::AgentThreadStatus::Completed,
+                status: child_status,
                 reason: None,
                 updated_at_ms: None,
             },
@@ -2139,6 +2146,27 @@ fn busy_plain_prompt_to_child_fails_closed_without_false_queue() -> Result<()> {
     assert!(app.composer_queue_rows().is_empty());
     assert_eq!(app.timeline.len(), main_timeline_len_before);
     assert!(!transcript_text(&app).contains("check this thread next"));
+    Ok(())
+}
+
+#[test]
+fn busy_plain_prompt_to_running_child_routes_to_its_mailbox() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_with_status(&mut app, sigil_kernel::AgentThreadStatus::Running)?;
+    assert!(app.activate_agent_view_at_index(1));
+    app.runtime.is_busy = true;
+    app.composer.input = "check this thread next".to_owned();
+    app.composer.input_cursor = app.composer.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::MessageAgent { thread_id, prompt })
+            if thread_id.as_str() == "child_1" && prompt == "check this thread next"
+    ));
+    assert!(app.composer.input.is_empty());
+    assert_eq!(app.last_notice(), Some("sending message to agent"));
     Ok(())
 }
 

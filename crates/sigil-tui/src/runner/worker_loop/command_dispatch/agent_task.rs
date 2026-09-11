@@ -1008,12 +1008,6 @@ where
                 }
             }
             AgentTaskCommand::MessageAgent { thread_id, prompt } => {
-                if state.run.active.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before messaging agent".to_owned(),
-                    ));
-                    continue;
-                }
                 match message_agent_thread(
                     runtime,
                     &state.agent.background_runs,

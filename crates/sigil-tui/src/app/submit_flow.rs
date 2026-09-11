@@ -24,17 +24,6 @@ impl AppState {
             self.reject_non_build_attachment_submission();
             return Ok(None);
         }
-        if self.runtime.is_busy
-            && self.composer.queue_edit_target.is_none()
-            && !prompt.starts_with('/')
-            && !prompt.trim_start().starts_with('@')
-            && matches!(&self.agent_panel.active_view, AgentView::Child { .. })
-        {
-            self.last_notice =
-                Some("child agent follow-ups cannot be queued; input kept".to_owned());
-            self.push_event("agent:follow-up-unavailable", "active run");
-            return Ok(None);
-        }
         self.discard_cleared_input_draft();
         if !prompt.is_empty() {
             self.record_input_history(prompt.clone());
@@ -94,6 +83,30 @@ impl AppState {
         }
 
         if self.runtime.is_busy {
+            if self.composer.queue_edit_target.is_none()
+                && !prompt.starts_with('/')
+                && !prompt.trim_start().starts_with('@')
+                && matches!(&self.agent_panel.active_view, AgentView::Child { .. })
+                && let Some(thread) = self.active_agent_thread_projection()
+                && !thread.status.is_terminal()
+            {
+                let thread_id = thread.thread_id;
+                self.set_input_and_cursor(String::new());
+                self.reset_slash_selector();
+                self.last_notice = Some("sending message to agent".to_owned());
+                self.push_event("agent:message-requested", thread_id.as_str());
+                return Ok(Some(AppAction::MessageAgent { thread_id, prompt }));
+            }
+            if self.composer.queue_edit_target.is_none()
+                && !prompt.starts_with('/')
+                && !prompt.trim_start().starts_with('@')
+                && matches!(&self.agent_panel.active_view, AgentView::Child { .. })
+            {
+                self.last_notice =
+                    Some("child agent follow-ups cannot be queued; input kept".to_owned());
+                self.push_event("agent:follow-up-unavailable", "active run");
+                return Ok(None);
+            }
             let (kind, target) = self.active_conversation_queue_submission();
             let safe_prompt = sigil_kernel::safe_persistence_text(&prompt);
             // Show the follow-up in the conversation immediately; it is delivered by the
