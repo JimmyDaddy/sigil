@@ -744,6 +744,7 @@ fn durable_task_cancellation_suppresses_crash_prefix_final_repair() -> Result<()
             artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
             verification_refs: Vec::new(),
+            completion_claim: None,
         },
     ))?;
     session
@@ -886,6 +887,7 @@ fn synthesis_result_only_crash_prefix_completes_without_provider_replay() -> Res
             artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
             verification_refs: Vec::new(),
+            completion_claim: None,
         },
     ))?;
 
@@ -1010,6 +1012,7 @@ fn step_result_only_crash_prefix_blocks_without_replaying_side_effects() -> Resu
             artifact_refs: Vec::new(),
             changed_paths: vec!["src/lib.rs".to_owned()],
             verification_refs: Vec::new(),
+            completion_claim: None,
         },
     ))?;
     let actions = coordinator.reconcile(&mut session, &parent_ref()?, 20)?;
@@ -1118,6 +1121,7 @@ fn legacy_step_result_only_prefix_fails_closed() -> Result<()> {
             artifact_refs: Vec::new(),
             changed_paths: vec!["src/legacy.rs".to_owned()],
             verification_refs: Vec::new(),
+            completion_claim: None,
         },
     ))?;
 

@@ -5571,6 +5571,7 @@ pub(super) fn participant_result_entry(
             })
             .filter(|reference| !reference.is_empty())
             .collect(),
+        completion_claim: None,
     };
     entry.validate_shape()?;
     Ok(entry)

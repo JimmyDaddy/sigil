@@ -247,6 +247,7 @@ fn typed_task_dependency_handoff(
         "artifacts": artifacts,
         "changed_paths": result.changed_paths,
         "verification_refs": result.verification_refs,
+        "completion_claim": result.completion_claim,
     })
     .to_string()
 }

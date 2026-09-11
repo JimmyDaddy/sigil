@@ -9,7 +9,8 @@ use serde_json::json;
 use sha2::Digest;
 
 use crate::{
-    AgentArtifactRef, AgentFinalAnswerRef, AgentThreadId,
+    AgentArtifactRef, AgentFinalAnswerRef, AgentThreadId, IntentCriterionId, IntentVersionRef,
+    TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
     provider::ToolCall,
     session::{ControlEntry, SessionLogEntry},
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
@@ -2887,6 +2888,10 @@ impl TaskParticipantRetryScheduledEntry {
 }
 
 /// Bounded result committed from a participant-owned transcript into the parent task log.
+///
+/// A participant result may carry a [`TaskCompletionClaimV1`] when the model explicitly reported
+/// which immutable requirements it fulfilled. The claim is advisory evidence for Task settlement;
+/// it never changes the referenced Task/Intent contract or the canonical verification projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TaskParticipantResultEntry {
@@ -2907,6 +2912,431 @@ pub struct TaskParticipantResultEntry {
     pub changed_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_claim: Option<TaskCompletionClaimV1>,
+}
+
+/// Current durable schema for a model-reported Task completion claim.
+pub const TASK_COMPLETION_CLAIM_SCHEMA_VERSION: u16 = 1;
+const TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS: usize = 128;
+const TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS: usize = 32;
+const TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS: usize = 2_000;
+const TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS: usize = 128;
+
+/// The immutable execution authority to which a completion claim is bound.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum TaskCompletionClaimSubjectV1 {
+    Task {
+        task_id: TaskId,
+        plan_version: u32,
+    },
+    Step {
+        task_id: TaskId,
+        plan_version: u32,
+        step_id: TaskStepId,
+    },
+    Direct {
+        task_id: TaskId,
+        admission_id: String,
+    },
+}
+
+impl TaskCompletionClaimSubjectV1 {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Task {
+                task_id,
+                plan_version,
+            } => {
+                if *plan_version == 0 {
+                    bail!("task completion claim plan version must be non-zero");
+                }
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
+                )?;
+            }
+            Self::Step {
+                task_id,
+                plan_version,
+                step_id,
+            } => {
+                if *plan_version == 0 {
+                    bail!("task completion claim plan version must be non-zero");
+                }
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
+                )?;
+                validate_stable_task_claim_token(
+                    "task completion claim step id",
+                    step_id.as_str(),
+                )?;
+            }
+            Self::Direct {
+                task_id,
+                admission_id,
+            } => {
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
+                )?;
+                validate_stable_task_claim_token(
+                    "task completion claim admission id",
+                    admission_id,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn task_id(&self) -> &TaskId {
+        match self {
+            Self::Task { task_id, .. }
+            | Self::Step { task_id, .. }
+            | Self::Direct { task_id, .. } => task_id,
+        }
+    }
+}
+
+/// An immutable source location for one requirement in the accepted Task/Intent authority.
+///
+/// The claim stores only identity and the source contract digest. Requirement text and required
+/// status remain owned by the source record and are never copied into this protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum TaskCompletionRequirementSourceV1 {
+    IntentCriterion {
+        intent_ref: IntentVersionRef,
+        criterion_id: IntentCriterionId,
+    },
+    TaskStepContract {
+        task_id: TaskId,
+        plan_version: u32,
+        step_id: TaskStepId,
+        field: TaskCompletionRequirementFieldV1,
+        index: u32,
+        contract_set_sha256: String,
+    },
+    DirectObjective {
+        admission_id: String,
+        objective_hash: String,
+    },
+}
+
+/// Which source contract array supplied a Task-step requirement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionRequirementFieldV1 {
+    Deliverable,
+    AcceptanceCriterion,
+}
+
+impl TaskCompletionRequirementSourceV1 {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::IntentCriterion {
+                intent_ref,
+                criterion_id,
+            } => {
+                intent_ref.validate()?;
+                validate_stable_task_claim_token(
+                    "task completion claim criterion id",
+                    criterion_id.as_str(),
+                )?;
+            }
+            Self::TaskStepContract {
+                task_id,
+                plan_version,
+                step_id,
+                index,
+                contract_set_sha256,
+                ..
+            } => {
+                if *plan_version == 0 {
+                    bail!("task completion claim plan version must be non-zero");
+                }
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
+                )?;
+                validate_stable_task_claim_token(
+                    "task completion claim step id",
+                    step_id.as_str(),
+                )?;
+                if *index > 1_000_000 {
+                    bail!("task completion claim requirement index is out of bounds");
+                }
+                validate_sha256_fingerprint(
+                    "task completion claim contract-set hash",
+                    contract_set_sha256,
+                )?;
+            }
+            Self::DirectObjective {
+                admission_id,
+                objective_hash,
+            } => {
+                validate_stable_task_claim_token(
+                    "task completion claim admission id",
+                    admission_id,
+                )?;
+                validate_sha256_fingerprint(
+                    "task completion claim objective hash",
+                    objective_hash,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Model-reported state for one immutable requirement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionRequirementOutcomeV1 {
+    Fulfilled,
+    Unfulfilled,
+    NotApplicable,
+}
+
+/// One bounded model report for an immutable requirement and its supporting evidence references.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskCompletionRequirementClaimV1 {
+    pub source: TaskCompletionRequirementSourceV1,
+    pub required: bool,
+    pub outcome: TaskCompletionRequirementOutcomeV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentArtifactRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub explanation: String,
+}
+
+/// Typed, bounded model declaration of which requirements were delivered by one attempt.
+///
+/// This is a claim, not a second goal store. It can only reference existing source identities;
+/// the host still checks source versions, evidence ownership, effect settlement, and canonical
+/// readiness before accepting a completed Task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TaskCompletionClaimV1 {
+    pub schema_version: u16,
+    pub subject: TaskCompletionClaimSubjectV1,
+    pub attempt_id: String,
+    pub evidence_frontier: String,
+    pub status: TaskCompletionClaimStatusV1,
+    pub requirements: Vec<TaskCompletionRequirementClaimV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<AgentArtifactRef>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub explanation: String,
+}
+
+/// Coarse semantic delivery state reported by the model.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionClaimStatusV1 {
+    Completed,
+    Partial,
+    Blocked,
+}
+
+impl TaskCompletionClaimV1 {
+    /// Validates claim shape without consulting mutable Task, Intent, or verification state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the claim is malformed, oversized, internally inconsistent, or
+    /// attempts to report a completed claim while leaving a required source requirement unfulfilled.
+    pub fn validate_shape(&self) -> Result<()> {
+        if self.schema_version != TASK_COMPLETION_CLAIM_SCHEMA_VERSION {
+            bail!("unsupported task completion claim schema version");
+        }
+        self.subject.validate()?;
+        validate_stable_task_claim_token("task completion claim attempt id", &self.attempt_id)?;
+        validate_sha256_fingerprint(
+            "task completion claim evidence frontier",
+            &self.evidence_frontier,
+        )?;
+        if self.requirements.is_empty() {
+            bail!("task completion claim must report at least one requirement");
+        }
+        if self.requirements.len() > TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS {
+            bail!("task completion claim has too many requirements");
+        }
+        if self.artifact_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
+            bail!("task completion claim has too many artifact refs");
+        }
+        validate_task_completion_claim_artifacts(&self.artifact_refs)?;
+        validate_task_completion_claim_explanation(&self.explanation)?;
+
+        let mut source_keys = BTreeSet::new();
+        let mut fulfilled = 0usize;
+        let mut unfulfilled_required = 0usize;
+        for requirement in &self.requirements {
+            requirement.source.validate()?;
+            if !source_keys.insert(serde_json::to_string(&requirement.source)?) {
+                bail!("task completion claim repeats a requirement source");
+            }
+            if requirement.artifact_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
+                bail!("task completion requirement has too many artifact refs");
+            }
+            validate_task_completion_claim_artifacts(&requirement.artifact_refs)?;
+            if requirement.event_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
+                bail!("task completion requirement has too many event refs");
+            }
+            for event_ref in &requirement.event_refs {
+                validate_bounded_task_claim_text(
+                    "task completion event ref",
+                    event_ref,
+                    TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS,
+                )?;
+            }
+            validate_task_completion_claim_explanation(&requirement.explanation)?;
+            match requirement.outcome {
+                TaskCompletionRequirementOutcomeV1::Fulfilled => fulfilled += 1,
+                TaskCompletionRequirementOutcomeV1::Unfulfilled if requirement.required => {
+                    unfulfilled_required += 1;
+                }
+                TaskCompletionRequirementOutcomeV1::Unfulfilled
+                | TaskCompletionRequirementOutcomeV1::NotApplicable => {}
+            }
+        }
+        match self.status {
+            TaskCompletionClaimStatusV1::Completed if unfulfilled_required > 0 => {
+                bail!("completed task claim leaves required requirements unfulfilled");
+            }
+            TaskCompletionClaimStatusV1::Partial if fulfilled == self.requirements.len() => {
+                bail!("partial task claim reports every requirement fulfilled");
+            }
+            TaskCompletionClaimStatusV1::Blocked if unfulfilled_required == 0 => {
+                bail!("blocked task claim has no unfulfilled required requirement");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Returns whether the model declaration itself is eligible for a completed settlement.
+    ///
+    /// This does not prove the Task is complete; callers must still validate source identities,
+    /// readiness, active blockers, and effect settlement.
+    #[must_use]
+    pub fn declares_completed_delivery(&self) -> bool {
+        self.status == TaskCompletionClaimStatusV1::Completed
+            && self.requirements.iter().all(|requirement| {
+                !requirement.required
+                    || requirement.outcome == TaskCompletionRequirementOutcomeV1::Fulfilled
+            })
+    }
+
+    /// Validates that this claim is attached to one exact participant attempt identity.
+    ///
+    /// The source contract and verification projection are intentionally outside this method;
+    /// callers must validate those against the current durable projection before settlement.
+    pub fn validate_for_participant_attempt(
+        &self,
+        attempt: &TaskParticipantAttemptEntry,
+    ) -> Result<()> {
+        self.validate_shape()?;
+        if self.attempt_id != attempt.attempt_id.as_str()
+            || self.subject.task_id() != &attempt.task_id
+        {
+            bail!("task completion claim is bound to another participant attempt");
+        }
+        match (
+            &self.subject,
+            attempt.purpose,
+            attempt.plan_version,
+            attempt.step_id.as_ref(),
+        ) {
+            (
+                TaskCompletionClaimSubjectV1::Task { plan_version, .. },
+                TaskParticipantPurpose::Synthesis,
+                Some(attempt_plan_version),
+                None,
+            ) if *plan_version == attempt_plan_version => {}
+            (
+                TaskCompletionClaimSubjectV1::Step {
+                    plan_version,
+                    step_id,
+                    ..
+                },
+                TaskParticipantPurpose::Step,
+                Some(attempt_plan_version),
+                Some(attempt_step_id),
+            ) if *plan_version == attempt_plan_version && step_id == attempt_step_id => {}
+            _ => bail!("task completion claim subject does not match participant purpose"),
+        }
+        Ok(())
+    }
+
+    /// Validates that this claim is attached to one exact direct-execution attempt and admission.
+    pub fn validate_for_direct_attempt(
+        &self,
+        attempt: &TaskDirectExecutionAttemptV1,
+        admission: &TaskDirectExecutionAdmittedV1,
+    ) -> Result<()> {
+        self.validate_shape()?;
+        if self.attempt_id != attempt.attempt_id
+            || attempt.task_id != admission.task_id
+            || attempt.admission_id != admission.admission_id
+        {
+            bail!("task completion claim is bound to another direct execution attempt");
+        }
+        match &self.subject {
+            TaskCompletionClaimSubjectV1::Direct {
+                task_id,
+                admission_id,
+            } if task_id == &admission.task_id && admission_id == &admission.admission_id => Ok(()),
+            _ => bail!("task completion claim subject is not the admitted direct execution"),
+        }
+    }
+}
+
+fn validate_stable_task_claim_token(label: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 256
+        || crate::safe_persistence_text(value) != value
+        || value.chars().any(char::is_whitespace)
+    {
+        bail!("{label} is not a bounded stable token");
+    }
+    Ok(())
+}
+
+fn validate_bounded_task_claim_text(label: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.is_empty()
+        || value.chars().count() > max_chars
+        || crate::safe_persistence_text(value) != value
+    {
+        bail!("{label} is not bounded safe text");
+    }
+    Ok(())
+}
+
+fn validate_task_completion_claim_explanation(value: &str) -> Result<()> {
+    if value.chars().count() > TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS
+        || crate::safe_persistence_text(value) != value
+    {
+        bail!("task completion claim explanation is not bounded safe text");
+    }
+    Ok(())
+}
+
+fn validate_task_completion_claim_artifacts(artifacts: &[AgentArtifactRef]) -> Result<()> {
+    for artifact in artifacts {
+        validate_bounded_task_claim_text("task completion artifact kind", &artifact.kind, 128)?;
+        validate_bounded_task_claim_text("task completion artifact path", &artifact.path, 512)?;
+        if let Some(hash) = artifact.hash.as_deref() {
+            validate_bounded_task_claim_text("task completion artifact hash", hash, 128)?;
+        }
+    }
+    Ok(())
 }
 
 /// Durable, hash-only checkpoint for one task-participant model turn.
@@ -3033,6 +3463,15 @@ impl TaskParticipantResultEntry {
                 reference,
                 TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
             )?;
+        }
+        if let Some(claim) = self.completion_claim.as_ref() {
+            claim.validate_shape()?;
+            if claim.subject.task_id() != &self.task_id {
+                bail!("task completion claim subject does not match participant result task");
+            }
+            if claim.attempt_id != self.attempt_id.as_str() {
+                bail!("task completion claim attempt does not match participant result");
+            }
         }
         Ok(())
     }

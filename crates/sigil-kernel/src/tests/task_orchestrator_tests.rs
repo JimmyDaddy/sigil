@@ -334,6 +334,7 @@ fn seed_completed_synthesis_prefix(
             artifact_refs: Vec::new(),
             changed_paths: Vec::new(),
             verification_refs: Vec::new(),
+            completion_claim: None,
         },
     ))?;
     let mut completed = attempt;

@@ -7,10 +7,13 @@ use crate::task::{TaskRootCompletionBlockerV1, TaskRootTerminalCandidateV1};
 use crate::{
     AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId,
     ConversationTurnRef, ModelMessage, Session, SessionLogEntry, SessionRef,
-    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskApprovalRouteBinding, TaskCapabilityV2,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
+    TASK_PLAN_UPDATE_TOOL_NAME, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskApprovalRouteBinding,
+    TaskCapabilityV2, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskCompletionClaimStatusV1, TaskCompletionClaimSubjectV1,
+    TaskCompletionClaimV1, TaskCompletionRequirementClaimV1, TaskCompletionRequirementFieldV1,
+    TaskCompletionRequirementOutcomeV1, TaskCompletionRequirementSourceV1,
     TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
     TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGuidanceApplyReason,
     TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
@@ -2427,6 +2430,7 @@ fn task_projection_rejects_orphan_participant_results() -> Result<()> {
                 artifact_refs: Vec::new(),
                 changed_paths: Vec::new(),
                 verification_refs: Vec::new(),
+                completion_claim: None,
             },
         )),
     ]);
@@ -2604,6 +2608,7 @@ fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result
         artifact_refs: Vec::new(),
         changed_paths: vec!["path".to_owned(); TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS + 1],
         verification_refs: Vec::new(),
+        completion_claim: None,
     };
 
     let error = entry
@@ -2654,6 +2659,7 @@ fn task_projection_rejects_final_commit_for_another_plan_version() -> Result<()>
                 artifact_refs: Vec::new(),
                 changed_paths: Vec::new(),
                 verification_refs: Vec::new(),
+                completion_claim: None,
             },
         )),
         SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
@@ -2722,6 +2728,7 @@ fn task_projection_rejects_result_ref_outside_attempt_session() -> Result<()> {
                 artifact_refs: Vec::new(),
                 changed_paths: Vec::new(),
                 verification_refs: Vec::new(),
+                completion_claim: None,
             },
         )),
     ]);
@@ -2776,6 +2783,7 @@ fn task_projection_rejects_non_deterministic_parent_final_message_id() -> Result
                 artifact_refs: Vec::new(),
                 changed_paths: Vec::new(),
                 verification_refs: Vec::new(),
+                completion_claim: None,
             },
         )),
         SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
@@ -2999,5 +3007,84 @@ fn explicit_run_target_selection_restores_focus_but_stale_plan_fails_closed() ->
     let stale = TaskStateProjection::from_entries(&entries);
     assert!(stale.current_task().is_none());
     assert_eq!(stale.focus_conflicts, 1);
+    Ok(())
+}
+
+#[test]
+fn task_completion_claim_validates_immutable_requirement_bindings() -> Result<()> {
+    let task_id = TaskId::new("task_claim")?;
+    let step_id = TaskStepId::new("step_claim")?;
+    let requirement = TaskCompletionRequirementClaimV1 {
+        source: TaskCompletionRequirementSourceV1::TaskStepContract {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            field: TaskCompletionRequirementFieldV1::AcceptanceCriterion,
+            index: 0,
+            contract_set_sha256: format!("sha256:{}", "a".repeat(64)),
+        },
+        required: true,
+        outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
+        artifact_refs: Vec::new(),
+        event_refs: vec!["event-1".to_owned()],
+        explanation: "criterion satisfied by the recorded result".to_owned(),
+    };
+    let claim = TaskCompletionClaimV1 {
+        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+        subject: TaskCompletionClaimSubjectV1::Step {
+            task_id,
+            plan_version: 1,
+            step_id,
+        },
+        attempt_id: "attempt-claim".to_owned(),
+        evidence_frontier: format!("sha256:{}", "b".repeat(64)),
+        status: TaskCompletionClaimStatusV1::Completed,
+        requirements: vec![requirement],
+        artifact_refs: Vec::new(),
+        explanation: String::new(),
+    };
+    claim.validate_shape()?;
+    assert!(claim.declares_completed_delivery());
+    Ok(())
+}
+
+#[test]
+fn task_completion_claim_rejects_inconsistent_delivery_status() -> Result<()> {
+    let task_id = TaskId::new("task_claim_invalid")?;
+    let step_id = TaskStepId::new("step_claim_invalid")?;
+    let source = TaskCompletionRequirementSourceV1::TaskStepContract {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        step_id: step_id.clone(),
+        field: TaskCompletionRequirementFieldV1::Deliverable,
+        index: 0,
+        contract_set_sha256: format!("sha256:{}", "c".repeat(64)),
+    };
+    let requirement = TaskCompletionRequirementClaimV1 {
+        source,
+        required: true,
+        outcome: TaskCompletionRequirementOutcomeV1::Unfulfilled,
+        artifact_refs: Vec::new(),
+        event_refs: Vec::new(),
+        explanation: "the deliverable is still pending".to_owned(),
+    };
+    let claim = TaskCompletionClaimV1 {
+        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+        subject: TaskCompletionClaimSubjectV1::Step {
+            task_id,
+            plan_version: 1,
+            step_id,
+        },
+        attempt_id: "attempt-claim-invalid".to_owned(),
+        evidence_frontier: format!("sha256:{}", "d".repeat(64)),
+        status: TaskCompletionClaimStatusV1::Completed,
+        requirements: vec![requirement],
+        artifact_refs: Vec::new(),
+        explanation: String::new(),
+    };
+    let error = claim
+        .validate_shape()
+        .expect_err("completed claim cannot leave a required requirement unfulfilled");
+    assert!(error.to_string().contains("required requirements"));
     Ok(())
 }
