@@ -152,6 +152,35 @@ fn fake_application_replays_exact_receipt_and_rejects_payload_conflict() {
 }
 
 #[test]
+fn client_can_prepare_an_urgent_command_without_a_projection_snapshot() {
+    let app = FakeApplication::new(snapshot()).expect("valid snapshot");
+    let scope = scope();
+    let client = ApplicationClient::new(
+        Arc::new(app),
+        scope.clone(),
+        1,
+        1,
+        HostConnectionInstanceId::new("connection").expect("valid id"),
+    )
+    .expect("client should initialize");
+    let request = client
+        .prepare_command_at_frontier(
+            ApplicationCommandId::new("urgent-command").expect("valid id"),
+            ApplicationCommand::Run(RunCommand::Cancel {
+                binding: "run-1".to_owned(),
+                reason: None,
+            }),
+            ExpectedFrontier {
+                scope,
+                writer_generation: 1,
+                through_sequence: 1,
+            },
+        )
+        .expect("urgent command should not require refresh");
+    assert_eq!(request.envelope.command.kind(), "run");
+}
+
+#[test]
 fn reducer_rejects_gap_and_accepts_exact_event_chain() {
     let envelope = snapshot();
     let mut reducer = ProjectionReducer::open(envelope.clone()).expect("valid snapshot");

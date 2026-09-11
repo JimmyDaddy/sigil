@@ -2224,16 +2224,38 @@ impl ApplicationClient {
         let expected_frontier = self
             .current_frontier()?
             .ok_or(ApplicationError::Unavailable)?;
+        self.prepare_command_at_frontier(
+            command_id,
+            command,
+            ExpectedFrontier {
+                scope: expected_frontier.scope,
+                writer_generation: expected_frontier.writer_generation,
+                through_sequence: expected_frontier.through_sequence,
+            },
+        )
+    }
+
+    /// Freezes a command against a caller-provided durable frontier.
+    ///
+    /// Hosts that own an urgent command identity can use this when the projection stream is
+    /// unavailable during an already authenticated stop request. The application port remains
+    /// responsible for reservation, scope, and domain-owner validation; this method only avoids
+    /// making a projection refresh a prerequisite for preparing the envelope.
+    pub fn prepare_command_at_frontier(
+        &self,
+        command_id: ApplicationCommandId,
+        command: ApplicationCommand,
+        expected_frontier: ExpectedFrontier,
+    ) -> Result<ApplicationCommandRequest, ApplicationError> {
+        if expected_frontier.scope != self.scope {
+            return Err(ApplicationError::ScopeMismatch);
+        }
         let request = ApplicationCommandRequest {
             envelope: ApplicationCommandEnvelope {
                 schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
                 command_id,
                 correlation_id: None,
-                expected_frontier: ExpectedFrontier {
-                    scope: self.scope.clone(),
-                    writer_generation: expected_frontier.writer_generation,
-                    through_sequence: expected_frontier.through_sequence,
-                },
+                expected_frontier,
                 command,
             },
             admission: CommandAdmissionContext::host_bound(

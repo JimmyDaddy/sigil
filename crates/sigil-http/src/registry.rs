@@ -3358,7 +3358,6 @@ impl HttpSessionRunRegistry {
             }
         }
 
-        client.refresh().map_err(application_registry_error)?;
         let reason = command
             .payload
             .reason
@@ -3368,7 +3367,7 @@ impl HttpSessionRunRegistry {
             })
             .transpose()?;
         let receipt = client
-            .execute(
+            .execute_without_refresh(
                 &command.command_id,
                 sigil_application::ApplicationCommand::Run(sigil_application::RunCommand::Cancel {
                     binding: run_id.to_owned(),

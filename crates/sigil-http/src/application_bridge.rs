@@ -140,6 +140,7 @@ pub struct HttpApplicationClient {
     runtime: Handle,
     source_generation: u64,
     command_frontiers: Arc<HttpCommandFrontiers>,
+    urgent_frontier: sigil_application::ExpectedFrontier,
 }
 
 impl HttpApplicationClient {
@@ -166,6 +167,24 @@ impl HttpApplicationClient {
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         let command_id = ApplicationCommandId::new(command_id.to_owned())?;
         let mut request = self.client.prepare_command(command_id, command)?;
+        self.command_frontiers.retain_original(&mut request)?;
+        self.block_on(self.client.execute_prepared(request))
+    }
+
+    /// Executes an urgent command using the host-bound baseline frontier without opening the
+    /// projection stream. Stop requests retain their exact run identity and reservation key even
+    /// when an unrelated projection refresh is unavailable.
+    pub(crate) fn execute_without_refresh(
+        &self,
+        command_id: &str,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        let command_id = ApplicationCommandId::new(command_id.to_owned())?;
+        let mut request = self.client.prepare_command_at_frontier(
+            command_id,
+            command,
+            self.urgent_frontier.clone(),
+        )?;
         self.command_frontiers.retain_original(&mut request)?;
         self.block_on(self.client.execute_prepared(request))
     }
@@ -249,6 +268,11 @@ pub(crate) fn build_client(
     let connection_instance =
         HostConnectionInstanceId::new(format!("http-{}", uuid::Uuid::new_v4()))
             .map_err(application_driver_error)?;
+    let urgent_frontier = sigil_application::ExpectedFrontier {
+        scope: scope.clone(),
+        writer_generation: 1,
+        through_sequence: 1,
+    };
     let client = ApplicationClient::new(service, scope, 1, client_epoch, connection_instance)
         .map_err(application_driver_error)?;
     Ok(HttpApplicationClient {
@@ -256,6 +280,7 @@ pub(crate) fn build_client(
         runtime: context.runtime.clone(),
         source_generation: context.application_generation,
         command_frontiers: Arc::clone(&context.command_frontiers),
+        urgent_frontier,
     })
 }
 

@@ -490,6 +490,37 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
 }
 
 #[tokio::test]
+async fn production_http_urgent_command_does_not_require_projection_refresh() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let driver = production_queue_driver(&temp, "urgent-command");
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-urgent.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let client = registry
+        .application_client(&session.id, "http-urgent-command")
+        .expect("application client should bind");
+
+    let receipt = tokio::task::spawn_blocking(move || {
+        client.execute_without_refresh(
+            "urgent-command-projection-free",
+            ApplicationCommand::Mcp(McpCommand::Refresh {
+                binding: "test-server".to_owned(),
+            }),
+        )
+    })
+    .await
+    .expect("urgent command task should complete")
+    .expect("urgent command should receive a typed response");
+    assert!(matches!(receipt, ApplicationCommandReceipt::Rejected(_)));
+}
+
+#[tokio::test]
 async fn production_run_admission_reports_external_attachment_before_allocating_a_run() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
     let driver = production_queue_driver(&temp, "attachment-admission");
