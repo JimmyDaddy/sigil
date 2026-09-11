@@ -508,7 +508,7 @@ pub(super) fn task_step_readiness(
     let workspace_id = stable_workspace_id(&options.workspace_root)?;
     let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let projection = session.verification_state_projection();
-    let mut policy = projection
+    let policy = projection
         .latest_policy(&scope)
         .map(|entry| entry.policy.clone())
         .or_else(|| {
@@ -545,11 +545,6 @@ pub(super) fn task_step_readiness(
     };
     let step_has_workspace_mutation =
         !output.outcome.changed_files.is_empty() || !durable_mutation_evidence.is_empty();
-    if !step_has_workspace_mutation {
-        policy.required_checks.clear();
-        policy.completion_criteria = CompletionCriteria::NoChecksRequired;
-        policy.allow_unverified_completion = true;
-    }
     let policy_hash = policy.stable_hash()?;
     let mut input = ReadinessInput::new_run(run_status_from_step_status(status), policy);
     input.workspace_trust = projection

@@ -4048,8 +4048,8 @@ async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step(
 }
 
 #[tokio::test]
-async fn sequential_task_orchestrator_completes_mutating_step_without_verification_config()
--> Result<()> {
+async fn sequential_task_orchestrator_completes_mutating_step_without_required_checks() -> Result<()>
+{
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -4100,17 +4100,16 @@ async fn sequential_task_orchestrator_completes_mutating_step_without_verificati
     assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
     assert_eq!(
         output.steps[0].verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
                 if readiness.evaluation.run_status == crate::RunStatus::Completed
-                    && readiness
-                        .evaluation
-                        .required_actions
-                        .contains(&crate::RequiredAction::ProvideVerificationConfig)
+                    && readiness.evaluation.verification_verdict
+                        == VerificationVerdict::NotApplicable
+                    && readiness.evaluation.required_actions.is_empty()
         )
     }));
     Ok(())
@@ -7191,7 +7190,7 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
 }
 
 #[tokio::test]
-async fn direct_child_session_completes_mutating_write_without_verification_config() -> Result<()> {
+async fn direct_child_session_completes_mutating_write_without_required_checks() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -7251,17 +7250,16 @@ async fn direct_child_session_completes_mutating_write_without_verification_conf
     assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
     assert_eq!(
         output.steps[0].verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
                 if readiness.evaluation.run_status == crate::RunStatus::Completed
-                    && readiness
-                        .evaluation
-                        .required_actions
-                        .contains(&crate::RequiredAction::ProvideVerificationConfig)
+                    && readiness.evaluation.verification_verdict
+                        == VerificationVerdict::NotApplicable
+                    && readiness.evaluation.required_actions.is_empty()
         )
     }));
     Ok(())
@@ -8210,7 +8208,7 @@ fn planner_parent_plan_commit_is_atomic_and_idempotent() -> Result<()> {
 }
 
 #[test]
-fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
+fn task_step_readiness_allows_known_changed_files_without_checks() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -8256,17 +8254,17 @@ fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
 
     assert_eq!(
         readiness.evaluation.verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
     assert_eq!(
         readiness.evaluation.visible_state,
-        VisibleCompletionState::CompletedUnverified
+        VisibleCompletionState::Completed
     );
     Ok(())
 }
 
 #[test]
-fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<()> {
+fn task_step_readiness_allows_durable_mutation_without_checks() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -8329,17 +8327,17 @@ fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<(
 
     assert_eq!(
         readiness.evaluation.verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
     assert_eq!(
         readiness.evaluation.visible_state,
-        VisibleCompletionState::CompletedUnverified
+        VisibleCompletionState::Completed
     );
     Ok(())
 }
 
 #[test]
-fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<()> {
+fn task_step_readiness_allows_post_task_mutation_without_checks() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -8411,14 +8409,9 @@ fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<
 
     assert_eq!(
         readiness.evaluation.verification_verdict,
-        VerificationVerdict::Missing
+        VerificationVerdict::NotApplicable
     );
-    assert!(
-        readiness
-            .evaluation
-            .required_actions
-            .contains(&crate::RequiredAction::ProvideVerificationConfig)
-    );
+    assert!(readiness.evaluation.required_actions.is_empty());
     Ok(())
 }
 
@@ -9407,7 +9400,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
 }
 
 #[test]
-fn task_step_status_completes_when_only_verification_config_is_missing() -> Result<()> {
+fn task_step_status_completes_when_known_mutation_has_no_required_checks() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -9455,13 +9448,11 @@ fn task_step_status_completes_when_only_verification_config_is_missing() -> Resu
         step_status_after_readiness(TaskStepStatus::Completed, &readiness),
         TaskStepStatus::Completed
     );
-    assert!(
-        readiness
-            .evaluation
-            .required_actions
-            .iter()
-            .any(|action| matches!(action, crate::RequiredAction::ProvideVerificationConfig))
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::NotApplicable
     );
+    assert!(readiness.evaluation.required_actions.is_empty());
     let run_check_readiness = crate::ReadinessEvaluatedEntry {
         evaluation: crate::ReadinessEvaluation {
             required_actions: vec![crate::RequiredAction::RunCheck {
@@ -9539,7 +9530,7 @@ fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
 }
 
 #[test]
-fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
+fn task_step_explicit_verification_config_blocks_read_only_step_until_check_runs() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -9602,12 +9593,19 @@ fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
 
     assert_eq!(
         readiness.evaluation.verification_verdict,
-        VerificationVerdict::NotApplicable
+        VerificationVerdict::Missing
     );
-    assert!(readiness.evaluation.required_actions.is_empty());
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .contains(&crate::RequiredAction::RunCheck {
+                check_spec_id: "cargo-test".to_owned()
+            })
+    );
     assert_eq!(
         step_status_after_readiness(TaskStepStatus::Completed, &readiness),
-        TaskStepStatus::Completed
+        TaskStepStatus::Blocked
     );
     Ok(())
 }

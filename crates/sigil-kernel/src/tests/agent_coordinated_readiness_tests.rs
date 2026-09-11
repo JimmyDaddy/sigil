@@ -186,3 +186,69 @@ async fn agent_finalization_waits_for_public_ack_writer_before_recording_complet
     assert!(final_sequence < ack_sequence && ack_sequence < terminal.stream_sequence);
     Ok(())
 }
+
+#[test]
+fn projected_readiness_keeps_explicit_check_for_read_only_run() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("mock", "model").with_store(store);
+    let policy = crate::VerificationPolicy {
+        required_checks: vec![crate::CheckSpec::new(
+            "cargo-test",
+            crate::CheckCommand::shell("cargo test"),
+            crate::ToolEffect::ReadOnly,
+            "scope-main",
+        )],
+        completion_criteria: crate::CompletionCriteria::AllRequiredChecks,
+        verification_scope: crate::VerificationScope::all_tracked("scope-main"),
+        sandbox_profile: crate::SandboxProfileRequirement::None,
+        workspace_trust_requirement: crate::WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: None,
+        auto_run: crate::VerificationAutoRunPolicy::Manual,
+    };
+    session.append_control(crate::ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            crate::EvidenceScope::Run("final".to_owned()),
+            policy,
+            "policy-event",
+        )?,
+    ))?;
+    let options = AgentRunOptions {
+        workspace_root: workspace,
+        max_turns: Some(1),
+        tool_timeout_secs: 5,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        traffic_partition_key: None,
+        interaction_mode: InteractionMode::Interactive,
+        permission_config: PermissionConfig::default(),
+        permission_mode_override: None,
+        permission_context: crate::PermissionEvaluationContext::default(),
+        memory_config: MemoryConfig::with_enabled(false),
+        compaction_config: CompactionConfig::default(),
+        tool_authority: None,
+    };
+
+    let readiness = crate::projected_agent_run_readiness(
+        &session,
+        &options,
+        "final",
+        &AgentRunOutcome::default(),
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .contains(&crate::RequiredAction::RunCheck {
+                check_spec_id: "cargo-test".to_owned()
+            })
+    );
+    Ok(())
+}

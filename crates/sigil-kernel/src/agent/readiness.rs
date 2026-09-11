@@ -37,7 +37,7 @@ pub fn projected_agent_run_readiness(
     }
     let scope = EvidenceScope::Run(final_message_id.to_owned());
     let projection = session.verification_state_projection();
-    let mut policy = projection
+    let policy = projection
         .latest_policy(&scope)
         .map(|entry| entry.policy.clone())
         .unwrap_or_else(|| {
@@ -69,11 +69,6 @@ pub fn projected_agent_run_readiness(
         mutations.push(unknown_dirty);
     }
     let has_workspace_mutation = has_recorded_workspace_mutation || !mutations.is_empty();
-    if !has_workspace_mutation {
-        policy.required_checks.clear();
-        policy.completion_criteria = crate::CompletionCriteria::NoChecksRequired;
-        policy.allow_unverified_completion = true;
-    }
     let policy_hash = policy.stable_hash()?;
     let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
     input.workspace_trust = projection
