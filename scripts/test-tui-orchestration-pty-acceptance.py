@@ -24,6 +24,83 @@ def tool(name: str) -> dict[str, object]:
 
 
 class OrchestrationPtyAcceptanceTests(unittest.TestCase):
+    def test_cancellation_requires_exact_task_scope_and_confirmed_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            request = {"record": "requested", "request_id": "cancel-one",
+                       "run_scope_id": "scope-one", "target": {"kind": "task", "task_id": "task-one"}}
+            terminal = {"record": "finalized", "request_id": "cancel-one",
+                        "run_scope_id": "scope-one", "outcome": "cancelled",
+                        "cleanup_complete": True, "active_effects": 0, "active_tasks": 0}
+            def write() -> None:
+                path.write_text("".join(json.dumps({"payload": payload}) + "\n"
+                                        for payload in [request, terminal]), encoding="utf-8")
+            write()
+            self.assertTrue(MODULE.task_cancellation_settled(path, "task-one"))
+            self.assertFalse(MODULE.task_cancellation_settled(path, "old-task"))
+            terminal["run_scope_id"] = "other-scope"
+            write()
+            self.assertFalse(MODULE.task_cancellation_settled(path, "task-one"))
+            terminal["run_scope_id"] = "scope-one"
+            terminal["outcome"] = "interrupted"
+            terminal["cleanup_complete"] = False
+            write()
+            with self.assertRaises(MODULE.AcceptanceError):
+                MODULE.task_cancellation_settled(path, "task-one")
+
+    def test_workbench_identity_keeps_the_complete_wrapped_hash(self) -> None:
+        screen = "plan plan-one · sha256:" + "a" * 48 + "\n" + "a" * 16
+        self.assertEqual(MODULE.plan_workbench_identity(screen), ("plan-one", "a" * 64))
+        with self.assertRaises(MODULE.AcceptanceError):
+            MODULE.plan_workbench_identity("plan plan-one · sha256:abc")
+
+    def test_stale_retry_requires_the_same_visible_plan_and_hash(self) -> None:
+        screen = (
+            "Plan Review · ready\nReview scenario 4 before execution\n"
+            "plan plan-one · sha256:" + "a" * 64 + "\n"
+            "Run failed: the session changed while running; retry the same command\n"
+            "Run [R] Reject [X]"
+        )
+        identity = ("plan-one", "a" * 64)
+        self.assertTrue(MODULE.retryable_plan_start(screen, 4, identity))
+        self.assertFalse(MODULE.retryable_plan_start(screen, 3, identity))
+        self.assertFalse(MODULE.retryable_plan_start(screen, 4, ("plan-two", "a" * 64)))
+        self.assertFalse(MODULE.retryable_plan_start(screen, 4, ("plan-one", "b" * 64)))
+        self.assertFalse(MODULE.retryable_plan_start(
+            screen.replace("the session changed while running", "permission denied"), 4, identity,
+        ))
+
+    def test_resumed_direct_identity_requires_same_admission_two_attempts_and_no_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            controls = [
+                {"task_direct_execution_admitted_v1": {"task_id": "task", "admission_id": "admission"}},
+                {"task_direct_execution_attempt_v1": {"task_id": "task", "attempt_id": "first"}},
+                {"task_direct_execution_attempt_v1": {"task_id": "task", "attempt_id": "second"}},
+            ]
+            def write() -> None:
+                path.write_text("\n".join(json.dumps({"payload": {"session_log_entry": {"control": control}}}) for control in controls), encoding="utf-8")
+            write()
+            MODULE.validate_resumed_direct_identity(path, "task", "admission")
+            controls.append({"task_direct_execution_attempt_v1": {"task_id": "task", "attempt_id": "third"}})
+            write()
+            with self.assertRaises(MODULE.AcceptanceError):
+                MODULE.validate_resumed_direct_identity(path, "task", "admission")
+            controls.pop()
+            controls.append({"task_plan": {"task_id": "task"}})
+            write()
+            with self.assertRaises(MODULE.AcceptanceError):
+                MODULE.validate_resumed_direct_identity(path, "task", "admission")
+
+    def test_conversation_terminal_status_uses_current_typed_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            for status, expected in (("succeeded", 0), ("failed", 1), ("unknown", 1)):
+                path.write_text(json.dumps({"event_type": "run_finalized", "payload": {
+                    "record": "conversation_run_finalized_v1", "status": status,
+                }}) + "\n", encoding="utf-8")
+                self.assertEqual(MODULE.read_session_audit(path).failed_run_count, expected)
+
     def test_session_audit_distinguishes_cancelled_from_hard_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             session = Path(directory) / "session.jsonl"
@@ -410,6 +487,124 @@ class OrchestrationPtyAcceptanceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(MODULE.managed_parent_session_files(root), [parent])
+
+    def test_plan_ready_screen_without_legacy_host_notice_is_detected(self) -> None:
+        class Runner:
+            output = b""
+            process = None
+
+            def read_available(self, _timeout: float) -> None:
+                pass
+
+            def screen(self) -> str:
+                return "▌ Plan ready  ·  Review scenario 1 before execution"
+
+        self.assertIn("Plan ready", MODULE.wait_for_plan_surface(Runner(), 0.1, scenario=1))
+
+    def test_plan_surface_requires_current_scenario_and_active_card(self) -> None:
+        visible = MODULE.current_plan_surface_visible
+        old_card = "▌ Plan ready  ·  Review scenario 1 before execution"
+        new_message = "Plan ready: Review scenario 2 before execution"
+        self.assertFalse(visible(old_card + "\n" + new_message, 2, require_workbench=False))
+        new_card = "▌ Plan ready  ·  Review scenario 2 before execution"
+        self.assertTrue(visible(old_card + "\n" + new_card, 2, require_workbench=False))
+        self.assertFalse(visible(new_card, 2, require_workbench=True))
+        old_workbench = "Plan Review · draft_ready\nReview scenario 1 before execution\nRun Reject"
+        self.assertFalse(visible(old_workbench, 2, require_workbench=False))
+        new_workbench = old_workbench.replace("scenario 1", "scenario 2")
+        self.assertTrue(visible(new_workbench, 2, require_workbench=True))
+
+    def test_historical_raw_workbench_does_not_authorize_plan_keys(self) -> None:
+        class Runner:
+            output = (b"validated plan draft recorded\nPlan Review\n"
+                      b"Review scenario 2 before execution\nRun Reject")
+            process = None
+
+            def read_available(self, _timeout: float) -> None:
+                pass
+
+            def screen(self) -> str:
+                return "▌ Plan ready · Review scenario 1 before execution"
+
+        with self.assertRaises(TimeoutError):
+            MODULE.wait_for_plan_surface(Runner(), 0.01, scenario=2)
+
+    def test_bound_approval_rejects_changed_identity_and_stops_after_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "records.jsonl"
+            controls = [{"call_id": "call", "action": "requested",
+                         "identity": {"approval_request_id": "request"}}]
+
+            def write() -> None:
+                path.write_text("".join(json.dumps({"payload": {"session_log_entry": {
+                    "control": {"tool_approval": value}}}}) + "\n" for value in controls),
+                    encoding="utf-8")
+
+            write()
+            self.assertEqual(MODULE.bound_approval_state(path, "call", "request"), "requested")
+            controls.append({"call_id": "other", "action": "requested",
+                             "identity": {"approval_request_id": "other-request"}})
+            write()
+            with self.assertRaises(MODULE.AcceptanceError):
+                MODULE.bound_approval_state(path, "call", "request")
+            controls.insert(1, {"call_id": "call", "action": "resolved", "user_decision": "approved",
+                                "identity": {"approval_request_id": "request"}})
+            write()
+            self.assertEqual(MODULE.bound_approval_state(path, "call", "request"), "resolved")
+            with self.assertRaises(MODULE.AcceptanceError):
+                MODULE.bound_approval_state(path, "call", "stale-request")
+
+    def test_direct_request_uses_latest_user_scenario_not_history_order(self) -> None:
+        for current, expected in ((2, "direct:write:request"), (3, "direct:continue"),
+                                  (1, "direct:read")):
+            payload = {"messages": [
+                {"role": "user", "content": "Review scenario 1 before execution"},
+                {"role": "assistant", "content": "Review scenario 3 before execution"},
+                {"role": "user", "content": f"Review scenario {current} before execution"},
+                {"role": "tool", "content": "Review scenario 6 before execution"},
+            ], "tools": []}
+            self.assertEqual(MODULE.classify_request(payload), expected)
+        payload["messages"][-2]["content"] = "Review scenario 2 before execution"
+        payload["messages"].append({"role": "tool", "tool_call_id": MODULE.APPROVAL_TOOL_CALL_ID})
+        self.assertEqual(MODULE.classify_request(payload), "direct:write:after_tool")
+
+    def test_direct_request_uses_latest_objective_within_user_context(self) -> None:
+        payload = {"messages": [{"role": "user", "content":
+            "Previous: Review scenario 3 before execution\n"
+            "Current: Review scenario 2 before execution"}], "tools": []}
+        self.assertEqual(MODULE.classify_request(payload), "direct:write:request")
+        payload["messages"][0]["role"] = "assistant"
+        with self.assertRaises(MODULE.AcceptanceError):
+            MODULE.classify_request(payload)
+
+    def test_current_plan_review_result_tool_is_classified(self) -> None:
+        self.assertEqual(MODULE.classify_request({
+            "tools": [{"type": "function", "function": {"name": "submit_plan_review_result"}}],
+            "messages": [],
+        }), "plan_review_research")
+
+    def test_hashed_managed_parent_excludes_active_children(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / ("a" * 64) / "records.jsonl"
+            child = root / ("b" * 64) / "records.jsonl"
+            for path, events in ((parent, ["plan_review_attempt"]),
+                                 (child, ["user_message_recorded", "assistant_message_recorded",
+                                          "run_status_changed", "run_finalized"])):
+                path.parent.mkdir()
+                path.write_text("".join(json.dumps({"event_type": event}) + "\n"
+                                        for event in events), encoding="utf-8")
+            self.assertEqual(MODULE.managed_parent_session_files(root), [parent])
+
+    def test_fixture_protocol_error_is_persisted_immediately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "errors.json"
+            fixture = MODULE.FixtureState(diagnostics_path=path)
+            fixture.start_request("plan_review")
+            fixture.record_error(ValueError("wrong contract"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["protocol_errors"], ["ValueError: wrong contract"])
+            self.assertEqual(data["request_counts"], {"plan_review": 1})
 
     def test_unknown_request_fails_closed(self) -> None:
         with self.assertRaises(MODULE.AcceptanceError):

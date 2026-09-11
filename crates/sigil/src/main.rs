@@ -486,8 +486,7 @@ async fn run_main(cli: Cli) -> Result<u8> {
         } => {
             println!(
                 "{}",
-                plan_decision_command(&config_path, &cwd, &session, &plan_id, &plan_hash, action)
-                    .await?
+                plan_decision_command(&session, &plan_id, &plan_hash, action).await?
             );
         }
         Commands::Serve {
@@ -1179,19 +1178,13 @@ fn durable_machine_run_result(
 }
 
 async fn plan_decision_command(
-    config_path: &Path,
-    launch_cwd: &Path,
     session_path: &Path,
     plan_id: &str,
     plan_hash: &str,
     action: PlanDecisionAction,
 ) -> Result<String> {
-    let root_config = RootConfig::load(config_path)
-        .with_context(|| format!("failed to load config at {}", config_path.display()))?;
-    let workspace_root =
-        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let store = sigil_kernel::JsonlSessionStore::new(session_path)?;
-    let session = sigil_kernel::Session::load_from_store("", "", store)
+    let session = sigil_kernel::Session::load_from_store_for_control(store)
         .with_context(|| format!("failed to load session at {}", session_path.display()))?;
     let action = match action {
         PlanDecisionAction::Run => sigil_runtime::ApplicationPlanAction::Run,
@@ -1201,8 +1194,6 @@ async fn plan_decision_command(
         PlanDecisionAction::AdoptCandidate => sigil_runtime::ApplicationPlanAction::AdoptCandidate,
     };
     let receipt = sigil_runtime::application_plan_decision(
-        &root_config,
-        &workspace_root,
         session_path,
         session.session_scope_id(),
         &sigil_runtime::ApplicationPlanDecisionCommand {

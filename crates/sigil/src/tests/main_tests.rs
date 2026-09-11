@@ -1872,6 +1872,7 @@ async fn plan_decision_command_applies_typed_hash_bound_action_and_rejects_repla
     write_application_run_test_config(&config_path, "http://127.0.0.1:1")?;
     let session_path = workspace.join("session.jsonl");
     let draft = session_with_pending_plan_draft(&session_path)?;
+    std::fs::remove_file(&config_path)?;
 
     // A committed draft without a decision is projected as the bounded awaiting artifact.
     let pending =
@@ -1883,14 +1884,14 @@ async fn plan_decision_command_applies_typed_hash_bound_action_and_rejects_repla
     assert_eq!(pending.step_count, 1);
 
     // Reject is hash-bound and returns a receipt without executing anything.
-    let output = run_plan_decision(&config_path, &workspace, &session_path, &draft, "reject")?;
+    let output = run_plan_decision(&session_path, &draft, "reject")?;
     assert_eq!(output["command"], "plan_decision");
     assert_eq!(output["action"], "reject");
     assert_eq!(output["plan_id"], draft.plan_id);
     assert!(output["task_id"].is_null());
 
     // The same decision cannot be applied twice against the durable facts.
-    let result = run_plan_decision(&config_path, &workspace, &session_path, &draft, "save");
+    let result = run_plan_decision(&session_path, &draft, "save");
     assert!(
         result.is_err(),
         "a second decision must be rejected as a durable conflict"
@@ -1912,8 +1913,9 @@ async fn plan_decision_run_creates_the_durable_task_prefix() -> Result<()> {
     write_application_run_test_config(&config_path, "http://127.0.0.1:1")?;
     let session_path = workspace.join("session.jsonl");
     let draft = session_with_pending_plan_draft(&session_path)?;
+    std::fs::remove_file(&config_path)?;
 
-    let output = run_plan_decision(&config_path, &workspace, &session_path, &draft, "run")?;
+    let output = run_plan_decision(&session_path, &draft, "run")?;
     assert_eq!(output["action"], "run");
     let task_id = output["task_id"]
         .as_str()
@@ -1932,7 +1934,7 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
         ControlEntry, ConversationRoute, ConversationRouteDecisionId,
         ConversationRouteDecisionRecordedEntry, ConversationRouteReason, ConversationTurnRef,
         ModelMessage, PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus,
-        SessionRef, submit_plan_draft_entry,
+        SessionRef, plan_draft_created_entry_with_plan_id,
     };
     // Initialize the session through the production route-resume path so the durable stream
     // carries the required identity and route trust records.
@@ -2006,9 +2008,9 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
         "target_paths": ["src/coordinator.rs"],
         "suggested_checks": ["cargo test"]
     }"#;
-    let draft = submit_plan_draft_entry(
-        draft_args,
+    let draft = plan_draft_created_entry_with_plan_id(
         sigil_kernel::PlanId::new("plan_draft_pending")?,
+        &format!("```sigil-plan-v2\n{}\n```", draft_args),
         sigil_kernel::PlanSourceRef {
             source_turn: Some(source.clone()),
             route_decision_id: Some(decision_id.clone()),
@@ -2020,43 +2022,6 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
     )?
     .expect("draft must be valid");
     session.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
-    // RFC-0067: a DraftReady plan must carry its executable candidate and ready marker.
-    let candidate = sigil_kernel::compile_executable_plan_candidate(
-        &draft,
-        &sigil_kernel::PlanCompileInputV1 {
-            source_attempt_id: attempt.attempt_id.as_str().to_owned(),
-            source_turn_id: source.message_id.clone(),
-            task_config_contract_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-task-config-v1",
-                "test",
-            ),
-            planner_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-plan-planner-schema-v1",
-                "v2",
-            ),
-            task_contract_schema_hash: sigil_kernel::stable_event_uuid(
-                "sigil-task-contract-schema-v1",
-                "v2",
-            ),
-            intent_schema_hash: None,
-            max_plan_steps: 64,
-            workspace_id: None,
-            session_scope_id: Some(session.session_scope_id().to_owned()),
-        },
-    )
-    .expect("fixture draft must compile");
-    session.append_control(ControlEntry::ExecutablePlanCandidatePreparedV1(Box::new(
-        candidate.clone(),
-    )))?;
-    session.append_control(ControlEntry::PlanReadyCommittedV1(
-        sigil_kernel::PlanReadyCommittedV1Entry {
-            plan_id: draft.plan_id.clone(),
-            plan_hash: draft.plan_hash.clone(),
-            candidate_hash: candidate.candidate_hash.clone(),
-            attempt_id: attempt.attempt_id.as_str().to_owned(),
-            committed_at_ms: 2,
-        },
-    ))?;
     let mut ready = attempt;
     ready.status = PlanReviewAttemptStatus::DraftReady;
     ready.recorded_at_ms = 2;
@@ -2068,8 +2033,6 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
 }
 
 fn run_plan_decision(
-    config_path: &std::path::Path,
-    workspace: &std::path::Path,
     session_path: &std::path::Path,
     draft: &PendingPlanDraft,
     action: &str,
@@ -2082,8 +2045,6 @@ fn run_plan_decision(
         _ => bail!("unknown test action"),
     };
     let rendered = futures::executor::block_on(super::plan_decision_command(
-        config_path,
-        workspace,
         session_path,
         &draft.plan_id,
         &draft.plan_hash,

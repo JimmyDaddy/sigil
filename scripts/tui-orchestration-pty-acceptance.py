@@ -331,6 +331,8 @@ class SessionAudit:
 
 @dataclasses.dataclass
 class FixtureState:
+    diagnostics_path: Path | None = None
+    request_payload_path: Path | None = None
     request_counts: dict[str, int] = dataclasses.field(default_factory=dict)
     request_order: list[str] = dataclasses.field(default_factory=list)
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
@@ -341,6 +343,12 @@ class FixtureState:
     cancel_release: threading.Event = dataclasses.field(default_factory=threading.Event)
     cancel_settled: threading.Event = dataclasses.field(default_factory=threading.Event)
     lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+
+    def record_request_payload(self, payload: object) -> None:
+        # Only isolated fixture request bodies are retained, never HTTP headers/credentials.
+        if self.request_payload_path is not None:
+            with self.lock, self.request_payload_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def start_request(self, kind: str) -> int:
         with self.lock:
@@ -364,6 +372,13 @@ class FixtureState:
     def record_error(self, error: Exception) -> None:
         with self.lock:
             self.protocol_errors.append(f"{type(error).__name__}: {error}")
+            if self.diagnostics_path is not None:
+                self.diagnostics_path.write_text(
+                    json.dumps({"protocol_errors": self.protocol_errors,
+                                "request_counts": self.request_counts,
+                                "request_order": self.request_order}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
 
     def record_expected_disconnect(self) -> None:
         with self.lock:
@@ -403,6 +418,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         request_number = 0
         try:
             payload = self._read_json()
+            self.fixture.record_request_payload(payload)
             if not self.path.endswith("/chat/completions"):
                 raise AcceptanceError(f"unexpected fixture path {self.path}")
             kind = classify_request(payload)
@@ -418,6 +434,16 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     f"plan-review-call-{request_number}",
                     "request_plan_review",
                     PLAN_REVIEW_ARGS,
+                )
+            elif kind == "plan_review_research":
+                self._send_tool_call(
+                    f"plan-review-result-{request_number}",
+                    "submit_plan_review_result",
+                    json.dumps({
+                        "schema_version": 1,
+                        "outcome": "draft",
+                        "content": f"Review scenario {request_number} before execution",
+                    }),
                 )
             elif kind == "plan_review":
                 self._send_tool_call(
@@ -736,6 +762,22 @@ def latest_task_step_id(text: str) -> str | None:
     return step_id if position >= 0 else None
 
 
+def current_direct_scenario(payload: object) -> int | None:
+    """Fixture routing follows the latest user objective, excluding assistant/tool history."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
+        return None
+    for message in reversed(payload["messages"]):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        text = request_text({"messages": [message]})
+        matches = [(text.rfind(f"Review scenario {scenario} before execution"), scenario)
+                   for scenario in range(1, 7)]
+        position, scenario = max(matches)
+        if position >= 0:
+            return scenario
+    return None
+
+
 def classify_request(payload: object) -> str:
     names = tool_names(payload)
     text = request_text(payload)
@@ -746,6 +788,8 @@ def classify_request(payload: object) -> str:
         return "title"
     if "request_plan_review" in names:
         return "routing:plan_review"
+    if "submit_plan_review_result" in names:
+        return "plan_review_research"
     if "submit_plan_draft" in names:
         return "plan_review"
     if "request_task_planning" in names:
@@ -754,14 +798,7 @@ def classify_request(payload: object) -> str:
         return "planner"
     if "Produce the single user-visible final answer" in text:
         return "synthesis"
-    direct_scenario = next(
-        (
-            scenario
-            for scenario in range(1, 7)
-            if f"Review scenario {scenario} before execution" in text
-        ),
-        None,
-    )
+    direct_scenario = current_direct_scenario(payload)
     if direct_scenario == 1:
         return "direct:read"
     if direct_scenario == 2:
@@ -813,7 +850,7 @@ def classify_request(payload: object) -> str:
 def managed_parent_session_files(root: Path) -> list[Path]:
     """Find parent sessions in the managed store, excluding plan-review children."""
     candidates = sorted(
-        root.glob("session-*/records.jsonl"),
+        root.glob("*/records.jsonl"),
         key=lambda path: path.stat().st_mtime_ns,
     )
     # A resume boot may create a short-lived session identity stream before it attaches to
@@ -834,11 +871,16 @@ def managed_parent_session_files(root: Path) -> list[Path]:
     managed = []
     for path in candidates:
         try:
-            has_parent_activity = any(
-                json.loads(line).get("event_type") in parent_event_types
-                for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            )
+            records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                       if line.strip()]
+            # RA names storage leaves by hash. These lifecycle records are emitted
+            # by the application parent, never by plan-review or task child agents.
+            event_types = {record.get("event_type") for record in records}
+            has_parent_activity = bool(event_types & {
+                "plan_review_attempt", "task_created_from_plan", "plan_decision_recorded",
+                "conversation_route_decision_recorded", "public_event_outbox",
+            }) or (path.parent.name.startswith("session-")
+                   and bool(event_types & parent_event_types))
         except (OSError, json.JSONDecodeError):
             continue
         if has_parent_activity:
@@ -1011,7 +1053,10 @@ def read_session_audit(path: Path) -> SessionAudit:
             continue
         if event_type == "run_finalized":
             outcome = payload.get("outcome")
-            if outcome == "cancelled" and payload.get("cleanup_complete") is True:
+            if payload.get("record") == "conversation_run_finalized_v1":
+                if payload.get("status") not in {"succeeded", "cancelled", "paused", "interrupted"}:
+                    failed_run_count += 1
+            elif outcome == "cancelled" and payload.get("cleanup_complete") is True:
                 cancelled_run_count += 1
             elif payload.get("run_status") not in {
                 "completed",
@@ -1350,6 +1395,8 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         "direct:terminal:after_cancel": 1,
         "title": 1,
     }
+    if "plan_review_research" in fixture.request_counts:
+        expected_requests["plan_review_research"] = expected_requests.pop("plan_review")
     if fixture.request_counts != expected_requests:
         raise AcceptanceError(
             f"unexpected terminal provider request distribution {fixture.request_counts}"
@@ -1417,6 +1464,102 @@ def validate_direct_task_audit(
         )
 
 
+def direct_task_controls(path: Path, key: str) -> list[dict[str, object]]:
+    """Read the real native run's append-only controls for identity assertions."""
+    controls = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        control = record.get("payload", {}).get("session_log_entry", {}).get("control", {})
+        value = control.get(key)
+        if isinstance(value, dict):
+            controls.append(value)
+    return controls
+
+
+def bound_approval_state(path: Path, call_id: str, request_id: str) -> str:
+    approvals = direct_task_controls(path, "tool_approval")
+    matching = [value for value in approvals if value.get("call_id") == call_id]
+    if not matching or matching[-1].get("identity", {}).get("approval_request_id") != request_id:
+        raise AcceptanceError("approval identity changed before fixture decision settled")
+    latest = matching[-1]
+    if latest.get("action") == "resolved":
+        if latest.get("user_decision") != "approved":
+            raise AcceptanceError("fixture approval was not approved")
+        return "resolved"
+    requested = [value for value in approvals if value.get("action") == "requested"]
+    if (latest.get("action") != "requested" or not requested
+            or requested[-1].get("identity", {}).get("approval_request_id") != request_id):
+        raise AcceptanceError("another approval replaced the fixture's active request")
+    return "requested"
+
+
+def approve_bound_tool_once(
+    runner: object, session_path: Path, call_id: str, tool_name: str,
+    visible_subject: str, timeout: float,
+) -> None:
+    approvals = [value for value in direct_task_controls(session_path, "tool_approval")
+                 if value.get("call_id") == call_id and value.get("action") == "requested"]
+    if not approvals:
+        raise AcceptanceError(f"missing durable approval request for {call_id}")
+    request_id = approvals[-1].get("identity", {}).get("approval_request_id")
+    if not isinstance(request_id, str):
+        raise AcceptanceError("approval request omitted its durable identity")
+    deadline = time.monotonic() + timeout
+    next_attempt = 0.0
+    attempts = 0
+    while time.monotonic() < deadline:
+        runner.read_available(0.05)
+        if bound_approval_state(session_path, call_id, request_id) == "resolved":
+            return
+        now = time.monotonic()
+        if now >= next_attempt and attempts < 3:
+            screen = runner.screen()
+            if ("Allow once" in screen and tool_name in screen and visible_subject in screen
+                    and active_review_overlay_present(screen)):
+                # A stale underlying plan workbench can consume a keyboard shortcut during
+                # projection catch-up. Click the fresh visible approval action instead.
+                if bound_approval_state(session_path, call_id, request_id) == "resolved":
+                    return
+                click_screen_text(runner, screen, "Allow once")
+                attempts += 1
+                next_attempt = now + 1.0
+    raise TimeoutError(f"approval {call_id} did not resolve after {attempts} bound clicks")
+
+
+def task_cancellation_settled(path: Path, task_id: str) -> bool:
+    requests: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        payload = record.get("payload", {})
+        target = payload.get("target", {})
+        if (payload.get("record") == "requested"
+                and target == {"kind": "task", "task_id": task_id}):
+            requests[payload["request_id"]] = payload["run_scope_id"]
+        if (payload.get("record") == "finalized"
+                and payload.get("request_id") in requests
+                and payload.get("run_scope_id") == requests[payload["request_id"]]):
+            if (payload.get("outcome") != "cancelled"
+                    or payload.get("cleanup_complete") is not True
+                    or payload.get("active_effects") != 0
+                    or payload.get("active_tasks") != 0):
+                raise AcceptanceError(
+                    f"task cancellation did not confirm quiescence: {payload.get('reason')}"
+                )
+            return True
+    return False
+
+
+def validate_resumed_direct_identity(path: Path, task_id: str, admission_id: str) -> None:
+    admissions = [entry for entry in direct_task_controls(path, "task_direct_execution_admitted_v1") if entry.get("task_id") == task_id]
+    if {entry.get("admission_id") for entry in admissions} != {admission_id}:
+        raise AcceptanceError("resume replaced the original Direct admission")
+    attempts = [entry for entry in direct_task_controls(path, "task_direct_execution_attempt_v1") if entry.get("task_id") == task_id]
+    if len({entry.get("attempt_id") for entry in attempts}) != 2:
+        raise AcceptanceError("one interrupted Direct attempt must create exactly one resumed attempt")
+    if any(entry.get("task_id") == task_id for entry in direct_task_controls(path, "task_plan")):
+        raise AcceptanceError("Direct recovery unexpectedly created a TaskPlan")
+
+
 def run_direct_task_acceptance(
     runner: object,
     *,
@@ -1441,7 +1584,7 @@ def run_direct_task_acceptance(
 ]:
     """Exercise the current direct-Task plan approval contract through a real TUI PTY."""
     submit_user_prompt(runner, USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=1, fixture=fixture)
     session_path, audit = wait_for_audit(
         managed_session_dir,
         runner,
@@ -1467,7 +1610,7 @@ def run_direct_task_acceptance(
     )
 
     submit_user_prompt(runner, APPROVAL_USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=2, fixture=fixture)
     wait_for_visible_screen(
         lambda text: ("Approve action?" in text or "Review file changes" in text)
         and "write_file" in text
@@ -1476,7 +1619,10 @@ def run_direct_task_acceptance(
         "direct task write approval",
         runner=runner,
     )
-    runner.send("y")
+    approve_bound_tool_once(
+        runner, session_path, APPROVAL_TOOL_CALL_ID, "write_file", APPROVAL_PATH,
+        deadline.remaining(15.0),
+    )
     session_path, approval_audit = wait_for_audit(
         managed_session_dir,
         runner,
@@ -1506,7 +1652,7 @@ def run_direct_task_acceptance(
     checkpoint_workspace(workspace, env, "record approved write fixture")
 
     submit_user_prompt(runner, CONTINUE_USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=3, fixture=fixture)
     wait_for_fixture_request(
         fixture,
         "direct:continue",
@@ -1514,6 +1660,9 @@ def run_direct_task_acceptance(
         runner,
         deadline.remaining(),
     )
+    direct_admission = direct_task_controls(session_path, "task_direct_execution_admitted_v1")[-1]
+    resumed_task_id = str(direct_admission["task_id"])
+    resumed_admission_id = str(direct_admission["admission_id"])
     runner.stop()
     fixture.crash_release.set()
     runner = SUPPORT.PtyRunner(
@@ -1525,6 +1674,14 @@ def run_direct_task_acceptance(
     runner_holder[0] = runner
     runner.start()
     SUPPORT.wait_for_main_tui(runner, deadline.remaining())
+    wait_for_visible_screen(
+        lambda text: "sigil ready." in text
+        and "Working..." not in text
+        and "Thinking..." not in text,
+        deadline.remaining(60.0),
+        "resumed worker ready for continuation",
+        runner=runner,
+    )
     session_path, interrupted_audit = wait_for_audit(
         managed_session_dir,
         runner,
@@ -1560,8 +1717,22 @@ def run_direct_task_acceptance(
         final_count=3,
     )
 
+    validate_resumed_direct_identity(session_path, resumed_task_id, resumed_admission_id)
+    requests_before_stale_continue = dict(fixture.request_counts)
+    runner.type_text("/task continue")
+    runner.send("\r")
+    wait_for_visible_screen(
+        lambda text: "already completed" in text,
+        deadline.remaining(),
+        "stale Direct continuation rejection",
+        runner=runner,
+    )
+    validate_resumed_direct_identity(session_path, resumed_task_id, resumed_admission_id)
+    if fixture.request_counts != requests_before_stale_continue:
+        raise AcceptanceError("stale Direct continuation dispatched provider work")
+
     submit_user_prompt(runner, CANCEL_USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=4, fixture=fixture)
     wait_for_fixture_request(
         fixture,
         "direct:cancel",
@@ -1569,13 +1740,19 @@ def run_direct_task_acceptance(
         runner,
         deadline.remaining(),
     )
+    cancelled_task_id = str(direct_task_controls(
+        session_path, "task_direct_execution_admitted_v1",
+    )[-1]["task_id"])
     # Ctrl-C is the production cancellation binding while the TUI is busy. Escape only clears
     # focus and would leave the provider fixture blocked forever.
     runner.send(b"\x03")
     session_path, cancel_audit = wait_for_audit(
         managed_session_dir,
         runner,
-        lambda value: value.interrupted_task_run_count >= 1,
+        lambda value: any(
+            entry.get("task_id") == cancelled_task_id and entry.get("status") == "interrupted"
+            for entry in direct_task_controls(session_path, "task_run")
+        ),
         deadline.remaining(),
     )
     fixture.cancel_release.set()
@@ -1588,7 +1765,7 @@ def run_direct_task_acceptance(
     session_path, cancel_audit = wait_for_audit(
         managed_session_dir,
         runner,
-        lambda value: value.interrupted_task_run_count >= 1
+        lambda value: task_cancellation_settled(session_path, cancelled_task_id)
         and value.cancelled_run_count == 1,
         deadline.remaining(),
     )
@@ -1613,7 +1790,7 @@ def run_direct_task_acceptance(
     # the terminal phase below separately asserts the user-visible cancelled terminal card.
 
     submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=5, fixture=fixture)
     session_path, integration_audit = wait_for_audit(
         managed_session_dir,
         runner,
@@ -1647,7 +1824,7 @@ def run_direct_task_acceptance(
             raise AcceptanceError(f"direct integration task did not write {path}")
 
     submit_user_prompt(runner, TERMINAL_USER_PROMPT)
-    approve_review_first_plan(runner, deadline.remaining(180.0))
+    approve_review_first_plan(runner, deadline.remaining(180.0), scenario=6, fixture=fixture)
     wait_for_visible_screen(
         lambda text: ("Approve action?" in text or "Review file changes" in text)
         and "terminal_start" in text
@@ -1656,7 +1833,10 @@ def run_direct_task_acceptance(
         "direct structured terminal_start approval",
         runner=runner,
     )
-    runner.send("y")
+    approve_bound_tool_once(
+        runner, session_path, TERMINAL_START_TOOL_CALL_ID, "terminal_start",
+        TERMINAL_READY_CANARY, deadline.remaining(15.0),
+    )
     session_path, terminal_audit = wait_for_audit(
         managed_session_dir,
         runner,
@@ -1762,53 +1942,122 @@ def wait_for_visible_screen(
     raise TimeoutError(f"timed out waiting for {description}")
 
 
-def approve_review_first_plan(runner: object, timeout: float) -> None:
-    # Replaying the complete VT transcript on every poll is unnecessarily expensive for this
-    # long-running campaign. The durable host notice is emitted immediately before the current
-    # plan surface; inspect only that raw suffix and strip CSI styling, then use the final-screen
-    # parser only for assertions that actually depend on layout.
-    first_surface = wait_for_plan_surface(runner, timeout)
-    if "Plan ready" in first_surface and not plan_review_workbench_visible(first_surface):
+def plan_workbench_identity(screen: str) -> tuple[str, str]:
+    lines = screen.splitlines()
+    for index, line in enumerate(lines):
+        match = re.search(r"\bplan ([a-zA-Z0-9-]+) · sha256:([0-9a-f]+)", line)
+        if match is None:
+            continue
+        digest = match.group(2)
+        if len(digest) < 64 and index + 1 < len(lines):
+            tail = re.match(r"[0-9a-f]+", lines[index + 1].lstrip())
+            if tail is not None:
+                digest += tail.group(0)
+        if len(digest) == 64:
+            return match.group(1), digest
+    raise AcceptanceError("visible plan workbench omitted its complete identity")
+
+
+def retryable_plan_start(screen: str, scenario: int, identity: tuple[str, str]) -> bool:
+    if not current_plan_surface_visible(screen, scenario, require_workbench=True):
+        return False
+    normalized = " ".join(screen.split())
+    return (
+        "Run failed:" in normalized
+        and "the session changed while running" in normalized
+        and "retry the same command" in normalized
+        and plan_workbench_identity(screen) == identity
+    )
+
+
+def approve_review_first_plan(
+    runner: object, timeout: float, *, scenario: int, fixture: FixtureState | None = None,
+) -> None:
+    # Only the current rendered surface may authorize a key press. Historical transcript
+    # cards and workbenches remain visible across scenarios and cannot identify a pending plan.
+    deadline = time.monotonic() + timeout
+    workbench = wait_for_plan_surface(runner, timeout, scenario=scenario)
+    if not plan_review_workbench_visible(workbench):
         runner.send("\r")
-        wait_for_plan_surface(runner, timeout, require_workbench=True)
+        workbench = wait_for_plan_surface(
+            runner, max(0.0, deadline - time.monotonic()),
+            scenario=scenario, require_workbench=True,
+        )
+    if fixture is None:
+        runner.send("\r")
+        return
+    identity = plan_workbench_identity(workbench)
+    request_key = {
+        1: "direct:read", 2: "direct:write:request", 3: "direct:continue",
+        4: "direct:cancel", 5: "direct:integration:a", 6: "direct:terminal:start",
+    }[scenario]
+    expected_count = fixture.request_counts.get(request_key, 0) + 1
     runner.send("\r")
+    attempts = 1
+    next_retry = time.monotonic() + 1.0
+    deadline = min(deadline, time.monotonic() + 30.0)
+    while time.monotonic() < deadline:
+        runner.read_available(0.05)
+        if fixture.protocol_errors:
+            raise AcceptanceError(f"fixture protocol errors: {fixture.protocol_errors}")
+        count = fixture.request_counts.get(request_key, 0)
+        if count == expected_count:
+            return
+        if count > expected_count:
+            raise AcceptanceError("plan approval dispatched more than once")
+        screen = runner.screen()
+        if time.monotonic() >= next_retry and retryable_plan_start(screen, scenario, identity):
+            if attempts == 3:
+                raise AcceptanceError("same-plan admission remained stale after three attempts")
+            runner.send("r")
+            attempts += 1
+            next_retry = time.monotonic() + 1.0
+        elif current_plan_surface_visible(screen, scenario, require_workbench=True) and "Run failed:" in screen:
+            if not retryable_plan_start(screen, scenario, identity):
+                raise AcceptanceError("plan approval failed without a same-plan stale retry")
+    raise TimeoutError(f"timed out waiting for approved scenario {scenario} to dispatch")
+
+
+def current_plan_surface_visible(text: str, scenario: int, *, require_workbench: bool) -> bool:
+    summary = f"Review scenario {scenario} before execution"
+    lines = text.splitlines()
+    active_workbench = (
+        any(line.lstrip().startswith("Plan Review ·") for line in lines[:4])
+        and plan_review_workbench_visible(text)
+        and summary in text
+    )
+    if active_workbench or require_workbench:
+        return active_workbench
+    # Match the active card, not the assistant's historical "Plan ready:" message.
+    return any(
+        line.lstrip().startswith("▌ Plan ready") and summary in line
+        for line in lines
+    )
 
 
 def wait_for_plan_surface(
     runner: object,
     timeout: float,
     *,
+    scenario: int,
     require_workbench: bool = False,
 ) -> str:
     deadline = time.monotonic() + timeout
     next_screen_check = 0.0
     while time.monotonic() < deadline:
         runner.read_available(0.05)
-        surface = latest_plan_surface(bytes(runner.output))
-        if surface and (
-            plan_review_workbench_visible(surface)
-            if require_workbench
-            else "Plan ready" in surface or plan_review_workbench_visible(surface)
-        ):
-            return surface
-        # A TUI redraw can be split across PTY reads: the durable notice and the workbench are
-        # emitted by different owner-loop iterations.  Keep the fast raw-suffix path, but sample
-        # the rendered screen periodically so a final workbench already visible on screen cannot
-        # be lost at the read boundary.
         now = time.monotonic()
         if now >= next_screen_check:
             screen = runner.screen()
-            if plan_review_workbench_visible(screen) and (
-                require_workbench or "Plan ready" in screen or "Plan Review" in screen
-            ):
+            if current_plan_surface_visible(screen, scenario, require_workbench=require_workbench):
                 return screen
             next_screen_check = now + 0.5
         if runner.process is not None and runner.process.poll() is not None:
             raise AcceptanceError("TUI exited while waiting for review-first plan surface")
     raise TimeoutError(
-        "timed out waiting for complete plan review workbench"
+        f"timed out waiting for scenario {scenario} complete plan review workbench"
         if require_workbench
-        else "timed out waiting for review-first plan card"
+        else f"timed out waiting for scenario {scenario} review-first plan card"
     )
 
 
@@ -1937,7 +2186,10 @@ def main() -> int:
         SUPPORT.generate_fixture_tls_identity(fixture_root)
         env = SUPPORT.isolated_environment(fixture_root)
         initialize_git_workspace(workspace, env)
-        fixture = FixtureState()
+        fixture = FixtureState(
+            diagnostics_path=output_dir / "fixture-protocol-errors.json",
+            request_payload_path=output_dir / "fixture-requests.jsonl",
+        )
         server = FixtureServer(("127.0.0.1", 0), FixtureHandler)
         server.fixture = fixture
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2051,7 +2303,7 @@ def main() -> int:
         submit_user_prompt(runner, USER_PROMPT)
         # RFC-0063 ReviewFirst baseline: open the complete workbench first, then explicitly
         # confirm its selected Run action. A single Enter must never skip plan review.
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=1)
         session_path, audit = wait_for_audit(
             managed_session_dir,
             runner,
@@ -2075,7 +2327,7 @@ def main() -> int:
         validate_audit(audit, fixture)
 
         submit_user_prompt(runner, APPROVAL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=2)
 
         runner.wait_until(
             lambda text: ("Approve action?" in text or "Review file changes" in text)
@@ -2109,7 +2361,7 @@ def main() -> int:
         checkpoint_workspace(workspace, env, "record approved write fixture")
 
         submit_user_prompt(runner, CONTINUE_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=3)
 
         wait_for_fixture_request(
             fixture,
@@ -2167,7 +2419,7 @@ def main() -> int:
         validate_continue_audit(continue_audit, fixture)
 
         submit_user_prompt(runner, CANCEL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=4)
 
         wait_for_fixture_request(
             fixture,
@@ -2199,7 +2451,7 @@ def main() -> int:
         )
 
         submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=5)
 
         session_path, review_audit = wait_for_audit(
             managed_session_dir,
@@ -2259,7 +2511,7 @@ def main() -> int:
                 raise AcceptanceError(f"reviewed integration did not promote {path}")
 
         submit_user_prompt(runner, TERMINAL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining())
+        approve_review_first_plan(runner, deadline.remaining(), scenario=6)
 
         runner.wait_until(
             lambda text: ("Approve action?" in text or "Review file changes" in text)
@@ -2385,7 +2637,7 @@ def main() -> int:
             try:
                 failure_sessions = output_dir / "failure-sessions"
                 failure_sessions.mkdir(parents=True, exist_ok=True)
-                for source in managed_parent_session_files(managed_session_dir):
+                for source in managed_session_dir.glob("*/records.jsonl"):
                     shutil.copyfile(
                         source,
                         failure_sessions / f"{source.parent.name}-records.jsonl",

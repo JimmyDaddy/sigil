@@ -372,7 +372,6 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
     let server_responded = Arc::clone(&responded);
     let generated = Arc::new(AtomicBool::new(false));
     let server_generated = Arc::clone(&generated);
-    let mut chat_request_count = 0_u32;
     let server = thread::spawn(move || -> Result<()> {
         let deadline = Instant::now() + PROCESS_TIMEOUT;
         loop {
@@ -407,11 +406,29 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
                 request.starts_with("POST /v1/chat/completions"),
                 "unexpected provider request: {request}"
             );
-            // The setup-written config now defaults to `auto`, so ordinary input first runs the
-            // routing-only microturn. Answer the first chat-completion request with the typed
-            // negative decision, then serve ordinary turns with the canary.
-            chat_request_count += 1;
-            let body = if chat_request_count == 1 {
+            // Respect the actual request contract: first-run composition can enter ordinary
+            // execution directly, whereas a routing microturn advertises only routing tools.
+            let (_, request_body) = request
+                .split_once("\r\n\r\n")
+                .context("chat completion request body is missing")?;
+            let payload: serde_json::Value = serde_json::from_str(request_body)?;
+            let routing_only = payload["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "continue_without_task_planning")
+                    && tools.iter().all(|tool| {
+                        matches!(
+                            tool["function"]["name"].as_str(),
+                            Some(
+                                "continue_without_task_planning"
+                                    | "request_task_planning"
+                                    | "request_plan_review"
+                                    | "continue_existing_task"
+                            )
+                        )
+                    })
+            });
+            let body = if routing_only {
                 concat!(
                     "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"routing-1\",\"type\":\"function\",\"function\":{\"name\":\"continue_without_task_planning\",\"arguments\":\"{\\\"reason\\\":\\\"does_not_meet_task_planning_criteria\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                     "data: [DONE]\n\n"
@@ -428,7 +445,7 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
                 body.len()
             )?;
             stream.flush()?;
-            if chat_request_count >= 2 && request.contains("reply with the first-run canary") {
+            if !routing_only && request.contains("reply with the first-run canary") {
                 server_generated.store(true, Ordering::Release);
                 return Ok(());
             }
