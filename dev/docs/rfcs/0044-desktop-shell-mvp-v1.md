@@ -83,6 +83,34 @@ Hard boundaries：
 5. Tauri capability 默认 deny；只向主窗口暴露 frozen desktop commands。不开 remote content、Node integration、
    arbitrary URL navigation、generic shell、generic filesystem 或 generic HTTP plugin。
 
+### 3.1 History observation cancellation（RFC-0075）
+
+`desktop_display` / `desktop_transcript` 的 native Future 必须随 renderer 所属会话或查询任务结束而取消。
+仅设置 `disposed` 不能停止 HTTP 观察；因此这两个命令必须先消费 native 已登记的 `queryId`，不能收到未知 ID
+时自行登记。新增 IPC 只由 `main-desktop` 的 `allow-desktop-history-query` permission 开放：
+
+| IPC | 输入/返回约束 |
+| --- | --- |
+| `desktop_prepare_history_query` | 输入已校验的 `workspaceId`、`sessionId`；native 确认 workspace 已打开，返回 process-local opaque `queryId` 字符串。票据只属于这一个 workspace/session，并且只能 claim 一次。 |
+| `desktop_cancel_history_query` | 输入相同绑定和原 `queryId`；未开始的票据被撤销，在途票据收到取消。不存在的旧 ID 幂等，无跨请求 tombstone；绑定不匹配拒绝且不撤销原票据。 |
+| `desktop_display` / `desktop_transcript` | 在既有收窄 `request` 外新增必需的 `queryId`；只能消费已登记且绑定匹配的票据。既有页数、cursor 和文本预算保持不变。 |
+| `desktop_message_content` | 使用相同 `queryId` 生命周期；输入 canonical `displayId`、UTF-8 字节 `offset`、4–65536 字节 `limit` 与续页必需的 `contentVersion`。返回同一已提交消息经既有脱敏规则处理后的单页文本；版本绑定 scope、显示身份与 source record checksum，不能用路径或任意消息引用读取日志。 |
+
+截断的消息行提供“查看完整消息”，仅在用户打开后读取正文。正文查看器每次只挂载一页，支持上一页、下一页；关闭、切换页或离开会话时取消该页 native 查询。列表和 transcript 的 64 KiB 预览预算不因此提高，完整结果也不通过 live delta 拼接恢复。
+
+native history owner 最多保留 32 个票据；已取消的在途请求仍占用容量，直到真实查询 Future 被 drop。
+renderer 硬重载丢失 prepare 回包时，未消费票据在 60 s 后由下一次 prepare/claim 惰性回收；过期 ID 拒绝，
+不建立 tombstone 或后台清扫任务，也不给已开始的长时间 cold read 套用该登记期限。
+claim 后的参数验证失败、成功、HTTP 错误和取消均通过 RAII 释放；取消先到时后续 query fail closed，
+不会重新创建票据。workspace close 与 prepare 共用 manager 的串行边界；退出同时关闭新登记并取消已有观察。
+票据不能提供路径、bearer、任意 HTTP、writer、run cancel 或恢复权限，也不进入公共 HTTP/OpenAPI schema。
+
+`DesktopBridge.display/transcript` 只新增可选的本地 `AbortSignal`。prepare/cancel 保持在真实 bridge 内部，
+signal 不经 IPC 序列化；prepare 返回前已 abort 则先撤销票据且不发 query，所有结果均在 `finally` 撤销票据。
+初始 history effect、终态 canonical refresh 和向前分页任务的 cleanup 都调用 abort，并保留既有 scope/epoch
+与迟到结果校验。native 取消丢弃真实 typed HTTP Future，从而触发现有显式连接关闭取消协议；它不改变
+server 的持久状态、普通 HTTP 半关闭语义或 run 生命周期。
+
 ## 4. R44.1 launcher supervisor contract
 
 ### 4.1 Ownership

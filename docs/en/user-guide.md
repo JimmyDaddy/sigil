@@ -66,6 +66,10 @@ Model, agent, follow-up, and every other command form are listed in [Reference](
 
 When a run is active, ordinary input becomes a visible follow-up and the first pending item is already scheduled to run after the current turn. Focus the follow-up panel with `Tab`, or click an item and its `Run next`, `Interrupt`, `Edit`, or `Delete` action directly. Pressing `Run next` while a new item is still being saved is acknowledged immediately; when a later or paused item needs reordering, the action is forwarded as soon as its durable queue id is confirmed. `Run next` also resumes a paused queue; use `Interrupt` only when you intentionally want to stop the current turn. Sigil does not resend a follow-up automatically when delivery is uncertain. On short terminals the composer collapses to three rows so a disappearing follow-up strip returns space to the transcript instead of leaving an oversized input panel.
 
+Queue changes show a pending indicator until confirmed. Repeated clicks while a change is pending
+do not send it again. Deleting an already deleted item is harmless; if it has already been consumed,
+the queue explains that result. A failed queue change keeps the current Task and tool activity visible.
+
 ## Config Panel
 
 `/config` groups common provider, permission, Web, memory, context, code-intelligence, terminal, appearance, agent, skill, plugin, and MCP settings. The per-model context-window field cycles through Automatic, 64K, 128K, 256K, and 1M instead of requiring a raw number; an existing custom value remains intact until you cycle the field. **Max output tokens** is an optional default for normal conversations: leave it Automatic or choose a preset / enter a positive value such as `8K`. Theme changes preview immediately; save changes with `Ctrl-S`. Exact fields and defaults belong in [Configuration Reference](configuration-reference.md).
@@ -78,20 +82,28 @@ When enabled, search and fetch activity shows where data is going. Search result
 
 ## Planned Tasks
 
-Use `/plan` for a read-only plan and accept its reviewable Plan card only when you want execution to begin. A readable Plan can be reviewed, revised, or saved without creating execution authority. Structured Plan submission improves the card, but is optional: when a model only returns complete prose, Sigil preserves that bounded text as the Plan instead of failing generation. **Run** atomically approves the exact Plan, creates one stable Task with a host-owned linear execution unit, and starts the runner immediately; it does not wait for the model to generate a Task DAG or another structured contract. Provider, permission, tool, or verification problems that occur during execution remain recoverable on the Task. Use `/task` when you want durable task execution directly. If its optional model planner cannot produce a valid structure, Sigil falls back to the same linear execution path instead of failing admission. With the default `routing_policy = "auto"`, task-worthy ordinary input is first routed through automatic plan review; chat never continues an unfinished task by itself.
+Use `/plan` for a read-only plan and accept its reviewable Plan card only when you want execution to begin. A readable Plan can be reviewed, revised, or saved without creating execution authority. Structured Plan submission improves the card, but is optional: when a model only returns complete prose, Sigil preserves that bounded text as the Plan instead of failing generation. **Run** atomically approves the exact Plan, creates one stable Task with a host-owned linear execution unit, and starts the runner immediately; it does not wait for the model to generate a Task DAG or another structured contract. Provider, permission, tool, or verification problems that occur during execution remain recoverable on the Task. Use `/task` when you want durable task execution directly. If its optional model planner cannot produce a valid structure, Sigil falls back to the same linear execution path instead of failing admission. With `routing_policy = "auto"`, the model can choose ordinary chat, plan review, or an available Task executor. Continuing an existing task requires a typed continuation decision.
+
+Continuing a task preserves its identity and completed operations; a direct task does not need a new multi-step plan. Repeated observations or an unresolved failure across several operation batches first produce a reminder, then pause with a partial result. A pause does not mean the task is complete. Inspect the reason, repair the specific issue and continue, or provide new guidance. Long tests and waiting do not consume the allowance merely because time passes.
 
 Open a Plan ready item to review the complete, immutable plan before choosing an action. The
 workbench keeps every step, dependency, path, check, risk, and note reachable even on a short or
 narrow terminal. Use the arrow keys, `PageUp`/`PageDown`, `Home`/`End`, and `Tab`/`Shift-Tab` to
 navigate. `Esc` only closes the workbench; it never rejects the plan. Typing a printable character
 returns to the composer and preserves that character, while `Shift-Tab` reopens the pending plan.
-Run, Save, Revise, and Reject remain explicit actions bound to the exact plan id and hash.
+Run, Save for later, Revise, and Reject remain explicit actions bound to the exact plan id and hash.
+Save for later keeps the draft without starting a Task. The workbench shows an operation as pending
+until its result arrives, then displays its success or failure on the same page. Only currently
+available actions appear in the keyboard hints.
 
-Revise opens a dedicated **Plan revision** form rather than a generic input request. It explains
-that the current plan remains active, puts the requested change in a focused multi-line editor, and
-labels the outcomes as **Prepare revised plan** and **Keep current plan**. The original plan remains
-reviewable while revision research runs, and a failed or cancelled revision restores its actions
-instead of replacing it with an empty failed draft. Questions from an agent use the same durable
+Revise opens a **Plan revision** form with a multi-line editor and one **Submit revision** action.
+The original plan remains reviewable while revision research runs, and a failed or cancelled revision restores its actions
+instead of replacing it with an empty failed draft. In this form, `Enter` submits the revision and
+`Shift-Enter` inserts a newline. Arrow keys and `Home`/`End` move the editing cursor; pasted text is
+inserted at that cursor. `Esc` preserves the draft, and a failed submission keeps the text available
+for retry. The Plan card and workbench show the same revision progress. An open review switches to
+the new draft when it is ready; execution still requires an explicit Run action. Returning with `Esc`
+keeps the current plan and revision draft without saving or running the plan. Questions from an agent use the same durable
 attention area: Submit, Decline, and Cancel run are distinct actions; `Esc` closes the form without
 answering it. Pending questions have no wall-clock timeout and are restored by `sigil resume`;
 `Shift-Tab` returns to them from the composer. Sigil resumes the exact suspended continuation after
@@ -99,14 +111,9 @@ an accepted answer instead of replaying the provider turn that asked the questio
 
 The task view shows steps, current status, child-agent work, and a Verification card when a check is needed. `Alt-V` focuses the card. Restoring a session shows the saved task state but never continues it automatically.
 
-The release default is `auto / explicit_request_only`: ordinary input is routed
-on the review-first baseline (automatic plan review before any durable Task).
-A newly installed qualified release may additionally show direct task execution
-in Quick Setup and `sigil doctor`. That qualification is bound to the exact
-provider route and binary build shipped with the release. Existing
-configurations stay unchanged. To turn off automatic routing and proactive
-spawning without deleting Task history, set `routing_policy = "manual"` and
-`multi_agent_mode = "explicit_request_only"`.
+The release default is `auto / explicit_request_only`. Automatic Task routing uses the configured provider's tool capability and the available executor; it does not require a release manifest. Release qualification can enable proactive read-only agents by default for a matching new installation. Existing configurations stay unchanged. Set `routing_policy = "manual"` and `multi_agent_mode = "explicit_request_only"` to disable automatic handoff and proactive spawning.
+
+Local Plan actions remain available after a model connection is removed. A failed review can be retried even before a draft exists. Revising after failure accepts new guidance; retrying an already accepted Run returns the same Task and preserves its progress.
 
 ## Approvals and File Changes
 

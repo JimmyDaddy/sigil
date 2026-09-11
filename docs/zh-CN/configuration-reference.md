@@ -29,10 +29,12 @@
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
 | `config_version` | 必填：`2` | 选择当前 provider connection schema；其他值都会 fail closed。 |
+| `[composition].profile` | 快速设置 `"core"`；手写省略 `"standard"` | `core` 保留普通任务基础能力；`standard` 选择全部可选模块。 |
+| `[composition].enhancements` | `[]` | core 的显式增强列表：`task_orchestration`、`memory`、`skills`、`code_intelligence`、`repository_context`、`web`、`mcp`、`terminal`、`change_sets`、`session_titles`、`compaction`、`updater`。模块自身的 `enabled` 仍可进一步禁用。 |
 | `[agent].connection` | 快速设置中的选择 | 保存默认 connection ID。 |
 | `[agent].model` | 模型服务设置中的选择 | 保存默认 connection 中的模型。 |
 | `[agent].tool_timeout_secs` | `30` | 工具超时秒数。 |
-| `[agent].max_turns` | 禁用 | 未收敛工具循环的可选上限。 |
+| `[agent].max_turns` | 未设置 / 不限 | 每次 agent run 的模型总轮数上限，可选正整数。省略即不限；不要用 `0` 表示不限，它会立即停止。修改配置文件后重启 Sigil 生效。 |
 | `[connections.<id>].label` | 必填 | 面向用户的账户或端点名称。 |
 | `[connections.<id>].provider` | 必填 | `deepseek`、`openai`、`anthropic`、`gemini` 或 `custom`。 |
 | `[connections.<id>].protocol` | 必填 | `deepseek`、`responses`、`chat_completions`、`anthropic_messages` 或 `generate_content`，并受 provider 约束。 |

@@ -8,6 +8,18 @@
 
 实施切片见[执行计划](../../../.repo-local-dev/rfcs/0073-plan-review-continuity-and-recovery-v1-execution-plan.md)。
 
+## 2026-09-11 生成链路局部消融
+
+当前实现将研究与结构化收口保留在同一个 research child：沿用 SessionLog、模型历史和 authority-admitted resource bundle，最多追加两次单轮 submit-only 纠错。每次收口只广告并接受 `submit_plan_review_result` 的 `draft | no_plan`，不开放研究、委派或写工具；失败参数与当前 validation feedback 保留在同一会话中。最终文本以 `Unknown` candidate 同时保存在 child 与 parent，不能因为非空正文进入 `DraftReady`。已有 Complete candidate 的显式用户采纳操作继续保留。
+
+本批删除独立 finalizer session/resource allocator、最近 12 个工具结果 / 24 KiB evidence builder、未使用的 PlanCompileInput 构造和重复 draft 校验，以及未广告的 `submit_plan_draft` 与 Accept-only `confirm_plan_review_candidate` 执行分支。旧工具名只保留明确协议拒绝与历史审计识别；历史 `finalizer_session_ref` 继续用于既有 durable attempt 的原样恢复，不据此分配新会话。真实来源绑定、只读权限、用户 Run 批准、取消和 resource settlement、revision 原子 terminal/outbox 保持各自的执行边界。
+
+同批清除没有生产调用的旧生成算法：`compile_executable_plan_candidate`、`task_plan_from_plan_draft`、旧 candidate intent prepare/materialize/bind、`append_plan_execution_adoption_at_frontier`，以及只供这些算法测试的 `create_task_from_plan` / `PlanExecutionService::adopt` 链。历史 `ExecutablePlanCandidateV1`、`PlanCompileBindingV1`、`PreparedIntentAdmissionV1`、`PlanExecutionAdoptedV1`、ready/failure/materialization 记录及其 reader、projection、validator 继续保留；旧日志测试直接读取[固定历史数据](../../../crates/sigil-kernel/src/tests/fixtures/historical_plan_execution_v1.json)，不再用旧生成器制造输入。当前批准仍使用原子的 `append_plan_approval_task_shell_at_frontier` 写入直接执行 authority。
+
+修订 guidance 的新 dispatch 身份同时绑定 `UserInputIdentityV1.generation`。未启动失败仍不制造 attempt；同文字、同 snapshot 的下一代指导可以保持相同物理 ordinal，但必须得到不同 attempt / Plan / child / run 身份。启动与失败结算核对当前已接受代次，拒绝旧派发和迟到失败污染新代。既有 attempt 的持久格式不变，恢复时从首次 attempt control 前的 immutable prefix 读取代次并原样保留历史身份。
+
+验证用例覆盖长于旧 evidence cap 的研究全文、超过 12 次读取的首个结果、同会话纠错、Unknown 非 ready、当前 draft/no_plan、旧协议拒绝及普通只读工具。测试运行结果由本次执行记录报告，本节不宣称整份 RFC 或真实模型资格化已经完成。
+
 ## 1. 修复目标与基线
 
 本方案解决一个具体问题：用户已经提供的约束、模型已经形成的方案，以及已经确认的领域结果，在 Plan 的阶段切换、纠错、资源收尾或恢复时丢失，最终表现为偏题、重复研究、重复生成、错误的 Plan ready 或整次失败。

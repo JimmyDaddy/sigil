@@ -33,6 +33,10 @@ Open the repository and run `sigil`. Quick Setup handles the workspace, provider
 ```toml
 config_version = 2
 
+[composition]
+profile = "core"
+enhancements = []
+
 [workspace]
 root = "."
 
@@ -59,6 +63,22 @@ publishing fails, the panel stays open with the draft intact, shows a persistent
 status, and focuses the related field when Sigil can identify one. Editing again clears the stale
 error so the next save attempt is unambiguous.
 
+If the current configuration is valid but authority startup fails afterward, setup keeps the
+specific startup error visible and selects **Retry Start**. After resolving that startup error,
+retry directly without saving the connection again or re-entering credentials.
+
+Model turns are unlimited by default. To set an optional limit for each agent run, add a positive
+`max_turns` value to the existing `[agent]` block in your config file, then restart Sigil:
+
+```toml
+[agent]
+max_turns = 100
+```
+
+This counts model turns across the run, including turns that request tools; a turn can request
+multiple tools. Omit `max_turns` to remove the limit; do not use `0` for unlimited turns, because it stops immediately. If the limit is reached, Sigil
+returns a partial result and preserves the conversation so you can continue with another message.
+
 `[model_request].max_output_tokens` is an optional provider-neutral default for ordinary agent
 runs. Omit it to keep the selected provider's automatic output budget. In TUI `/config`, **Max
 output tokens** accepts a positive integer or a `K`/`M` suffix such as `8K`; leave it empty for
@@ -70,6 +90,19 @@ A connection ID identifies the saved route but is not itself a trust grant. Corr
 path on the same endpoint origin can rebind a resumed session automatically. Changing origin,
 provider protocol, or an account/tenant boundary requires an exact user confirmation or route
 replacement before any history is sent.
+
+The core composition includes model conversation, file reading, writing and search, short commands,
+approval, cancellation, and durable sessions. Quick Setup selects `profile = "core"` for new configs.
+Add optional capabilities individually under `[composition].enhancements`, for example
+`["skills", "memory"]`, then configure those modules. `profile = "standard"` selects all optional
+modules, subject to their own `enabled` settings. Omitting `[composition]` in a hand-written config
+selects `standard`.
+
+Unselected modules do not construct runtime owners. Their configuration is preserved when saved
+and validated when the module is selected. A session records its composition before the first run;
+after changing the selection, restart and create a new session. Old execution sessions without a
+composition record cannot resume; existing files are not automatically deleted or migrated. See the
+[Field reference](configuration-reference.md) for capability names.
 
 ## Workspace
 
@@ -85,20 +118,10 @@ Retention limits are applied only through an explicit preview and confirmation u
 
 ## Task Rollout And Defaults
 
-The current schema defaults to
-`routing_policy = "auto"` and `multi_agent_mode = "explicit_request_only"`.
-Ordinary input therefore runs the automatic Chat / PlanReview / Task route
-decision on the review-first baseline; explicit `manual` keeps chat-first
-behavior. Quick Setup saves `auto + proactive` only when the installed binary
-is accompanied by a qualified rollout manifest and the selected provider,
-model, official endpoint family, task config, and build all match its exact
-route.
+When Task orchestration is selected, its configuration defaults to `routing_policy = "auto"` and `multi_agent_mode = "explicit_request_only"`. The model chooses Chat, PlanReview, or Task according to the actual provider and executor capabilities. Explicit `manual` disables automatic handoff.
 
-Sigil never rewrites an incompatible config. A missing, malformed, stale, or non-matching
-manifest stays on the review-first baseline. Use `sigil doctor` to inspect the effective
-release qualification, including whether direct task execution is qualified, on the
-review-first fallback, or unavailable. Setting `routing_policy = "manual"` is the coarse
-rollout rollback; it does not delete durable Task or agent history.
+Quick Setup saves `auto + proactive` only when the selected provider, model, official endpoint, task config and build match a qualified release manifest. This evidence influences installation defaults; missing or invalid evidence does not gate a configured Task executor. Existing configurations are not rewritten. `sigil doctor` reports configuration and release evaluation. Setting `routing_policy = "manual"` preserves Task and agent history.
+
 
 ## Use Doctor When Setup Looks Wrong
 

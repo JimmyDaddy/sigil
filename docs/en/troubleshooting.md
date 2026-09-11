@@ -113,6 +113,13 @@ The session has a write-capable owner in another TUI, Desktop run, or headless r
 
 Sigil records work that was running when the process stopped as interrupted; it does not replay the command automatically. Review the tool card and retry only if the action is still needed.
 
+`shutdown deadline exceeded` / `cleanup_complete=false` means the shared shutdown deadline expired
+before all background work could be confirmed finished. The terminal is restored first. Keep the
+full error with `owned_thread`, `stage`, `elapsed_ms`, and task counts to identify the pending
+cancellation, storage, maintenance, or runtime cleanup. Check existing files or commits before
+repeating a write. Unavailable output storage can accompany a successful command; missing output
+does not mean the command never ran and does not trigger an automatic retry.
+
 ## Context Usage Is High
 
 The info rail shows context pressure. Finish or checkpoint the current work before starting a large new request. `/compact` is available only when Sigil can safely apply it for the selected model; otherwise start a fresh or forked conversation. See [User Guide](user-guide.md#long-context-and-compaction).

@@ -44,6 +44,8 @@
 | **Large outputs stay inspectable**<br>Sigil keeps bounded conversation views while preserving policy-safe tool output as session-scoped artifacts for precise, paged follow-up reads. | **Cache-stable context**<br>Historical tool output ages deterministically before semantic compaction, so long sessions shed token pressure without rewriting the active cached prefix. |
 | **Commands have one lifecycle**<br>Finite checks run in the foreground with live progress; persistent or interactive work uses explicit terminal tasks and event-driven waits. | **Approval matches real effects**<br>One immutable permission plan binds parsed commands, targets, containment, policy, approval, audit, and execution across Desktop and TUI. |
 
+Desktop and TUI show bounded live previews while an answer is streaming, then replace them with the saved result. Reopening a session restores committed history; a truncated preview is not the complete answer. In Desktop, use “View complete message” to read the saved text page by page. Plan revision can keep accepting input while details load, and an interrupted cleanup remains visible as unfinished recovery work. Only the current session and protocol formats are supported; older formats are rejected without automatic migration.
+
 ## Start in under a minute
 
 ```bash
@@ -56,7 +58,7 @@ Quick Setup opens when configuration is missing or invalid. No values are reused
 
 Prefer a native app? The [GitHub prerelease](https://github.com/JimmyDaddy/sigil/releases) provides signed and Apple-notarized macOS DMGs for Apple Silicon and Intel. See [Installation](docs/en/installation.md) for the exact asset names and update path.
 
-Automatic Task routing is the default: ordinary input is first routed through a host-owned decision (Chat / PlanReview / Task) on the review-first baseline, and only an accepted plan can create a durable Task. A release may additionally enable direct Task execution and proactive read-only Explore agents for a new installation only when it ships an exact-route qualification manifest for its own binary; other routes and releases without that sidecar stay on the review-first baseline. An explicit manual policy remains available as the coarse rollback and keeps chat-first behavior. This changes orchestration only; it never grants file, shell, network, MCP, external-directory, or merge permission. `sigil doctor` reports the three automatic-orchestration facts. See [Advanced Configuration](docs/en/advanced-configuration.md#task-planning).
+Automatic Task routing is the default: a model chooses Chat, PlanReview, or Task through a typed decision. A plan waits for your approval; a direct Task can begin when the configured provider and executor support it. Release evaluation informs new-install defaults for proactive read-only agents, and does not grant execution permission. File, shell, network, MCP, external-directory, and merge permissions still apply. Use `routing_policy = "manual"` to disable automatic handoff. See [Advanced Configuration](docs/en/advanced-configuration.md#task-planning).
 
 ## Go deeper
 

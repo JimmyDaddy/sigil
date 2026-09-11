@@ -2,6 +2,12 @@
 
 状态：implemented（R63.0–R63.7、§15 acceptance 与 2026-08-17 release qualification 已完成；见 §13.14）
 
+> 2026-09-11 消融修订：本文历史的“exact-route qualification 才允许 DirectTask”运行期门槛已由
+> [Plan / Task / Execute 消融](../plan-task-execute-ablation.md) 替代。当前自动 Task 能力取决于用户策略、
+> provider tool capability、实际 executor 与 durable invariant；发布清单只为安装默认值提供评测依据。
+> 同一修订将 Plan 研究与 typed draft/no-plan 收口合并为一个 durable child，删除旧 Plan candidate 编译生成链。
+> 以下历史验收数字与 release snapshot 继续保留，不能用来覆盖本修订的当前行为。
+
 创建日期：2026-08-03
 
 依赖：

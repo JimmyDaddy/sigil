@@ -532,6 +532,13 @@ provider-neutral durable request/answer、exact continuation、跨重启恢复�
   HTTP/TUI 会从 parent route 定位 child session、恢复原 command id 与答案，并 exact replay；route 注册后失败
   则根据 provider physical-attempt evidence 回到可恢复状态或 fail closed。deterministic application 与 TUI
   reload 测试覆盖这一 crash window，且断言没有第二个 planner participant。
+- TUI 的 accepted recovery 使用同一无 answer payload 的私有 Resume 命令覆盖普通 agent、Task planner
+  与 PlanReview research。launcher 保留原 application command receipt，worker 在确认没有 active、retired
+  或 background continuation owner 后，从当前受管理 session 重新读取 exact identity/hash/command；
+  provider physical-attempt 证据仍决定是否允许续跑，不能凭 Resume 文案推断旧 owner 已停止。
+- TUI 在接受回执及 parent route Registered/Resolved 到达时，按 exact identity/hash 退休对应表单；
+  迟到的辅助投影不得重新打开已应用的旧问题。其他问题草稿与 MCP live form 独立保留；重载后的
+  显式 worker recovery 仍能呈现尚未完成的 Registered continuation。
 - 本轮受影响 crate gate：`cargo test -p sigil-kernel`（1568 passed / 0 failed / 6 ignored）、
   `cargo test -p sigil-runtime`（1079 / 0 / 3）、`cargo test -p sigil-tui`（1662 / 0 / 3），以及三 crate
   `cargo clippy --all-targets -- -D warnings` 均通过。并行 gate 暴露的 rollout-manifest 环境变量测试 race

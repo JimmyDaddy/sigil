@@ -84,6 +84,12 @@ pnpm --dir apps/desktop package --bundles nsis  # Windows
 13. 用键盘完成 workspace/session 选择、filter、navigation/review drawer、会话重命名/删除确认、approval 和 theme 切换，确认 Esc、Tab trap、选择后焦点恢复与中文 IME；每个公开 installer candidate 还需在当前 Space 使用 VoiceOver 验证 WebView 内容导航，不得用 hidden-window AX probe 代替。
 14. 对公开 macOS beta candidate，在 **Settings → Desktop updates** 检查 signed beta channel；验证“仅检查”不会下载，
     安装完成后不会自动重启，活动任务会阻止重启，签名或 manifest 校验失败时不会替换现有应用。
+15. Plan 草稿刚显示完成时立即选择 Revise：foreground run 仍在释放时，服务端以
+    `plan_decision_busy` 拒绝执行，Desktop 保留同一 command identity 最多重试 8 次，累计退避上限
+    5.5 秒。前置拒绝保留 durable identity，但尚未调用 Plan driver；成功后重复请求只能重放 receipt。
+    其他拒绝不自动重试，失败提示须在相同 Plan 的刷新后保留，用户可检查状态后主动重试。
+16. 回答 Plan 修订的澄清题后，确认同一 review run 恢复并显示新版计划、关闭已处理的问题卡。
+    迟到的旧 run 终态或旧等待页不得覆盖已确认的新状态；缺少有序恢复证据或真正互斥的终态仍须报错。
 
 macOS package 还必须通过：
 

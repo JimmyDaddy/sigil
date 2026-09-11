@@ -471,13 +471,13 @@ effect且需要 exact-route recovery时仍 Paused，取消仍 Cancelled；durabl
 
 这条降级保证弱 tool-calling模型只损失并行/分工优化，不损失基础任务可执行性。
 
-### 8.5 Legacy迁移
+### 8.5 当前格式边界（2026-09-09 修订）
 
-- 旧 `PlanExecutionAdoptedV1`、`TaskMaterialization*`和多 step DAG继续 replay；
-- 旧 candidate/ready marker继续可读，但不再决定新 PlanReviewable；
-- `PlanExecutionService::materialize_approved_plan`与 legacy adoption只保留 replay/test兼容，生产 surface不得调用；
-- 新写路径禁止 raw `PlanDecision::Accepted`；
-- Doctor报告 partial legacy prefix，不自动猜测缺失 authority。
+- 按用户决定取消旧数据迁移与旧 Plan 执行兼容要求；缺失当前修订、候选或执行绑定的记录明确拒绝，不猜测或补造 authority。
+- 旧 candidate/ready marker 不能授予 PlanReviewable 或 Run 权限；当前候选采纳必须携带专用 candidate hash。
+- 移除无生产调用者的 `PlanExecutionService::materialize_approved_plan` 旧兼容 API；当前 Run 通过 approve 与 direct execution authority 执行。
+- 当前格式的 Task materialization blocker、Retry/Adopt、已接受答案恢复与精确幂等继续有效；这不授权解释旧格式或改写旧文件。
+- 新写路径禁止 raw `PlanDecision::Accepted`；Doctor 报告不支持或缺失的绑定，不迁移数据。
 
 ## 9. Workspace authority与 observation分离
 
@@ -865,9 +865,11 @@ PlanReview revision 的独立终态协议（2026-08-31）：
   `ConversationRunStarted`，也不增设镜像 Started/Finalized 状态机。
 - 一个 revision 的 run identity 由既有 plan-review/attempt identity 确定。真正的
   `Started` 绑定 revision request、ordinal、base plan/hash、source turn 和 child lineage。
-  guidance 已接受但同 base/hash 从未出现 attempt 时，adapter 登记失败不伪造终态；用户
-  仍可显式 Save 原草稿。首次 Started 与输入后 resume 都必须重验原 RevisionRequested，
-  已 Save 的基础计划不能被滞后的 prepared request 再启动；已有 attempt 不适用该例外。
+  guidance 已接受但尚未出现该 request 的 attempt 时，正常排队不能恢复 Save。
+  adapter 若确认零 dispatch 启动失败，须在校验 exact accepted request 与 base/hash 后追加
+  `RevisionFailed`，再恢复原计划动作；不得伪造不存在的 attempt 终态。
+  首次 Started 与输入后 resume 都必须重验原 RevisionRequested，已保存或已失败的基础
+  决策不能被滞后的 prepared request 再启动；已有 attempt 仍按其真实终态协议收口。
 - 成功提交按 `PlanDraftCreated + RevisionSucceeded + PlanReviewAttempt(DraftReady) +
   PublicEventOutbox` 一个既有 crash-safe append bundle 落盘；无 draft 的终态按
   `RevisionFailed + PlanReviewAttempt(实际状态) + PublicEventOutbox` 同样落盘。
@@ -1406,3 +1408,10 @@ detect precisely
   -> pause only the owning boundary
   -> fail globally only when irrecoverability is proven
 ```
+
+
+### 2026-09-10：Direct 续接和完成输入修正
+
+续接入口先验证现有 execution binding。Direct 使用原 admission/attempt 和 `continue_direct_run`，不要求 executable plan，也不消费 Plan guidance recovery；Plan 分支保留 accepted plan/version 和原 guidance 校验。同一 continuation 输入被拒绝后不能重新选择 Chat 来绕过，后续独立输入仍可普通对话。Direct 的 provider request 接收完整 objective，participant 接收所属 step 合约。
+
+Direct runner 在生成 Completed attempt 候选前检查 outcome 是否阻塞、当前效果是否充分结算、相关 recovery blocker，以及已配置必要检查的 readiness。`StillUncertain` 终态只结束 probe，不等于效果已解决；模型 final answer 不覆盖它。纯分析且无相关修改、无适用检查配置时为 NotApplicable；修改后的未验证状态仍如实保留，不能显示为验证通过。通过这些输入检查后仍由原 Task root evaluator 形成一致的 durable/public 终态。

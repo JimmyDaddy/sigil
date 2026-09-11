@@ -33,6 +33,10 @@
 ```toml
 config_version = 2
 
+[composition]
+profile = "core"
+enhancements = []
+
 [workspace]
 root = "."
 
@@ -57,6 +61,20 @@ theme = "sigil_dark"
 配置面板会保留未保存草稿并持续显示 **保存失败**；能够识别具体字段时还会自动聚焦该字段。再次编辑
 会清除已经过期的错误状态，让下一次保存结果保持明确。
 
+如果当前配置有效，但后续 authority 启动失败，设置页会保留具体启动错误，并默认选中
+**Retry Start**。修复所显示的启动问题后直接重试即可，无需重复保存连接或重新输入凭据。
+
+默认不限制模型轮数。需要为每次 agent run 设置可选上限时，在配置文件已有的 `[agent]`
+区块中加入正整数 `max_turns`，然后重启 Sigil：
+
+```toml
+[agent]
+max_turns = 100
+```
+
+它累计本次运行的模型总轮数，包含请求工具的轮次；同一轮可以请求多个工具。省略 `max_turns`
+即可取消轮数上限；不要用 `0` 表示不限，它会立即停止。达到上限时，Sigil 返回部分结果并保留对话，之后可以发送新消息继续。
+
 `[model_request].max_output_tokens` 是普通 agent run 的 provider-neutral 可选默认值。省略时保留
 所选 Provider 自动决定的输出预算。在 TUI `/config` 中，**Max output tokens** 接受正整数或 `8K`、
 `1M` 这类 K/M 后缀；留空即为 Automatic。显式指定的单次运行约束优先于此默认值。
@@ -67,6 +85,15 @@ theme = "sigil_dark"
 Connection ID 用于标识保存的 route，但本身不等于 trust 授权。只修正同一 endpoint origin 内的路径时，
 恢复的 session 可以自动 rebind；origin、Provider 协议或账户/tenant 边界变化时，发送任何历史前都必须
 经过精确的用户确认或选择 replacement route。
+
+核心组合保留模型对话、文件读写与搜索、短命令、审批、取消和持久会话。快速设置为新配置选择
+`profile = "core"`。需要增强能力时，在 `[composition].enhancements` 中逐项加入，例如
+`["skills", "memory"]`，并配置相应模块。`profile = "standard"` 选择所有可选模块，再由各模块的
+`enabled` 设置决定是否启用；手写配置省略 `[composition]` 时使用 `standard`。
+
+未选择的模块不会装配运行组件，其配置内容会保留到下次保存，并在选择该模块后才校验。
+能力组合在会话首次运行时固定；修改组合后请重新启动并创建新会话。缺少组合记录的旧执行会话不能继续，
+已有文件不会自动删除或迁移。完整能力名称见[字段参考](configuration-reference.md)。
 
 ## 工作区
 
@@ -82,18 +109,10 @@ Shell 选择和终端行为见[终端兼容性](terminal-compatibility.md)；可
 
 ## Task Rollout 与默认值
 
-当前 schema 默认使用
-`routing_policy = "auto"` 和 `multi_agent_mode = "explicit_request_only"`。
-普通输入因此默认在 review-first 基线上运行 Chat / PlanReview / Task 自动路由；
-显式 `manual` 保持 chat-first。只有在缺少配置、安装的 binary 同时携带 qualified
-rollout manifest，并且所选 provider、model、官方 endpoint family、task config 与 build
-全部精确匹配时，Quick Setup 才保存 `auto + proactive`。
+选择 Task 增强能力后，配置默认使用 `routing_policy = "auto"` 与 `multi_agent_mode = "explicit_request_only"`。模型依据实际 provider 与执行器能力选择 Chat、PlanReview 或 Task；显式 `manual` 关闭自动交接。
 
-Sigil 不会重写不兼容的配置。manifest 缺失、损坏、过期或 route 不匹配时保持
-review-first 基线。使用 `sigil doctor` 检查当前 release qualification，包括 direct task
-execution 是 qualified、review-first fallback 还是 unavailable。设置
-`routing_policy = "manual"` 就是 rollout 的 coarse rollback；它不会删除 durable Task 或
-agent history。
+Quick Setup 只有在所选 provider、model、官方 endpoint、task config 与 build 匹配 qualified release manifest 时才保存 `auto + proactive`。该证据影响安装默认值；证据缺失或无效不阻断已配置的 Task 执行器。已有配置不会被重写。`sigil doctor` 分别报告配置和发布评测；设置 `routing_policy = "manual"` 会保留 Task 与 agent 历史。
+
 
 ## 设置异常时使用 Doctor
 

@@ -29,10 +29,12 @@ Use [Configuration](configuration.md#storage-and-session-paths) for path choices
 | Section / field | Default | Purpose |
 | --- | --- | --- |
 | `config_version` | required: `2` | Selects the current provider-connection schema. Any other value fails closed. |
+| `[composition].profile` | Quick Setup `"core"`; omitted `"standard"` | `core` retains ordinary task capabilities; `standard` selects all optional modules. |
+| `[composition].enhancements` | `[]` | Explicit additions to core: `task_orchestration`, `memory`, `skills`, `code_intelligence`, `repository_context`, `web`, `mcp`, `terminal`, `change_sets`, `session_titles`, `compaction`, `updater`. Module `enabled` settings can further disable selected modules. |
 | `[agent].connection` | setup choice | Saved default connection ID. |
 | `[agent].model` | provider setup choice | Saved default model within `[agent].connection`. |
 | `[agent].tool_timeout_secs` | `30` | Tool timeout in seconds. |
-| `[agent].max_turns` | disabled | Optional limit for an unfinished tool loop. |
+| `[agent].max_turns` | unset / unlimited | Optional positive integer limiting total model turns in each agent run. Omit to leave turns unlimited; do not use `0`, which stops immediately, for unlimited turns. Edit the config file and restart Sigil to apply. |
 | `[connections.<id>].label` | required | User-visible account or endpoint label. |
 | `[connections.<id>].provider` | required | `deepseek`, `openai`, `anthropic`, `gemini`, or `custom`. |
 | `[connections.<id>].protocol` | required | `deepseek`, `responses`, `chat_completions`, `anthropic_messages`, or `generate_content`, constrained by provider. |

@@ -6,6 +6,8 @@
 
 请先完成普通设置并确认 Sigil 可以正常工作，再使用本页选项。一次只修改一个区域；结果不清楚时运行 `sigil doctor`。
 
+工作区变化或快照不可用不会阻止执行、保存已审核的 Plan；执行时会读取当前文件。模型列表仅供参考，即使列表未返回某个模型，也可明确选择该模型 ID。默认模型可以先保存，再补齐暂缺的密钥；启动运行时才校验凭证。修改文件后仍可重跑验证；验证检查当前文件，快照不完整时会如实记录为无法确定。
+
 ## 任务规划
 
 <!-- public-doc-topic: task -->
@@ -24,12 +26,7 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-以上数值是当前 schema 默认值。`auto` 是 release 默认值，缺少配置的 Quick Setup
-因此保存 `auto + explicit_request_only`（review-first 基线）。只有 installed release 携带
-qualified sidecar，且 provider、model、官方 endpoint family、task-config digest 与 binary
-build 全部精确匹配，Quick Setup 才保存 `auto + proactive`。不兼容的配置会被拒绝；
-sidecar 缺失、无效、过期或不匹配时保持在 review-first 基线。`sigil doctor` 会报告
-rollout 状态与 direct-task tier。
+以上数值是当前 schema 默认值。Quick Setup 保存 `auto + explicit_request_only`；匹配的 qualified release sidecar 可改为推荐 `auto + proactive`。该安装推荐要求 provider、model、endpoint、task-config digest 与 build 匹配。发布证据缺失或过期不禁用已配置的执行器；运行时依据实际 provider/tool/executor 能力和用户策略。`sigil doctor` 分别报告配置与发布评测。
 
 coarse rollback 是设置 `routing_policy = "manual"` 与
 `multi_agent_mode = "explicit_request_only"`。它会关闭自动 handoff 和 proactive spawn，

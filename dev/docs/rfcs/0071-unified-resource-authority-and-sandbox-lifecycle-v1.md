@@ -4980,7 +4980,7 @@ runtime必须提供唯一`CurrentSchemaChildSessionResourceProvisionerV1`（名�
 - child purpose允许的managed storage、execution/extension与recovery ports；
 - cancellation、terminal settlement、lease finalize与crash reconciliation owner。
 
-plan-review research与submit-only finalizer必须各自取得bundle；需要在两个child间转交证据时只传递durable opaque artifact refs和typed evidence，不共享raw artifact root或未分区parent store。`Session::load_from_store`加URL capability不是current-schema child onboarding。bundle acquisition任一mandatory channel失败时，coordinator在provider physical attempt与tool execution前写typed blocked/failed terminal并向parent投影stable recovery code；不得创建一个没有durable artifact store却继续运行的child。
+Plan review 的 research 与 submit-only 收口复用同一个 authority-admitted research child、SessionLog 和 resource bundle；收口只收窄 advertised tool/dispatch 到 `submit_plan_review_result`，保留完整模型会话，不新建 finalizer child 或转交裁剪证据包。独立的 Task role、agent child 等真实 child scope 仍须各自取得 bundle；跨 child 转交证据只使用 durable opaque artifact refs 和 typed evidence，不共享 raw artifact root 或未分区 parent store。`Session::load_from_store`加URL capability不是current-schema child onboarding。bundle acquisition任一mandatory channel失败时，coordinator在provider physical attempt与tool execution前写typed blocked/failed terminal并向parent投影stable recovery code；不得创建一个没有durable artifact store却继续运行的child。
 
 artifact backend在首个tool call前必须ready。工具已经发生effect后出现真实disk-full/backpressure仍按现有single-drain规则将artifact标记`Unavailable`且不重放effect；但“coordinator从未provision store”属于zero-effect composition blocker，不能伪装成每个ToolResultRecordedV3各自的capture failure。child natural terminal、cancel、provider failure、parent detach与process crash均按bundle owner完成settlement或typed reconciliation，不能依赖`Drop`猜测已释放。
 
@@ -9788,6 +9788,8 @@ private support bundle 可包含脱敏 manifest、reason code、generation 与 p
 
 R71.1-R71.5允许新增实现、shadow plan与isolated current-schema qualification，但已发布build/user session仍整体走旧epoch；shadow不得创建production目录、签发grant、spawn、cleanup或写用户durable V3/V2并行事实。R71.4必须先为shell、terminal、MCP、plugin、verification、RuntimeState/Cache、ArtifactStaging等全部§9.5 consumer准备好current-lease adapter；R71.5再完成journal/recovery/cross-surface fault qualification。
 
+2026-09-08 composition 修订：本节的 mandatory consumer 现指启动时选定能力的依赖闭包，由 kernel 固定映射生成。manifest schema 2 将纯能力选择纳入内容哈希；Standard 仍为原 18 类 channel，Core 保留 13 类基础 authority/storage/recovery channel，再按 Terminal、MCP/Skills、Memory、Updater 等选择加入相应真实 probe。未选能力不创建其 adapter 或 storage grant，也不产生假的 passed probe。缺失/重复/未选 probe 均拒绝；所选能力继续执行下述唯一 current-schema authority 契约。本修订不是 per-consumer 新旧 authority 开关，任何实际副作用仍须得到当前 authority 准入。旧 schema manifest 不迁移为新组合，也不自动删除用户数据。
+
 R71.6才在未发布release candidate的application startup选择唯一schema/authority epoch，并对**全部consumer原子切换**：新epoch只使用Resource Authority、`ManagedExecutionServiceV1`、V3 admission与RecoveryBlockerV2；旧epoch只运行旧binary/旧session，不被当前binary读取。不存在per-consumer生产开关、V2/V3 dual write、legacy allocator fallback或“先切shell、长生命周期稍后再说”。active process固定其adapter/provider generation；feature flag不允许dual execute/dual cleanup。若任何mandatory consumer adapter或recovery projector未ready，application startup fail closed，不能部分启动。R71.6/7不得独立发布；原 R71.8 evidence 在历史候选 SHA 上保留，但当前 closure 必须等待 R71.9 同一 candidate 重新通过资格门禁。
 
 ---
@@ -10429,7 +10431,7 @@ base_sha="$(git merge-base origin/main "$candidate_sha")"
    - 旧 path-shaped ref、zero hash/generation 与 runtime-local 宽泛 registry 一次性 clean cutover；只允许 test-support adapter 显式保留，且 negative dependency gate 必须证明 shipping graph 不可达。
 3. **R71.9c — current-schema child session resource bundle**
    - application composition 必须只有一个 `CurrentSchemaChildSessionResourceProvisionerV1`（最终命名可与现有 owner 对齐，但职责不可拆成 best-effort attach），在 child provider/tool 启动前原子交付 SessionLog、ArtifactStaging、ArtifactStore、managed file/storage/tool authority、scope/generation 与 terminalization guard。
-   - plan-review research child 与 finalizer 使用不同的 scoped bundle；两者均必须具备 artifact writer/store，不得共享 parent 的 raw store object、writer handle 或 unscoped token。
+   - Plan review 的 submit-only 收口继续使用 research child 已取得的 scoped bundle、模型历史与 artifact backend；只收窄工具能力，不分配另一 finalizer scope。独立 child 仍使用不同的 bundle，不得共享 parent 的 raw store object、writer handle 或 unscoped token。
    - success/failure/cancel/timeout/panic/restart 由同一 lifecycle guard 结算 lease、seal/publish artifact、finalize SessionLog；不能因 child 最终文本存在就忽略 artifact capture 缺口。
    - mandatory bundle 任一 component 缺失时返回 `ResourcePreconditionUnavailable`（或等价 closed current-schema variant），并证明零 provider request、零 tool start、零 filesystem effect。
 4. **R71.9d — production E2E、negative gate 与重新资格化**
@@ -10738,6 +10740,17 @@ V1 的 fixed-forward 规则补充如下：
 6. resource 与 quota 的 file-backed journal 每次 append 必须使用 Resource Authority 内部统一的 owner-only、no-follow sidecar writer lock，并比较磁盘 snapshot 与调用方预期 predecessor；不相等即 typed precondition failure 并回滚内存/book mutation，禁止 last-writer-wins 丢失其他进程已经 durable 的记录。若 quota reservation 已 durable、resource admission 因竞争未落盘，restart 只释放不在 exact pending-admission owner set 中的 orphan；旧 terminal 与较新 pending 复用同一 legacy owner key 时由 pending 保留 reservation，旧 terminal 不得误释放。domain journal schema 与 replay 仍分别归属各自模块，只有 host-filesystem exclusion 原语集中管理。
 
 上述补充只为历史 pending state 提供保守终结，不把 pending 当作 settled，不给 legacy marker 新写权限，也不修改既有 session 数据。新 schema、terminal event、lock producer 与恢复路径必须进入 inventory、restart、cross-version、concurrency、corruption 和 five-platform qualification。
+
+当前 artifact staging 的热写路径使用同一 live namespace 的 authority-issued byte capacity：
+首次测量建立使用量，后续每次写前检查两份 paired lease 并计算 bytes/entries 增量；只有容量
+不足时才申请扩容，namespace 内最多预留 1 MiB 余量，容量紧张时 authority 可授予小于 preferred
+但不小于 minimum 的容量。chunk 写入不逐次扫描目录或追加 quota snapshot；finish/drop 删除
+实际 staging 后精确缩容，publish/GC 使缓存更新或重新测量。缓存只保存计量投影，不提供权限。
+
+quota resize 使用一条带预期旧 reservation 的 `Adjusted` 记录完成替换，先检查 namespace 与
+workspace 的 bytes/entries 上限，再持久化并更新账本；不能先释放旧额度再申请新额度。
+拒绝和 predecessor CAS 冲突保留旧 reservation；rename 后 directory fsync 等不确定持久化
+失败使账本进入需 reopen 的状态，禁止在旧内存视图上继续分配，包括表面上的 no-op reconcile。
 
 ---
 

@@ -386,6 +386,28 @@ sigil/
 高度变化或宽度 reflow 只能重投影同一锚点。child tail window 滚动时还必须用稳定的 logical
 entry identity 跨越 bounded cache 的前缀裁剪，不能把相对尾部偏移误当作用户正在阅读的位置。
 
+RFC-0075 的会话读模型由 `RuntimeSessionProjectionOwner` 随真实 attachment 共享，克隆句柄复用同一增量状态。kernel 只提供严格只读的受协调范围读取、source identity、字节预算与协作取消；runtime 保存 reducer 和位置元数据，Desktop canonical display 与 TUI/application page 从同一已验证 cut 读取有界页面。冷历史句柄不创建 writer 或恢复 sidecar；活动 owner 失败不降级为按路径重开。历史页固定 cut 不因后续消息或 ACK append 失效，外部替换或已访问记录失配则拒绝。
+
+HTTP 的 display 与 artifact page 在同一会话上串行取得临时 artifact lease，并在等待时检查原查询预算。已有运行登记的 store 只有在 session scope 与规范化日志路径精确一致、且唯一时才可复用；foreground 清空到物理 lease 释放之间仍使用该登记 owner。错误 scope、多个 owner、损坏或完整性失败均拒绝，不能借重新申请 lease 绕过。
+
+Desktop 的截断消息另提供显式正文分页：canonical display identity 由同一 owner 的索引定位到唯一已提交 source record，在既有 raw-record 与脱敏预算内读取，按 UTF-8 边界返回最多 64 KiB。续页版本绑定原始 scope、显示身份与 checksum，拒绝混用来源；renderer 保留单页且复用 scope-bound native history query 的取消链路，不放宽列表预览预算。
+
+HTTP application command 的前置 snapshot 也复用该严格只读 owner；健康会话的写 attachment 因切换或迟到请求离开缓存，不等于读服务不可用。实际 dispatch 仍独立获取写 attachment 并执行 authority/run admission，现有活动 owner 的读取故障不能回退为按路径重开。Plan 决策在前台运行或清理尚未释放时，仅记录“执行前延期”并返回 typed busy；同一 command fingerprint 可重新准入，已执行、不确定或崩溃中断的命令不能借此自动重放。
+
+Desktop 队列入队成功后主动查询前台 owner，不能依赖仍在传输后台终端状态的旧 run stream 通知后继运行；交接期间按已有有界退避等待，快速完成的后继运行通过 canonical display 回补。Plan 问题投影按 review/attempt 的最新控制状态折叠，恢复或完成只退休该 attempt 的问题；同 run 的等待输入可以经有序恢复和更新的持久终态结清，旧页面与迟到的已覆盖终态不能回滚当前状态，真正互斥的最终状态仍拒绝。
+
+初始 attach/owner confirmation 进行时到达的终态必须留下后续查询请求，避免较早取得的 running snapshot 把已结束运行重新显示为 live。后续查询不重新改写 owner/predecessor，订阅前的既有回放由首次新查询覆盖；失败则停止自动重试并进入显式恢复，不能以反复 attach 掩盖持续故障。
+
+canonical display 的内部 cursor v2 使用追加时计算的 prefix digest 绑定固定 cut，热页不重算整个历史前缀；非当前 cursor 版本明确拒绝，不保留 v1 校验与升级分支。display DTO 保持 v1。历史查询不扫描当前 workspace 来猜测 Plan 是否仍有效，缺少当前 snapshot 时保留未验证状态，动作仍由实际 owner 重新校验。Desktop 的 display/transcript GET 显式声明连接关闭取消观察；HTTP 普通半关闭请求保留原语义。取消只停止观察，已开始的持久批次仍须完成，退出计数保留底层任务直到它真实结束。损坏前缀在当前 attachment 内保持 typed corrupt，不以无限重试或空页掩盖。
+
+本轮会话、outbox、ACK、HTTP journal/envelope、display cursor 与 Plan 修订恢复只支持各自的当前版本和格式。旧版本以及持久化 transient delta 明确拒绝，不自动迁移、补造身份或回退解释。当前 public payload v2、HTTP envelope/journal v3、内部 cursor v2 与 display DTO v1 分属不同契约，不能按版本数字大小误判为旧格式。
+
+流式预览在 durable public sequence 分配之前进入最多四个 64 KiB 槽位，每 32 ms 合并替换快照；TUI、HTTP 与 Desktop 分开维护 live revision 和 durable cursor。最终消息、工具结果和终态退休对应槽位，重连读取当前快照与持久重放，预览不成为历史正文或模型上下文。application 当前状态与历史 delivery 分开推进：补投旧通知不回滚 Plan、问题或终态，准确消费 ID 才可生成有界、可重试的收据。
+
+TUI 的 Plan 准入保留原 command identity、scope、epoch 和 plan hash，由后台提交，辅助 review、child 和 workspace 查询不阻塞输入框。退出先以真实 owner 的受限 stop capability reserve 关闭前向副作用，再恢复终端；worker 与 observer 共用剩余退出期限，未确认静止时返回清理未完成。PlanReview research、Waiting continuation 与 finalizer 都从首次 Started 或真实 source turn 之前的原始 parent prefix 构造固定初始片段，再接 child history；缺失或冲突的绑定不能回退到当前 parent。
+
+TUI worker 回收匹配的运行结果时，先结束该 root 的取消竞争，再释放 owner；失败或挂起的结果也不能遗留可被后续设置重启再次 reserve 的空闲 stop target。已经 reserve 的取消保留唯一 owner，由 urgent stop 路径完成审计与 join。任务计数、effect 计数和 cleanup-incomplete 证据仍独立检查，收到结果不等于已完成资源清理。
+
 Provider connection 配置采用 V2 复合身份。kernel 只定义中立的 `ConnectionId`、
 `ModelRef` 与 durable `ResolvedModelRoute`；runtime 拥有
 `ProviderConnectionConfig`、V1 -> V2 投影、credential reference、connection inventory、
@@ -407,6 +429,7 @@ secret-free offline readiness，用户主动进入配置流程后才异步验证
 选择值都保持完整 `ModelRef`。设置 saved default 使用共享 typed mutation，不保存 renderer-local
 Provider/model override；TUI `/config` 选择 connection/model 并保存时，会同时更新 saved default，
 并在当前 idle session 追加同一 route-selection boundary 后重绑 worker，而不是创建新 session。
+配置发布回执确认成功后，打开的面板同步已提交 draft/base 并清除 dirty/save-error；后续保存以该新 base 做 CAS，正常关闭不再要求丢弃已保存的更改。
 配置校验、credential rotation 或 atomic publish 失败时，TUI 保留 draft/dirty state，并在 header、
 detail 和 footer 投影持久 save-error；可识别字段会获得焦点，后续编辑清除旧错误状态。
 session identity 建立 initial exact route，后续只允许在 idle 边界追加完整、
@@ -607,6 +630,13 @@ shell/cargo workspace check 的资源失败采用独立语义：启动重型 che
 reserve；遇到 ENOSPC 时释放后对同一 crash-safe append 重试一次，以优先落下最小 terminal /
 checkpoint 事实。
 
+managed one-shot 输出 reader 独立报告 EOF、读取失败或未读完，进程 exit 0 不代替 EOF。
+reader 不执行存储 I/O；每流最多 16 MiB 的候选缓冲在 reader 收尾后交给受 root cancellation
+owner 管理的有限后台写入任务，按批次落到预先绑定的 staging 命名空间。超过缓冲上限仍保留真实
+observed bytes，finalize 不得用较小的存储 snapshot 覆盖读端计数。后台任务被放弃等待时，
+清理 staging 后才释放任务计数；capture 完成句柄丢失必须投影为 storage unavailable。
+具体 drain 期限、独立预算和发布顺序见 [RFC-0062 §10](rfcs/0062-harness-owned-tool-output-spooling-and-result-conformance-v1.md#10-streaming-capture-protocol)。
+
 上述 root-run cumulative counter 是 RFC-0059 V2 的历史兼容描述，不是当前 writer 契约。RFC-0062 V3
 已经 implemented/verified，并将其替换为四个独立 plane：harness-owned policy-safe artifact capture；
 per-result 8/16 KiB + per-assistant-tool-batch 64 KiB actual-byte initial projection；RFC-0059
@@ -642,7 +672,11 @@ Anthropic stream mapper把`server_tool_use`和`web_search_tool_result`按`tool_u
 
 WebFetch transport 禁用自动 redirect、自动 retry、Referer 和 reqwest 自动解压，显式流式处理 gzip/br/zstd/deflate，并分别执行 wire/decoded/model hard cap。Same-origin redirect 每跳重新经过 durable barrier、budget attempt 与 destination guard；cross-origin或 HTTPS downgrade只返回并持久化新的 session capability，不在原调用内继续。HTML/charset 正文经过 bounded decode、active-content剔除、terminal-control清理与 kernel persistence sanitizer，最终输出 `FetchedPage` provenance、安全 URL registration、transport security、network guard与 truncation metadata。Tool result 与 hosted/search source 的 exact capability 在 agent pre-persistence boundary stage/commit，raw URL 在 RunEvent 前被消费；同一 tool result 的 provider-visible message、`WebUrlCapabilityDescriptor` 和 `ExternalProvenance` 必须在一次有序 writer batch 中完成持久化，随后才向 TUI 发布 control 事件，避免 UI 的 session reader 在条目之间抢占 JSONL 锁。运行中的 TUI control 更新只重算内存投影并保留最近一次 durable review cache，完整 durable review 在 session 同步/run 边界刷新。main、provider turns 与 agent child 共享 root-owned `WebTaskTreeBudget` handle。
 
-Active-run facts 是下一次 provider request 的 advisory context，不是 finalization request，也不是对已经完成的 assistant stream 做事后否决：agent loop 必须在构建 post-tool request 前以 `active_run_facts` 注入当前 run 的实质性 facts，只按本轮 `tool_call_ids` 投影 command、approval 与 changed-file evidence，并明确要求模型从当前状态继续。该 context 在一个 root run 内是单一、可替换的 transient snapshot；facts 变化时原位替换，不能把 v1、v2、v3 的完整累计快照连续追加到后续 request。agent facts 只纳入 durable invocation grant 绑定到当前 root logical run 且仍 running/unread/unsettled 的 child；历史 root、closed 或已完整交付的 child 不得持续触发新一轮生成。该 transient context 禁止预投影 `RunStatus::Completed`、`pending_final_answer` 或 final readiness；真正的 readiness 只在 final answer 已产生后计算。runtime 必须先用内存投影确认存在 material facts，普通 policy-allowed 网络只读记录仍保留审计，但单独存在时不能触发额外生成或 JSONL 读取。final answer 写入后，`RunStatusChanged`、`RunFinalized` 与 `ReadinessEvaluated` 必须在同一个 ordered writer batch 中完成一次 durable sync；worker 直接接纳 run task 返回的 authoritative in-memory session，并把 Session detached 期间由 worker 已成功持久化的 control delta 合并回内存投影，不在 `RunFinished` 前重读完整 JSONL。TUI 在 run 边界只读取一次 durable records，并用一次 checkpoint/readiness reducer 从同一 snapshot 同时更新顺序状态与 review sidebar。完全相同的 `PrefixSnapshot` 复用最近一次 durable snapshot，不重复把同一 materialized prefix 写入 session。
+Active-run facts 是下一次 provider request 的 advisory context，不是 finalization request，也不是对已经完成的 assistant stream 做事后否决：agent loop 必须在构建 post-tool request 前以 `active_run_facts` 注入当前 run 的实质性 facts，从活动结果投影选取本次 logical run 及有确切 Task/attempt 绑定的历史 `ToolResultRecordedV3.facts`，附原 source/call 和 availability，不再猜旧 shell metadata；每次最多展示 32 项；活动结果退休后按 archive binding 从同一 Session owner 读取原 V3 facts，并重新核对 source、call、artifact 与声明消息的 run 绑定。查询只缓存有界来源偏移，复用已扫描位置，不缓存一套平行 facts；磁盘读取经 async 边界进入 blocking worker，取消等待会通过原 reader budget 中止后续读取；损坏来源沿原错误体系失败，无法取得、无 scope 绑定及数量截断分别说明。未列出不代表没有执行，所选证据也不授予验证或完成权限。模型应从已有结果继续，只补具体缺口。该 context 在一个 root run 内是单一、可替换的 transient snapshot；facts 变化时原位替换，不能把 v1、v2、v3 的完整累计快照连续追加到后续 request。agent facts 只纳入 durable invocation grant 绑定到当前 root logical run 且仍 running/unread/unsettled 的 child；历史 root、closed 或已完整交付的 child 不得持续触发新一轮生成。该 transient context 禁止预投影 `RunStatus::Completed`、`pending_final_answer` 或 final readiness；真正的 readiness 只在 final answer 已产生后计算。runtime 必须先用内存投影确认存在 material facts，普通 policy-allowed 网络只读记录仍保留审计，但单独存在时不能触发额外生成或 JSONL 读取。final answer 写入后，`RunStatusChanged`、`RunFinalized` 与 `ReadinessEvaluated` 必须在同一个 ordered writer batch 中完成一次 durable sync；worker 直接接纳 run task 返回的 authoritative in-memory session，并把 Session detached 期间由 worker 已成功持久化的 control delta 合并回内存投影，不在 `RunFinished` 前重读完整 JSONL。TUI 在 run 边界只读取一次 durable records，并用一次 checkpoint/readiness reducer 从同一 snapshot 同时更新顺序状态与 review sidebar。完全相同的 `PrefixSnapshot` 复用最近一次 durable snapshot，不重复把同一 materialized prefix 写入 session。
+
+普通 Conversation、Direct 和 Task participant 共用 agent loop，`[agent].max_turns` 默认 `None`，不限制模型总轮数；用户可在配置文件中显式设置正整数，修改后重启生效；省略表示不限制，不要用 `0` 表示不限，它会立即停止。重复观察和失败修复不再触发固定 batch 计数提醒或暂停，runtime 也不重建这类跨 attempt 的预算历史。真实工具结果、执行失败和 owner-published check facts 仍通过上述活动事实投影供模型读取；模型据此决定后续行动。审批、effect authority、取消、恢复和完成验证契约继续在各自边界生效。
+
+显式设置 `max_turns` 时，每次 agent run 累计模型轮数，同一轮中的多个工具调用不分别计数。达到用户配置的轮数边界时返回有原因的部分结果，并保留已持久化的工具调用和结果；不能用 synthetic final answer 推进 Task Completed。
 
 上述 facts 从 Some 收敛到 None 时必须移除旧 transient snapshot；final-answer blocker 只读取同一
 current-root child 集合，不再嵌入全 session command/file facts。Blocker prompt 也只有一个可替换实例，
@@ -878,7 +912,7 @@ pub enum ControlEntry {
 
 工具恢复规则是：只有 `Started` 没有 `Completed / Failed / Cancelled / Interrupted` 终态的 execution，在 `Session::load_from_store` 时追加 `Interrupted` 控制记录；provider-visible history 若仍等待 tool result，则投影一个结构化 `ToolErrorKind::Interrupted` tool result，不自动重放工具。
 
-`agent.max_turns` 默认不限制，用户可在配置里显式设置数字作为保险丝。它是防止模型无限循环请求工具的运行保护，而不是工具执行错误分类。当前 agent 达到该阈值时会发出 notice 并以可恢复方式结束本轮 run，保留已经追加的 assistant tool calls 和 tool results；下一条用户消息可以继续基于这些历史推进，不把这类停止伪装成 bash/read_file 等工具失败。
+`[agent].max_turns` 默认 `None`，即不限制每次 agent run 的模型总轮数。用户可在配置文件中设置正整数并重启应用，省略字段即可移除上限；不要用 `0` 表示不限，它会立即停止。达到显式阈值时，agent 发出 notice 并以可恢复方式结束本轮 run，保留已经追加的 assistant tool calls 和 tool results；下一条用户消息可以继续基于这些历史推进，不把轮数限制伪装成 bash/read_file 等工具失败。
 
 建议至少保留一类 provider 无关的 continuation 记录：
 
@@ -1018,6 +1052,14 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 
 ### 7.1 TUI worker 命令面
 
+独立 Task 的启动和继续复用 public run recorder，审批先写 durable outbox，再呈现原生确认卡。
+启动及会话切换在持有对应 session attachment、尚未准入前台工作时，调用既有
+`ConversationRunLifecycleRecorder::reconcile_unfinished`，将崩溃遗留的唯一未完成 run
+结算为 `Interrupted`；不据此声明 Task 完成或资源已静止。启动时实际发生恢复，还会在
+`WorkerReady` 前发送同一 Session 的原生 `RunInterrupted`，解除旧运行投影留下的 busy 状态。
+恢复、切换、取消与 fork 消息直接携带 worker 已加载的 session ID；UI 不从文件名重新推导身份，
+也不为恢复界面另行打开日志。磁盘启动入口复用其已加载 Session 的身份。
+
 当前 TUI worker protocol 的主要命令面包括；完整枚举以
 `crates/sigil-tui/src/runner/protocol.rs` 为准：
 
@@ -1117,10 +1159,12 @@ Desktop、TUI、CLI 与 HTTP streaming 都消费同一套事件语义，而不�
 - 混合读写批次必须串行执行
 - 整个循环使用 kernel-owned `RunCancellationOwner` / `RunCancellationHandle` 协作式取消。provider turn、tool、process、MCP socket 与 child work 在最后责任边界取得 forward effect permit；取消请求原子关闭新 permit，cleanup/rollback/reap 仍可取得 cleanup permit。
 - TUI 只投影 `Cancel requested -> Cancelling -> Cancelled | Interrupted`。唯一 owner 等待 owned task 与 effect permit 有界收敛后才可写 `Cancelled`；deadline 超时、process-tree/MCP cleanup 未确认或 hard abort 都写 `Interrupted`/cleanup-incomplete，不把本地 future drop 伪装成远端确认。
+- 普通聊天交接给 Task 后，TUI 根取消完成收尾时通过当前 cancellation scope 的持久绑定定位 Task；仍活动的 Task 记为可继续的 `Interrupted`，已有暂停或终态保持原结果，不选择其他历史 Task。Discovery 的 typed provider cancellation 保留取消状态；foreground 中断审计仅记录对应 attempt 一次，复用共享 reducer 的终态规则。
 - 被中断的工具轮次要保留足够上下文，防止恢复后出现 tool-call pairing 损坏
 - 历史写回必须保持 append-only，禁止为“清理上下文”而重排旧消息
 - per-turn volatile scratch 不直接上游发送给 provider
 - 并行工具即使执行完成顺序不同，写回 log 时也必须按声明顺序落盘
+- Planner / Discovery / Explore 的嵌套轮询使用生产默认线程栈。kernel 主循环、provider 收集和工具批次，以及 TUI 的 Task handoff 包装层，通过私有 boxed Future 构造边界避免大型构造临时值叠加在父级 `poll` 栈帧中；这些 Future 仍由原调用方借用和等待，不创建新的调度任务或取消 owner。
 
 如果目标是最大化 prefix-cache 命中，还要额外禁止这些常见反模式：
 
@@ -1214,38 +1258,44 @@ routing decision 或宣布将要行动。routing-only microturn 的 text/reasoni
 不进入 live UI，也不持久化为 transcript。该过渡由 typed decision 驱动，不扫描用户 prompt
 关键词。
 
-RFC-0063 把 conversation 语义路由扩展为 Chat / PlanReview / Task 三路。每次 durable route
-decision 都绑定 route contract fingerprint（routing contract、exact tool surface、capability
-与 host route facts），自动 capability 由 host 证据决定，模型不能自封：无精确 rollout
-qualification 时只能得到 ReviewFirst，只有 qualified orchestration manifest 精确匹配 provider、
-model、endpoint、build 与 task defaults 才允许 DirectTask；kill switch 或 provider 不支持
-streaming tool calls 时整体 Unsupported。PlanReview 是完整 durable lifecycle（Started →
-DraftReady / CompletedWithoutDraft / Failed / Interrupted / Cancelled）：模型通过 typed
-`submit_plan_draft`（schema v2）提交 plan draft，host strict-validate 后 append
-`PlanDraftCreated`，只读 research 与 draft 提交都在 child session 内；`/plan` 与自动 review
-共享同一个 PlanReviewCoordinator。plan decision（Run / Save / Revise / Reject）绑定 exact plan
-id/hash，Run 直接走 RFC-0018 的 `TaskCreatedFromPlan` 前缀，不重放 planner；Revise 启动新一轮
-attempt。RFC-0063 §13.9 后，Revise 先通过 RFC-0064 收集 durable guidance；base plan 与 revision
-substate 同时投影，candidate 成功前不覆盖 base plan，所有 terminal failure 都恢复 base actions。
-Plan step 的 `display_name` 只是不超过 32 字符的展示元数据：`submit_plan_draft` 在 durable commit
-前与 Task promotion 使用同一 canonicalizer，旧 session 在 promotion 时再次兼容规范化；完整执行语义
-始终保留在 `title/detail`，展示名不得阻断 Task。Run action 在 promotion 前后失败时追加 system-owned
-`TaskCreationFailed` decision，原 Plan 继续保持可操作；TUI 通过 typed worker message 同步失败后的
-session entries、恢复 Plan Workbench 并展示原因，不能把失败压缩成瞬态 footer Notice。
-公开 conversation 投影只暴露 bounded plan review summary（active plan、revision、status、counts、
-risk、allowed actions、source、stale），完整 plan document 通过绑定 plan id/hash 的 authenticated
-detail contract 读取；detail 包含 structured step/detail/dependency/path/check/risk/lineage，但不暴露
-prompt、private ref 或 authority。HTTP
-`POST /sessions/{id}/plan-decision` 与 Desktop `desktop_plan_decision` IPC 复用同一 typed
-command receipt 的幂等语义；React/TUI compact card 只作为入口，DraftReady 后由 dedicated Plan Review
-workbench 提供完整审阅。research 与 submit-only finalizer 使用隔离 child context；finalizer 不继承
-research tool history/continuation，只消费 bounded evidence bundle，非 `submit_plan_draft` 调用在 dispatch
-前以 typed protocol violation 终止。
+RFC-0063 的 conversation 语义路由为 Chat / PlanReview / Task。每次 durable route decision
+绑定 route contract fingerprint 与当前 host 能力。自动路由开启、provider 支持 tool streaming 且
+实际装配 Task executor 时允许模型选择 DirectTask；没有 executor 时保留 ReviewFirst。发布评测
+只影响新安装推荐值，不作为运行期许可。route-local hard invariant 仍会降级，用户显式 Manual
+或禁用 Task 仍被尊重。
 
-后续修复设计见 [RFC-0073：Plan Review 上下文连续性、结果保全与可恢复收口](rfcs/0073-plan-review-continuity-and-recovery-v1.md)
-（2026-09-07，设计提案，尚未实施）。该方案覆盖父会话讨论与澄清回答交接、完整候选保全、typed draft/no-plan、
-有效纠错、研究预算、资源结算与领域终态分离，以及普通 Plan/revision 的共享恢复；不重建 Task DAG 前置或资源 journal。
-实施状态与验收证据以该 RFC 的执行计划为准，不能把本段设计入口解释为当前行为已经改变。
+PlanReview 的研究与 typed 收口在同一个 durable child session 完成：收口保留完整研究正文、工具
+历史与 provider continuity，只允许 `submit_plan_review_result` 的 `draft` / `no_plan`，不再次研究或
+写入。`/plan` 与自动 review 共享 PlanReviewCoordinator。完整文字是计划本体，结构化步骤只增强
+展示；Run 原子记录精确 Plan 的用户决定与稳定 direct Task 身份，不依赖 executable candidate、
+Task DAG 编译或显示清单的当前版本。Save / Reject / Run 等本地决定不装配 provider，不以最新
+展示卡片取代用户指定的 Plan；错误会话、错误内容、已终结决定及正在修订的对象仍被拒绝。
+控制读取使用 `Session::load_from_store_for_control`，校验已有身份和日志完整性但不结算活跃
+工具、agent、取消或 Plan；`Session::load_from_store` 的启动恢复只在接管会话时执行。
+接管前，runtime 通过现有 Resource Authority 读取该 attempt 的受管研究会话；完整成功的
+typed draft 可补齐父会话提交。恢复不重派模型请求，历史 finalizer 引用继续只用于旧日志读取。
+
+Revise 每次收集新指导；旧提交重放绑定自己的指导代次，失败后的新要求不能被旧内容替代。
+Desktop/TUI 消费同一 allowed-actions 投影；即使研究失败时尚无 draft/candidate，也保留可用的
+RetryReview。运行错误留在可恢复 Task 中，重复 Run 返回同一 Task，不重新创建任务或重置进度。
+
+公开 conversation 投影提供 bounded plan review summary，完整计划通过绑定 id/hash 的
+contract 读取。HTTP Plan decision 与 Desktop IPC 复用同一命令幂等语义。详情读取与持久化的
+会话边界继续校验；模型配置缺失不能阻断本地决定。
+
+工作区观察采用 advisory 语义：Plan card 的 `stale` 只提示工作区变化或快照不可用，
+TUI/Desktop 的 Run、Save 与恢复执行均不据此禁用。Task admission 持久化快照关系、
+磁盘余量与验证 runner 状态，但不以全仓哈希、固定 64 MiB 阈值或关闭自动验证拒绝启动；
+实际写入容量、逐文件冲突和任务完成所需验证仍由对应执行边界处理。
+子智能体 grant 的工作区观察同样可缺省，缺失不会撤销已验证的 role、tool scope、
+permission ceiling 或 cancellation scope；未知副作用仍必须留下 reconciliation 状态。
+轮询次数与重复 final 展示只进入诊断，不能通过 route kill switch 禁用后续任务。
+
+
+Plan 上下文连续性与 typed 结果见 [RFC-0073](rfcs/0073-plan-review-continuity-and-recovery-v1.md)。
+2026-09-11 的职责消融、反例与当前验证边界见 [Plan / Task / Execute 消融](plan-task-execute-ablation.md)。
+直接执行仅装配实际 Executor；尚无 TaskPlan 的指导先持久化并交给 planner，恢复中的旧物理请求
+仍使用原请求材料。Task 完成由 kernel 统一裁定，runtime 子 runner 不重复解释根完成条件。
 
 RFC-0064 定义普通 agent、PlanReview 与 interactive planner 的 durable user-input protocol。模型只能通过
 bounded `request_user_input` typed tool 创建问题；host 先 append `UserInputRequestedV1`，再以
@@ -1377,7 +1427,7 @@ parent `Session`，detached child future 不捕获 parent；全部 terminal enve
 - O6e integration lane 已形成可恢复边界：homogeneous Worktree whole-batch 先冻结同一 clean commit 或 dirty-overlay base，完成全部 owned worktree materialization、Created 与 child Started 后才统一放行 provider。Kernel 以 content-bound effect facts 构建 deterministic conflict graph；runtime 对 clean base 使用 expected-old/new-object CAS 的 managed ref，对 dirty/untracked base 使用 expected snapshot/revision CAS 的 snapshot workspace，不同 lane 的 apply 与 RFC-0003 scoped check 可并发，同 lane 保持 accepted plan 顺序，parent workspace 不在 lane 阶段被修改。`IntegrationLanePrepared/MemberApplied/VerificationLinked/Terminal/CleanupRecorded` 均在后续 effect 前 durable acknowledgement，verification receipt 绑定 exact check spec、scope、backend、network 和 candidate；active/retained overlay artifact 由 isolated-workspace lifecycle retention-pin，恢复只重建 inventory，不重放 apply/check。lane candidate 与最终 promotion target 均为 tagged union；promotion authority、parent mutation/final verification 与 O6g 产品面继续按 RFC-0053 O6f/O6g 实现。
 - O6f promotion protocol、物理 substrate、authoritative parent-check gate 与 crash reconciliation 已建立独立安全检查点：`TaskPromotionPreview` 只从全部 terminal-ready、已有 scoped receipt 且 cleanup disposition 明确的 lanes 生成，并绑定 ordered candidates、aggregate diff、单一 target、verification invalidation、intent/policy 与 digest；host-owned `TaskPromotionAuthorityConsumed` 再绑定 expiry 和 single-use nonce，普通 TaskPlan、planner 文本或 tool approval 不能替代。当前唯一启用来源是 exact user integration review；RFC-0005 E05.17 deferred 时 controlled-auto source fail closed。Runtime 会从 exact frozen base 重建一个 aggregate candidate；`WorkspaceApply` 经 RFC-0002 full preflight/mutation batch 修改 parent 且不更新 ref，`GitRefAdvance` 只对 clean、未 checkout、expected-old 匹配的目标执行单次 CAS 且不改用户 worktree。authority consumed 与 Prepared 都需 durable ack，parent/ref drift、checked-out ref、digest/file preflight mismatch 或 ack 拒绝都在首个目标 effect 前 fail closed 并清理 private candidate。promotion 与 parent checks 使用同一份 preview-bound policy scope；GitRef 的 runtime-owned clean checkout 保留到 checks terminal 后再清理。启动和 session switch 对 Prepared-only attempt 执行 zero-forward-effect reconciliation：只用 exact ref、完整 RFC-0002 mutation batch、冻结 policy 与当前 snapshot 补齐可唯一推导的终态，歧义进入 needs-review，绝不重放 merge、check 或 provider。task runner 要求当前 plan version 的所有 integration plans 都产生 `synthesis_ready_attempt` 才启动 Synthesis。
 - O6g integration review 产品闭环已完成：changeset-only 与 worktree child 的 exact diff 在离开 child runner 前进入 RFC-0002 内容寻址 artifact lifecycle；全部 physical lanes terminal-ready 后，runtime 从冻结 base 重放 aggregate candidate、持久化 aggregate diff，并返回绑定 task/plan version、ordered lane candidates、单一 promotion target、verification policy/digest 的 `TaskPromotionPreview`，由 kernel single-writer 追加 recovery-critical preview entry。Kernel 只投影当前 task/plan version 的未消费 exact review；TUI detail 从 durable projection 展示 aggregate diff、脱敏 lane provenance、冲突原因与 child/lane/parent verification 分层，review/load/accept 都绑定 request id、task id、plan version 和 preview digest。用户接受后 runtime 会重新构建并校验 candidate、消费单次 authority、执行 promotion 与 authoritative parent verification；只有 `Passed` / `NotApplicable` 才按 exact task id 自动续跑 Synthesis。stale/superseded/late response 无法作用于新状态，private worktree path/ref 不进入产品面。
-- O8a 的 verification rerun action 已采用 exact binding：产品投影只从当前最新 plan 生成 action，request id 对 task id、plan version、step、check spec/hash、policy hash 与 workspace snapshot 做内容绑定；kernel 在追加任何 queued lifecycle 前重算 identity，并确认 plan 仍是最新、未 supersede 且仍包含目标 step。TUI、HTTP、Desktop IPC 与 generated contract 传递同一组字段，因此旧 modal、迟到回包或跨 plan 的 rerun 无法作用于新状态。
+- O8a 的 verification rerun action 对 task id、plan version、step、check spec/hash、policy hash 与渲染时的可选 workspace observation 做内容绑定；kernel 在追加 queued lifecycle 前重算 identity，并确认 plan 仍是最新、未 supersede 且仍包含目标 step。工作区变化或缺少渲染快照不阻断重跑；runner 对当前文件重新采样并生成本次 receipt，快照不完整时只能记录 inconclusive。已完成的检查可再次显式运行，queued/running 的检查仍不可重复启动。TUI、HTTP、Desktop IPC 与 generated contract 传递同一组字段，因此旧 modal 不能跨 task/plan/check/policy 执行。
 - O8a 的 TUI product completion 已完成：task、live progress 与 pending follow-up 的 viewport/render/hit-area 复用唯一 live-band 高度计算，已发送 follow-up 不常驻 pending list；versioned session view cache 以 250-step / 752-entry fixture 证明 unchanged frame 不扫描 JSONL 或重放 reducer。`Alt-P` 只从 running task 的最新 accepted plan 生成内容绑定的 `TaskPauseRequest(request_id, task_id, plan_version)`；worker 同时校验 durable task/plan 与 active cancellation scope，auto handoff 继承 root scope 时会收窄为 exact task target。quiescence 成功后 physical run 诚实记录 cancellation，而 durable task 写 `Paused`、active step/child 写 `Interrupted`，后续 `/task continue` 可恢复；planning 无 accepted plan、scope 漂移、stale plan 或迟到 action 均在停止 run 前 fail closed。自动 handoff -> Pause -> Continue -> Completed、长 task cache、三区布局和 worker-to-app session restore 均有回归测试。
 - O8c 的 production-path harness 已接入 `ApplicationRunServices`：committed generated corpus 固定为 20 Chat / 15 PlanReview / 15 DirectTask，route contract 与 runtime-derived provider/model/config/corpus facts 共同形成 exact route identity，V2 report 独立计算三路误路由、majority misroute 与 zero-tolerance invariants。`scripts/run-evals.sh` 会传递 bounded route contract、验证两层 report artifact，并在 deterministic mode 检查 corpus drift 和关键 orchestration gates；CI 另跑真实 TUI PTY fixture campaign。2026-07-25 对旧 30-case 候选 `6432fc5728a6` 的 DeepSeek V4 Flash campaign 完成 90 次 provider admission，但只有 55 次完成；exact route positive miss 为 `77.8%`，并有 33 次 TLS handshake EOF。该证据不合格且已驱动 routing-only typed microturn 修复，修复后的 prompt/tool digest 与旧报告不同。2026-07-26 先补齐 confirmed-pre-dispatch connect retry；2026-08-22 又按 RFC-0069 把 bounded recovery扩展到 typed rate-limit/transient/transport/unsafe-EOF与仅含可丢弃 partial text的场景。DeepSeek Messages body-read error保留 typed `reqwest::Error` source供 kernel分类；旧 attempt必须先 terminal，request material必须是当前进程仍可验证的 exact frozen material或可由 durable frontier重建，且 durable output、client tool proposal与 mutating effect均为零。Read-only hosted WebSearch不会仅因request bytes已发送进入 effect reconciliation；process-local overlay只允许同进程新 attempt，重启仍要求 durable reconstruction。queue/task recovery只接受同 provider/model/purpose/request fingerprint的有序安全 predecessor chain。该历史失败只保留为诊断证据；当前每个 release route仍必须由最终 exact-build的 `auto + proactive` 50×3 report独立 qualification。
 - O8d 使用 release-owned sidecar 激活新安装默认，而不是修改 Rust schema 默认：exact candidate binary 从完整 qualified report 生成 path-free `sigil-orchestration-rollout-v1.json`，并重新验证 commit/build、route identity、task-config digest、30×3 repetition、阈值与零容忍不变量。Quick Setup 只对缺少配置且 exact provider/model/官方 endpoint/build/digest 匹配的 route 写入 `auto + proactive`；其他 route、custom endpoint、sidecar 缺失/损坏/过期以及所有已有配置保持 `manual + explicit_request_only`。route-local kill switch 在 typed handoff 与 exact spawn admission 前从 durable facts 触发，并同时降级 routing 与 proactive spawn；accepted TaskPlan recovery 和 Task history 保留。Doctor 投影 release qualification 与 session report handle；archive/npm/Homebrew 只把由同一 binary 验证生成的 sidecar 安装在 binary 旁。
@@ -1470,6 +1520,11 @@ provider consumption；`ready` 表示摘要调用已经发生、actual usage 与
 预计 savings/break-even 与 native carrier availability；只有 `ready`
 展示摘要调用实际 cache-read/uncached/output/cost。standalone tool-output shrink 只消费
 `prepared` plan，追加独立 context epoch sidecar，不创建 semantic checkpoint。
+Portable compaction 的 `valid_for_snapshot` 是可选观察：完整快照不可用时仍可基于
+持久会话生成并激活摘要，模型内容标记 `SnapshotUnavailable`，TaskMemory 投影标记
+`CaptureUnknown`，不能宣称当前工作区已验证。Source cursor、原始记录引用、whole-turn
+边界、target fit 与 append-only activation 的完整性约束保持独立且强制。
+
 原始 JSONL 永远不覆盖；manual/automatic activation 都通过同一 portable lifecycle、stale-frontier CAS
 和 continuity validation。
 
@@ -1604,8 +1659,7 @@ R71.7 的工程 gate 同时把 resource/process inventory 与 Cargo graph 作为
 import 越界和 kernel path type 回流。R71.5 frozen conformance manifest 与 inventory baseline
 分开维护，baseline generator 不得重写前者。
 
-HTTP ProtocolReplay 的损坏 legacy snapshot 只允许由 `sigil-http` journal owner 在一次性
-import/rebuild 边界隔离；CLI/serve 不得直接执行 rename。current-schema attachment 完成后，
+HTTP ProtocolReplay 的非当前 journal/envelope/public payload 版本由 `sigil-http` journal owner 明确拒绝，原文件不隔离、不重建、不改写；当前格式损坏仍由同一 owner 处理，CLI/serve 不得直接执行 rename。current-schema attachment 完成后，
 后续 replay 写入必须走 authority-admitted managed adapter namespace。
 
 用户态 state/cache path 解析属于同一边界：`SIGIL_STATE_HOME`、`SIGIL_CACHE_HOME` 或平台
@@ -2059,12 +2113,26 @@ screen 只负责保留用户原来的 shell 内容，应用运行期间的所有
 - Tool card 的用户可见层级固定为 action/subject header、bounded summary、typed result surface 与 overflow action。首批 search/read-file/shell/terminal renderer 不展示 `result`、`code`、`matches`、`output` 这类协议字段作为通用分节标签：搜索结果按文件分组并使用行号 gutter，文件代码使用编辑器式行号与语法高亮，shell/terminal 使用 stdout/stderr rail；空结果和截断分别由安静的语义状态与统一 footer 表达。结构化 preview kind 只用于选择表面 renderer，未知类型降级为 plain text；选中态只强调 header 和结果 rail，不覆盖 syntax/match/diff 的语义样式
 - 主内容区：在同一全屏帧内显示历史窗口、当前流式尾部与可操作卡片，不要求用户在 chat 区和 composer 之间切焦点
 - 底部输入区：支持多行输入、发送、取消、清空
+- TUI 退出先恢复终端，worker、application admission/interaction、provider/MCP observation 与
+  maintenance 共用一个 5 s 绝对期限。取消仅发出停止意图；真实任务 join 和 root task/effect
+  归零前不得宣告 cleanup complete。退出诊断记录具体 owned thread、闭集收尾阶段、耗时和
+  未结束数量；诊断 snapshot 不授予取消或资源权限。所有 run 入口先完成可失败的 preflight、
+  注册 root task，再在实际 spawn 前发布 stop capability，失败 admission 不留下过期 owner。
 - 右侧信息区 + composer 下状态行：展示写权限、subagent 状态、cache 命中、上下文压力、花费与余额；右栏启动可见性由 `[appearance].info_rail` 控制，运行中用 `F2` 显示/隐藏、`Shift-F2` 切换精简/详情，窄终端仍按布局能力自动收起
 - 模态或侧栏审批区：展示工具预览、写操作 diff、允许/拒绝动作
 - Plan revision guidance：`Revise` 进入独立的 `Plan revision` 卡片，而不是泛化的 “Input required”
-  表单；卡片先说明当前计划保持可用、提交只会准备新的待审阅草案，再提供带示例的多行 guidance
-  编辑区，以及语义明确的 `Prepare revised plan` / `Keep current plan` 动作。该表现层只投影
-  durable `PlanRevision` user-input source，不改变其 exact request/hash 或 append-only 决策语义
+  表单；多行 guidance 编辑区使用 `Enter` 提交、`Shift-Enter` 换行与真实文本光标，`Esc` 和提交失败保留草稿。
+  修订表单只有 `Submit revision` 提交入口；`Esc` 返回保留原计划与修订草稿，`Save for later` 才是保存待用且不执行。
+  外卡和审阅页复用 durable revision 状态，正常 queued/researching/finalizing 期间不授予保存原计划的权限；
+  真实启动失败必须先持久化 `RevisionFailed` 才恢复基础计划动作，不能从尚无 attempt 或超时推断失败。
+  同一 review 的新草稿完成时保留审阅页面并切换内容，不自动执行；页内操作 pending/success/error 与输入提交回执
+  都匹配 exact id/hash/generation，旧响应不能污染新请求。该表现层只投影 durable `PlanRevision` user-input source，
+  不改变 append-only 决策语义；快捷键依据当前动作生成，没有结构数据时不显示虚假的零计数
+- 后续输入的删除、编辑、排序与暂停使用独立操作回执；本地 pending 防止重复派发，成功只在持久化回执到达后显示。
+  已取消的 exact queue item 可幂等确认，已消费或未知 item 返回对应错误；这些失败不得进入全局 `RunFailed`
+  或清除当前 Task、工具活动与运行状态。回执必须匹配 session scope 与对应 pending operation。
+  已入队消息的删除、编辑、排序、发送与暂停操作，以及 Plan 决策和修订 guidance 提交，在主线程冻结请求后交给有界后台 admission owner，持久化接收不得阻塞
+  首帧 pending、输入或取消；显式重试复用原 envelope，后台线程即使先收到领域回执仍计入统一退出期限
 - 会话控制区：新会话、恢复会话、切换 workspace、查看错误详情
 - setup 模式：当没有可用配置时，TUI 内部直接承载首启配置流，而不是把用户赶回命令行手写配置；Provider 作为第一项可直接切换，最终的 `Trust folder, save and start` 同时表达当前启动目录的显式信任与配置保存，不再使用独立且默认关闭的信任开关阻塞启动
 - 用户配置的 setup、`/config` 和 `sigil mcp add/remove` 共用 kernel-owned 独占 sidecar lease 与同目录原子替换；MCP 读改写从读取、校验到发布全程持锁，进程崩溃不会留下半截 TOML，并发入口不能静默覆盖彼此。显式配置符号链接会保持链接身份并更新其 canonical regular-file target。
@@ -2567,7 +2635,7 @@ O5b2d1 已在 task role runtime 落地 provider-neutral 的第一层本地背压
 
 建议行为：
 
-- 初始化时可选调用模型列表接口，补充推荐与诊断；站点不提供列表或刷新失败时仍允许保存明确模型 ID
+- 初始化时可选调用模型列表接口，补充推荐与诊断；站点不提供列表、刷新失败或列表未返回某个模型时，仍允许选择及保存明确模型 ID。模型选择 binding 只绑定当前来源模型，列表内容、缓存来源与推荐变化不会使选择失效。默认模型配置允许密钥暂缺，真实 run 启动时再验证凭证。
 - 若用户配置了 `deepseek-chat` 或 `deepseek-reasoner`，启动时立刻归一化并告警
 - 将“模型名归一化前后结果”写入诊断日志，方便后续排查历史配置
 

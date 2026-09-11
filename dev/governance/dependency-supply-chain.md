@@ -326,3 +326,9 @@ workspace、文档、站点和分发 gate。
 `.github/dependabot.yml` 每周检查 Cargo 与 GitHub Actions 版本。Cargo minor/patch 合并为
 一个更新组，major 保持独立 PR；Actions 更新合并为一个组。两个 ecosystem 的开放 PR
 上限分别为 3 和 2，不自动合并，仍必须通过普通 CI 与上述供应链门禁。
+
+## Managed 文件工具的生产路径测试
+
+| 依赖 | 版本 / feature | Owner | 用途 | 许可 / 来源 | 验证与边界 |
+| --- | --- | --- | --- | --- | --- |
+| `sigil-resource-authority` | workspace path crate；`sigil-tools-builtin` dev-dependency，无新增 feature | `sigil-tools-builtin/tests/file_tool_fixture` | 用真实 RA、capability broker 与独立临时 storage 验证生产文件工具，清除 `cfg(test)` legacy 业务实现 | Sigil first-party crate；本仓库维护 | 仅增加测试依赖边，不改变 shipping crate 图；验证连续读写、CAS、拒绝、mutation 事实、流式输出与取消预算，fixture 经统一隔离入口运行 |

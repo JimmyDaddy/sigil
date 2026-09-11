@@ -193,6 +193,7 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 - markdown renderer 变更必须覆盖 assistant timeline、tool preview 或 approval modal 的至少一个调用面，避免 options 增强只在单测中成立
 - setup/config 状态模型拆分必须保留保存、关闭、dirty guard 和 modal 输入的持久化/状态机测试
 - 新增或迁移单元测试时，必须遵守 `dev/governance/code-standards.md` 的测试目录规范：默认使用同层 `tests/<module>_tests.rs`，业务文件只保留 `#[path = "tests/<module>_tests.rs"] mod tests;` 声明；不要新增 inline tests、`module/tests.rs`、`module/test_support.rs` 或裸 `src/tests.rs`
+- agent 嵌套执行与栈溢出回归必须覆盖产品入口的完整调用链，并使用不大于生产配置的线程栈；从中间层开始的测试或单独增大测试栈不能作为完整链路证据。异步执行边界调整还须验证取消时子任务和 effect 已收尾。
 
 ## 8. Provider 与工具工程规范
 
@@ -216,6 +217,9 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 ## 9. 会话与持久化规范
 
 - session log 采用 append-only JSONL
+- 已持有 session/store 的执行与观察路径必须复用该 owner 派生的严格只读协调句柄。冷历史浏览可显式打开已存在的只读 source，但不得按路径新建 writer、取得恢复权限或查询全局 authority。单次 application projection/page 的 frontier、context、transcript 和 public events 必须属于同一已验证 cut；允许 owner 保留增量 reducer、位置元数据及有界显示窗口，页面只校验并读取该 cut 内实际访问的范围。受控 append 不使旧 cut 失效，source identity、范围、session/record identity 或 checksum 失配则拒绝；不得借查询修复损坏尾部。HTTP/TUI 的句柄随实际 attachment、worker 或活动 run 释放，冷查询缓存必须有界且不持 writer lease。回归覆盖 reader/writer 协调、外部 typed busy、固定 cut、同 owner 单次追赶及损坏数据不被修复。
+- 只读 range 在分配和 JSON 解析前实施 raw-record 2 MiB、本页及前驱合计 4 MiB 和编码返回 1 MiB 上限；热刷新不能 clone/replay 全部历史正文。delivery cursor 独立于当前状态 frontier，只有实际消费的准确 public event IDs 可被 ACK；已确认 ID 的原请求重试幂等，未知或越界身份拒绝。每批读取、ACK 及 coordinator 等待均检查取消/期限，底层任务真实结束前不能把外层 future 的 abort 当作清理完成。
+- 固定 cut 的 cursor digest 在追加时增量计算，热页不得遍历全部历史来重算校验；只接受当前 cursor 版本，非当前版本明确拒绝，不扫描升级。HTTP 观察请求的连接取消必须显式约定，不能改变普通半关闭请求语义；scope 切换后仍在运行的旧观察任务继续计入共享退出期限。cold 加载、可重试 busy/cancel 和永久 corrupt 保持不同的 typed 结果，不能用假空页或无休止 cold 重扫替代。
 - current-schema application runs on CLI/HTTP (including Task and user-input continuations) must
   resolve the logical session key through the composed `SessionLog` managed writer, admit the
   authority-declared namespace before opening `records.jsonl`, and finalize that namespace on
@@ -244,8 +248,12 @@ hook 会先运行 `scripts/test-check-no-prompt-phrase-routing.py` 与 `scripts/
 
 ## 10. RFC-0071 资源权威 / 沙箱生命周期约束（R71.6+）
 
-- application 启动只选择一次 epoch（legacy 或 new current-schema），选择结果以 content-addressed 的 startup cutover manifest 呈现；同一 application instance 发布不同 manifest 即 fixed-forward 拒绝
-- new current-schema epoch 的 mandatory adapter readiness 任一 probe 失败，application 必须 fail closed，不得部分启动；对 18 个 mandatory adapter channel 的 probe 必须是真实调用（storage admit/finalize round trip、surface contract 校验、admission gate 可达性），不得用空跑或"无输出即通过"代替
+- application 启动只选择一次 current-schema epoch，选择结果以 content-addressed 的 startup cutover manifest 呈现；同一 application instance 和 generation 发布不同 manifest 即 fixed-forward 拒绝，合法的后续 generation 必须重新完成实际 readiness 后发布。
+- bootstrap root 创建、首次初始化判定与首次 metadata 发布必须处于同一跨进程序列化边界；不能仅锁最后的发布动作，也不能将已存在但缺少必需 metadata 的目录重新解释为全新实例。竞争启动必须依次完成，初始化中断形状仍按损坏状态处理。
+- current-schema boot manifest 必须绑定不可变的 capability composition；mandatory adapter 集合由 kernel 的固定依赖映射生成，caller 不能任意省略 authority/recovery 前置。Standard 组合包含 18 个 channel，Core 仅检查核心与显式增强所需 channel。未选择的 storage/extension/updater owner 不得先初始化再隐藏 probe；所选 channel 任一缺失、重复、失败，或 manifest 出现未选 channel，application 都必须 fail closed。每个 probe 必须是真实调用（storage admit/finalize round trip、surface contract 校验、admission gate 可达性），不得用空跑或"无输出即通过"代替。能力选择不允许切换 legacy authority、dual write/execute/cleanup 或绕过实际动作的授权。
+- 启动清单升级必须覆盖已有 bootstrap 状态：schema 1 只能作为经原始 hash、完整 readiness 与同一 owner 校验的历史发布前序，在 publication lock 内先验证再推进 generation，重新探测并发布 schema 2。不得补默认 composition 伪造旧 hash、把历史 probe 当作本次 readiness、清空 bootstrap/journal，或开放旧会话恢复。损坏、未知版本、owner 不符与 generation 回退必须拒绝且不得预先改写 metadata；失败后重试不得反复推进同一配置的 generation。
+- 同一存储目录的 workspace quota 上限必须由明确的存储政策给定，不得随当前所选 capability/channel 数量缩放。切换组合只改变可签发的 channel grant，不清空既有用量，也不注册未选 owner；历史较低上限的调整只能经过 authority 对精确已知前值的单调政策升级，未知上限与不一致用量仍必须拒绝。
+- 已持有 durable session store 的读取必须复用该 owner 的 writer coordinator，避免与本进程的 public delivery ACK 等追加操作争夺独立文件锁；readiness、preview、projection 读取仍须保持严格只读，不得借 writer recovery 隐式修复损坏尾部。外部 path-only 观察者继续遵守有界 ReaderBusy 与原始完整性校验，不得按路径查全局 writer 来推断权限。
 - ExecutionExtension 的 production seam 必须由同一 composed `ManagedExecutionServiceV1` 提供：runtime 只能把已解析的 long-lived stdio plan 映射为 planner/broker 绑定的 managed request，sandbox 通过真实注入 launcher 启动并返回 opaque managed process lifecycle；Local 缺少 launcher 时必须保持 `ProviderUnavailable`，不得回退到裸 MCP `Child`
 - R71.7 后，MCP 的 production registration/activation 不得使用 `McpProcessLaunch::owned`、裸 `Child` 或 `launch_planned_mcp_process`；这些 legacy 构造只允许存在于 test fixture，production 默认 launcher 必须在没有 composed managed route 时 fail closed。
 - TUI production worker 必须把 boot composition 的 managed Extension route 同时传入 lazy surface、显式 activation、eager startup 与后台 refresh；没有 composition 的兼容/测试 wrapper 只能显式注入真实 route，不能把缺失 route 当作成功。

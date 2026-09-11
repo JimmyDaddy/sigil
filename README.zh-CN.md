@@ -44,6 +44,8 @@
 | **大输出仍可检查**<br>对话只展示有界摘要，policy-safe 的工具输出则保存在 session artifact 中，可按页或按字面量精确读取。 | **上下文缓存稳定**<br>历史工具输出先确定性老化，再进入语义压缩；长会话可以降低 token 压力，而不重写仍在使用的缓存前缀。 |
 | **命令生命周期明确**<br>有限检查以前台方式运行并实时展示进度；常驻或交互任务使用明确的 terminal task 与事件驱动等待。 | **审批绑定真实副作用**<br>同一份不可变权限计划贯穿命令解析、目标、隔离、策略、审批、审计和执行，并由 Desktop 与 TUI 共用。 |
 
+Desktop 与 TUI 在生成过程中显示有界的实时预览，完成后替换为已保存的结果。重新打开会话会恢复已提交的历史；截断的预览不代表完整回答。在 Desktop 中可通过“查看完整消息”逐页阅读已保存的正文。计划修订在详情加载时仍可接收输入，退出时未完成的清理会保留为待恢复工作。 仅支持当前会话与协议格式；旧格式明确拒绝，不自动迁移。
+
 ## 一分钟内开始
 
 ```bash
@@ -56,7 +58,7 @@ sigil
 
 希望使用原生应用？[GitHub prerelease](https://github.com/JimmyDaddy/sigil/releases) 提供面向 Apple 芯片与 Intel Mac、已签名并完成 Apple 公证的 DMG。精确资源名和更新方式见[安装指南](docs/zh-CN/installation.md)。
 
-只有当某个 release 为自身 binary 携带 exact-route qualified manifest 时，Quick Setup 才会为匹配的新安装启用自动 Task routing 和主动只读 Explore 子智能体。其他 route、缺少 sidecar 的 release，以及所有已有配置都继续保持保守的手动策略。这只改变编排方式，不会授予文件、Shell、网络、MCP、外部目录或 merge 权限。见[高级配置](docs/zh-CN/advanced-configuration.md#任务规划)。
+Task 默认自动路由：模型通过结构化决定选择普通对话、计划审查或 Task。计划等待用户批准；直接 Task 在当前 provider 与执行器支持时可启动。发布评测为新安装的主动只读子智能体默认值提供依据，不授予执行权限。文件、Shell、网络、MCP、外部目录与 merge 权限继续生效。设置 `routing_policy = "manual"` 可关闭自动交接。见[高级配置](docs/zh-CN/advanced-configuration.md#任务规划)。
 
 ## 深入了解
 

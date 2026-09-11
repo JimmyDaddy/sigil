@@ -6,6 +6,8 @@
 
 Use these settings only after the normal setup works. Change one area at a time and run `sigil doctor` when the result is unclear.
 
+Workspace changes or an unavailable workspace snapshot do not prevent running or saving a reviewed Plan. Execution reads the current files. Model catalogs are optional references: an explicit model ID remains selectable even when the list omits it. Missing credentials can be repaired after saving a default model; they are checked when starting a run. Verification reruns check current files, including after edits; an incomplete snapshot produces inconclusive evidence.
+
 ## Task Planning
 
 <!-- public-doc-topic: task -->
@@ -24,14 +26,7 @@ multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-The values above are the current schema defaults. `auto` is the release
-default, so a missing-config Quick Setup saves `auto + explicit_request_only`
-on the review-first baseline. Quick Setup saves `auto + proactive` only when
-the installed release carries a qualified sidecar whose exact provider, model,
-official endpoint family, task-config digest, and binary build all match.
-Incompatible configurations are rejected. Missing, invalid, stale, or
-non-matching sidecars stay on the review-first baseline. `sigil doctor`
-reports the rollout state and the direct-task tier.
+The values above are the current schema defaults. Quick Setup saves `auto + explicit_request_only`; a matching qualified release sidecar may instead recommend `auto + proactive`. Provider, model, endpoint, task-config digest and build must match for that installation recommendation. Missing or stale release evidence does not disable a configured executor. Runtime routing uses actual provider/tool/executor availability and the user's policy. `sigil doctor` reports configuration and release evaluation separately.
 
 For a coarse rollback, set `routing_policy = "manual"` and
 `multi_agent_mode = "explicit_request_only"`. This disables automatic handoff

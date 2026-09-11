@@ -798,6 +798,20 @@ staging object 名称随机化、owner-only，不进入环境变量，也不返�
 边界而漏检。无法安全完成 policy projection 时停止持久化正文、标记 `policy = Rejected` 或
 `storage = Unavailable`，但仍按资源策略 drain child；不得把未审查原文作为 fallback 放进 result。
 
+当前 managed one-shot 路径将 pipe reader 与存储 I/O 分离：reader 只更新计数与有界候选缓冲，
+每流最多保留 `min(staging limit, 16 MiB)`，双流峰值最多 32 MiB；超出部分继续计数和 drain。
+reader 全部收尾后，由明确 await 的有限 `spawn_blocking` 任务按 256 KiB 批次写入预先绑定的
+owner-only staging 命名空间，再进入既有整流脱敏和发布流程。候选原文不进入 session、model 或 UI；
+该缓冲独立于 64 KiB preview 和最终 16 MiB artifact cap。存储任务在进程 dispatch 前计入
+root cancellation owner，调用方放弃等待时仍须完成 staging 清理后才释放任务计数。
+
+reader 持有可中止、可 join 的非阻塞管道读取任务。leader 结束后的 50 ms 无数据空闲期限和
+1 s 总 drain 期限仅限制后代仍持有管道的收尾；持续可读数据不会在首个 50 ms 被丢弃。
+只有实际 EOF 才写 source `Complete`；读取失败与期限到达分别保留 `ReadFailed` / `Incomplete`
+证据，后者投影为 interrupted source。preview 截断、storage 截断和 source 不完整彼此独立；
+exit 0 不足以证明 source 完整。已配置 capture 却丢失完成句柄时显式标记 storage unavailable，
+禁止把 bounded preview 再发布成完整 artifact。
+
 ### 10.3 Independent limits
 
 V1 默认建议值：
@@ -1356,3 +1370,17 @@ bounded facts + explicit outcome + truthful completeness
 这既减少模型上下文和偶发提示工程，也让 Desktop/TUI、provider adapter、MCP 与 crash recovery 共享同一份
 可验证事实。当前 batch 通过 byte caps 保持 deterministic bounded，历史 batch 通过 token pressure 和
 cache-stable aging 管理；两者不再由同一个 root-run 递减字节桶耦合。
+
+### RFC-0076：退休结果的选取事实恢复
+
+最终回答的事实摘要在同 Task/run authority 下选取最多 32 个现有 V3 来源。已退休
+working-set 的结果通过 Session 原 owner 的 coordinated range reader 按需恢复原 facts；
+只保留有界的进程内来源/声明偏移，首次分块重建、后续从旧尾部增量前进，不逐轮全量扫描。
+每次返回前重读并核对原 event、sequence、message、call、tool、artifact 和 declaring
+assistant 的 logical run；不读取 artifact body，不新增 durable ledger 或完整历史声明。
+未选取、原来源不可取得与损坏来源分别计数或报错，不能把退休当作未执行。
+
+归档事实查询通过异步 delegate seam 等待 `spawn_blocking`；只捕获既有 owner reader、
+来源 binding 与共享偏移索引，不克隆完整 Session。读取复用 cooperative read budget，
+等待 future drop 会取消后续扫描/读取；沿用现有 reader 的锁与分块边界，不另设历史长度
+相关的 wall-clock 超时；无归档选择时不派发 worker。

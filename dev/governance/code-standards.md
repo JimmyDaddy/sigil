@@ -30,6 +30,16 @@
 - 写入审计面状态时，优先追加记录，不做难以追踪的就地改写
 - tool approval、tool execution started/completed/failed/interrupted 必须落结构化 `ControlEntry`，不要用裸文本 `Note` 代替可恢复审计数据
 
+### 1.4 辅助观察不得阻断用户操作
+
+- Plan 的审核与执行绑定计划内容及持久状态；整个工作区的哈希变化、快照缺失不得禁止执行、保存或恢复任务。
+- 模型列表、缓存来源、推荐信息、磁盘余量估算与诊断结果只提供参考，不得充当用户选择模型、保存配置或启动已授权工作的额外许可。
+- 会话压缩与子智能体调用允许工作区观察缺失，必须用显式可选字段标记未知，不能伪造成功快照或把未知内容声明为已验证。
+- 文件写入冲突、effect 结果不确定、身份与权限边界、取消与到期、真实协议能力和明确的验证完成条件仍在对应操作边界校验；辅助信息缺失不能扩大这些权限。
+- 产品动作是否可用由共享语义决定，Desktop/TUI 不得额外叠加全局 freshness 或诊断门禁。
+- 发布评测与推荐默认值不得变成已配置运行的额外许可；Task routing 只依据实际 provider/tool/executor 能力、用户策略与 durable invariant。
+- 本地 Plan 决定不装配 provider；批准身份不依赖可变展示清单；执行仅装配实际使用角色。
+
 ## 2. Rust 编码规则
 
 ### 2.1 风格
@@ -66,6 +76,7 @@
 - 必须桥接阻塞逻辑时，短时阻塞工作使用 `tokio::task::spawn_blocking`
 - `spawn_blocking` 只用于会自行结束的阻塞工作；长期常驻的阻塞 loop / worker 优先使用专用线程，并提供明确的退出路径
 - 后台任务不能“放飞不管”；需要有明确 owner、`JoinHandle`、取消信号或收尾路径
+- 跨层 agent 调用必须控制原生线程栈占用；大型 Future 的构造临时值不得长期叠加在父级 `poll` 栈帧中。需要时使用私有构造函数返回 boxed Future 或拆分执行阶段，并通过完整调用链验证；仅在调用处增加 `.boxed()` 或调大线程栈不能代替验证。
 - run/task/agent取消必须使用唯一root owner与可复制child handle；所有forward effect在最后责任边界取得RAII permit，取消后不得再取得新permit。cleanup/rollback/reap使用独立cleanup permit；只有启动前冻结的scope/coverage下owned task与permit全部归零才能记录`Cancelled`，deadline超时只能记录`Interrupted`/cleanup-incomplete。有限native停止不能表述为全树静止；具体资源结算与强要求见[RFC-0071 §1.1](../docs/rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)
 
 ### 2.6 用户自然语言与语义决策边界
@@ -118,6 +129,7 @@
 - prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
 - `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
 - `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
+- 受控 `bash` 的审批环境哈希与实际执行请求必须使用同一封闭环境映射。`CARGO_HOME`、`RUSTUP_HOME` 优先采用显式父进程值，缺失时从父 `HOME` 派生工具链根；不得继承父 `HOME`、任意凭据环境变量或 shell startup 变量。执行 `HOME` 仍由 authority 的临时资源提供，工具链根变化必须使旧审批绑定失效，不能在审批后由 adapter 静默补入未绑定的环境值。
 - 所有current-schema工具结果必须通过`ToolResultRecordedV3`拆成immutable policy-safe artifact、bounded model view和bounded display view；artifact body不得进入JSONL、control entry、run event或Desktop IPC。V2只保留历史契约说明和旧格式拒绝fixture，被替代的生产legacy decoder随对应整改包删除，不再作为新writer或治理目标；数据影响遵守工程规范§3.4
 - 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
