@@ -244,7 +244,8 @@ pub struct TaskMemoryV1 {
     pub memory_id: TaskMemoryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_id: Option<BranchId>,
-    pub valid_for_snapshot: WorkspaceSnapshotId,
+    /// Advisory capture snapshot; absent when workspace observation was unavailable.
+    pub valid_for_snapshot: Option<WorkspaceSnapshotId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<TaskMemoryId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -283,7 +284,11 @@ impl TaskMemoryV1 {
         if self.memory_id.trim().is_empty() {
             bail!("task memory id is empty");
         }
-        if self.valid_for_snapshot.trim().is_empty() {
+        if self
+            .valid_for_snapshot
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.trim().is_empty())
+        {
             bail!("task memory snapshot id is empty");
         }
         if self.objective.trim().is_empty() {
@@ -379,7 +384,8 @@ fn model_summary_fact(fact: ModelAssistedMemoryFact, source_event_id: &str) -> S
 #[serde(rename_all = "snake_case")]
 pub struct TaskMemoryExtractionInput {
     pub memory_id: TaskMemoryId,
-    pub valid_for_snapshot: WorkspaceSnapshotId,
+    /// Advisory capture snapshot; absent when workspace observation was unavailable.
+    pub valid_for_snapshot: Option<WorkspaceSnapshotId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_id: Option<BranchId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

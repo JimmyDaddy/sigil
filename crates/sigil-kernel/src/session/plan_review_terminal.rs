@@ -418,6 +418,9 @@ pub(super) fn validate_revision_pairs(
     let mut finalized = BTreeMap::new();
     let mut paired = std::collections::BTreeSet::new();
     for (index, record) in records.iter().enumerate() {
+        if record.stored_event().event_kind() != Some(DurableEventType::PlanReviewAttempt) {
+            continue;
+        }
         let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) =
             record.session_log_entry()?
         else {

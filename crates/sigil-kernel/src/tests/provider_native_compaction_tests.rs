@@ -106,7 +106,7 @@ fn seed_portable_checkpoint(
             initiation: CompactionInitiation::Manual,
             base_projection_revision: "native-dual-write-r1".to_owned(),
             branch_id: None,
-            valid_for_snapshot: "snapshot-native-dual-write".to_owned(),
+            valid_for_snapshot: Some("snapshot-native-dual-write".to_owned()),
             objective: Some("portable truth remains authoritative".to_owned()),
             language: "en".to_owned(),
             plan,

@@ -49,7 +49,20 @@ impl PublicEventOutboxProjectionV1 {
     /// Rebuilds the outbox from critical durable records. A corrupt entry is a projection
     /// degradation, never evidence that the underlying application run failed.
     pub fn from_records(records: &[SessionStreamRecord]) -> Result<Self> {
-        crate::conversation_run::validate_conversation_run_lifecycle(records)?;
+        // The main replay below validates every envelope. Lifecycle validation only needs its
+        // own categories; decoding unrelated transcript/tool payloads again holds the writer
+        // during recovery-critical appends without adding another validation boundary.
+        let lifecycle_records = records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.stored_event().event_kind(),
+                    Some(DurableEventType::RunStatusChanged | DurableEventType::RunFinalized)
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        crate::conversation_run::validate_conversation_run_lifecycle(&lifecycle_records)?;
         let mut projection = Self::default();
         for record in records {
             projection.apply_record(record)?;
@@ -113,13 +126,24 @@ impl PublicEventOutboxProjectionV1 {
 
     fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
         let event = record.stored_event();
+        match decode_stored_event(event.clone())? {
+            StoredEventDecode::Known(domain) => {
+                // Pair validators filter by domain below. Preserve the canonical embedded
+                // session-entry checks once here, reusing the already verified envelope.
+                if matches!(
+                    super::session_entry_from_domain_event(&domain)?,
+                    Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(_)))
+                ) && event.event_kind() != Some(DurableEventType::PlanReviewAttempt)
+                {
+                    bail!("plan review attempt used the wrong durable event type");
+                }
+            }
+            StoredEventDecode::UnknownNonCritical(_) => {}
+        }
         if projection_apply_decision(self.cursor.as_ref(), event)?
             == ProjectionApplyDecision::IgnoreAlreadyApplied
         {
             return Ok(());
-        }
-        match decode_stored_event(event.clone())? {
-            StoredEventDecode::Known(_) | StoredEventDecode::UnknownNonCritical(_) => {}
         }
         match event.event_kind() {
             Some(DurableEventType::PublicEventOutbox) => {

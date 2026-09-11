@@ -1888,7 +1888,7 @@ fn sample_invocation_grant_binding(
         },
         network_upper_bound: NetworkPolicy::Deny,
         tool_contract_fingerprint: "sha256:contracts".to_owned(),
-        workspace_snapshot_id: "sha256:workspace".to_owned(),
+        workspace_snapshot_id: Some("sha256:workspace".to_owned()),
         root_cancellation_scope_id: "private-cancellation-scope".to_owned(),
         expires_at_ms: 100,
     })
@@ -1941,7 +1941,7 @@ fn invocation_grant_revalidation_rebases_workspace_but_fails_on_authority_drift(
     assert!(matches!(
         grant.validate_tool_effect(
             &binding.tool_contract_fingerprint,
-            &"sha256:external-workspace-change".to_owned(),
+            &Some("sha256:external-workspace-change".to_owned()),
             &binding.root_cancellation_scope_id,
             99,
         )?,
@@ -1966,6 +1966,96 @@ fn invocation_grant_revalidation_rebases_workspace_but_fails_on_authority_drift(
                 100,
             )
             .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn readonly_invocation_settles_only_complete_unchanged_workspace_effects() -> Result<()> {
+    let binding = sample_invocation_grant_binding(DelegationAuthority::ModelProactive)?;
+    let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;
+    let before = binding.workspace_snapshot_id.clone();
+    let changed = Some("sha256:changed".to_owned());
+    grant.advance_workspace_frontier(&before, before.clone())?;
+    assert!(
+        grant
+            .advance_workspace_frontier(&before, changed.clone())
+            .is_err()
+    );
+    assert!(grant.advance_workspace_frontier(&None, None).is_err());
+    assert!(grant.advance_workspace_frontier(&before, None).is_err());
+    assert!(
+        grant
+            .advance_workspace_frontier(&None, before.clone())
+            .is_err()
+    );
+
+    // A concurrent observation cannot hide this tool's mutation or invalidate its no-op proof.
+    grant.validate_tool_effect(
+        &binding.tool_contract_fingerprint,
+        &changed,
+        &binding.root_cancellation_scope_id,
+        2,
+    )?;
+    assert!(
+        grant
+            .advance_workspace_frontier(&before, changed.clone())
+            .is_err()
+    );
+    grant.advance_workspace_frontier(&before, before.clone())?;
+    assert_eq!(
+        grant.validate_tool_effect(
+            &binding.tool_contract_fingerprint,
+            &changed,
+            &binding.root_cancellation_scope_id,
+            2,
+        )?,
+        crate::AgentInvocationWorkspaceObservationV1::Unchanged
+    );
+    assert_eq!(grant.durable_record()?.workspace_snapshot_id, before);
+    Ok(())
+}
+
+#[test]
+fn invocation_grant_without_snapshot_preserves_permission_and_expiry_checks() -> Result<()> {
+    let mut binding = sample_invocation_grant_binding(DelegationAuthority::UserExplicit)?;
+    binding.workspace_snapshot_id = None;
+    let grant = AgentInvocationGrant::mint(binding.clone(), 1)?;
+    assert!(grant.durable_record()?.workspace_snapshot_id.is_none());
+    grant.validate_tool_effect(
+        &binding.tool_contract_fingerprint,
+        &None,
+        &binding.root_cancellation_scope_id,
+        2,
+    )?;
+    assert!(
+        grant
+            .validate_tool_effect(
+                "wrong-contract",
+                &None,
+                &binding.root_cancellation_scope_id,
+                2
+            )
+            .is_err()
+    );
+    assert!(
+        grant
+            .validate_tool_effect(&binding.tool_contract_fingerprint, &None, "wrong-scope", 2)
+            .is_err()
+    );
+    assert!(
+        grant
+            .validate_tool_effect(
+                &binding.tool_contract_fingerprint,
+                &None,
+                &binding.root_cancellation_scope_id,
+                100
+            )
+            .is_err()
+    );
+    assert_eq!(
+        grant.permission_upper_bound().mode,
+        PermissionMode::ReadOnly
     );
     Ok(())
 }

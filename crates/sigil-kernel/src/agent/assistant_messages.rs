@@ -12,6 +12,7 @@ pub(super) fn append_tool_preamble_message<H>(
     session: &mut Session,
     handler: &mut H,
     tools: &ToolRegistry,
+    logical_run_id: &str,
     assistant_text: &str,
     completed_calls: &[ToolCall],
     pending_states: Vec<ProviderContinuationState>,
@@ -25,11 +26,12 @@ where
     } else {
         (!assistant_text.trim().is_empty()).then(|| assistant_text.to_owned())
     };
-    let exact_assistant_message = ModelMessage::assistant_with_kind(
+    let mut exact_assistant_message = ModelMessage::assistant_with_kind(
         assistant_content,
         completed_calls.to_vec(),
         AssistantMessageKind::ToolPreamble,
     );
+    exact_assistant_message.logical_run_id = Some(crate::LogicalRunId::new(logical_run_id)?);
     let (assistant_message, exact_overlay) =
         crate::project_message_for_persistence(exact_assistant_message)?;
     append_assistant_message_bundle(

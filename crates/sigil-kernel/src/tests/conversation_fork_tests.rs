@@ -349,7 +349,7 @@ fn conversation_fork_copies_safe_prefix_rebinds_provenance_and_preserves_parent(
         initiation: CompactionInitiation::Manual,
         base_projection_revision: "fork-checkpoint-r1".to_owned(),
         branch_id: None,
-        valid_for_snapshot: "fork-snapshot-v1".to_owned(),
+        valid_for_snapshot: Some("fork-snapshot-v1".to_owned()),
         objective: Some("Preserve forked raw conversation history".to_owned()),
         language: "en".to_owned(),
         plan,

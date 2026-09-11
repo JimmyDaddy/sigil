@@ -63,6 +63,111 @@ fn session_id(store: &JsonlSessionStore) -> Result<String> {
 }
 
 #[test]
+fn lifecycle_prefilter_preserves_unrelated_record_validation() -> Result<()> {
+    let valid = StoredEvent::new(
+        DurableEventType::UserMessageRecorded,
+        EventClass::Critical,
+        "user-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({
+            "session_log_entry": SessionLogEntry::User(crate::ModelMessage::user("context"))
+        }),
+    )?;
+    let records = [SessionStreamRecord::Stored(valid.clone())];
+    PublicEventOutboxProjectionV1::from_records(&records)?;
+    PublicEventOutboxAdmissionIndexV1::from_records(&records)?;
+
+    let mut checksum_corrupt = valid.clone();
+    checksum_corrupt.payload = serde_json::json!({"changed": true});
+    let duplicate_records = [
+        SessionStreamRecord::Stored(valid),
+        SessionStreamRecord::Stored(checksum_corrupt.clone()),
+    ];
+    assert!(PublicEventOutboxProjectionV1::from_records(&duplicate_records).is_err());
+    assert!(PublicEventOutboxAdmissionIndexV1::from_records(&duplicate_records).is_err());
+    let malformed = StoredEvent::new(
+        DurableEventType::UserMessageRecorded,
+        EventClass::Critical,
+        "user-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"session_log_entry": {"user": "malformed"}}),
+    )?;
+    let malformed_composition = StoredEvent::new(
+        DurableEventType::SessionCompositionBound,
+        EventClass::Critical,
+        "composition-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"session_log_entry": {"control": {"session_composition_bound": {}}}}),
+    )?;
+    for invalid in [checksum_corrupt, malformed, malformed_composition] {
+        let records = [SessionStreamRecord::Stored(invalid)];
+        assert!(PublicEventOutboxProjectionV1::from_records(&records).is_err());
+        assert!(PublicEventOutboxAdmissionIndexV1::from_records(&records).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn outbox_projection_rejects_revision_attempt_hidden_in_another_event_category() -> Result<()> {
+    let review_id = crate::PlanReviewId::new("review-1")?;
+    let attempt_id = crate::PlanReviewAttemptId::new("attempt-1")?;
+    let attempt = crate::PlanReviewAttemptEntry {
+        plan_review_id: review_id.clone(),
+        attempt_id: attempt_id.clone(),
+        plan_id: crate::PlanId::new("candidate-1")?,
+        source: crate::PlanReviewSource::ExplicitPlanCommand,
+        source_turn: crate::ConversationTurnRef::new("session-1", "message-1", "run-1")?,
+        explicit_objective: Some("Revise the plan".to_owned()),
+        route_decision_id: None,
+        child_session_ref: crate::plan_review_child_session_ref(&review_id, &attempt_id),
+        finalizer_session_ref: Some(crate::plan_review_finalizer_session_ref(
+            &review_id,
+            &attempt_id,
+            1,
+        )),
+        revision_request_id: Some(crate::UserInputRequestId::new("request-1")?),
+        attempt_ordinal: 1,
+        base_plan_id: Some(crate::PlanId::new("base-1")?),
+        base_plan_hash: Some("base-hash".to_owned()),
+        workspace_snapshot_id: None,
+        pending_user_input: None,
+        status: crate::PlanReviewAttemptStatus::DraftReady,
+        terminal_reason: None,
+        recorded_at_ms: 4,
+    };
+    let payload = serde_json::json!({
+        "session_log_entry": SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))
+    });
+    // The payload is a decodable attempt. Both its normal missing-pair representation and a
+    // checksum-valid disguise under another known category must remain rejected.
+    for category in [
+        DurableEventType::PlanReviewAttempt,
+        DurableEventType::UserMessageRecorded,
+    ] {
+        let event = StoredEvent::new(
+            category,
+            EventClass::Critical,
+            "attempt-event".to_owned(),
+            "session-1".to_owned(),
+            1,
+            payload.clone(),
+        )?;
+        let record = SessionStreamRecord::Stored(event);
+        assert!(matches!(
+            record.session_log_entry()?,
+            Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(_)))
+        ));
+        let records = [record];
+        assert!(PublicEventOutboxProjectionV1::from_records(&records).is_err());
+        assert!(PublicEventOutboxAdmissionIndexV1::from_records(&records).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn malformed_lifecycle_degrades_admission_without_rejecting_the_raw_append() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

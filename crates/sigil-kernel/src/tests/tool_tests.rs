@@ -462,6 +462,160 @@ struct RemovingWorkspaceShellFixtureTool;
 
 struct ReadOnlyShellFixtureTool;
 
+struct NoopUnknownShellFixtureTool;
+
+#[async_trait]
+impl Tool for NoopUnknownShellFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "fixture_shell_noop".to_owned(),
+            access: ToolAccess::Execute,
+            ..ReadOnlyShellFixtureTool.spec()
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "fixture_shell_noop",
+            "hello",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+fn readonly_child_context(
+    workspace: &std::path::Path,
+    registry: &ToolRegistry,
+    recorder: MutationEventRecorder,
+) -> Result<ToolContext> {
+    let cancellation = RunCancellationOwner::new().handle();
+    let grant = AgentInvocationGrant::mint(
+        AgentInvocationGrantBinding {
+            source: AgentInvocationGrantSource::Conversation {
+                source_turn: crate::ConversationTurnRef::new(
+                    "session-1",
+                    "message-1",
+                    "root-run-1",
+                )?,
+            },
+            authority: DelegationAuthority::ModelProactive,
+            root_logical_run_id: "root-run-1".to_owned(),
+            profile_id: AgentProfileId::new("explore")?,
+            role: AgentRole::SubagentRead,
+            isolation: TaskIsolationMode::SharedReadOnly,
+            permission_upper_bound: PermissionConfig {
+                mode: PermissionMode::ReadOnly,
+                ..PermissionConfig::default()
+            },
+            network_upper_bound: NetworkPolicy::Deny,
+            tool_contract_fingerprint: registry.contract_fingerprint()?,
+            workspace_snapshot_id: crate::agent_invocation_workspace_snapshot_id(workspace)?,
+            root_cancellation_scope_id: cancellation.scope_id().to_owned(),
+            expires_at_ms: u64::MAX,
+        },
+        1,
+    )?;
+    Ok(ToolContext::new(workspace, 30)
+        .with_mutation_recorder(recorder)
+        .with_cancellation(cancellation)
+        .with_agent_invocation_grant(grant))
+}
+
+#[tokio::test]
+async fn readonly_child_unknown_shell_accepts_noop_but_rejects_workspace_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("tracked.txt"), "before\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NoopUnknownShellFixtureTool));
+    registry.register(Arc::new(MutatingShellFixtureTool {
+        path: "tracked.txt",
+        content: "changed\n",
+    }));
+    let context = readonly_child_context(&workspace, &registry, MutationEventRecorder::new(store))?;
+    assert_eq!(
+        NoopUnknownShellFixtureTool.mutation_tracking(),
+        ToolMutationTracking::Unknown
+    );
+
+    let noop = registry
+        .execute_after_started_audit(
+            context.clone(),
+            ToolCall {
+                id: "readonly-noop".to_owned(),
+                name: "fixture_shell_noop".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert_eq!(noop.content, "hello");
+    assert!(!noop.is_error());
+
+    let error = registry
+        .execute_after_started_audit(
+            context,
+            ToolCall {
+                id: "readonly-change".to_owned(),
+                name: "fixture_shell".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("an observed workspace mutation must fail read-only effect settlement");
+    assert!(
+        error
+            .to_string()
+            .contains("read-only agent invocation changed the workspace")
+    );
+    Ok(())
+}
+
+#[test]
+fn readonly_child_unknown_shell_requires_complete_workspace_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NoopUnknownShellFixtureTool));
+    let context = readonly_child_context(&workspace, &registry, recorder.clone())?;
+    let complete_scan = recorder.capture_workspace_scan(
+        &workspace,
+        &VerificationScope::all_tracked("readonly-evidence"),
+    )?;
+    let error = super::finish_agent_invocation_workspace_effect(
+        &context,
+        &NoopUnknownShellFixtureTool.spec(),
+        "readonly-missing-before",
+        ToolMutationTracking::Unknown,
+        Some(super::ValidatedAgentInvocationWorkspace {
+            workspace_snapshot_id: None,
+        }),
+        Some(complete_scan),
+    )
+    .expect_err("a complete post-scan cannot replace missing pre-effect evidence");
+    assert!(matches!(
+        error.downcast_ref::<super::ToolExecutionGuardError>(),
+        Some(super::ToolExecutionGuardError::EffectReconciliationRequired)
+    ));
+    let events = JsonlSessionStore::read_event_records(store.path())?;
+    assert!(events.iter().any(|record| matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::EffectReconciliationRequired.as_str()
+    )));
+    Ok(())
+}
+
 #[async_trait]
 impl Tool for ReadOnlyShellFixtureTool {
     fn spec(&self) -> ToolSpec {
@@ -536,8 +690,18 @@ async fn child_read_tool_rebases_workspace_without_revoking_grant_authority() ->
     let first = registry.execute(context.clone(), call.clone()).await?;
     assert!(!first.is_error());
     fs::write(workspace.path().join("tracked.txt"), "after\n")?;
-    let second = registry.execute(context, call).await?;
+    let second = registry.execute(context.clone(), call.clone()).await?;
     assert!(!second.is_error());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("missing-target", workspace.path().join("unreadable.rs"))?;
+        assert!(crate::agent_invocation_workspace_snapshot_id(workspace.path())?.is_none());
+        let unobserved = registry.execute(context, call).await?;
+        assert!(
+            !unobserved.is_error(),
+            "read authority survives incomplete workspace observation"
+        );
+    }
     Ok(())
 }
 

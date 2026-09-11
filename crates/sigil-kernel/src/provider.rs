@@ -772,6 +772,10 @@ pub struct ModelMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_kind: Option<AssistantMessageKind>,
+    /// Host-owned execution identity for a durable assistant tool-call batch. Absent in older
+    /// messages; provider request adapters must not send this bookkeeping field to the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_run_id: Option<crate::LogicalRunId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_attachments: Vec<crate::ImageAttachment>,
     /// RFC-0062 9.6: typed tool-result payload. Provider adapters must pattern-match this and
@@ -1519,6 +1523,7 @@ impl ModelMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             assistant_kind: None,
+            logical_run_id: None,
             image_attachments: Vec::new(),
             tool_result_payload: None,
         }

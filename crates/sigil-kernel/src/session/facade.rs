@@ -4,6 +4,10 @@ use crate::{
     RecoveryBlockerSupersededV1, ResolvedModelRoute, TaskGuidancePromotedEntry,
 };
 
+#[cfg(test)]
+#[path = "tests/control_loader_tests.rs"]
+mod control_loader_tests;
+
 /// In-memory session state backed by an optional append-only JSONL store.
 #[derive(Debug)]
 pub struct Session {
@@ -18,6 +22,8 @@ pub struct Session {
     pub(super) runtime_attachments: SessionRuntimeAttachments,
     durable_session_entry_count: Option<u64>,
     reconstruction_records: Option<Arc<[SessionStreamRecord]>>,
+    pub(super) archived_fact_sources:
+        Arc<std::sync::Mutex<super::archived_facts::ArchivedFactSources>>,
     pub(super) control_public_projection: super::control_publication::ControlPublicProjection,
 }
 
@@ -113,6 +119,7 @@ impl StableCompactionSnapshot {
             runtime_attachments: self.runtime_attachments.clone(),
             durable_session_entry_count: Some(self.durable_session_entry_count),
             reconstruction_records: None,
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         }))
     }
@@ -181,6 +188,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         }
     }
@@ -199,6 +207,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         }
     }
@@ -240,6 +249,27 @@ impl Session {
             .as_ref()
             .map(JsonlSessionStore::active_projection_snapshot)
             .transpose()
+    }
+
+    /// Returns current and durably bound same-Task run identities for evidence selection.
+    /// Missing historical bindings never attribute an unrelated conversation to a Task.
+    ///
+    /// # Errors
+    /// Returns an error for a corrupt durable stream or conflicting execution identities.
+    pub fn recorded_evidence_run_ids(
+        &self,
+        run_id: &str,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        if let Some(snapshot) = self.active_projection_snapshot()? {
+            return Ok(snapshot.recorded_evidence_run_ids(run_id));
+        }
+        let mut progress = super::execution_progress::ExecutionProgress::default();
+        for entry in &self.entries {
+            if let SessionLogEntry::Control(control) = entry {
+                progress.apply_control(control)?;
+            }
+        }
+        Ok(progress.recorded_evidence_run_ids(run_id))
     }
 
     /// Returns the append-only context epoch currently governing V2 tool-result model views.
@@ -349,6 +379,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: None,
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         }
     }
@@ -360,6 +391,24 @@ impl Session {
         store: JsonlSessionStore,
     ) -> Result<Self> {
         Self::load_from_store_with_route(provider_name, model_name, None, store)
+    }
+
+    /// Loads an existing session for local control without taking startup recovery ownership.
+    ///
+    /// The writer still validates the durable envelope and repairs an incomplete tail, but this
+    /// read does not infer that active tools, agents, cancellation or Plan attempts were
+    /// interrupted. The persisted session identity remains authoritative.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid stream or a stream without an existing session identity.
+    pub fn load_from_store_for_control(store: JsonlSessionStore) -> Result<Self> {
+        let records = store.read_event_records_writer()?;
+        PublicEventOutboxProjectionV1::from_records(&records)?;
+        let entries = session_entries_from_records(&records)?;
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .context("local control requires an existing durable session identity")?;
+        Self::from_loaded_store_entries(provider_name, model_name, entries, store)
     }
 
     /// Reconstructs the privacy-safe session source at one exact provider-request frontier.
@@ -401,6 +450,7 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count: None,
             reconstruction_records: Some(records.into()),
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         })
     }
@@ -444,6 +494,26 @@ impl Session {
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
             .context("failed to recover provider continuation payload lifecycle")?;
+        let mut session =
+            Self::from_loaded_store_entries(provider_name, model_name, entries, store)?;
+        let recovered_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
+        crate::conversation_route::reconcile_plan_review_attempts_from_recovered_entries(
+            &mut session,
+            recovered_at_ms,
+        )?;
+        Ok(session)
+    }
+
+    fn from_loaded_store_entries(
+        provider_name: impl Into<String>,
+        model_name: impl Into<String>,
+        entries: Vec<SessionLogEntry>,
+        store: JsonlSessionStore,
+    ) -> Result<Self> {
         let durable_session_entry_count = Some(
             store
                 .active_projection_snapshot()?
@@ -452,6 +522,8 @@ impl Session {
         let session_scope_id = session_id_for_path(store.path());
         let (entries, audit_needed) = validated_recovered_entries(&session_scope_id, entries);
         let stats = session_stats_from_entries(&entries);
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .unwrap_or_else(|| (provider_name.into(), model_name.into()));
         let mut session = Self {
             session_scope_id,
             provider_name,
@@ -464,20 +536,12 @@ impl Session {
             runtime_attachments: SessionRuntimeAttachments::default(),
             durable_session_entry_count,
             reconstruction_records: None,
+            archived_fact_sources: Default::default(),
             control_public_projection: Default::default(),
         };
         if audit_needed {
             session.append_control(unsafe_external_recovery_audit_control())?;
         }
-        let recovered_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
-        crate::conversation_route::reconcile_plan_review_attempts_from_recovered_entries(
-            &mut session,
-            recovered_at_ms,
-        )?;
         Ok(session)
     }
 
@@ -1405,6 +1469,13 @@ impl Session {
     /// Returns a clone of the durable store for a blocking-I/O bridge.
     pub(crate) fn durable_store(&self) -> Option<JsonlSessionStore> {
         self.store.clone()
+    }
+
+    /// Clones only the existing stream reader for host-side reconstruction on a blocking worker.
+    /// This handle cannot append records or create a missing history stream.
+    #[must_use]
+    pub fn durable_event_read_handle(&self) -> Option<super::SessionRecordReadHandle> {
+        self.store.as_ref().map(JsonlSessionStore::read_handle)
     }
 
     /// Updates the in-memory projection after a caller has synchronously persisted a control.

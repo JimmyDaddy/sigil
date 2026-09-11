@@ -317,6 +317,7 @@ fn external_provenance_rewrites_remote_id_and_binds_utf8_citation() -> Result<()
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: Some(crate::AssistantMessageKind::FinalAnswer),
+        logical_run_id: None,
         image_attachments: Vec::new(),
         tool_result_payload: None,
     };

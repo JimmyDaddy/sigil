@@ -8,12 +8,11 @@ use crate::{
     PlanReviewAttemptEntry, PlanReviewAttemptId, PlanReviewAttemptStatus,
     PlanReviewCandidateCompletenessV1, PlanReviewId, PlanReviewSource, PlanSourceRef,
     SessionLogEntry, TaskCreatedFromPlanEntry, TaskId, TaskIsolationMode, TaskStepMode, ToolAccess,
-    ToolCategory, ToolPreviewCapability, ToolSpec, confirm_plan_review_candidate_tool_spec,
-    plain_text_plan_draft_entry, plain_text_plan_draft_entry_with_plan_id,
-    plan_draft_created_entry, plan_review_candidate_recorded_entry, plan_review_child_session_ref,
-    plan_review_detail_from_entries, plan_task_input_from_draft, plan_text_hash,
-    plan_workspace_paths, submit_plan_draft_entry, task_id_from_plan_draft,
-    task_plan_from_plan_draft,
+    ToolCategory, ToolPreviewCapability, ToolSpec, plain_text_plan_draft_entry,
+    plain_text_plan_draft_entry_with_plan_id, plan_draft_created_entry,
+    plan_draft_created_entry_with_plan_id, plan_review_candidate_recorded_entry,
+    plan_review_child_session_ref, plan_review_detail_from_entries, plan_task_input_from_draft,
+    plan_text_hash, plan_workspace_paths, task_id_from_plan_draft,
 };
 
 use crate::plan::{
@@ -298,7 +297,7 @@ fn plan_task_input_uses_human_readable_plan_without_step_translation() -> Result
 }
 
 #[test]
-fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
+fn legacy_sigil_plan_v2_preserves_structured_steps_without_task_authority() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
 {
@@ -337,17 +336,20 @@ fn sigil_plan_v2_promotes_directly_to_the_shared_task_dag() -> Result<()> {
         task_id_from_plan_draft(&draft)?
     );
 
-    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
-        .expect("v2 plan should promote directly");
-    let task_plan = promotion.task_plan;
-    let mapping = promotion.step_mapping;
-    assert_eq!(task_plan.steps.len(), 2);
-    assert_eq!(mapping.len(), 2);
-    assert_eq!(task_plan.steps[1].depends_on[0].as_str(), "inspect");
-    assert_eq!(task_plan.steps[0].effective_mode(), TaskStepMode::Read);
+    assert_eq!(draft.steps.len(), 2);
+    assert_eq!(draft.steps[1].depends_on, vec!["inspect"]);
+    assert_eq!(draft.steps[0].mode, Some(TaskStepMode::Read));
     assert_eq!(
-        task_plan.steps[0].effective_isolation(),
-        TaskIsolationMode::SharedReadOnly
+        draft.steps[0].isolation,
+        Some(TaskIsolationMode::SharedReadOnly)
+    );
+    let entries = vec![SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        draft,
+    ))];
+    assert!(
+        crate::TaskStateProjection::from_entries(&entries)
+            .tasks
+            .is_empty()
     );
     Ok(())
 }
@@ -415,41 +417,6 @@ fn sigil_plan_v2_rejects_verification_run_as_participant_capability() {
 }
 
 #[test]
-fn direct_plan_promotion_rejects_legacy_verify_participant_steps() -> Result<()> {
-    let mut draft = plan_draft_created_entry(
-        r#"```sigil-plan-v2
-{
-  "summary": "Inspect Cargo",
-  "steps": [{
-    "step_id": "inspect",
-    "title": "Inspect Cargo",
-    "role": "executor",
-    "depends_on": [],
-    "mode": "read",
-    "isolation": "shared_read_only",
-    "target_paths": ["Cargo.toml"]
-  }],
-  "target_paths": ["Cargo.toml"]
-}
-```"#,
-        PlanSourceRef::default(),
-        42,
-        None,
-    )?
-    .expect("read plan should create a draft");
-    draft.steps[0].mode = Some(TaskStepMode::Verify);
-
-    let error = task_plan_from_plan_draft(&draft, TaskId::new("task_legacy_verify")?, 1)
-        .expect_err("legacy verify steps must not become impossible participants");
-    assert!(
-        error
-            .to_string()
-            .contains("cannot promote verify participant steps")
-    );
-    Ok(())
-}
-
-#[test]
 fn sigil_plan_v2_carries_digest_bound_intent_proposal_without_runtime_authority() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
@@ -502,19 +469,20 @@ fn sigil_plan_v2_carries_digest_bound_intent_proposal_without_runtime_authority(
         proposal.computed_digest()?,
         "the host must bind the exact provider proposal"
     );
-    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_1")?, 1)?
-        .expect("v2 plan should promote directly");
-    assert!(promotion.task_plan.steps[0].intent_refs.is_empty());
-    assert_eq!(
-        promotion.intent_alias_bindings[0].intent_aliases,
-        vec!["retry"]
+    assert_eq!(draft.steps[0].intent_aliases, vec!["retry"]);
+    let entries = vec![SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        draft,
+    ))];
+    assert!(
+        crate::TaskStateProjection::from_entries(&entries)
+            .tasks
+            .is_empty()
     );
     Ok(())
 }
 
 #[test]
-fn sigil_plan_v2_keeps_missing_intent_aliases_reviewable_until_task_materialization() -> Result<()>
-{
+fn legacy_sigil_plan_v2_keeps_unbound_intent_aliases_as_readable_context() -> Result<()> {
     let draft = plan_draft_created_entry(
         r#"```sigil-plan-v2
 {
@@ -536,63 +504,19 @@ fn sigil_plan_v2_keeps_missing_intent_aliases_reviewable_until_task_materializat
     )?
     .expect("readable plan must remain reviewable before task materialization");
 
-    let error = crate::compile_executable_plan_candidate(&draft, &compile_input())
-        .expect_err("task materialization must reject an intent alias without a proposal");
-    assert!(error.reason.contains("require a top-level intent proposal"));
-    Ok(())
-}
-
-#[test]
-fn single_intent_proposal_binds_unannotated_write_steps_during_materialization() -> Result<()> {
-    let draft = plan_draft_created_entry(
-        r#"```sigil-plan-v2
-{
-  "summary": "Apply one approved change",
-  "intents": [{
-    "intent_alias": "apply-change",
-    "title": "Apply change",
-    "statement": "Apply the approved change across each implementation step.",
-    "acceptance_criteria": [{
-      "criterion_alias": "complete",
-      "statement": "The change is complete.",
-      "required": true
-    }],
-    "depends_on_aliases": []
-  }],
-  "steps": [{
-    "id": "write",
-    "title": "Apply change",
-    "role": "executor",
-    "depends_on": [],
-    "mode": "write",
-    "isolation": "sequential_workspace_write",
-    "target_paths": ["src/lib.rs"]
-  }],
-  "target_paths": ["src/lib.rs"]
-}
-```"#,
-        PlanSourceRef::default(),
-        42,
-        None,
-    )?
-    .expect("single-intent plan should create a durable draft");
-    let mut input = compile_input();
-    input.workspace_id = Some("workspace-test".to_owned());
-
-    let candidate = crate::compile_executable_plan_candidate(&draft, &input)
-        .expect("the host can deterministically bind the sole intent");
-    let prepared = candidate
-        .prepared_intent_admission
-        .as_ref()
-        .expect("intent-enabled candidate must retain its prepared admission");
-    assert_eq!(prepared.alias_bindings.len(), 1);
-    assert_eq!(
-        prepared.alias_bindings[0].intent_aliases,
-        vec!["apply-change"]
+    assert!(draft.intent_proposal.is_none());
+    assert_eq!(draft.steps[0].intent_aliases, vec!["missing"]);
+    let entries = vec![SessionLogEntry::Control(ControlEntry::PlanDraftCreated(
+        draft,
+    ))];
+    assert!(
+        crate::TaskStateProjection::from_entries(&entries)
+            .tasks
+            .is_empty()
     );
-    assert_eq!(candidate.task_plan.steps[0].intent_refs.len(), 1);
     Ok(())
 }
+
 #[test]
 fn sigil_plan_v2_accepts_single_string_notes_and_acceptance() -> Result<()> {
     let draft = plan_draft_created_entry(
@@ -769,9 +693,9 @@ fn plan_review_detail_preserves_complete_typed_content_and_exact_hash() -> Resul
         "suggested_checks": ["cargo test -p sigil-kernel plan_review_detail"],
         "notes": ["Use the shared converter."]
     });
-    let draft = submit_plan_draft_entry(
-        &serde_json::to_string(&args)?,
+    let draft = plan_draft_created_entry_with_plan_id(
         plan_id.clone(),
+        &format!("```sigil-plan-v2\n{}\n```", &serde_json::to_string(&args)?),
         PlanSourceRef::default(),
         42,
         Some("snapshot-detail".to_owned()),
@@ -996,20 +920,6 @@ fn typed_plan_review_no_plan_has_no_draft_artifact_or_run_candidate() -> Result<
 }
 
 #[test]
-fn confirm_plan_review_candidate_schema_is_body_free_and_strict() -> Result<()> {
-    let spec = confirm_plan_review_candidate_tool_spec();
-    assert_eq!(spec.name, "confirm_plan_review_candidate");
-    assert_eq!(spec.input_schema["required"], json!(["decision"]));
-    assert_eq!(spec.input_schema["additionalProperties"], json!(false));
-    assert_eq!(
-        spec.input_schema["properties"]["decision"]["enum"],
-        json!(["accept"])
-    );
-    assert!(spec.input_schema["properties"].get("content").is_none());
-    Ok(())
-}
-
-#[test]
 fn plan_review_candidate_is_immutable_attempt_bound_evidence() -> Result<()> {
     let review_id = PlanReviewId::new("candidate-review")?;
     let attempt_id = PlanReviewAttemptId::new("candidate-attempt")?;
@@ -1144,9 +1054,9 @@ fn plan_review_rejects_oversized_summary_instead_of_truncating_detail() -> Resul
         "suggested_checks": []
     });
 
-    let error = submit_plan_draft_entry(
-        &serde_json::to_string(&args)?,
+    let error = plan_draft_created_entry_with_plan_id(
         PlanId::new("plan-summary-too-large")?,
+        &format!("```sigil-plan-v2\n{}\n```", &serde_json::to_string(&args)?),
         PlanSourceRef::default(),
         42,
         None,
@@ -1158,7 +1068,7 @@ fn plan_review_rejects_oversized_summary_instead_of_truncating_detail() -> Resul
 }
 
 #[test]
-fn plan_display_name_is_bounded_before_draft_commit_and_during_legacy_promotion() -> Result<()> {
+fn plan_display_name_is_bounded_at_commit_and_legacy_text_remains_readable() -> Result<()> {
     let oversized = "提交 code-intel / mcp / provider-deepseek / tools-builtin";
     let args = json!({
         "schema_version": 2,
@@ -1175,9 +1085,9 @@ fn plan_display_name_is_bounded_before_draft_commit_and_during_legacy_promotion(
         "target_paths": ["crates"],
         "suggested_checks": []
     });
-    let mut draft = submit_plan_draft_entry(
-        &serde_json::to_string(&args)?,
+    let mut draft = plan_draft_created_entry_with_plan_id(
         PlanId::new("bounded-display-name")?,
+        &format!("```sigil-plan-v2\n{}\n```", &serde_json::to_string(&args)?),
         PlanSourceRef::default(),
         42,
         None,
@@ -1193,29 +1103,14 @@ fn plan_display_name_is_bounded_before_draft_commit_and_during_legacy_promotion(
         crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS
     );
     assert!(committed.ends_with('…'));
-    let promotion = task_plan_from_plan_draft(&draft, TaskId::new("task_bounded")?, 1)?
-        .expect("bounded draft promotes");
-    assert_eq!(
-        promotion.task_plan.steps[0].display_name.as_deref(),
-        Some(committed)
-    );
-
-    // A previously persisted V2 draft may still carry the old unbounded representation. It must
-    // remain executable after an upgrade because this field is presentation-only.
+    // Historical display text remains readable without manufacturing a TaskPlan from it.
     draft.steps[0].display_name = Some(oversized.to_owned());
-    let legacy = task_plan_from_plan_draft(&draft, TaskId::new("task_legacy")?, 1)?
-        .expect("legacy draft promotes");
-    let legacy_name = legacy.task_plan.steps[0]
-        .display_name
-        .as_deref()
-        .expect("legacy display name");
-    assert_eq!(
-        legacy_name.chars().count(),
-        crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS
-    );
-    assert!(legacy_name.ends_with('…'));
+    let persisted = serde_json::to_string(&draft)?;
+    let replayed: crate::PlanDraftCreatedEntry = serde_json::from_str(&persisted)?;
+    assert_eq!(replayed.steps[0].display_name.as_deref(), Some(oversized));
     Ok(())
 }
+
 #[test]
 fn workspace_edits_plan_permission_does_not_cover_shell_network_mcp_or_agent() {
     let permission = PlanApprovalPermission::WorkspaceEdits;
@@ -1271,143 +1166,89 @@ fn workspace_edits_plan_permission_does_not_cover_shell_network_mcp_or_agent() {
     )));
 }
 
-// --- RFC-0067 single execution spine tests ---
-
-fn compile_input() -> crate::PlanCompileInputV1 {
-    crate::PlanCompileInputV1 {
-        source_attempt_id: "attempt-1".to_owned(),
-        source_turn_id: "message-1".to_owned(),
-        task_config_contract_hash: crate::stable_event_uuid("sigil-plan-task-config-v1", "test"),
-        planner_schema_hash: crate::stable_event_uuid("sigil-plan-planner-schema-v1", "v2"),
-        task_contract_schema_hash: crate::stable_event_uuid("sigil-task-contract-schema-v1", "v2"),
-        intent_schema_hash: None,
-        max_plan_steps: 64,
-        workspace_id: None,
-        session_scope_id: Some("test-session".to_owned()),
-    }
+// Historical execution records are fixed snapshots, never output of a retired generator.
+#[derive(serde::Deserialize)]
+struct HistoricalPlanExecutionFixture {
+    draft: crate::PlanDraftCreatedEntry,
+    adoption: crate::PlanExecutionAdoptedV1Entry,
 }
 
-fn executable_draft(plan_id: PlanId, summary: &str) -> crate::PlanDraftCreatedEntry {
-    crate::PlanDraftCreatedEntry {
-        plan_id,
-        schema_version: 2,
-        source: PlanSourceRef::default(),
-        plan_hash: crate::plan_text_hash(summary),
-        summary: summary.to_owned(),
-        inline_text: None,
-        steps: vec![crate::PlanDraftStep {
-            step_id: "step_1".to_owned(),
-            title: "Implement the change".to_owned(),
-            display_name: Some("implement".to_owned()),
-            detail: None,
-            role: Some(crate::AgentRole::Executor),
-            depends_on: Vec::new(),
-            intent_aliases: Vec::new(),
-            mode: Some(TaskStepMode::Write),
-            isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
-            target_paths: vec!["src/lib.rs".to_owned()],
-            required_capabilities: Vec::new(),
-            deliverables: vec!["working implementation".to_owned()],
-            acceptance_criteria: Vec::new(),
-            suggested_checks: Vec::new(),
-            risk: None,
-            notes: Vec::new(),
-        }],
-        intent_proposal: None,
-        target_paths: vec!["src/lib.rs".to_owned()],
-        suggested_checks: Vec::new(),
-        risk: None,
-        notes: Vec::new(),
-        workspace_snapshot_id: Some("sha256:snapshot-a".to_owned()),
-        created_at_ms: 10,
-    }
+fn historical_plan_execution_fixture() -> HistoricalPlanExecutionFixture {
+    serde_json::from_str(include_str!("fixtures/historical_plan_execution_v1.json"))
+        .expect("historical execution fixture must decode")
 }
 
 #[test]
-fn executable_candidate_compiles_pure_and_round_trips() {
-    let draft = executable_draft(PlanId::new("plan_test_1").unwrap(), "Implement the change");
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input())
-        .expect("executable draft must compile");
-    candidate.validate().expect("candidate must self-check");
-    assert_eq!(candidate.plan_id, draft.plan_id);
-    assert_eq!(candidate.plan_hash, draft.plan_hash);
-    assert_eq!(candidate.task_id, task_id_from_plan_draft(&draft).unwrap());
-    assert_eq!(candidate.task_plan.plan_version, 1);
-    assert_eq!(candidate.task_plan.status, crate::TaskPlanStatus::Accepted);
-    assert_eq!(candidate.step_contracts.len(), 1);
-    assert!(candidate.candidate_hash.starts_with("sha256:"));
-    assert!(
-        candidate
-            .required_capabilities
-            .contains(&crate::TaskCapabilityV2::WorkspaceWrite)
-    );
-    assert_eq!(candidate.compile_binding.source_attempt_id, "attempt-1");
+fn historical_execution_candidate_round_trips_and_validates_its_fixed_hash() {
+    let fixture = historical_plan_execution_fixture();
+    let candidate = fixture.adoption.adopted_candidate;
+    candidate
+        .validate()
+        .expect("historical candidate must self-check");
+    assert_eq!(candidate.plan_id, fixture.draft.plan_id);
+    assert_eq!(candidate.plan_hash, fixture.draft.plan_hash);
     assert_eq!(
-        candidate
-            .compile_binding
-            .base_workspace_snapshot_id
-            .as_deref(),
-        Some("sha256:snapshot-a")
+        candidate.task_id,
+        task_id_from_plan_draft(&fixture.draft).unwrap()
     );
-    // Retrying the same attempt produces the identical candidate hash.
-    let recompiled = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
-    assert_eq!(recompiled.candidate_hash, candidate.candidate_hash);
-    // ...but different content changes the hash.
-    let mut changed = draft.clone();
-    changed.summary = "Implement a different change".to_owned();
-    changed.plan_hash = crate::plan_text_hash(&changed.summary);
-    let changed_candidate =
-        crate::compile_executable_plan_candidate(&changed, &compile_input()).unwrap();
-    assert_ne!(changed_candidate.candidate_hash, candidate.candidate_hash);
-    // Serialized round-trip keeps the exact hash.
-    let serialized = serde_json::to_value(&candidate).unwrap();
-    let decoded: crate::ExecutablePlanCandidateV1 = serde_json::from_value(serialized).unwrap();
-    assert_eq!(decoded, candidate);
+    assert_eq!(candidate.task_plan.plan_version, 1);
+    assert_eq!(candidate.step_contracts.len(), 1);
+    let decoded: crate::ExecutablePlanCandidateV1 =
+        serde_json::from_str(&serde_json::to_string(&candidate).unwrap()).unwrap();
+    assert_eq!(decoded, *candidate);
+    let mut changed = decoded;
+    changed.safe_objective.push_str(" changed");
+    assert!(
+        changed.validate().is_err(),
+        "historical hashes must reject altered payloads"
+    );
 }
 
 #[test]
-fn candidate_canonical_hash_ignores_volatile_fields() {
-    let draft = executable_draft(PlanId::new("plan_test_2").unwrap(), "Hash stability");
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
-    let base_hash = candidate.candidate_hash.clone();
-    // Timestamps are not part of the candidate; map ordering is canonicalized by serde_json.
-    let mut value = serde_json::to_value(&candidate).unwrap();
-    value
-        .as_object_mut()
-        .unwrap()
-        .insert("volatile_timestamp".to_owned(), json!(1_700_000_000_000u64));
-    let hash = crate::candidate_canonical_hash(&candidate).unwrap();
-    assert_eq!(hash, base_hash);
+fn historical_candidate_canonical_hash_survives_json_field_reordering() {
+    let fixture = historical_plan_execution_fixture();
+    let candidate = fixture.adoption.adopted_candidate;
+    let value = serde_json::to_value(&candidate).unwrap();
+    let decoded: crate::ExecutablePlanCandidateV1 = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        crate::candidate_canonical_hash(&decoded).unwrap(),
+        candidate.candidate_hash
+    );
 }
 
 #[test]
-fn compile_failures_are_typed_and_never_reach_ready() {
-    let plan_id = PlanId::new("plan_test_3").unwrap();
-    let mut draft = executable_draft(plan_id.clone(), "Needs changes");
-    draft.steps[0].isolation = None;
-    let failure = crate::compile_executable_plan_candidate(&draft, &compile_input())
-        .expect_err("missing isolation must fail compile");
-    assert_eq!(failure.reason_code, "incomplete_step_contract");
-    assert_eq!(failure.affected_step.as_deref(), Some("step_1"));
-
-    draft.steps[0].isolation = Some(TaskIsolationMode::SequentialWorkspaceWrite);
-    draft.steps[0].mode = Some(TaskStepMode::Verify);
-    let failure = crate::compile_executable_plan_candidate(&draft, &compile_input())
-        .expect_err("verify steps must fail compile");
-    assert_eq!(failure.reason_code, "verify_step_forbidden");
-
-    draft.steps[0].mode = Some(TaskStepMode::Write);
-    let mut bounded = compile_input();
-    bounded.max_plan_steps = 0;
-    let failure = crate::compile_executable_plan_candidate(&draft, &bounded)
-        .expect_err("step limit must fail compile");
-    assert_eq!(failure.reason_code, "step_limit_exceeded");
+fn historical_compile_failure_round_trips_without_becoming_execution_authority() {
+    let fixture = historical_plan_execution_fixture();
+    let failure = crate::PlanCompileFailureV1 {
+        plan_id: fixture.draft.plan_id.clone(),
+        plan_hash: fixture.draft.plan_hash.clone(),
+        reason_code: "incomplete_step_contract".to_owned(),
+        reason: "plan step is missing its role, mode or isolation contract".to_owned(),
+        affected_step: Some("step_1".to_owned()),
+        compile_binding: Some(fixture.adoption.adopted_candidate.compile_binding.clone()),
+        failed_at_ms: 20,
+    };
+    failure.validate().unwrap();
+    let entry = SessionLogEntry::Control(ControlEntry::PlanCompileFailedV1(failure));
+    let decoded: SessionLogEntry =
+        serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+    let projection = PlanArtifactProjection::from_entries(std::slice::from_ref(&decoded));
+    assert_eq!(
+        projection.plan_ready_state(&fixture.draft.plan_id),
+        crate::PlanReadyStateV1::CompileFailed
+    );
+    assert!(
+        crate::TaskStateProjection::from_entries(&[decoded])
+            .tasks
+            .is_empty()
+    );
 }
 
 #[test]
 fn durable_draft_is_ready_while_candidate_state_remains_advisory() {
-    let plan_id = PlanId::new("plan_test_4").unwrap();
-    let draft = executable_draft(plan_id.clone(), "Ready state");
+    let fixture = historical_plan_execution_fixture();
+    let draft = fixture.draft;
+    let plan_id = draft.plan_id.clone();
     let mut projection = PlanArtifactProjection::default();
     projection.apply_draft(&draft);
     // A durable draft is reviewable and directly runnable without a model-authored candidate.
@@ -1415,7 +1256,7 @@ fn durable_draft_is_ready_while_candidate_state_remains_advisory() {
         projection.plan_ready_state(&plan_id),
         crate::PlanReadyStateV1::Ready
     );
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let candidate = *fixture.adoption.adopted_candidate;
     projection
         .candidates
         .insert(plan_id.clone(), candidate.clone());
@@ -1457,25 +1298,12 @@ fn durable_draft_is_ready_while_candidate_state_remains_advisory() {
 }
 
 #[test]
-fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
-    let plan_id = PlanId::new("plan_test_5").unwrap();
-    let draft = executable_draft(plan_id.clone(), "Adoption authority");
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
-    let adoption = crate::PlanExecutionAdoptedV1Entry {
-        command_id: "run-command-1".to_owned(),
-        plan_id: plan_id.clone(),
-        plan_hash: draft.plan_hash.clone(),
-        candidate_hash: candidate.candidate_hash.clone(),
-        task_id: candidate.task_id.clone(),
-        task_title: candidate.semantic_title.clone(),
-        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl").unwrap(),
-        start_mode: crate::PlanTaskStartMode::CreateAndRun,
-        permission_grant: Some(PlanApprovalPermission::WorkspaceEdits),
-        adopted_candidate: Box::new(candidate.clone()),
-        execution_segments: None,
-        initial_phase: crate::TaskExecutionPhaseV1::Preparing,
-        adopted_at_ms: 30,
-    };
+fn historical_adoption_replays_plan_and_task_authority() {
+    let fixture = historical_plan_execution_fixture();
+    let draft = fixture.draft;
+    let plan_id = draft.plan_id.clone();
+    let adoption = fixture.adoption;
+    let candidate = *adoption.adopted_candidate.clone();
     adoption.validate().expect("adoption event must validate");
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
@@ -1529,7 +1357,10 @@ fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
         .get(&task_id)
         .expect("adopted task must project");
     assert_eq!(task.status, crate::TaskRunStatus::Started);
-    assert_eq!(task.title.as_deref(), Some("Adoption authority"));
+    assert_eq!(
+        task.title.as_deref(),
+        Some("Historical implementation plan")
+    );
     assert_eq!(
         tasks.execution_phase(&task_id),
         Some(crate::TaskExecutionPhaseV1::Preparing)
@@ -1542,9 +1373,10 @@ fn adoption_event_is_the_single_authority_for_plan_and_task_views() {
 
 #[test]
 fn materialization_attempts_replay_block_then_prepare_without_replacing_task_shell() {
-    let plan_id = PlanId::new("plan_r69_materialization_lifecycle").unwrap();
-    let draft = executable_draft(plan_id.clone(), "Materialization lifecycle");
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let fixture = historical_plan_execution_fixture();
+    let draft = fixture.draft;
+    let plan_id = draft.plan_id.clone();
+    let candidate = *fixture.adoption.adopted_candidate;
     let task_id = candidate.task_id.clone();
     let blocker = crate::TaskBlockerV1 {
         reason_code: crate::TaskBlockerReasonCodeV1::ContractRecompileRequired,
@@ -1670,9 +1502,10 @@ fn materialization_attempts_replay_block_then_prepare_without_replacing_task_she
 
 #[test]
 fn admission_attempts_are_monotonic_and_drive_phase() {
-    let plan_id = PlanId::new("plan_test_6").unwrap();
-    let draft = executable_draft(plan_id.clone(), "Admission phase");
-    let candidate = crate::compile_executable_plan_candidate(&draft, &compile_input()).unwrap();
+    let fixture = historical_plan_execution_fixture();
+    let draft = fixture.draft;
+    let plan_id = draft.plan_id.clone();
+    let candidate = *fixture.adoption.adopted_candidate;
     let mut entries = vec![
         SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)),
         SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(Box::new(

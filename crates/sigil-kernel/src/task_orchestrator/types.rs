@@ -319,7 +319,7 @@ pub struct SequentialTaskStepOutput {
     pub outcome: AgentRunOutcome,
 }
 
-/// Exact projection binding required to rerun one trusted task verification check.
+/// Exact task/check/policy binding and advisory workspace observation for a verification rerun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct TaskVerificationRerunRequest {
@@ -330,7 +330,7 @@ pub struct TaskVerificationRerunRequest {
     pub check_spec_id: CheckSpecId,
     pub check_spec_hash: String,
     pub policy_hash: PolicyHash,
-    pub workspace_snapshot_id: WorkspaceSnapshotId,
+    pub workspace_snapshot_id: Option<WorkspaceSnapshotId>,
 }
 
 impl TaskVerificationRerunRequest {
@@ -342,7 +342,7 @@ impl TaskVerificationRerunRequest {
         check_spec_id: CheckSpecId,
         check_spec_hash: String,
         policy_hash: PolicyHash,
-        workspace_snapshot_id: WorkspaceSnapshotId,
+        workspace_snapshot_id: Option<WorkspaceSnapshotId>,
     ) -> Self {
         let mut request = Self {
             request_id: String::new(),

@@ -62,6 +62,43 @@ fn extend_custom_session_tail(session: &mut Session) -> Result<()> {
 }
 
 #[test]
+fn portable_compaction_without_workspace_snapshot_replays_unverified_context() -> Result<()> {
+    let (_temp, store, _session) = setup_session()?;
+    let original = fs::read(store.path())?;
+    let mut request = request(
+        &store,
+        "unknown-workspace-attempt",
+        "unknown-workspace-compaction",
+        None,
+    )?;
+    request.valid_for_snapshot = None;
+    let scope = session_scope_id(&store)?;
+    execute_with_target(&store, request, |checkpoint, memory, candidate| {
+        target_material(&scope, checkpoint, memory, candidate)
+    })?;
+    let records = store.read_event_records_writer()?;
+    assert!(fs::read(store.path())?.starts_with(&original));
+    let sidecars = CompactionSidecarProjection::from_records(&records)?;
+    let active = sidecars
+        .latest_for_branch(None)
+        .expect("compaction is replayable");
+    assert!(active.task_memory.valid_for_snapshot.is_none());
+    assert!(active.checkpoint.valid_for_snapshot.is_none());
+    assert!(active.checkpoint.in_progress.iter().all(|item| {
+        item.snapshot_scope == crate::ContinuationSnapshotScope::SnapshotUnavailable
+            && item.authority == crate::ContinuationItemAuthority::ModelGeneratedUnverified
+    }));
+    let projection = SessionContextProjection::from_durable_records(&[], &records, None)?
+        .with_current_workspace_snapshot(Some("later-workspace".to_owned()));
+    assert_eq!(
+        projection.task_memory_snapshot_relation,
+        Some(TaskMemorySnapshotRelation::CaptureUnknown)
+    );
+    assert!(!projection.model_messages().is_empty());
+    Ok(())
+}
+
+#[test]
 fn adaptive_checkpoint_rebuilds_the_same_whole_turn_plan_during_activation() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("adaptive-activation.jsonl"))?;
@@ -92,7 +129,7 @@ fn adaptive_checkpoint_rebuilds_the_same_whole_turn_plan_during_activation() -> 
         initiation: CompactionInitiation::Manual,
         base_projection_revision: "adaptive-whole-turn-r1".to_owned(),
         branch_id: None,
-        valid_for_snapshot: "snapshot-v1".to_owned(),
+        valid_for_snapshot: Some("snapshot-v1".to_owned()),
         objective: Some("Activate one adaptive whole-turn checkpoint".to_owned()),
         language: "en".to_owned(),
         plan,
@@ -198,7 +235,7 @@ fn request(
         initiation: CompactionInitiation::Manual,
         base_projection_revision: "portable-checkpoint-r1".to_owned(),
         branch_id: None,
-        valid_for_snapshot: "snapshot-v1".to_owned(),
+        valid_for_snapshot: Some("snapshot-v1".to_owned()),
         objective: Some(
             "Durably compact the current session without hiding raw history".to_owned(),
         ),

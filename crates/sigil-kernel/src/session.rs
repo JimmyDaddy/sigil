@@ -118,6 +118,7 @@ const UNSAFE_EXTERNAL_RECOVERY_AUDIT_REASON: &str =
     "recovery skipped unsafe external persistence control";
 
 mod active_projection;
+mod archived_facts;
 mod compaction_plan;
 mod compaction_shrink_sidecar;
 mod compaction_sidecar;
@@ -131,6 +132,7 @@ mod conversation_queue_mutation;
 mod conversation_queue_promotion;
 mod effect_reconciliation;
 mod entry;
+pub(crate) mod execution_progress;
 mod facade;
 mod plan_review_terminal;
 mod plan_review_waiting;
@@ -163,6 +165,7 @@ pub use active_projection::{
     ActiveProjectionObserver, ActiveProjectionSubscription, ActiveSessionProjectionSnapshot,
     ActiveTaskGuidanceState,
 };
+pub use archived_facts::ArchivedToolResultFacts;
 pub use compaction_plan::{
     ADAPTIVE_TAIL_SELECTION_SCHEMA_VERSION, AdaptiveTailPolicyV3, AdaptiveTailSelectionV3,
     COMPACTION_FOLD_PLAN_SCHEMA_VERSION, CompactionEventRef, CompactionFoldPlan,

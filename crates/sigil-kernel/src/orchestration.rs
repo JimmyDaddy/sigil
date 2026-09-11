@@ -19,6 +19,18 @@ pub enum OrchestrationHardInvariant {
     ModelPollingTurn,
 }
 
+impl OrchestrationHardInvariant {
+    /// Only duplicated execution or authority violations revoke automatic execution.
+    /// Polling overhead and repeated presentation remain diagnostics.
+    #[must_use]
+    pub fn blocks_execution(self) -> bool {
+        !matches!(
+            self,
+            Self::ParentChildDuplicateFinal | Self::ModelPollingTurn
+        )
+    }
+}
+
 /// Append-only local kill-switch fact for one exact provider route and Sigil build.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +82,9 @@ impl OrchestrationRouteDisablementProjection {
             else {
                 continue;
             };
+            if !disabled.invariant.blocks_execution() {
+                continue;
+            }
             projection
                 .disabled
                 .entry((

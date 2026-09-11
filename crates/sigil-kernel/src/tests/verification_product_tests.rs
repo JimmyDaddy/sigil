@@ -135,7 +135,7 @@ fn product_view_exposes_one_exact_rerun_binding() -> Result<()> {
             .check_spec_hash
     );
     assert_eq!(request.policy_hash, POLICY_HASH);
-    assert_eq!(request.workspace_snapshot_id, SNAPSHOT_ID);
+    assert_eq!(request.workspace_snapshot_id.as_deref(), Some(SNAPSHOT_ID));
     assert_eq!(view.status, "missing");
     assert_eq!(
         view.recommendation_reason.as_deref(),

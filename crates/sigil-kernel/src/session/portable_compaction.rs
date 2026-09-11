@@ -28,7 +28,8 @@ pub struct PortableSemanticCompactionRequest {
     /// Optional branch binding for the resulting checkpoint.
     pub branch_id: Option<crate::BranchId>,
     /// Workspace snapshot that bounds validity of the resulting checkpoint.
-    pub valid_for_snapshot: crate::WorkspaceSnapshotId,
+    /// Advisory workspace observation. Transcript compaction does not require a file snapshot.
+    pub valid_for_snapshot: Option<crate::WorkspaceSnapshotId>,
     /// Optional user objective retained by the checkpoint.
     pub objective: Option<String>,
     /// Language used for the rendered checkpoint framing.
@@ -594,7 +595,10 @@ fn validate_request_shape(request: &PortableSemanticCompactionRequest) -> Result
     if request.attempt_id.trim().is_empty()
         || request.compaction_id.trim().is_empty()
         || request.base_projection_revision.trim().is_empty()
-        || request.valid_for_snapshot.trim().is_empty()
+        || request
+            .valid_for_snapshot
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.trim().is_empty())
         || request.language.trim().is_empty()
         || request
             .branch_id
@@ -704,7 +708,7 @@ fn prepare_portable_checkpoint(
             attempt_id: request.attempt_id.clone(),
             parent_compaction_id: active.map(|sidecar| sidecar.compaction_id.clone()),
             branch_id: request.branch_id.clone(),
-            valid_for_snapshot: Some(request.valid_for_snapshot.clone()),
+            valid_for_snapshot: request.valid_for_snapshot.clone(),
             task_memory_id: Some(task_memory_record.memory.memory_id.clone()),
             checkpoint,
             base_projection_revision: request.base_projection_revision.clone(),

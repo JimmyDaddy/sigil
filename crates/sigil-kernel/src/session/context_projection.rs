@@ -114,6 +114,8 @@ pub enum TaskMemorySnapshotRelation {
     },
     /// No current workspace snapshot was available when the projection was built.
     CurrentUnknown,
+    /// No workspace snapshot was available when the TaskMemory was captured.
+    CaptureUnknown,
 }
 
 /// Trust facts carried beside provider-visible history.
@@ -174,6 +176,7 @@ impl SessionContextProjection {
         let sidecars = CompactionSidecarProjection::from_records(records)?;
         let output_sidecars = ToolOutputProjectionSidecarProjection::from_records(records)?;
         let aged_outputs = ToolOutputAgingProjectionV1::from_records(records)?;
+        // Select by reference so iterator temporaries do not copy large checkpoint/sidecar values.
         let activated = lifecycle
             .attempts()
             .filter_map(|attempt| {
@@ -190,12 +193,10 @@ impl SessionContextProjection {
                     return None;
                 }
                 let sidecar = match entry.task_memory_id.as_deref() {
-                    Some(_) => sidecars
-                        .resolved_compaction(&entry.compaction_id)
-                        .cloned()?,
-                    None => return Some((*stream_sequence, entry.clone(), None)),
+                    Some(_) => sidecars.resolved_compaction(&entry.compaction_id)?,
+                    None => return Some((*stream_sequence, entry, None)),
                 };
-                Some((*stream_sequence, entry.clone(), Some(sidecar)))
+                Some((*stream_sequence, entry, Some(sidecar)))
             })
             .max_by_key(|(stream_sequence, _, _)| *stream_sequence);
 
@@ -208,11 +209,11 @@ impl SessionContextProjection {
             )?;
             let portable_retained_raw_event_ids = (sidecar.is_some()
                 && applied.checkpoint.kind == ContinuationCheckpointKind::PortableSemantic)
-                .then(|| portable_retained_raw_event_ids(records, &applied))
+                .then(|| portable_retained_raw_event_ids(records, applied))
                 .transpose()?;
             projection.activate_v2_boundary(
-                applied,
-                sidecar,
+                applied.clone(),
+                sidecar.cloned(),
                 raw_messages,
                 portable_retained_raw_event_ids.as_ref(),
             )?;
@@ -306,16 +307,18 @@ impl SessionContextProjection {
         let Some(memory) = &self.task_memory else {
             return self;
         };
-        self.task_memory_snapshot_relation = Some(match current_snapshot {
-            Some(current) if current == memory.valid_for_snapshot => {
-                TaskMemorySnapshotRelation::Same
-            }
-            Some(current) => TaskMemorySnapshotRelation::Changed {
-                captured: memory.valid_for_snapshot.clone(),
-                current,
-            },
-            None => TaskMemorySnapshotRelation::CurrentUnknown,
-        });
+        self.task_memory_snapshot_relation =
+            Some(match (&memory.valid_for_snapshot, current_snapshot) {
+                (Some(captured), Some(current)) if *captured == current => {
+                    TaskMemorySnapshotRelation::Same
+                }
+                (Some(captured), Some(current)) => TaskMemorySnapshotRelation::Changed {
+                    captured: captured.clone(),
+                    current,
+                },
+                (None, _) => TaskMemorySnapshotRelation::CaptureUnknown,
+                (Some(_), None) => TaskMemorySnapshotRelation::CurrentUnknown,
+            });
         self
     }
 
@@ -329,8 +332,13 @@ impl SessionContextProjection {
         self.active_compaction_id = Some(applied.compaction_id);
         self.folded_through = Some(applied.folded_through);
         if let Some(sidecar) = sidecar {
+            self.task_memory_snapshot_relation =
+                Some(if sidecar.task_memory.valid_for_snapshot.is_some() {
+                    TaskMemorySnapshotRelation::CurrentUnknown
+                } else {
+                    TaskMemorySnapshotRelation::CaptureUnknown
+                });
             self.task_memory = Some(sidecar.task_memory);
-            self.task_memory_snapshot_relation = Some(TaskMemorySnapshotRelation::CurrentUnknown);
             self.checkpoint = Some(sidecar.checkpoint);
             if self.checkpoint.as_ref().is_some_and(|checkpoint| {
                 checkpoint.kind == ContinuationCheckpointKind::PortableSemantic

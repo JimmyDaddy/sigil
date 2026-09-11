@@ -125,6 +125,7 @@ use prompts::{
     task_step_dependency_result_context, task_synthesis_prompt,
 };
 pub use prompts::{
+    task_direct_execution_system_prompt_contract_material,
     task_participant_finalization_prompt_contract_material,
     task_participant_system_prompt_contract_material, task_planner_prompt_contract_material,
     task_planner_system_prompt_contract_material,

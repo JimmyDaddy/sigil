@@ -571,6 +571,7 @@ pub fn project_user_message_with_attachments_for_persistence_with_nonce_and_issu
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        logical_run_id: None,
         image_attachments: image_attachments
             .iter()
             .map(crate::ImageAttachment::without_resolved_bytes)
@@ -584,6 +585,7 @@ pub fn project_user_message_with_attachments_for_persistence_with_nonce_and_issu
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        logical_run_id: None,
         image_attachments,
         tool_result_payload: None,
     };

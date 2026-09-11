@@ -307,9 +307,11 @@ impl IntentAdoptionAuthorityV1 {
             bail!("Intent adoption source workspace is out of scope");
         }
         let source_snapshot_id =
-            agent_invocation_workspace_snapshot_id(source_workspace_root.as_ref())?;
+            agent_invocation_workspace_snapshot_id(source_workspace_root.as_ref())?
+                .context("Intent adoption requires a complete source workspace snapshot")?;
         let destination_snapshot_id =
-            agent_invocation_workspace_snapshot_id(destination_workspace_root.as_ref())?;
+            agent_invocation_workspace_snapshot_id(destination_workspace_root.as_ref())?
+                .context("Intent adoption requires a complete destination workspace snapshot")?;
         let source_turn_id = source_turn_id.into();
         let authority_event_id = authority_event_id.into();
         validate_identity("Intent adoption source turn id", &source_turn_id)?;
@@ -523,9 +525,11 @@ pub fn adopt_forked_intent_stack(
     let source_workspace_id = stable_workspace_id(source_workspace_root.as_ref())?;
     let destination_workspace_id = stable_workspace_id(destination_workspace_root.as_ref())?;
     let source_snapshot_id =
-        agent_invocation_workspace_snapshot_id(source_workspace_root.as_ref())?;
+        agent_invocation_workspace_snapshot_id(source_workspace_root.as_ref())?
+            .context("Intent adoption requires a complete source workspace snapshot")?;
     let destination_snapshot_id =
-        agent_invocation_workspace_snapshot_id(destination_workspace_root.as_ref())?;
+        agent_invocation_workspace_snapshot_id(destination_workspace_root.as_ref())?
+            .context("Intent adoption requires a complete destination workspace snapshot")?;
     validate_identity(
         "current source Intent branch lineage digest",
         source_branch_lineage_digest,

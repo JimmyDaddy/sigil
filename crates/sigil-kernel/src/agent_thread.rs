@@ -725,7 +725,7 @@ pub struct AgentInvocationGrantBinding {
     pub permission_upper_bound: PermissionConfig,
     pub network_upper_bound: crate::NetworkPolicy,
     pub tool_contract_fingerprint: String,
-    pub workspace_snapshot_id: crate::WorkspaceSnapshotId,
+    pub workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
     pub root_cancellation_scope_id: String,
     pub expires_at_ms: u64,
 }
@@ -765,7 +765,7 @@ pub struct AgentInvocationGrant {
 }
 
 struct AgentInvocationWorkspaceFrontier {
-    current_snapshot_id: crate::WorkspaceSnapshotId,
+    current_snapshot_id: Option<crate::WorkspaceSnapshotId>,
 }
 
 /// Process-local result of observing a mutable workspace at an invocation boundary.
@@ -777,8 +777,8 @@ struct AgentInvocationWorkspaceFrontier {
 pub enum AgentInvocationWorkspaceObservationV1 {
     Unchanged,
     Rebased {
-        previous_snapshot_id: crate::WorkspaceSnapshotId,
-        observed_snapshot_id: crate::WorkspaceSnapshotId,
+        previous_snapshot_id: Option<crate::WorkspaceSnapshotId>,
+        observed_snapshot_id: Option<crate::WorkspaceSnapshotId>,
     },
 }
 
@@ -875,7 +875,7 @@ impl AgentInvocationGrant {
         role: crate::AgentRole,
         isolation: crate::TaskIsolationMode,
         tool_contract_fingerprint: &str,
-        workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+        workspace_snapshot_id: &Option<crate::WorkspaceSnapshotId>,
         root_cancellation_scope_id: &str,
         now_ms: u64,
     ) -> Result<AgentInvocationWorkspaceObservationV1> {
@@ -906,7 +906,7 @@ impl AgentInvocationGrant {
     pub fn validate_tool_effect(
         &self,
         tool_contract_fingerprint: &str,
-        workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+        workspace_snapshot_id: &Option<crate::WorkspaceSnapshotId>,
         root_cancellation_scope_id: &str,
         now_ms: u64,
     ) -> Result<AgentInvocationWorkspaceObservationV1> {
@@ -924,7 +924,7 @@ impl AgentInvocationGrant {
 
     fn observe_workspace(
         &self,
-        observed_snapshot_id: &crate::WorkspaceSnapshotId,
+        observed_snapshot_id: &Option<crate::WorkspaceSnapshotId>,
     ) -> Result<AgentInvocationWorkspaceObservationV1> {
         let mut frontier = self
             .workspace_frontier
@@ -943,7 +943,7 @@ impl AgentInvocationGrant {
         })
     }
 
-    /// Advances a writable invocation to the workspace state produced by one authorized tool.
+    /// Settles one authorized tool's observed workspace effect.
     ///
     /// The initial binding remains immutable audit evidence. This process-local frontier may move
     /// only after the tool's mutation evidence has been settled. Concurrent observation drift is
@@ -952,12 +952,12 @@ impl AgentInvocationGrant {
     ///
     /// # Errors
     ///
-    /// Returns an error for read-only invocations that reached a mutation boundary, or poisoned
-    /// state.
+    /// Returns an error for read-only invocations without complete, unchanged observations, or
+    /// poisoned state.
     pub(crate) fn advance_workspace_frontier(
         &self,
-        observed_before: &crate::WorkspaceSnapshotId,
-        observed_after: crate::WorkspaceSnapshotId,
+        observed_before: &Option<crate::WorkspaceSnapshotId>,
+        observed_after: Option<crate::WorkspaceSnapshotId>,
     ) -> Result<()> {
         let mut frontier = self
             .workspace_frontier
@@ -967,6 +967,10 @@ impl AgentInvocationGrant {
             self.binding.isolation,
             crate::TaskIsolationMode::SharedReadOnly
         ) {
+            if matches!((observed_before, &observed_after), (Some(before), Some(after)) if before == after)
+            {
+                return Ok(());
+            }
             bail!("read-only agent invocation changed the workspace");
         }
         if frontier.current_snapshot_id != *observed_before {
@@ -1043,7 +1047,7 @@ pub struct AgentInvocationGrantRecord {
     pub permission_upper_bound_fingerprint: String,
     pub network_upper_bound: crate::NetworkPolicy,
     pub tool_contract_fingerprint: String,
-    pub workspace_snapshot_id: crate::WorkspaceSnapshotId,
+    pub workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
     pub root_run_fingerprint: String,
     pub root_cancellation_scope_fingerprint: String,
     pub expires_at_ms: u64,
@@ -1072,7 +1076,10 @@ fn validate_invocation_grant_binding(
     }
     if binding.root_logical_run_id.trim().is_empty()
         || binding.tool_contract_fingerprint.trim().is_empty()
-        || binding.workspace_snapshot_id.trim().is_empty()
+        || binding
+            .workspace_snapshot_id
+            .as_deref()
+            .is_some_and(|snapshot| snapshot.trim().is_empty())
         || binding.root_cancellation_scope_id.trim().is_empty()
     {
         bail!("agent invocation grant binding is incomplete");
@@ -1126,47 +1133,29 @@ fn fingerprint_text(domain: &[u8], value: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// Captures the tracked workspace snapshot bound to child-agent invocation authority.
+/// Observes the tracked workspace without using file contents as invocation authority.
 ///
 /// # Errors
 ///
-/// Returns an error when the workspace cannot be identified or the snapshot is incomplete.
+/// Returns an error when the workspace cannot be identified. Incomplete or failed content
+/// observations return `None`; role, permissions, expiry and per-effect checks remain mandatory.
 pub fn agent_invocation_workspace_snapshot_id(
     workspace_root: impl AsRef<Path>,
-) -> Result<crate::WorkspaceSnapshotId> {
+) -> Result<Option<crate::WorkspaceSnapshotId>> {
     let workspace_root = workspace_root.as_ref();
     let workspace_id = crate::stable_workspace_id(workspace_root)?;
-    let snapshot = crate::build_workspace_snapshot(
+    match crate::build_workspace_snapshot(
         workspace_root,
         workspace_id,
         &crate::VerificationScope::all_tracked(AGENT_INVOCATION_GRANT_SCOPE_HASH),
         0,
-    )?;
-    snapshot.workspace_snapshot_id.ok_or_else(|| {
-        let incomplete = snapshot
-            .manifest
-            .entries
-            .iter()
-            .filter(|entry| !entry.is_complete())
-            .take(8)
-            .map(|entry| {
-                format!(
-                    "{}={:?}/{:?}",
-                    entry.normalized_path.display(),
-                    entry.file_type,
-                    entry.state
-                )
-            })
-            .collect::<Vec<_>>();
-        let suffix = if incomplete.is_empty() {
-            "unknown manifest failure".to_owned()
-        } else {
-            incomplete.join(", ")
-        };
-        anyhow::anyhow!(
-            "agent invocation grant requires a complete tracked workspace snapshot: {suffix}"
-        )
-    })
+    ) {
+        Ok(snapshot) => Ok(snapshot.workspace_snapshot_id),
+        Err(error) => {
+            tracing::warn!(%error, "agent workspace observation unavailable; retaining invocation authority");
+            Ok(None)
+        }
+    }
 }
 
 /// Durable, non-executable projection of the authority used for one admitted child invocation.

@@ -3839,7 +3839,7 @@ impl ToolRegistry {
     fn validate_agent_invocation_grant(
         &self,
         ctx: &ToolContext,
-    ) -> Result<Option<crate::WorkspaceSnapshotId>> {
+    ) -> Result<Option<ValidatedAgentInvocationWorkspace>> {
         let Some(grant) = ctx.agent_invocation_grant.as_ref() else {
             return Ok(None);
         };
@@ -3863,7 +3863,9 @@ impl ToolRegistry {
             cancellation.scope_id(),
             now_ms,
         )?;
-        Ok(Some(workspace_snapshot_id))
+        Ok(Some(ValidatedAgentInvocationWorkspace {
+            workspace_snapshot_id,
+        }))
     }
 
     /// Returns the mutation profile that must be persisted before executing this tool call.
@@ -4227,18 +4229,26 @@ fn finish_unknown_mutation_scan(
     Ok(Some(after))
 }
 
+// Presence proves invocation authority was checked, independently of snapshot availability.
+struct ValidatedAgentInvocationWorkspace {
+    workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
+}
+
 fn finish_agent_invocation_workspace_effect(
     ctx: &ToolContext,
     spec: &ToolSpec,
     call_id: &str,
     mutation_tracking: ToolMutationTracking,
-    validated_workspace_snapshot_id: Option<crate::WorkspaceSnapshotId>,
+    validated_workspace_snapshot_id: Option<ValidatedAgentInvocationWorkspace>,
     audited_workspace_scan: Option<WorkspaceMutationScan>,
 ) -> Result<()> {
     let Some(grant) = ctx.agent_invocation_grant.as_ref() else {
         return Ok(());
     };
-    let Some(validated_workspace_snapshot_id) = validated_workspace_snapshot_id else {
+    let Some(ValidatedAgentInvocationWorkspace {
+        workspace_snapshot_id: validated_workspace_snapshot_id,
+    }) = validated_workspace_snapshot_id
+    else {
         bail!("child tool execution lost its validated workspace frontier");
     };
     if spec.access == ToolAccess::Read && mutation_tracking == ToolMutationTracking::None {
@@ -4246,11 +4256,13 @@ fn finish_agent_invocation_workspace_effect(
     }
     let observed_after = crate::agent_invocation_workspace_snapshot_id(&ctx.workspace_root)?;
     if mutation_tracking == ToolMutationTracking::Unknown {
-        let complete_audit = audited_workspace_scan.as_ref().is_some_and(|scan| {
-            scan.workspace_snapshot_id.is_some()
-                && scan.manifest.is_some()
-                && !scan.workspace_knowledge.is_unknown_dirty()
-        });
+        let complete_audit = validated_workspace_snapshot_id.is_some()
+            && observed_after.is_some()
+            && audited_workspace_scan.as_ref().is_some_and(|scan| {
+                scan.workspace_snapshot_id.is_some()
+                    && scan.manifest.is_some()
+                    && !scan.workspace_knowledge.is_unknown_dirty()
+            });
         if !complete_audit {
             return Err(effect_reconciliation_required_error(
                 ctx,
@@ -4267,10 +4279,10 @@ fn effect_reconciliation_required_error(
     ctx: &ToolContext,
     spec: &ToolSpec,
     call_id: &str,
-    validated_workspace_snapshot_id: &crate::WorkspaceSnapshotId,
+    validated_workspace_snapshot_id: &Option<crate::WorkspaceSnapshotId>,
 ) -> anyhow::Error {
     let effect_seed = format!(
-        "{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{:?}",
         ctx.logical_run_id().unwrap_or("unbound-logical-run"),
         call_id,
         spec.name,
@@ -4297,7 +4309,7 @@ fn effect_reconciliation_required_error(
         task_id: None,
         step_id: None,
         participant_attempt_id: None,
-        base_workspace_observation_id: Some(validated_workspace_snapshot_id.as_str().to_owned()),
+        base_workspace_observation_id: validated_workspace_snapshot_id.clone(),
         current_workspace_observation_id: None,
         known_receipt_ids: Vec::new(),
         allowed_probe_kinds: vec![crate::ReconciliationProbeKindV1::WorkspaceObservation],

@@ -47,17 +47,22 @@ pub fn task_planner_system_prompt_contract_material() -> &'static str {
     )
 }
 
+/// Stable system-level contract for the complete directly admitted Task objective.
+#[must_use]
+pub fn task_direct_execution_system_prompt_contract_material() -> &'static str {
+    "You are executing the complete user-approved objective of one durable Task. Preserve its existing progress and address the current guidance within that same Task. Read the current files before editing; earlier Plan observations may predate workspace changes. Adapt implementation to current code while preserving the approved scope. Use the available tools to finish the objective and perform the required verification. The optional checklist reports progress only; it does not authorize actions or prove completion. Report actual results and unresolved blockers accurately."
+}
+
 /// Stable system-level contract for one accepted task-plan participant.
 #[must_use]
 pub fn task_participant_system_prompt_contract_material() -> &'static str {
     "You are executing exactly one accepted durable task-plan step. Work only on that step and return a bounded final result as soon as its requested outcome is achieved.\n\nUse only tool names explicitly advertised in the current request; never invent shell aliases, terminal commands, or verification tools that are absent. File-tool paths are relative to the bound workspace root: use paths such as src/lib.rs directly, never /workspace, the workspace directory itself, an absolute host path, or an environment-variable placeholder. When the step names exact files or modules, access those paths directly instead of enumerating the repository. A path not explicitly named by the step, objective, or direct dependency result must be discovered with list, glob, or grep before read_file; never derive a conventional neighboring module or test path. After read_file reports not_found, discover the exact path instead of trying another guessed path. When the host supplies direct dependency results, treat them as the authoritative handoff; do not search for or invent result files. Do not perform sibling plan steps or add unrequested verification after the step is complete. If a requested check cannot be executed with the available tools, report that limitation without guessing or repeatedly retrying unavailable tools."
 }
 
-/// Stable host-owned convergence instruction for a participant that already mutated its workspace
-/// but keeps spending turns on read-only tail work.
+/// Bounded reporting instruction for the last configured participant turn.
 #[must_use]
 pub fn task_participant_finalization_prompt_contract_material() -> &'static str {
-    "The accepted task step has already produced a workspace mutation and then used its bounded read-only convergence allowance without producing a final answer. Client and hosted tools are disabled for this finalization turn. Return a concise final result now: state what changed, name any known limitation, and do not request or describe additional tool work."
+    "The configured model-turn allowance has reached its last reporting turn. Client and hosted tools are disabled. Return a concise partial result: state the recorded changes and checks, identify unresolved work, and do not claim missing verification or unfinished work is complete. This reporting turn does not complete the Task."
 }
 
 pub(super) fn planner_prompt(

@@ -21,7 +21,7 @@ fn task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
         memory_id: "memory-1".to_owned(),
         branch_id: None,
-        valid_for_snapshot: "snapshot-1".to_owned(),
+        valid_for_snapshot: Some("snapshot-1".to_owned()),
         supersedes: None,
         source_event_ids: vec!["event-source".to_owned()],
         objective: "Keep the compaction contract durable".to_owned(),

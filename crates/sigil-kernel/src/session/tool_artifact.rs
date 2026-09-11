@@ -1401,6 +1401,7 @@ impl ToolResultRecordedV3 {
             tool_calls: Vec::new(),
             tool_call_id: Some(self.call_id.clone()),
             assistant_kind: None,
+            logical_run_id: None,
             image_attachments: Vec::new(),
             tool_result_payload: Some(ProviderToolResultMessageV1 {
                 call_id: self.call_id.clone(),
@@ -1975,6 +1976,7 @@ impl ToolResultRecordedV2 {
             tool_calls: Vec::new(),
             tool_call_id: Some(self.call_id.clone()),
             assistant_kind: None,
+            logical_run_id: None,
             image_attachments: Vec::new(),
             tool_result_payload: None,
         })

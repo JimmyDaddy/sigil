@@ -67,8 +67,8 @@ use crate::{
 use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
-    PendingConversationInputProvider, RoutingMicroturnEventFilter,
-    TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT, build_task_step_checkpoint, emit_tool_result,
+    PendingConversationInputProvider, RoutingMicroturnEventFilter, build_task_step_checkpoint,
+    emit_tool_result,
 };
 
 #[path = "agent_coordinated_readiness_tests.rs"]
@@ -911,7 +911,7 @@ impl AgentToolDelegate for ToolRunFactsDelegate {
         Ok(None)
     }
 
-    fn final_answer_context(
+    async fn final_answer_context(
         &mut self,
         _session: &Session,
         _options: &AgentRunOptions,
@@ -939,7 +939,7 @@ impl AgentToolDelegate for EvolvingToolRunFactsDelegate {
         Ok(None)
     }
 
-    fn final_answer_context(
+    async fn final_answer_context(
         &mut self,
         _session: &Session,
         _options: &AgentRunOptions,
@@ -966,7 +966,7 @@ impl AgentToolDelegate for SettlingToolRunFactsDelegate {
         Ok(None)
     }
 
-    fn final_answer_context(
+    async fn final_answer_context(
         &mut self,
         _session: &Session,
         _options: &AgentRunOptions,
@@ -6691,8 +6691,76 @@ async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<(
 }
 
 #[tokio::test]
-async fn task_participant_forces_toolless_finalization_after_post_mutation_read_tail() -> Result<()>
+async fn task_direct_system_contract_precedes_the_goal_without_participant_contract() -> Result<()>
 {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let step_prompt = "Edit src/lib.rs for the accepted parser step.";
+    let input =
+        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(step_prompt)])
+            .with_run_purpose(AgentRunPurpose::TaskDirectExecution(
+                crate::TaskDirectExecutionContext {
+                    task_id: TaskId::new("task-participant-contract")?,
+                    admission_id: "direct-admission-1".to_owned(),
+                    attempt_id: "direct-attempt-1".to_owned(),
+                },
+            ));
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+                tool_authority: None,
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    let request = requests.first().expect("participant request");
+    let contract_index = request
+        .messages
+        .iter()
+        .position(|message| {
+            message.content.as_deref()
+                == Some(crate::task_direct_execution_system_prompt_contract_material())
+        })
+        .expect("participant request should include its system contract");
+    let prompt_index = request
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some(step_prompt))
+        .expect("participant request should include the step prompt");
+    assert!(contract_index < prompt_index);
+    assert!(!request.messages.iter().any(|message| {
+        message.content.as_deref() == Some(task_participant_system_prompt_contract_material())
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_repeated_reads_use_only_configured_turn_limit() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -6744,45 +6812,33 @@ async fn task_participant_forces_toolless_finalization_after_post_mutation_read_
         .await?;
 
     assert_eq!(
-        output.result.final_text,
-        "mutation complete after bounded inspection"
-    );
-    assert_eq!(
         output.outcome.terminal_reason,
-        AgentRunTerminalReason::FinalAnswer
+        AgentRunTerminalReason::FinalAnswerBlocked
     );
+    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
+    assert!(output.result.final_message_id.is_none());
+    assert!(!output.result.final_text.is_empty());
     assert_eq!(
-        output.result.tool_calls,
-        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 2
+        output.result.tool_calls, 19,
+        "the configured final reporting turn follows one mutation and eighteen reads"
     );
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 3
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 20);
+    let requests = captured.lock().expect("requests");
     assert!(
-        output.result.tool_calls < TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT + 1,
-        "semantic no-progress finalization should preempt the coarser post-mutation read tail"
-    );
-    let requests = captured
-        .lock()
-        .expect("captured requests lock should not be poisoned");
-    let final_request = requests.last().expect("finalization request");
-    assert!(final_request.tools.is_empty());
-    assert!(final_request.hosted_tools.is_empty());
-    assert!(final_request.messages.iter().any(|message| {
-        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
-    }));
-    assert!(
-        requests[..requests.len() - 1]
+        requests[..19]
             .iter()
             .all(|request| !request.tools.is_empty())
+    );
+    assert!(requests[19].tools.is_empty());
+    assert_eq!(
+        output.result.final_text,
+        "mutation complete after bounded inspection"
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn task_participant_forces_toolless_finalization_after_repeated_semantic_frontier()
--> Result<()> {
+async fn task_participant_repeated_frontier_respects_configured_max_turns() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -6833,11 +6889,14 @@ async fn task_participant_forces_toolless_finalization_after_repeated_semantic_f
         .await?;
 
     assert_eq!(
-        output.result.final_text,
-        "bounded result after repeated analysis"
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::MaxTurns
     );
-    assert_eq!(output.result.tool_calls, 3);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(output.disposition, AgentRunDisposition::Interrupted);
+    assert!(output.result.final_message_id.is_none());
+    assert!(output.result.final_text.is_empty());
+    assert_eq!(output.result.tool_calls, 20);
+    assert_eq!(calls.load(Ordering::SeqCst), 20);
     let checkpoints = session
         .entries()
         .iter()
@@ -6850,15 +6909,13 @@ async fn task_participant_forces_toolless_finalization_after_repeated_semantic_f
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(checkpoints, vec![0, 1, 2]);
-    let requests = captured
-        .lock()
-        .expect("captured requests lock should not be poisoned");
-    let final_request = requests.last().expect("finalization request");
-    assert!(final_request.tools.is_empty());
-    assert!(final_request.messages.iter().any(|message| {
-        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
-    }));
+    assert_eq!(
+        checkpoints,
+        (0..20).collect::<Vec<_>>(),
+        "checkpoints retain evidence without forcing a final answer"
+    );
+    let requests = captured.lock().expect("requests");
+    assert!(requests.iter().all(|request| !request.tools.is_empty()));
     Ok(())
 }
 
@@ -6984,78 +7041,76 @@ fn task_checkpoint_detects_repeated_bounded_observation_only_when_output_is_unch
 }
 
 #[tokio::test]
-async fn task_participant_enters_repair_replan_after_empty_finalization() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(EchoTool));
-    let agent = Agent::new(
-        RepeatedReadLoopProvider {
-            calls: Arc::clone(&calls),
-            captured: Arc::clone(&captured),
-            finalization_text: Some(String::new()),
-        },
-        registry,
-    );
-    let mut session = Session::new("mock-empty-finalization", "mock-model").with_store(store);
-    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        "Inspect the accepted step and return a bounded result.",
-    )])
-    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-        task_id: TaskId::new("task-empty-finalization")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("read-step")?,
-        attempt_id: TaskParticipantAttemptId::new("participant-empty-finalization-1")?,
-    }));
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: temp.path().to_path_buf(),
-                max_turns: Some(20),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.result.final_text, "");
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::RepairReplanRequired
-    );
-    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        crate::TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD as usize + 2
-    );
-    let requests = captured
-        .lock()
-        .expect("captured requests lock should not be poisoned");
-    assert!(
-        requests
-            .last()
-            .is_some_and(|request| request.tools.is_empty())
-    );
+async fn ordinary_loop_without_limit_preserves_repeated_reads_and_failure_recovery() -> Result<()> {
+    for fail_first in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let mut session = Session::load_from_store("mock-scripted-tool", "model", store)?;
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Arc::new(NoisyFailureTool {
+            calls: Arc::clone(&failed_calls),
+        }));
+        let mut turns = Vec::new();
+        if fail_first {
+            turns.push(vec![(
+                "failure".to_owned(),
+                "noisy_failure".to_owned(),
+                "{}".to_owned(),
+            )]);
+        }
+        for index in 0..12 {
+            turns.push(vec![(
+                format!("read-{index}"),
+                "echo".to_owned(),
+                r#"{"value":"same recorded observation"}"#.to_owned(),
+            )]);
+        }
+        let agent = Agent::new(ScriptedTurnToolProvider::new(turns), registry);
+        let mut options = scripted_run_options(1);
+        options.workspace_root = temp.path().to_path_buf();
+        options.max_turns = None;
+        let mut handler = RecordingEventHandler::default();
+        let output = agent
+            .run_with_input(
+                &mut session,
+                AgentRunInput::user("Inspect and report the recorded results."),
+                options,
+                &mut handler,
+            )
+            .await?;
+        assert_eq!(
+            output.disposition,
+            AgentRunDisposition::FinalAnswer,
+            "fail_first={fail_first}"
+        );
+        assert_eq!(output.result.tool_calls, 12 + usize::from(fail_first));
+        assert_eq!(output.result.final_text, "ordinary answer");
+        assert!(output.result.final_message_id.is_some());
+        assert_eq!(failed_calls.load(Ordering::SeqCst), usize::from(fail_first));
+        let results = session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::ToolResultV3(result) => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), output.result.tool_calls);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.facts.exit_code == Some(1))
+                .count(),
+            usize::from(fail_first)
+        );
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -> Result<()> {
+async fn ordinary_conversation_preserves_long_novel_research_without_task() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -7066,9 +7121,10 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
     registry.register(Arc::new(WorkspaceMutatingCustomTool));
     registry.register(Arc::new(EchoTool));
     let agent = Agent::new(
-        PostMutationReadLoopProvider {
+        LoopScriptProvider {
             calls: Arc::clone(&calls),
             captured: Arc::clone(&captured),
+            fail: false,
         },
         registry,
     );
@@ -7081,7 +7137,7 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
             AgentRunInput::user("Keep inspecting."),
             AgentRunOptions {
                 workspace_root: workspace,
-                max_turns: Some(8),
+                max_turns: Some(20),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -7102,7 +7158,8 @@ async fn ordinary_conversation_does_not_inherit_task_participant_convergence() -
         AgentRunTerminalReason::MaxTurns
     );
     assert_eq!(output.disposition, AgentRunDisposition::Interrupted);
-    assert_eq!(calls.load(Ordering::SeqCst), 8);
+    assert_eq!(calls.load(Ordering::SeqCst), 20);
+    assert!(session.task_state_projection().tasks.is_empty());
     let requests = captured
         .lock()
         .expect("captured requests lock should not be poisoned");
@@ -7997,6 +8054,216 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
             if execution.call_id == "call-side-effect-before-continuation"
                 && execution.status == ToolExecutionStatus::Cancelled
     )));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_task_guidance_recovery_blocks_input_but_allows_independent_chat() -> Result<()> {
+    let executions = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(TaskHandoffSideEffectTool {
+        executions: Arc::clone(&executions),
+    }));
+    let agent = Agent::new(TaskContinuationProvider, registry);
+    let mut session = Session::new("mock-task-continuation", "mock-model");
+    let task_id = TaskId::new("task-current-1")?;
+    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "ship the original task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: task_id.clone(),
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("step-current-1")?,
+            title: "implement original scope".to_owned(),
+            display_name: None,
+            detail: None,
+            role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            intent_refs: Vec::new(),
+            mode: None,
+            isolation: None,
+        }],
+        reason: Some("accepted v1".to_owned()),
+    }))?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: parent_session_ref.clone(),
+        objective: "ship the original task".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+
+    let original = crate::project_conversation_prompt_for_persistence("preserve the original API");
+    let applied = crate::TaskGuidanceAppliedEntry {
+        queue_id: ConversationInputQueueId::new("pending-guidance-queue")?,
+        task_id: task_id.clone(),
+        plan_version: 1,
+        dispatch_run_id: "pending-guidance-dispatch".to_owned(),
+        reason: crate::TaskGuidanceApplyReason::AddsExecutionConstraint,
+        target_step_ids: vec![TaskStepId::new("step-current-1")?],
+    };
+    let materialized = crate::TaskGuidanceMaterializedEntry::new(
+        &applied,
+        original.prompt_hash,
+        original.exact_prompt_required,
+        original.safe_prompt,
+    )?;
+    session.append_controls(vec![
+        ControlEntry::TaskGuidanceApplied(applied),
+        ControlEntry::TaskGuidanceMaterialized(materialized),
+    ])?;
+
+    let prompt = "continue, but also add the compatibility check";
+    let logical_run_id = "task-continuation-run-1";
+    let input = AgentRunInput::user(prompt);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("direct input owns a message id"),
+        logical_run_id,
+    )?;
+    let prompt_projection = crate::project_conversation_prompt_for_persistence(prompt);
+    let route_contract_fingerprint = "sha256:task-continuation-contract-v1".to_owned();
+    let input =
+        input
+            .with_logical_run_id(logical_run_id)
+            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+                ConversationPurposeContext {
+                    root_run_id: logical_run_id.to_owned(),
+                    source_turn: source_turn.clone(),
+                    routing_policy: TaskRoutingPolicy::Auto,
+                    route_capability: AutomaticRouteCapability::DirectTask,
+                    writable_memory_routing: false,
+                    task_continuation: Some(TaskContinuationHandoffBinding {
+                        task_id: task_id.clone(),
+                        source_turn: source_turn.clone(),
+                        plan_version: Some(1),
+                        task_status: TaskRunStatus::Paused,
+                        plan_status: Some(TaskPlanStatus::Accepted),
+                        effective_capability: AutomaticRouteCapability::DirectTask,
+                        policy_snapshot_hash: "sha256:task-continuation-policy-v1".to_owned(),
+                        route_contract_fingerprint: route_contract_fingerprint.clone(),
+                        decided_at_ms: 43,
+                        exact_guidance: SecretString::new(prompt),
+                        prompt_hash: prompt_projection.prompt_hash,
+                        exact_prompt_required: prompt_projection.exact_prompt_required,
+                        safe_guidance: prompt_projection.safe_prompt,
+                    }),
+                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
+                    task_handoff: Some(TaskPlanningHandoffBinding {
+                        handoff_id: TaskHandoffId::new("handoff-decoy-for-continuation")?,
+                        task_id: TaskId::new("task-decoy-for-continuation")?,
+                        source_turn: source_turn.clone(),
+                        parent_session_ref,
+                        objective: prompt.to_owned(),
+                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
+                        route_contract_fingerprint,
+                        requested_at_ms: 42,
+                        decided_at_ms: 43,
+                    }),
+                },
+            )));
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_mode_override: None,
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig::with_enabled(false),
+                compaction_config: CompactionConfig::default(),
+                tool_authority: None,
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert!(matches!(output.disposition, AgentRunDisposition::Blocked));
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::TaskRoutingUnsatisfied
+    );
+    assert!(output.result.final_message_id.is_none());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(session.entries().iter().filter(|entry| matches!(entry,
+        SessionLogEntry::ToolResultV3(result)
+            if result.call_id == "call-continue-existing-task" && result.facts.error.is_some()
+    )).count(), 1, "the rejected continuation batch must settle once before stopping");
+    assert!(!session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(_))
+    )));
+    assert_eq!(
+        session.task_state_projection().tasks[&task_id].status,
+        TaskRunStatus::Paused
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let chat = Agent::new(
+        ChatDecisionRoutingProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let prompt = "explain queue promotion";
+    let input = AgentRunInput::user(prompt);
+    let source = ConversationTurnRef::new(
+        session.session_scope_id(),
+        input
+            .persisted_user_message_id
+            .clone()
+            .expect("independent input owns its message"),
+        "independent-chat-after-recovery-rejection",
+    )?;
+    let input = input
+        .with_logical_run_id(source.logical_run_id.clone())
+        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
+            ConversationPurposeContext {
+                root_run_id: source.logical_run_id.clone(),
+                source_turn: source.clone(),
+                routing_policy: TaskRoutingPolicy::Auto,
+                route_capability: AutomaticRouteCapability::DirectTask,
+                writable_memory_routing: false,
+                task_continuation: None,
+                plan_review: Some(test_plan_review_handoff_binding(&source, prompt)),
+                task_handoff: None,
+            },
+        )));
+    let chat_output = chat
+        .run_with_input(&mut session, input, scripted_run_options(4), &mut handler)
+        .await?;
+    assert!(matches!(
+        chat_output.disposition,
+        AgentRunDisposition::FinalAnswer
+    ));
+    assert_eq!(
+        chat_output.result.final_text,
+        "queue promotion is a durable CAS promotion"
+    );
+    assert_eq!(
+        session.task_state_projection().tasks[&task_id].status,
+        TaskRunStatus::Paused
+    );
     Ok(())
 }
 
@@ -15127,7 +15394,7 @@ fn activate_cache_conformance_compaction(
             initiation: crate::CompactionInitiation::Manual,
             base_projection_revision: "cache-conformance-compaction-r1".to_owned(),
             branch_id: None,
-            valid_for_snapshot: "cache-conformance-snapshot-r1".to_owned(),
+            valid_for_snapshot: Some("cache-conformance-snapshot-r1".to_owned()),
             objective: Some("Preserve cache conformance across epoch rotation".to_owned()),
             language: "en".to_owned(),
             plan,
@@ -15652,18 +15919,14 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
         .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
         .await?;
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_single_settled_result(
-        &session,
-        "call-draft",
-        "submit_plan_draft is not available for this run",
-    );
+    assert_single_settled_result(&session, "call-draft", "retired_plan_protocol");
     assert_eq!(tool_result_event_count(&handler, "call-draft"), 1);
     assert!(
         output
             .outcome
             .tool_errors
             .iter()
-            .any(|error| error.kind == ToolErrorKind::Unsupported)
+            .any(|error| error.kind == ToolErrorKind::Protocol)
     );
     Ok(())
 }
@@ -16425,5 +16688,357 @@ fn r71_sealed_v3_decision_binds_policy_evidence_exactly() -> Result<()> {
         v3_subject_binding_hash(&sealed_v3)
     );
     assert!(sealed.decision_hash != crate::resource::CanonicalHash::from_bytes([0u8; 32]));
+    Ok(())
+}
+
+struct LoopScriptProvider {
+    calls: Arc<AtomicUsize>,
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+    fail: bool,
+}
+
+#[async_trait]
+impl Provider for LoopScriptProvider {
+    fn name(&self) -> &str {
+        "scripted-loop"
+    }
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.captured.lock().expect("requests").push(request);
+        let name = if self.fail { "noisy_failure" } else { "echo" };
+        let args_json = if self.fail {
+            "{}".to_owned()
+        } else {
+            serde_json::json!({"value": format!("new source evidence {index}")}).to_string()
+        };
+        let call = ToolCall {
+            id: format!("guard-call-{index}"),
+            name: name.to_owned(),
+            args_json,
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: call.id.clone(),
+                name: call.name.clone(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: call.id.clone(),
+                delta: call.args_json.clone(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(call)),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+struct NoisyFailureTool {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Tool for NoisyFailureTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "noisy_failure".to_owned(),
+            description: "test execution failure".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Execute,
+            network_effect: None,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        ToolMutationTracking::None
+    }
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        let tick = self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "noisy_failure",
+            format!("failed at timestamp {tick}"),
+            ToolResultMeta {
+                exit_code: Some(1),
+                ..Default::default()
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn failed_execution_after_restart_uses_only_configured_max_turns() -> Result<()> {
+    for direct in [false, true] {
+        let temp = tempfile::tempdir()?;
+        let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+        let mut session = Session::load_from_store("scripted-loop", "model", store.clone())?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(NoisyFailureTool {
+            calls: Arc::clone(&executed),
+        }));
+        let agent = Agent::new(
+            LoopScriptProvider {
+                calls: Arc::clone(&calls),
+                captured: Arc::clone(&captured),
+                fail: true,
+            },
+            registry,
+        );
+        let input = || {
+            let input = AgentRunInput::without_persisted_user_message(Vec::new())
+                .with_logical_run_id("guard-restart-run");
+            if direct {
+                input.with_run_purpose(AgentRunPurpose::TaskDirectExecution(
+                    crate::TaskDirectExecutionContext {
+                        task_id: TaskId::new("guard-direct").expect("task id"),
+                        admission_id: "guard-admission".to_owned(),
+                        attempt_id: "guard-attempt".to_owned(),
+                    },
+                ))
+            } else {
+                input
+            }
+        };
+        let mut options = scripted_run_options(3);
+        options.workspace_root = temp.path().to_path_buf();
+        let first = agent
+            .run_with_input(
+                &mut session,
+                input(),
+                options.clone(),
+                &mut crate::event::NoopEventHandler,
+            )
+            .await?;
+        assert_eq!(
+            first.outcome.terminal_reason,
+            AgentRunTerminalReason::MaxTurns
+        );
+        assert_eq!(first.result.tool_calls, 3);
+        drop(session);
+        let mut restored = Session::load_from_store("scripted-loop", "model", store)?;
+        options.max_turns = Some(20);
+        let second = agent
+            .run_with_input(
+                &mut restored,
+                input(),
+                options,
+                &mut crate::event::NoopEventHandler,
+            )
+            .await?;
+        assert_eq!(
+            second.outcome.terminal_reason,
+            AgentRunTerminalReason::MaxTurns,
+            "direct={direct}"
+        );
+        assert_eq!(second.disposition, AgentRunDisposition::Interrupted);
+        assert!(second.result.final_message_id.is_none());
+        assert_eq!(
+            second.result.tool_calls, 20,
+            "the resumed run uses the configured limit without a hidden failure allowance"
+        );
+        assert_eq!(executed.load(Ordering::SeqCst), 23);
+        assert_eq!(calls.load(Ordering::SeqCst), 23);
+        let results = restored
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::ToolResultV3(result) => Some(crate::stable_event_hash(
+                    result.initial_model_view.preview.as_bytes(),
+                )),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            results.len(),
+            23,
+            "all failed result bodies differ despite no repair"
+        );
+        assert!(
+            captured
+                .lock()
+                .expect("requests")
+                .iter()
+                .all(|request| !request.tools.is_empty())
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_participant_configured_max_turns_preserves_partial_finalization() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WorkspaceMutatingCustomTool));
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        PostMutationReadLoopProvider {
+            calls: Arc::clone(&calls),
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-post-mutation-read-loop", "mock-model").with_store(store);
+    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+        "Apply the accepted mutation and return the result.",
+    )])
+    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
+        task_id: TaskId::new("task-configured-limit")?,
+        plan_version: 1,
+        step_id: TaskStepId::new("write-step")?,
+        attempt_id: TaskParticipantAttemptId::new("participant-configured-limit")?,
+    }));
+    let mut options = scripted_run_options(3);
+    options.workspace_root = temp.path().to_path_buf();
+    let output = agent
+        .run_with_input(
+            &mut session,
+            input,
+            options,
+            &mut crate::event::NoopEventHandler,
+        )
+        .await?;
+    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswerBlocked
+    );
+    assert_eq!(
+        output.result.final_text,
+        "mutation complete after bounded inspection"
+    );
+    assert!(output.result.final_message_id.is_none());
+    assert_eq!(output.result.tool_calls, 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let requests = captured.lock().expect("requests");
+    let finalization = requests.last().expect("finalization request");
+    assert!(finalization.tools.is_empty());
+    assert!(finalization.messages.iter().any(|message| {
+        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_review_current_results_reject_retired_tools_and_keep_ordinary_reads() -> Result<()> {
+    for retired in [
+        crate::SUBMIT_PLAN_DRAFT_TOOL_NAME,
+        crate::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
+    ] {
+        for result_outcome in ["draft", "no_plan"] {
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(EchoTool));
+            let legacy_args = if retired == crate::SUBMIT_PLAN_DRAFT_TOOL_NAME {
+                r#"{"schema_version":2,"summary":"old draft","steps":[{"title":"old step"}],"target_paths":[],"suggested_checks":[]}"#
+            } else {
+                r#"{"decision":"accept"}"#
+            };
+            let result_args = serde_json::json!({
+                "schema_version": 1, "outcome": result_outcome,
+                "content": "A complete typed review result.",
+            })
+            .to_string();
+            let agent = Agent::new(
+                ScriptedTurnToolProvider::new(vec![
+                    vec![
+                        (
+                            "retired".to_owned(),
+                            retired.to_owned(),
+                            legacy_args.to_owned(),
+                        ),
+                        (
+                            "ordinary-read".to_owned(),
+                            "echo".to_owned(),
+                            r#"{"value":"ordinary read survived"}"#.to_owned(),
+                        ),
+                    ],
+                    vec![(
+                        "current-result".to_owned(),
+                        crate::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
+                        result_args,
+                    )],
+                ]),
+                registry,
+            );
+            let mut session = Session::new("plan-protocol-retirement", "mock-model");
+            let input = AgentRunInput::user("propose a bounded change");
+            let source = ConversationTurnRef::new(
+                session.session_scope_id(),
+                input
+                    .persisted_user_message_id
+                    .clone()
+                    .expect("source message"),
+                "plan-protocol-retirement",
+            )?;
+            let binding = test_plan_review_handoff_binding(&source, "propose a bounded change");
+            let input = input
+                .with_logical_run_id("plan-protocol-retirement")
+                .with_run_purpose(AgentRunPurpose::PlanReview(PlanReviewPurposeContext {
+                    plan_review_id: binding.plan_review_id.clone(),
+                    attempt_id: binding.attempt_id.clone(),
+                    plan_id: binding.plan_id.clone(),
+                    source_turn: source.clone(),
+                    route_decision_id: None,
+                }))
+                .with_plan_review_draft(crate::PlanReviewDraftContext {
+                    plan_review_id: binding.plan_review_id.clone(),
+                    attempt_id: binding.attempt_id.clone(),
+                    plan_id: binding.plan_id.clone(),
+                    source: crate::PlanSourceRef {
+                        source_turn: Some(source),
+                        plan_review_id: Some(binding.plan_review_id),
+                        ..Default::default()
+                    },
+                    workspace_snapshot_id: None,
+                });
+            let output = agent
+                .run_with_input(
+                    &mut session,
+                    input,
+                    scripted_run_options(4),
+                    &mut RecordingEventHandler::default(),
+                )
+                .await?;
+            assert_single_settled_result(&session, "retired", "retired_plan_protocol");
+            assert!(session.entries().iter().any(|entry| matches!(entry,
+                SessionLogEntry::ToolResultV3(result)
+                    if result.call_id == "ordinary-read" && result.facts.status == "ok"
+                        && result.initial_model_view.preview.contains("ordinary read survived"))));
+            let drafts = session.plan_artifact_projection();
+            assert_eq!(drafts.plans.len(), usize::from(result_outcome == "draft"));
+            if result_outcome == "draft" {
+                assert!(matches!(
+                    output.disposition,
+                    AgentRunDisposition::PlanReviewDraftSubmitted(_)
+                ));
+                assert_eq!(
+                    drafts.plans[&binding.plan_id].inline_text.as_deref(),
+                    Some("A complete typed review result.")
+                );
+            } else {
+                assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
+            }
+            assert!(
+                crate::TaskStateProjection::from_entries(session.entries())
+                    .tasks
+                    .is_empty()
+            );
+        }
+    }
     Ok(())
 }

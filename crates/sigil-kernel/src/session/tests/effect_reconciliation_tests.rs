@@ -162,3 +162,32 @@ fn reconciliation_probe_is_single_claim_and_terminal_binds_its_exact_receipt() -
     );
     Ok(())
 }
+
+#[test]
+fn completion_fence_retains_uncertain_terminal_without_reopening_probe() -> Result<()> {
+    for (outcome, unsettled) in [
+        (EffectReconciliationOutcomeV1::StillUncertain, true),
+        (EffectReconciliationOutcomeV1::ObservedApplied, false),
+        (EffectReconciliationOutcomeV1::ObservedNotApplied, false),
+    ] {
+        let mut projection = EffectReconciliationProjectionV1::default();
+        let requirement = required();
+        projection.apply_required(requirement.clone())?;
+        assert_eq!(projection.unsettled().len(), 1);
+        projection.apply_terminal(EffectReconciliationTerminalEntryV1 {
+            schema_version: EFFECT_RECONCILIATION_SCHEMA_VERSION,
+            reconciliation_id: requirement.reconciliation_id,
+            effect_id: requirement.effect_id,
+            effect_digest: requirement.effect_digest,
+            outcome,
+            probe_receipt_digest: None,
+            probe_id: None,
+        })?;
+        assert!(
+            projection.active().is_empty(),
+            "a terminal probe cannot be dispatched again"
+        );
+        assert_eq!(!projection.unsettled().is_empty(), unsettled);
+    }
+    Ok(())
+}

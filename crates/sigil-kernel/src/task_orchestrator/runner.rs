@@ -239,11 +239,15 @@ pub fn recoverable_task_guidance_review(
         let (candidate_id, candidate) = match entry {
             SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selection))
                 if &selection.task_id == task_id
-                    && selection.plan_version == Some(plan_version)
-                    && selection.plan_status == Some(TaskPlanStatus::Accepted) =>
+                    && ((selection.plan_version == Some(plan_version)
+                        && selection.plan_status == Some(TaskPlanStatus::Accepted))
+                        || (plan_version == 1
+                            && initial_guidance_needs_review(session, selection)?)) =>
             {
                 selection.validate_for_session(session.session_scope_id())?;
-                if !selection_status_matches_recovered_attempt(session, selection, task) {
+                if selection.plan_version.is_some()
+                    && !selection_status_matches_recovered_attempt(session, selection, task)
+                {
                     bail!(
                         "pending task continuation selection is stale against current task status"
                     );
@@ -461,7 +465,19 @@ fn recoverable_review_authority_position(
                         if recorded == selection.as_ref()
                 )
             })
-            .map(|index| (selection.task_id.clone(), index))
+            .map(|index| {
+                let index =
+                    if selection.plan_version.is_none() {
+                        session.entries().iter().position(|entry| matches!(entry,
+                        SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                            if plan.task_id == selection.task_id && plan.plan_version == 1
+                                && plan.status == TaskPlanStatus::Accepted
+                    )).unwrap_or(index)
+                    } else {
+                        index
+                    };
+                (selection.task_id.clone(), index)
+            })
             .ok_or_else(|| {
                 anyhow!("pending task continuation selection is absent from the session")
             }),
@@ -517,12 +533,11 @@ fn recover_guidance_review_text(
 fn task_continuation_guidance_binding(
     selection: &crate::TaskContinuationSelectedEntry,
 ) -> Result<TaskGuidanceReviewBinding> {
-    let plan_version = selection
-        .plan_version
-        .ok_or_else(|| anyhow!("task continuation guidance requires an accepted task plan"))?;
-    if selection.plan_status != Some(TaskPlanStatus::Accepted) {
-        bail!("task continuation guidance is not bound to an accepted task plan");
-    }
+    let plan_version = match (selection.plan_version, selection.plan_status) {
+        (Some(version), Some(TaskPlanStatus::Accepted)) => version,
+        (None, None) => 1,
+        _ => bail!("task continuation guidance is not bound to an accepted task plan"),
+    };
     let seed = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         selection.source_turn.session_scope_id,
@@ -651,7 +666,52 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        self.run_with_initial_guidance(
+            session,
+            request,
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            max_plan_steps,
+            None,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    /// Plans an unplanned Task with source-bound user guidance, preserving any pending physical
+    /// planner request before applying later input. Accepted input is recovered from the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale or conflicting guidance, or when Task execution cannot continue.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_with_initial_guidance<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        planner_options: AgentRunOptions,
+        executor_options: AgentRunOptions,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        max_plan_steps: usize,
+        guidance: Option<(&str, &crate::ConversationTurnRef)>,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        if let Some((text, source)) = guidance {
+            accept_initial_continuation_guidance(session, &request, text, source, handler)?;
+        }
+        let initial_guidances =
+            initial_task_guidances(session, &request.task_id, guidance.map(|(text, _)| text))?;
         let admission = admit_or_validate_task_run(session, handler, &request)?;
+        reconcile_committed_initial_planner(session, &request, handler)?;
         if let TaskExecutionAdmissionState::Direct(direct) = admission {
             return self
                 .run_direct_execution(
@@ -679,7 +739,9 @@ where
                 .transpose()?
                 .flatten();
             loop {
-                let (attempt, planner_input) = if let Some(attempt) = resumed_planner.take() {
+                let (attempt, planner_input, recovering) = if let Some(attempt) =
+                    resumed_planner.take()
+                {
                     // The child session still contains the exact durable planner prompt. A
                     // recovery-only run may claim only that planner's provider-turn schedule;
                     // it cannot synthesize a new first request from the task objective.
@@ -700,7 +762,7 @@ where
                             ))
                             .with_durable_provider_recovery_only(),
                     );
-                    (attempt, planner_input)
+                    (attempt, planner_input, true)
                 } else {
                     let projection = session.task_state_projection();
                     let task = projection.tasks.get(&request.task_id).ok_or_else(|| {
@@ -735,7 +797,16 @@ where
                     )?;
                     let planner_input = self.bind_cancellation(
                         AgentRunInput::user_with_message_id(
-                            planner_prompt(&request.objective, worktree_availability),
+                            initial_planner_prompt(
+                                &request.objective,
+                                worktree_availability,
+                                initial_planner_guidance_for_attempt(
+                                    session,
+                                    &initial_guidances,
+                                    &attempt.attempt_id,
+                                )
+                                .as_deref(),
+                            ),
                             task_participant_input_message_id(&attempt.attempt_id),
                         )
                         .with_task_plan_update(TaskPlanUpdateContext {
@@ -750,9 +821,11 @@ where
                         }))
                         .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
                     );
-                    (attempt, planner_input)
+                    (attempt, planner_input, false)
                 };
-                validate_scheduled_retry_input(session, &attempt, &planner_input)?;
+                if !recovering {
+                    validate_scheduled_retry_input(session, &attempt, &planner_input)?;
+                }
                 let planner_output = self
                     .child_runner
                     .run_planner_session(
@@ -779,26 +852,7 @@ where
                             &attempt.child_session_ref,
                             &output,
                         )?;
-                        let result = participant_result_entry(
-                            &attempt,
-                            &format!(
-                                "accepted task plan v{} with {} steps",
-                                output.accepted_plan.plan_version,
-                                output.accepted_plan.steps.len()
-                            ),
-                            None,
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                        )?;
-                        append_participant_result_and_terminal(
-                            session,
-                            handler,
-                            &attempt,
-                            result,
-                            TaskParticipantAttemptStatus::Completed,
-                            None,
-                        )?;
+
                         break;
                     }
                     Ok(TaskPlannerSessionRunOutcome::AwaitingUserInput(waiting)) => {
@@ -899,7 +953,36 @@ where
                     request,
                     direct,
                     executor_options,
-                    None,
+                    initial_guidances.last().map(|guidance| {
+                        (guidance.guidance.as_str(), &guidance.selection.source_turn)
+                    }),
+                    handler,
+                    approval_handler,
+                )
+                .await;
+        }
+
+        if let Some(guidance) = initial_guidances
+            .into_iter()
+            .rfind(|guidance| !initial_guidance_consumed_by_plan(session, guidance))
+            && session
+                .task_state_projection()
+                .tasks
+                .get(&request.task_id)
+                .is_some_and(|task| task.latest_plan_version == Some(1))
+            && !initial_guidance_consumed_by_plan(session, &guidance)
+        {
+            return self
+                .continue_run_with_conversation_guidance_review(
+                    session,
+                    request,
+                    planner_options,
+                    executor_options,
+                    subagent_read_options,
+                    subagent_write_options,
+                    max_plan_steps,
+                    guidance.guidance,
+                    guidance.selection,
                     handler,
                     approval_handler,
                 )
@@ -939,8 +1022,8 @@ where
 
     /// Continues a first-class direct Task and optionally applies the exact current follow-up.
     ///
-    /// Direct guidance is transient executor context, not a TaskPlan mutation and not new
-    /// scheduling authority. The durable direct admission remains bound to the original objective.
+    /// Direct guidance is accepted as a durable source-bound continuation after recovery
+    /// validation. The direct admission remains bound to the original objective.
     ///
     /// # Errors
     ///
@@ -951,7 +1034,7 @@ where
         session: &mut Session,
         request: SequentialTaskRequest,
         executor_options: AgentRunOptions,
-        guidance: Option<&str>,
+        guidance: Option<(&str, &crate::ConversationTurnRef)>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<SequentialTaskRunOutput>
@@ -983,7 +1066,7 @@ where
         request: SequentialTaskRequest,
         admission: crate::TaskDirectExecutionAdmittedV1,
         executor_options: AgentRunOptions,
-        guidance: Option<&str>,
+        guidance: Option<(&str, &crate::ConversationTurnRef)>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<SequentialTaskRunOutput>
@@ -1014,8 +1097,18 @@ where
             bail!("direct Task has multiple started execution attempts");
         }
         let recovering = !started.is_empty();
-        if recovering && guidance.is_some_and(|value| !value.trim().is_empty()) {
+        if recovering && guidance.is_some_and(|(value, _)| !value.trim().is_empty()) {
             bail!("direct Task recovery cannot mix a new follow-up with an unsettled attempt");
+        }
+        if let Some((guidance, source)) = guidance.filter(|(value, _)| !value.trim().is_empty()) {
+            accept_task_continuation_guidance(
+                session,
+                &request.task_id,
+                task.status,
+                guidance,
+                source,
+                handler,
+            )?;
         }
         append_task_run(
             session,
@@ -1073,7 +1166,7 @@ where
                 .with_durable_provider_recovery_only()
         } else {
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                direct_execution_prompt(&request.objective, guidance),
+                direct_execution_prompt(&request.objective, guidance.map(|(text, _)| text)),
             )])
         }
         .with_task_checklist_update(crate::TaskChecklistUpdateContextV1 {
@@ -1100,7 +1193,7 @@ where
                     admission,
                     attempt: attempt.clone(),
                     input,
-                    options: executor_options,
+                    options: executor_options.clone(),
                 },
                 handler,
                 approval_handler,
@@ -1175,19 +1268,108 @@ where
         {
             status = TaskRunStatus::Paused;
         }
+        let mut completion_blocker = None;
+        if status == TaskRunStatus::Completed {
+            let projection = session.task_state_projection();
+            let task = projection
+                .tasks
+                .get(&request.task_id)
+                .ok_or_else(|| anyhow!("direct completion Task is unavailable"))?;
+            if task.direct_execution_attempts.get(&attempt.attempt_id) != Some(&attempt)
+                || task
+                    .direct_execution_admission
+                    .as_ref()
+                    .is_none_or(|admission| admission.admission_id != attempt.admission_id)
+            {
+                bail!("direct completion authority changed during execution");
+            }
+            if output
+                .outcome
+                .terminal_reason
+                .blocks_successful_completion()
+                || !output.outcome.interrupted_tool_calls.is_empty()
+            {
+                completion_blocker = Some("direct execution has unsettled run output".to_owned());
+            } else if self
+                .cancellation
+                .as_ref()
+                .is_some_and(|handle| !handle.cleanup_complete() || handle.active_effects() != 0)
+            {
+                completion_blocker = Some("direct execution effects have not settled".to_owned());
+            } else if projection
+                .evaluate_root_terminal(
+                    &request.task_id,
+                    TaskRunStatus::Completed,
+                    Some(&crate::task::TaskRootTerminalCandidateV1::DirectExecution {
+                        attempt_id: attempt.attempt_id.clone(),
+                        status: TaskParticipantAttemptStatus::Completed,
+                    }),
+                )
+                .is_some_and(|evaluation| !evaluation.allows_completed())
+            {
+                completion_blocker =
+                    Some("direct execution has unfinished Task dependencies".to_owned());
+            } else {
+                let (mut readiness, auto_run, blocker) =
+                    super::readiness::direct_task_completion_readiness(
+                        session,
+                        &request,
+                        &output.outcome,
+                        &executor_options,
+                    )
+                    .await?;
+                completion_blocker = blocker;
+                if completion_blocker.is_none()
+                    && auto_run == VerificationAutoRunPolicy::TrustedOnly
+                    && super::readiness::run_task_scope_verification_checks(
+                        session,
+                        handler,
+                        self.verification_execution_port.as_deref(),
+                        &request.task_id,
+                        EvidenceScope::Task(request.task_id.as_str().to_owned()),
+                        &executor_options,
+                        &readiness,
+                    )
+                    .await?
+                {
+                    let (updated, _, blocker) = super::readiness::direct_task_completion_readiness(
+                        session,
+                        &request,
+                        &output.outcome,
+                        &executor_options,
+                    )
+                    .await?;
+                    readiness = updated;
+                    completion_blocker = blocker;
+                }
+                if completion_blocker.is_none()
+                    && super::scheduler::readiness_blocks_step(&readiness)
+                {
+                    completion_blocker = Some(
+                        "direct execution requires verification or workspace recovery".to_owned(),
+                    );
+                }
+                append_task_readiness(session, handler, readiness)?;
+            }
+            if completion_blocker.is_some() {
+                status = TaskRunStatus::Paused;
+            }
+        }
         let mut terminal = attempt;
         terminal.status = if status == TaskRunStatus::Completed {
             TaskParticipantAttemptStatus::Completed
         } else {
             TaskParticipantAttemptStatus::Blocked
         };
-        terminal.reason = Some(crate::safe_persistence_text(
-            &if final_text.trim().is_empty() {
-                "direct execution produced no final text".to_owned()
-            } else {
-                bounded_task_participant_summary(&final_text)
-            },
-        ));
+        terminal.reason = Some(crate::safe_persistence_text(&if let Some(reason) =
+            completion_blocker.as_ref()
+        {
+            reason.clone()
+        } else if final_text.trim().is_empty() {
+            "direct execution produced no final text".to_owned()
+        } else {
+            bounded_task_participant_summary(&final_text)
+        }));
         if status == TaskRunStatus::Completed {
             terminal.final_message_id = output.final_message_id;
             terminal.output_hash = Some(format!("sha256:{}", hash_task_text(&final_text)));
@@ -1220,7 +1402,8 @@ where
             Some(if status == TaskRunStatus::Completed {
                 "direct Task objective completed".to_owned()
             } else {
-                "direct Task execution paused before completion".to_owned()
+                completion_blocker
+                    .unwrap_or_else(|| "direct Task execution paused before completion".to_owned())
             }),
         )?;
         Ok(SequentialTaskRunOutput {
@@ -1344,26 +1527,7 @@ where
                     &attempt.child_session_ref,
                     &output,
                 )?;
-                let result = participant_result_entry(
-                    &attempt,
-                    &format!(
-                        "accepted task plan v{} with {} steps",
-                        output.accepted_plan.plan_version,
-                        output.accepted_plan.steps.len()
-                    ),
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )?;
-                append_participant_result_and_terminal(
-                    session,
-                    handler,
-                    &attempt,
-                    result,
-                    TaskParticipantAttemptStatus::Completed,
-                    None,
-                )?;
+
                 self.continue_run(
                     session,
                     request,
@@ -1454,6 +1618,7 @@ where
             max_plan_steps,
             guidance,
             binding,
+            None,
             handler,
             approval_handler,
         )
@@ -1488,6 +1653,7 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        reconcile_committed_initial_planner(session, &request, handler)?;
         selection.validate_for_session(session.session_scope_id())?;
         if !session.entries().iter().any(|entry| {
             matches!(
@@ -1498,6 +1664,13 @@ where
         }) {
             bail!("task guidance review requires its exact durable continuation selection");
         }
+        if selection.plan_version.is_none() && !initial_guidance_needs_review(session, &selection)?
+        {
+            bail!(
+                "initial task guidance is already consumed or does not precede its accepted plan"
+            );
+        }
+        let initial_context = initial_guidance_review_context(session, &selection, &guidance)?;
         let binding = task_continuation_guidance_binding(&selection)?;
         self.continue_run_with_bound_guidance_review(
             session,
@@ -1509,6 +1682,7 @@ where
             max_plan_steps,
             guidance,
             binding,
+            initial_context,
             handler,
             approval_handler,
         )
@@ -1527,6 +1701,7 @@ where
         max_plan_steps: usize,
         guidance: String,
         binding: TaskGuidanceReviewBinding,
+        initial_guidance_context: Option<String>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<SequentialTaskRunOutput>
@@ -1669,9 +1844,17 @@ where
             &request.objective,
             &accepted_plan,
             &eligible_pending_step_ids,
-            &guidance,
+            initial_guidance_context.as_deref().unwrap_or(&guidance),
             worktree_availability,
         );
+
+        let assessment_prompt = if initial_guidance_context.is_some() {
+            format!(
+                "{assessment_prompt}\n\nThese are multiple accepted user inputs in source order. Incorporate them together with task_plan_update; a single guidance supplement cannot represent this combined input."
+            )
+        } else {
+            assessment_prompt
+        };
 
         loop {
             let projection = session.task_state_projection();
@@ -1723,6 +1906,11 @@ where
                 }))
                 .with_logical_run_id(task_participant_logical_run_id(&attempt.attempt_id)),
             );
+            let planner_input = if initial_guidance_context.is_some() {
+                planner_input.suppress_tool(crate::TASK_GUIDANCE_APPLY_TOOL_NAME)
+            } else {
+                planner_input
+            };
             validate_scheduled_retry_input(session, &attempt, &planner_input)?;
             let planner_output = self
                 .child_runner
@@ -1793,6 +1981,9 @@ where
                 controls_before_participant_terminal,
                 controls_after_participant_terminal,
             ) = if let Some(applied) = output.guidance_applied.as_ref() {
+                if initial_guidance_context.is_some() {
+                    bail!("combined initial guidance requires an accepted model replan");
+                }
                 applied.validate_against(&assessment)?;
                 if output.accepted_plan != accepted_plan {
                     bail!("guidance supplement decision returned a different accepted task plan");
@@ -1903,6 +2094,7 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        reconcile_committed_initial_planner(session, &request, handler)?;
         let recovered = recoverable_task_guidance(session, &request.task_id, guidance.as_deref())?;
         let (guidance, guidance_target_step_ids) = match recovered {
             Some(recovered) => (Some(recovered.guidance), Some(recovered.target_step_ids)),
@@ -5319,20 +5511,71 @@ where
         expected_child_session_ref,
         output,
     )?;
-    let controls = planner_plan_commit_controls(output)?;
-    if planner_output_is_already_committed(session, output) {
-        return Ok(false);
-    }
-    if session
-        .task_state_projection()
+    let projection = session.task_state_projection();
+    let task = projection
         .tasks
         .get(&request.task_id)
-        .is_some_and(|task| task.plans.contains_key(&output.accepted_plan.plan_version))
+        .context("planner commit lost its Task")?;
+    let attempt = task
+        .participant_attempts
+        .get(expected_attempt_id)
+        .context("planner commit lost its participant")?;
+    if attempt.purpose != TaskParticipantPurpose::Planner
+        || attempt.plan_version.is_some()
+        || attempt.child_session_ref != *expected_child_session_ref
+        || !matches!(
+            attempt.status,
+            TaskParticipantAttemptStatus::Started | TaskParticipantAttemptStatus::Completed
+        )
     {
-        bail!(
-            "task plan v{} is partially committed or conflicts with the planner output",
-            output.accepted_plan.plan_version
-        );
+        bail!("planner commit does not match its active participant");
+    }
+    let result = participant_result_entry(
+        attempt,
+        &format!(
+            "accepted task plan v{} with {} steps",
+            output.accepted_plan.plan_version,
+            output.accepted_plan.steps.len()
+        ),
+        None,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )?;
+    let terminal_controls = participant_result_and_terminal_controls(
+        attempt,
+        result,
+        TaskParticipantAttemptStatus::Completed,
+        None,
+    )?;
+    let mut controls = if planner_output_is_already_committed(session, output) {
+        Vec::new()
+    } else {
+        if task.plans.contains_key(&output.accepted_plan.plan_version) {
+            bail!(
+                "task plan v{} is partially committed or conflicts with the planner output",
+                output.accepted_plan.plan_version
+            );
+        }
+        planner_plan_commit_controls(output)?
+    };
+    for control in terminal_controls {
+        match &control {
+            ControlEntry::TaskParticipantResult(result) => {
+                if let Some(existing) = task.participant_results.get(expected_attempt_id) {
+                    if existing != result {
+                        bail!("planner result conflicts with its committed plan");
+                    }
+                    continue;
+                }
+            }
+            ControlEntry::TaskParticipantAttempt(terminal) if terminal == attempt => continue,
+            _ => {}
+        }
+        controls.push(control);
+    }
+    if controls.is_empty() {
+        return Ok(false);
     }
     append_task_controls(session, handler, controls)?;
     Ok(true)
@@ -5889,6 +6132,106 @@ where
     Ok(TaskExecutionAdmissionState::NeedsPlanning)
 }
 
+fn accept_task_continuation_guidance<H: EventHandler + Send>(
+    session: &mut Session,
+    task_id: &TaskId,
+    task_status: TaskRunStatus,
+    guidance: &str,
+    source: &crate::ConversationTurnRef,
+    handler: &mut H,
+) -> Result<()> {
+    crate::ConversationTurnRef::new(
+        source.session_scope_id.clone(),
+        source.message_id.clone(),
+        source.logical_run_id.clone(),
+    )?;
+    if source.session_scope_id != session.session_scope_id() {
+        bail!("direct Task guidance source belongs to a different session");
+    }
+    let projected = crate::project_conversation_prompt_for_persistence(guidance);
+    let entries = if session.store_path().is_some() {
+        session
+            .read_durable_event_records()?
+            .iter()
+            .filter_map(|record| record.session_log_entry().transpose())
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        session.entries().to_vec()
+    };
+    let mut existing_selection = None;
+    for entry in &entries {
+        if let SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selection)) = entry
+            && selection.source_turn == *source
+        {
+            selection.validate_shape()?;
+            if selection.task_id != *task_id
+                || selection.plan_version.is_some()
+                || selection.control
+                    != crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance
+                || selection.prompt_hash != projected.prompt_hash
+                || selection.exact_prompt_required != projected.exact_prompt_required
+                || selection.guidance != projected.safe_prompt
+            {
+                bail!("direct Task guidance conflicts with its durable source selection");
+            }
+            existing_selection = Some(selection);
+        }
+    }
+    let existing_user = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::User(message) if message.id == source.message_id => Some(message),
+        _ => None,
+    });
+    if let Some(message) = existing_user {
+        if message.role != crate::MessageRole::User
+            || message.content.as_deref() != Some(projected.safe_prompt.as_str())
+            || message.assistant_kind.is_some()
+            || !message.tool_calls.is_empty()
+            || message.tool_call_id.is_some()
+            || message
+                .logical_run_id
+                .as_ref()
+                .is_some_and(|run| run.as_str() != source.logical_run_id)
+        {
+            bail!("direct Task guidance source message conflicts with durable content");
+        }
+    } else if existing_selection.is_some() {
+        bail!("direct Task guidance selection is missing its durable source message");
+    }
+    if existing_selection.is_some() {
+        return Ok(());
+    }
+    let selection = crate::TaskContinuationSelectedEntry {
+        task_id: task_id.clone(),
+        source_turn: source.clone(),
+        plan_version: None,
+        task_status,
+        plan_status: None,
+        route_contract_fingerprint: "explicit-task-guidance-v1".to_owned(),
+        control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
+        prompt_hash: projected.prompt_hash,
+        exact_prompt_required: projected.exact_prompt_required,
+        guidance: projected.safe_prompt.clone(),
+        selected_at_ms: unix_time_ms(),
+    };
+    selection.validate_shape()?;
+    let mut entries = Vec::new();
+    if existing_user.is_none() {
+        let mut message = ModelMessage::user(projected.safe_prompt);
+        message.id = source.message_id.clone();
+        message.logical_run_id = Some(crate::LogicalRunId::new(source.logical_run_id.clone())?);
+        entries.push(SessionLogEntry::User(message));
+    }
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskContinuationSelected(selection),
+    ));
+    // User input and this private selection have no public run-event projection. Commit
+    // both sources atomically, then notify private consumers; the public outbox API
+    // requires at least one projected event and must not manufacture one for guidance.
+    session.append_session_entries(entries.clone())?;
+    handler.handle_committed_session_publications(entries, Vec::new())?;
+    Ok(())
+}
+
 pub(super) fn direct_execution_prompt(objective: &str, guidance: Option<&str>) -> String {
     let follow_up = guidance
         .filter(|value| !value.trim().is_empty())
@@ -5902,3 +6245,16 @@ pub(super) fn direct_execution_prompt(objective: &str, guidance: Option<&str>) -
         "Execute the following complete, user-approved Task objective now. Use the available tools, keep the optional display checklist current when it helps the user, verify the result, and finish with a concise outcome. Checklist updates are progress reporting only and never execution authority.\n\n{objective}{follow_up}"
     )
 }
+
+#[cfg(test)]
+#[path = "tests/direct_guidance_tests.rs"]
+mod direct_guidance_tests;
+
+#[path = "initial_guidance.rs"]
+mod initial_guidance;
+use initial_guidance::{
+    accept_initial_continuation_guidance, initial_guidance_consumed_by_plan,
+    initial_guidance_needs_review, initial_guidance_review_context,
+    initial_planner_guidance_for_attempt, initial_planner_prompt, initial_task_guidances,
+    reconcile_committed_initial_planner,
+};

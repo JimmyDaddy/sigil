@@ -439,6 +439,7 @@ impl RuntimeContextSnapshotV2 {
             tool_calls: Vec::new(),
             tool_call_id: None,
             assistant_kind: None,
+            logical_run_id: None,
             image_attachments: Vec::new(),
             tool_result_payload: None,
         };

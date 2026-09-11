@@ -207,6 +207,9 @@ pub(super) fn validate_waiting_pairs(
 ) -> Result<()> {
     let mut paired = BTreeSet::new();
     for (index, record) in records.iter().enumerate() {
+        if record.stored_event().event_kind() != Some(DurableEventType::PlanReviewAttempt) {
+            continue;
+        }
         let Some(SessionLogEntry::Control(ControlEntry::PlanReviewAttempt(attempt))) =
             record.session_log_entry()?
         else {

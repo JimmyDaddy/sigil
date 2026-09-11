@@ -22,6 +22,22 @@ use crate::{
 };
 
 #[test]
+fn agent_turn_limit_is_optional_and_round_trips() -> anyhow::Result<()> {
+    let raw =
+        "config_version = 2\n[agent]\nconnection = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n";
+    for limit in [None, Some(48)] {
+        let mut config: RootConfig = toml::from_str(raw)?;
+        assert_eq!(config.agent.max_turns, None);
+        config.agent.max_turns = limit;
+        let serialized = toml::to_string_pretty(&config)?;
+        assert_eq!(serialized.contains("max_turns"), limit.is_some());
+        let restored: RootConfig = toml::from_str(&serialized)?;
+        assert_eq!(restored.agent.max_turns, limit);
+    }
+    Ok(())
+}
+
+#[test]
 fn compaction_threshold_status_follows_configured_window() {
     let config = CompactionConfig {
         strategy: Default::default(),

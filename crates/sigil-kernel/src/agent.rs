@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
@@ -24,8 +24,7 @@ use crate::{
         AutomaticRouteCapability, CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
         ConversationRouteDecisionId, PlanReviewAttemptId, PlanReviewDraftContext,
         PlanReviewHandoffBinding, PlanReviewId, REQUEST_PLAN_REVIEW_TOOL_NAME,
-        SUBMIT_PLAN_DRAFT_TOOL_NAME, confirm_plan_review_candidate_tool_spec,
-        conversation_route_routing_contract_material,
+        SUBMIT_PLAN_DRAFT_TOOL_NAME, conversation_route_routing_contract_material,
         direct_conversation_continuation_prompt_contract_material, request_plan_review_tool_spec,
         submit_plan_review_result_tool_spec,
     },
@@ -44,10 +43,10 @@ use crate::{
     },
     task::{
         TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
-        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD,
-        TaskGuidanceAssessmentContext, TaskId, TaskParticipantAttemptId, TaskPlanStatus,
-        TaskPlanUpdateContext, TaskRunStatus, TaskStepCheckpointV2, TaskStepId,
-        task_guidance_apply_tool_spec, task_plan_update_tool_spec_for_worktree,
+        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskGuidanceAssessmentContext, TaskId,
+        TaskParticipantAttemptId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunStatus,
+        TaskStepCheckpointV2, TaskStepId, task_guidance_apply_tool_spec,
+        task_plan_update_tool_spec_for_worktree,
     },
     task_checklist::{
         TaskChecklistUpdateContextV1, UPDATE_TASK_CHECKLIST_TOOL_NAME,
@@ -62,6 +61,7 @@ use crate::{
         request_task_planning_tool_spec, run_pending_plan_tool_spec,
     },
     task_orchestrator::{
+        task_direct_execution_system_prompt_contract_material,
         task_participant_finalization_prompt_contract_material,
         task_participant_system_prompt_contract_material,
         task_planner_system_prompt_contract_material,
@@ -97,9 +97,7 @@ use approval_policy::{
 };
 use assistant_messages::{append_final_answer_message, append_tool_preamble_message};
 use plan_draft::{
-    append_tool_ignored_after_plan_draft, confirm_plan_review_candidate_call_is_accepted,
-    handle_confirm_plan_review_candidate_call, handle_submit_plan_draft_call,
-    handle_submit_plan_review_result_call, submit_plan_draft_call_is_accepted,
+    append_tool_ignored_after_plan_draft, handle_submit_plan_review_result_call,
     submit_plan_review_result_call_outcome,
 };
 use plan_review::{
@@ -161,7 +159,6 @@ use user_input::{
     request_user_input_call_is_accepted,
 };
 
-const TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT: usize = 6;
 const MAX_FINAL_ANSWER_BLOCKER_RETRIES: usize = 3;
 
 struct RoutingMicroturnEventFilter<'a, H> {
@@ -861,7 +858,7 @@ impl AgentRunInput {
         self
     }
 
-    /// Restricts a fresh plan finalizer to the typed draft submission protocol.
+    /// Restricts a Plan review continuation to the typed draft submission protocol.
     #[must_use]
     pub fn with_plan_review_submit_only(mut self) -> Self {
         self.plan_review_submit_only = true;
@@ -1827,7 +1824,7 @@ pub trait AgentToolDelegate: Send {
     /// # Errors
     ///
     /// Returns an error if the delegate cannot inspect its durable state.
-    fn final_answer_context(
+    async fn final_answer_context(
         &mut self,
         _session: &Session,
         _options: &AgentRunOptions,
@@ -2115,7 +2112,6 @@ where
             approval_handler,
             None,
         )
-        .boxed()
         .await
     }
 
@@ -2146,7 +2142,6 @@ where
             approval_handler,
             Some(agent_delegate),
         )
-        .boxed()
         .await
     }
 
@@ -2178,7 +2173,6 @@ where
             approval_handler,
             None,
         )
-        .boxed()
         .await
     }
 
@@ -2211,11 +2205,38 @@ where
             approval_handler,
             Some(agent_delegate),
         )
-        .boxed()
         .await
     }
 
-    async fn run_with_approval_input_and_tools<H, A>(
+    // Construct the large loop future before polling it. Boxing at an async caller still
+    // leaves construction temporaries in that caller's poll frame during nested agent runs.
+    fn run_with_approval_input_and_tools<'run, H, A>(
+        &'run self,
+        session: &'run mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        tools: &'run ToolRegistry,
+        handler: &'run mut H,
+        approval_handler: &'run mut A,
+        agent_delegate: Option<&'run mut (dyn AgentToolDelegate + Send)>,
+    ) -> BoxFuture<'run, Result<AgentRunOutput>>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        self.run_loop(
+            session,
+            input,
+            options,
+            tools,
+            handler,
+            approval_handler,
+            agent_delegate,
+        )
+        .boxed()
+    }
+
+    async fn run_loop<H, A>(
         &self,
         session: &mut Session,
         input: AgentRunInput,
@@ -2428,10 +2449,16 @@ where
                     "plan review draft context requires the PlanReview run purpose"
                 ));
             }
-            if tools.spec_for(SUBMIT_PLAN_DRAFT_TOOL_NAME).is_some() {
-                return Err(anyhow!(
-                    "tool registry collides with reserved internal tool {SUBMIT_PLAN_DRAFT_TOOL_NAME}"
-                ));
+            for reserved in [
+                PLAN_REVIEW_RESULT_TOOL_NAME,
+                SUBMIT_PLAN_DRAFT_TOOL_NAME,
+                CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
+            ] {
+                if tools.spec_for(reserved).is_some() {
+                    return Err(anyhow!(
+                        "tool registry collides with reserved internal tool {reserved}"
+                    ));
+                }
             }
             if let Some(AgentRunPurpose::PlanReview(context)) = purpose.as_ref()
                 && (context.plan_review_id != draft_context.plan_review_id
@@ -2512,12 +2539,14 @@ where
                 0,
                 ModelMessage::system(task_planner_system_prompt_contract_material()),
             ),
-            Some(AgentRunPurpose::TaskDirectExecution(_) | AgentRunPurpose::TaskParticipant(_)) => {
-                transient_context.insert(
-                    0,
-                    ModelMessage::system(task_participant_system_prompt_contract_material()),
-                )
-            }
+            Some(AgentRunPurpose::TaskDirectExecution(_)) => transient_context.insert(
+                0,
+                ModelMessage::system(task_direct_execution_system_prompt_contract_material()),
+            ),
+            Some(AgentRunPurpose::TaskParticipant(_)) => transient_context.insert(
+                0,
+                ModelMessage::system(task_participant_system_prompt_contract_material()),
+            ),
             Some(AgentRunPurpose::Conversation(_))
             | Some(AgentRunPurpose::PlanReview(_))
             | Some(AgentRunPurpose::TaskSynthesis(_))
@@ -2705,7 +2734,6 @@ where
         let mut final_answer_blocker_message_index: Option<usize> = None;
         let mut final_answer_blocker_retries = 0usize;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
-        let mut participant_post_mutation_read_calls = 0usize;
         let mut participant_finalization_pending = false;
         let mut participant_finalization_prompt_injected = false;
         let mut participant_finalization_dispatched = false;
@@ -2782,7 +2810,10 @@ where
             if initial_frozen_provider_request.is_none()
                 && let Some(delegate) = agent_delegate.as_deref_mut()
             {
-                match delegate.final_answer_context(session, &options, &outcome)? {
+                match delegate
+                    .final_answer_context(session, &options, &outcome)
+                    .await?
+                {
                     Some(context)
                         if final_answer_context_key.as_deref() != Some(context.key.as_str()) =>
                     {
@@ -2887,16 +2918,13 @@ where
                     tool_specs.push(update_task_checklist_tool_spec());
                 }
                 if plan_review_draft.is_some() {
-                    if plan_review_draft
-                        .as_ref()
-                        .is_some_and(|context| context.candidate_content.is_some())
-                    {
-                        tool_specs.push(confirm_plan_review_candidate_tool_spec());
-                    } else {
-                        tool_specs.push(submit_plan_review_result_tool_spec());
-                    }
+                    tool_specs.push(submit_plan_review_result_tool_spec());
                 }
-                if task_guidance_assessment.is_some() {
+                if task_guidance_assessment.is_some()
+                    && !suppressed_tool_names
+                        .iter()
+                        .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
+                {
                     tool_specs.push(task_guidance_apply_tool_spec());
                 }
             }
@@ -3032,54 +3060,27 @@ where
                     initial_provider_physical_attempt_id.take();
                 let mut provider_event_handler =
                     RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
-                match initial_frozen_request {
-                    Some(frozen_request) => {
-                        provider_stream::collect_frozen_provider_turn(
-                            &self.provider,
-                            self.provider_turn_recovery_policy,
-                            session,
-                            frozen_request,
-                            &provider_logical_run_id,
-                            &mut previous_response_handle,
-                            total_tool_calls,
-                            &mut provider_event_handler,
-                            cancellation.as_ref(),
-                            provider_stream::ProviderTurnDispatchContext {
-                                hosted_processor: current_hosted_processor.as_ref(),
-                                hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle
-                                    .as_ref(),
-                                initial_physical_attempt_id: current_provider_physical_attempt_id
-                                    .as_deref(),
-                                require_durable_recovery_claim: recovery_only_provider_turn
-                                    && model_turns == 1,
-                            },
-                        )
-                        .await
-                    }
-                    None => {
-                        collect_provider_turn(
-                            &self.provider,
-                            self.provider_turn_recovery_policy,
-                            session,
-                            request,
-                            &provider_logical_run_id,
-                            &mut previous_response_handle,
-                            total_tool_calls,
-                            &mut provider_event_handler,
-                            cancellation.as_ref(),
-                            provider_stream::ProviderTurnDispatchContext {
-                                hosted_processor: current_hosted_processor.as_ref(),
-                                hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle
-                                    .as_ref(),
-                                initial_physical_attempt_id: current_provider_physical_attempt_id
-                                    .as_deref(),
-                                require_durable_recovery_claim: recovery_only_provider_turn
-                                    && model_turns == 1,
-                            },
-                        )
-                        .await
-                    }
-                }
+                collect_run_provider_turn(
+                    &self.provider,
+                    self.provider_turn_recovery_policy,
+                    session,
+                    request,
+                    initial_frozen_request,
+                    &provider_logical_run_id,
+                    &mut previous_response_handle,
+                    total_tool_calls,
+                    &mut provider_event_handler,
+                    cancellation.as_ref(),
+                    provider_stream::ProviderTurnDispatchContext {
+                        hosted_processor: current_hosted_processor.as_ref(),
+                        hosted_dispatch_lifecycle: current_hosted_dispatch_lifecycle.as_ref(),
+                        initial_physical_attempt_id: current_provider_physical_attempt_id
+                            .as_deref(),
+                        require_durable_recovery_claim: recovery_only_provider_turn
+                            && model_turns == 1,
+                    },
+                )
+                .await
             };
             drop(provider_effect);
             let provider_turn = match provider_turn_result {
@@ -3143,30 +3144,18 @@ where
             }
 
             if !completed_calls.is_empty() {
-                let changed_files_before_batch = outcome.changed_files.len();
                 let tool_call_ids_before_batch = outcome.tool_call_ids.len();
                 let declaration_order = completed_calls
                     .iter()
                     .enumerate()
                     .map(|(ordinal, call)| (call.id.clone(), ordinal))
                     .collect::<BTreeMap<_, _>>();
-                let participant_read_calls_in_batch = if is_task_participant {
-                    completed_calls
-                        .iter()
-                        .filter(|call| {
-                            tools
-                                .spec_for(&call.name)
-                                .is_some_and(|spec| spec.access == ToolAccess::Read)
-                        })
-                        .count()
-                } else {
-                    0
-                };
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
                     &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
                     tools,
+                    &logical_run_id,
                     &assistant_text,
                     &completed_calls,
                     pending_states,
@@ -3221,33 +3210,18 @@ where
                         .as_ref()
                         .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
                 });
-                let accepted_plan_result_in_batch = !accepted_task_plan_in_batch
-                    && plan_review_draft.is_some()
-                    && completed_calls.iter().any(|call| {
-                        plan_review_draft.as_ref().is_some_and(|context| {
-                            confirm_plan_review_candidate_call_is_accepted(context, call)
-                                || submit_plan_draft_call_is_accepted(context, call)
-                                || matches!(
-                                    submit_plan_review_result_call_outcome(context, call),
-                                    Some(
-                                        PlanReviewResultOutcome::Draft
-                                            | PlanReviewResultOutcome::NoPlan
-                                    )
-                                )
+                let first_plan_result_in_batch = (!accepted_task_plan_in_batch)
+                    .then(|| {
+                        completed_calls.iter().find_map(|call| {
+                            plan_review_draft.as_ref().and_then(|context| {
+                                submit_plan_review_result_call_outcome(context, call)
+                            })
                         })
-                    });
-                let accepted_plan_draft_in_batch = !accepted_task_plan_in_batch
-                    && plan_review_draft.is_some()
-                    && completed_calls.iter().any(|call| {
-                        plan_review_draft.as_ref().is_some_and(|context| {
-                            confirm_plan_review_candidate_call_is_accepted(context, call)
-                                || submit_plan_draft_call_is_accepted(context, call)
-                                || matches!(
-                                    submit_plan_review_result_call_outcome(context, call),
-                                    Some(PlanReviewResultOutcome::Draft)
-                                )
-                        })
-                    });
+                    })
+                    .flatten();
+                let accepted_plan_result_in_batch = first_plan_result_in_batch.is_some();
+                let accepted_plan_draft_in_batch =
+                    first_plan_result_in_batch == Some(PlanReviewResultOutcome::Draft);
                 let pending_plan_bound = plan_review_binding
                     .as_ref()
                     .is_some_and(|binding| binding.pending_plan.is_some());
@@ -3381,22 +3355,22 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
-                    let submit_only_call_allowed = !plan_review_submit_only
-                        || if plan_review_draft
-                            .as_ref()
-                            .is_some_and(|context| context.candidate_content.is_some())
-                        {
-                            call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
-                        } else {
-                            call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME
-                                || call.name == PLAN_REVIEW_RESULT_TOOL_NAME
-                        };
-                    if !submit_only_call_allowed {
+                    let retired_plan_tool = matches!(
+                        call.name.as_str(),
+                        SUBMIT_PLAN_DRAFT_TOOL_NAME | CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
+                    );
+                    if retired_plan_tool
+                        || (plan_review_submit_only && call.name != PLAN_REVIEW_RESULT_TOOL_NAME)
+                    {
                         let mut result = ToolResult::error(
                             call.id.clone(),
                             call.name.clone(),
                             ToolErrorKind::Protocol,
-                            "submit_only_protocol_violation: plan finalization accepts only the advertised Plan finalization tool",
+                            if retired_plan_tool {
+                                "retired_plan_protocol: use the advertised submit_plan_review_result tool"
+                            } else {
+                                "submit_only_protocol_violation: plan finalization accepts only submit_plan_review_result"
+                            },
                         );
                         attach_tool_call_context(&mut result, &call, &[]);
                         append_tool_execution_audit(
@@ -3407,7 +3381,12 @@ where
                             None,
                             Some(&result),
                         )?;
-                        assistant_batch_results.push((call.clone(), result));
+                        tool_results::record_tool_result_to_batch(
+                            &mut outcome,
+                            &call,
+                            result,
+                            &mut assistant_batch_results,
+                        );
                         continue;
                     }
                     if accepted_user_input_in_batch
@@ -3497,11 +3476,7 @@ where
                         )?;
                         continue;
                     }
-                    if accepted_plan_result_in_batch
-                        && call.name != SUBMIT_PLAN_DRAFT_TOOL_NAME
-                        && call.name != PLAN_REVIEW_RESULT_TOOL_NAME
-                        && call.name != CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
-                    {
+                    if accepted_plan_result_in_batch && call.name != PLAN_REVIEW_RESULT_TOOL_NAME {
                         append_tool_ignored_after_plan_draft(
                             session,
                             &mut outcome,
@@ -3510,11 +3485,7 @@ where
                         )?;
                         continue;
                     }
-                    if accepted_plan_result.is_some()
-                        && (call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME
-                            || call.name == PLAN_REVIEW_RESULT_TOOL_NAME
-                            || call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME)
-                    {
+                    if accepted_plan_result.is_some() && call.name == PLAN_REVIEW_RESULT_TOOL_NAME {
                         append_tool_ignored_after_plan_draft(
                             session,
                             &mut outcome,
@@ -3896,46 +3867,6 @@ where
                         )?;
                         continue;
                     }
-                    if call.name == CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME {
-                        let Some(context) = plan_review_draft.as_ref() else {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "confirm_plan_review_candidate is not available for this run",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        };
-                        let now_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let accepted = handle_confirm_plan_review_candidate_call(
-                            session,
-                            handler,
-                            &mut outcome,
-                            &call,
-                            context,
-                            now_ms,
-                            &mut assistant_batch_results,
-                        )?;
-                        if let Some(accepted) = accepted {
-                            accepted_plan_result = Some(accepted);
-                            accepted_plan_draft =
-                                accepted_plan_draft || accepted == PlanReviewResultOutcome::Draft;
-                        }
-                        continue;
-                    }
                     if call.name == PLAN_REVIEW_RESULT_TOOL_NAME {
                         let Some(context) = plan_review_draft.as_ref() else {
                             let mut result = ToolResult::error(
@@ -3976,47 +3907,12 @@ where
                         }
                         continue;
                     }
-                    if call.name == SUBMIT_PLAN_DRAFT_TOOL_NAME {
-                        let Some(context) = plan_review_draft.as_ref() else {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "submit_plan_draft is not available for this run",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        };
-                        let now_ms = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64;
-                        let accepted = handle_submit_plan_draft_call(
-                            session,
-                            handler,
-                            &mut outcome,
-                            &call,
-                            context,
-                            now_ms,
-                            &mut assistant_batch_results,
-                        )?;
-                        accepted_plan_draft = accepted_plan_draft || accepted;
-                        if accepted {
-                            accepted_plan_result = Some(PlanReviewResultOutcome::Draft);
-                        }
-                        continue;
-                    }
                     if call.name == TASK_GUIDANCE_APPLY_TOOL_NAME {
-                        let Some(context) = task_guidance_assessment.as_ref() else {
+                        let Some(context) = task_guidance_assessment.as_ref().filter(|_| {
+                            !suppressed_tool_names
+                                .iter()
+                                .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
+                        }) else {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
                                 call.name.clone(),
@@ -4082,20 +3978,6 @@ where
                     }
                     return Err(error);
                 }
-                if is_task_participant {
-                    if outcome.changed_files.len() > changed_files_before_batch {
-                        participant_post_mutation_read_calls = 0;
-                    } else if !outcome.changed_files.is_empty() {
-                        participant_post_mutation_read_calls = participant_post_mutation_read_calls
-                            .saturating_add(participant_read_calls_in_batch);
-                        if participant_post_mutation_read_calls
-                            >= TASK_PARTICIPANT_POST_MUTATION_READ_TAIL_LIMIT
-                            && !participant_finalization_dispatched
-                        {
-                            participant_finalization_pending = true;
-                        }
-                    }
-                }
                 assistant_batch_results.sort_by_key(|(call, _)| {
                     declaration_order
                         .get(&call.id)
@@ -4145,15 +4027,6 @@ where
                 if let Some(checkpoint) = task_step_checkpoint {
                     session
                         .append_control(ControlEntry::TaskStepCheckpointV2(checkpoint.clone()))?;
-                    if checkpoint.no_progress_count >= TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD
-                        && !participant_finalization_dispatched
-                    {
-                        participant_finalization_pending = true;
-                        handler.handle(RunEvent::Notice(
-                            "Repeated task-step analysis reached the same durable frontier; requesting a bounded finalization result."
-                                .to_owned(),
-                        ))?;
-                    }
                     latest_task_step_checkpoint = Some(checkpoint);
                 }
                 if let Some(request) = accepted_user_input {
@@ -4241,6 +4114,33 @@ where
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartPlanReview(action),
+                    });
+                }
+                if accepted_task_continuation_in_batch {
+                    handler.handle(RunEvent::Notice(
+                        "task continuation could not recover its existing authority; the task remains paused".to_owned(),
+                    ))?;
+                    outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
+                    outcome.tool_calls = total_tool_calls;
+                    claim_natural_run_terminal(
+                        cancellation.as_ref(),
+                        cancellation_terminal_authority,
+                    )?;
+                    append_run_lifecycle_events(
+                        session,
+                        "blocked",
+                        outcome.terminal_reason,
+                        None,
+                        total_tool_calls,
+                    )?;
+                    return Ok(AgentRunOutput {
+                        result: AgentRunResult {
+                            final_text: String::new(),
+                            tool_calls: total_tool_calls,
+                            final_message_id: None,
+                        },
+                        outcome,
+                        disposition: AgentRunDisposition::Blocked,
                     });
                 }
                 if accepted_direct_conversation {
@@ -4527,12 +4427,12 @@ where
                 }
             }
             final_answer_blocker_prompt = None;
-            if participant_finalization_dispatched && assistant_text.trim().is_empty() {
+            if participant_finalization_dispatched {
                 handler.handle(RunEvent::Notice(
-                    "task participant made no semantic progress after bounded finalization; repair or replan is required"
+                    "the configured turn allowance ended after a partial reporting turn; the Task remains unfinished"
                         .to_owned(),
                 ))?;
-                outcome.terminal_reason = AgentRunTerminalReason::RepairReplanRequired;
+                outcome.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
                 outcome.tool_calls = total_tool_calls;
                 claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
                 append_run_lifecycle_events(
@@ -4544,7 +4444,7 @@ where
                 )?;
                 return Ok(AgentRunOutput {
                     result: AgentRunResult {
-                        final_text: String::new(),
+                        final_text: crate::safe_persistence_text(&assistant_text),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
                     },
@@ -4649,6 +4549,55 @@ where
                 disposition: AgentRunDisposition::FinalAnswer,
             });
         }
+    }
+}
+
+// Provider collection is a separate phase: its construction scratch must not remain in the
+// run-loop poll frame when the completed tool batch invokes another agent loop.
+#[allow(clippy::too_many_arguments)]
+fn collect_run_provider_turn<'turn, H>(
+    provider: &'turn dyn Provider,
+    recovery_policy: crate::ProviderTurnRecoveryPolicyV1,
+    session: &'turn mut Session,
+    request: crate::CompletionRequest,
+    frozen_request: Option<FrozenProviderRequestMaterial>,
+    logical_run_id: &'turn str,
+    previous_response_handle: &'turn mut Option<crate::ResponseHandle>,
+    total_tool_calls: usize,
+    handler: &'turn mut H,
+    cancellation: Option<&'turn RunCancellationHandle>,
+    dispatch: provider_stream::ProviderTurnDispatchContext<'turn>,
+) -> BoxFuture<'turn, Result<provider_stream::ProviderTurnOutput>>
+where
+    H: EventHandler + Send,
+{
+    match frozen_request {
+        Some(frozen_request) => provider_stream::collect_frozen_provider_turn(
+            provider,
+            recovery_policy,
+            session,
+            frozen_request,
+            logical_run_id,
+            previous_response_handle,
+            total_tool_calls,
+            handler,
+            cancellation,
+            dispatch,
+        )
+        .boxed(),
+        None => collect_provider_turn(
+            provider,
+            recovery_policy,
+            session,
+            request,
+            logical_run_id,
+            previous_response_handle,
+            total_tool_calls,
+            handler,
+            cancellation,
+            dispatch,
+        )
+        .boxed(),
     }
 }
 
@@ -4836,7 +4785,20 @@ impl<'run, 'policy, 'delegate, H, A> ToolCallProcessingContext<'run, 'policy, 'd
     }
 }
 
-async fn process_tool_call_batch<H, A>(
+// Keep authorization/execution future construction out of the parent agent poll frame;
+// the returned future remains borrowed by the same owner and follows its existing cleanup.
+fn process_tool_call_batch<'run, H, A>(
+    context: ToolCallProcessingContext<'run, '_, '_, H, A>,
+    calls: Vec<(ToolCall, ToolCall)>,
+) -> BoxFuture<'run, Result<()>>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    process_tool_call_batch_inner(context, calls).boxed()
+}
+
+async fn process_tool_call_batch_inner<H, A>(
     mut context: ToolCallProcessingContext<'_, '_, '_, H, A>,
     calls: Vec<(ToolCall, ToolCall)>,
 ) -> Result<()>
@@ -5493,7 +5455,28 @@ where
     let mut prepared_tool_call = None;
     let (resolved_invocation, unresolved_error) = match tools.resolve_invocation(&call.name) {
         Ok(invocation) => (Some(invocation), None),
-        Err(error) => (None, Some(error.to_string())),
+        Err(error) => {
+            // Resolution failed before any tool dispatch. Keep the terminal result, but do
+            // not publish a Started audit for an invocation that does not exist.
+            let mut result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+            attach_tool_call_context(&mut result, &call, &[]);
+            append_tool_execution_audit(
+                session,
+                &call,
+                &[],
+                ToolExecutionStatus::Failed,
+                None,
+                Some(&result),
+            )?;
+            record_tool_run_outcome(outcome, &result);
+            assistant_batch_results.push((call, result));
+            return Ok(None);
+        }
     };
     let execution_spec = resolved_invocation
         .as_ref()

@@ -317,6 +317,21 @@ impl EffectReconciliationProjectionV1 {
             .collect()
     }
 
+    /// Lists effects without a conclusive observation, including completed uncertain probes.
+    /// Unlike `active`, this is a completion fence, not permission to start another probe.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<&EffectReconciliationRequiredEntryV1> {
+        self.required
+            .iter()
+            .filter(|(id, _)| {
+                self.terminal.get(*id).is_none_or(|terminal| {
+                    terminal.outcome == EffectReconciliationOutcomeV1::StillUncertain
+                })
+            })
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
     #[must_use]
     pub fn cursor(&self) -> Option<&ProjectionCursor> {
         self.cursor.as_ref()

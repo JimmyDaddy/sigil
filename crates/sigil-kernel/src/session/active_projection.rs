@@ -412,6 +412,7 @@ pub struct ActiveSessionProjection {
     usage: SessionStats,
     latest_readiness: Option<ReadinessEvaluatedEntry>,
     tool_output_pressure: ToolOutputPressureProjectionV1,
+    execution_progress: super::execution_progress::ExecutionProgress,
     durable_session_entry_count: u64,
     last_session_entry_cursor: Option<ProjectionCursor>,
     cursor: Option<ProjectionCursor>,
@@ -447,6 +448,7 @@ impl ActiveSessionProjection {
             usage: SessionStats::default(),
             latest_readiness: None,
             tool_output_pressure: ToolOutputPressureProjectionV1::default(),
+            execution_progress: super::execution_progress::ExecutionProgress::default(),
             durable_session_entry_count: 0,
             last_session_entry_cursor: None,
             cursor: None,
@@ -537,6 +539,7 @@ impl ActiveSessionProjection {
     }
 
     fn apply_control_entry(&mut self, control: &ControlEntry) -> Result<()> {
+        self.execution_progress.apply_control(control)?;
         match control {
             ControlEntry::TaskRun(entry) => {
                 if matches!(
@@ -797,6 +800,14 @@ impl ActiveSessionProjectionSnapshot {
     #[must_use]
     pub fn tool_output_pressure(&self) -> ToolOutputPressureSnapshotV1 {
         self.projection.tool_output_pressure.snapshot()
+    }
+
+    /// Selects only run identities joined by durable Task or continuation records.
+    #[must_use]
+    pub fn recorded_evidence_run_ids(&self, run_id: &str) -> BTreeSet<String> {
+        self.projection
+            .execution_progress
+            .recorded_evidence_run_ids(run_id)
     }
 
     /// Returns the exact number of durable records projecting to a [`SessionLogEntry`].

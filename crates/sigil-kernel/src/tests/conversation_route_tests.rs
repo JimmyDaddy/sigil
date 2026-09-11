@@ -9,10 +9,10 @@ use crate::{
     PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
     PlanReviewTerminalReason, PlanSourceRef, Session, SessionLogEntry, SessionRef,
     TaskRoutingPolicy, ToolCall, conversation_route_decision_id_for_source,
-    conversation_route_routing_contract_material, plan_review_attempt_id_for_review,
-    plan_review_child_session_ref, plan_review_id_for_source, plan_review_plan_id_for_attempt,
-    plan_review_reason_codes, reconcile_plan_review_attempts, request_plan_review_tool_spec,
-    route_surface_tool_specs, submit_plan_draft_entry,
+    conversation_route_routing_contract_material, plan_draft_created_entry_with_plan_id,
+    plan_review_attempt_id_for_review, plan_review_child_session_ref, plan_review_id_for_source,
+    plan_review_plan_id_for_attempt, plan_review_reason_codes, reconcile_plan_review_attempts,
+    request_plan_review_tool_spec, route_surface_tool_specs,
 };
 
 fn source_turn(session: &Session, message_id: &str) -> ConversationTurnRef {
@@ -603,75 +603,9 @@ fn routing_contract_material_is_stable_and_capability_independent() {
 }
 
 #[test]
-fn submit_plan_draft_validates_strict_schema() -> Result<()> {
-    let session = Session::new("mock", "mock");
-    let turn = source_turn(&session, "msg-1");
-    let review_id = plan_review_id_for_source(&turn);
-    let attempt_id = plan_review_attempt_id_for_review(&review_id);
-    let plan_id = plan_review_plan_id_for_attempt(&review_id, &attempt_id);
-    let source = PlanSourceRef {
-        source_turn: Some(turn.clone()),
-        ..PlanSourceRef::default()
-    };
-    let valid_args = r#"{
-        "schema_version": 2,
-        "summary": "Refactor the coordinator",
-        "steps": [
-            {"step_id": "s1", "title": "Update coordinator", "role": "executor", "depends_on": [], "mode": "write", "isolation": "sequential_workspace_write", "target_paths": ["src/coordinator.rs"]}
-        ],
-        "target_paths": ["src/coordinator.rs"],
-        "suggested_checks": [
-            "cargo test",
-            {"command": "cargo", "args": ["check"], "effect": "workspace_write"}
-        ],
-        "risk": "medium",
-        "notes": ["keep api stable"]
-    }"#;
-    let entry = submit_plan_draft_entry(valid_args, plan_id.clone(), source.clone(), 42, None)?
-        .expect("valid draft materializes");
-    assert_eq!(entry.plan_id, plan_id);
-    assert_eq!(entry.schema_version, 2);
-    assert_eq!(entry.steps.len(), 1);
-    assert_eq!(entry.summary, "Refactor the coordinator");
-    assert_eq!(entry.target_paths, vec!["src/coordinator.rs"]);
-    assert_eq!(entry.suggested_checks.len(), 2);
-    assert_eq!(
-        entry
-            .suggested_checks
-            .iter()
-            .find(|check| check.check_spec_id == "cargo-check")
-            .expect("structured check is retained")
-            .effect,
-        crate::ToolEffect::WorkspaceWrite
-    );
-
-    let wrong_version = r#"{"schema_version": 1, "summary": "x", "steps": [{"title": "s"}], "target_paths": ["a"], "suggested_checks": []}"#;
-    assert!(
-        submit_plan_draft_entry(wrong_version, plan_id.clone(), source.clone(), 42, None).is_err()
-    );
-
-    let empty_steps = r#"{"schema_version": 2, "summary": "x", "steps": [], "target_paths": ["a"], "suggested_checks": []}"#;
-    assert!(
-        submit_plan_draft_entry(empty_steps, plan_id.clone(), source.clone(), 42, None).is_err()
-    );
-
-    let unknown_field = r#"{"schema_version": 2, "summary": "x", "steps": [{"title": "s"}], "target_paths": ["a"], "suggested_checks": [], "mode": "plan"}"#;
-    assert!(
-        submit_plan_draft_entry(unknown_field, plan_id.clone(), source.clone(), 42, None).is_err()
-    );
-
-    let invalid_path = r#"{"schema_version": 2, "summary": "x", "steps": [{"title": "s"}], "target_paths": ["/etc/passwd"], "suggested_checks": []}"#;
-    let entry = submit_plan_draft_entry(invalid_path, plan_id.clone(), source.clone(), 42, None)?;
-    assert!(entry.is_some());
-    Ok(())
-}
-
-#[test]
-fn submit_plan_draft_accepts_schema_conformant_intents_and_rejects_legacy_shape() -> Result<()> {
-    // Regression: the advertised tool schema and the host-side IntentProposalUnitV1 parser drifted
-    // (intent_id/description/string criteria vs intent_alias/statement/criterion objects), so a
-    // model submitting intents exactly as the schema advertised was always rejected. The schema
-    // and the strict parser must accept the same shape.
+fn historical_structured_plan_retains_intents_and_rejects_invalid_intent_shape() -> Result<()> {
+    // Historical structured Plan records still preserve typed intent hints, although current
+    // model submissions use the smaller draft/no_plan result envelope.
     let session = Session::new("mock", "mock");
     let turn = source_turn(&session, "msg-1");
     let review_id = plan_review_id_for_source(&turn);
@@ -699,8 +633,14 @@ fn submit_plan_draft_accepts_schema_conformant_intents_and_rejects_legacy_shape(
         "target_paths": ["src/coordinator.rs"],
         "suggested_checks": ["cargo test"]
     }"#;
-    let entry = submit_plan_draft_entry(conformant, plan_id.clone(), source.clone(), 42, None)?
-        .expect("schema-conformant intents must materialize");
+    let entry = plan_draft_created_entry_with_plan_id(
+        plan_id.clone(),
+        &format!("```sigil-plan-v2\n{}\n```", conformant),
+        source.clone(),
+        42,
+        None,
+    )?
+    .expect("schema-conformant intents must materialize");
     assert_eq!(entry.steps.len(), 1);
     let proposal = entry.intent_proposal.as_ref().expect("intent proposal");
     assert_eq!(proposal.intents.len(), 1);
@@ -727,11 +667,16 @@ fn submit_plan_draft_accepts_schema_conformant_intents_and_rejects_legacy_shape(
         "target_paths": ["src/coordinator.rs"],
         "suggested_checks": ["cargo test"]
     }"#;
-    let error = submit_plan_draft_entry(legacy, plan_id, source, 42, None)
-        .expect_err("legacy intent shape must fail closed");
+    let rejected = plan_draft_created_entry_with_plan_id(
+        plan_id,
+        &format!("```sigil-plan-v2\n{legacy}\n```"),
+        source,
+        42,
+        None,
+    )?;
     assert!(
-        format!("{error:#}").contains("unknown field `intent_id`"),
-        "unexpected error: {error:#}"
+        rejected.is_none(),
+        "invalid historical intent shape must not materialize a draft"
     );
     Ok(())
 }

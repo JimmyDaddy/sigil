@@ -106,6 +106,9 @@ pub struct ToolOutputPressureItemV1 {
     pub source_stream_sequence: u64,
     pub message_id: String,
     pub call_id: String,
+    /// Host-bound run of the declaring assistant batch; absent means unknown history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_run_id: Option<crate::LogicalRunId>,
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<ToolArtifactRefV1>,
@@ -138,6 +141,9 @@ pub struct ToolOutputArchivedArtifactBindingV1 {
     pub artifact_sha256: String,
     pub persisted_bytes: u64,
     pub call_id: String,
+    /// Host-bound run of the declaring assistant batch; absent means unknown history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_run_id: Option<crate::LogicalRunId>,
     pub tool_name: String,
     pub artifact_availability: ToolArtifactAvailability,
     pub archived: bool,
@@ -334,7 +340,7 @@ pub struct ToolOutputPressureProjectionV1 {
     current_turn_ids: Vec<String>,
     recent_ids: VecDeque<String>,
     recent_tokens: u64,
-    open_tool_calls: BTreeSet<String>,
+    open_tool_calls: BTreeMap<String, Option<crate::LogicalRunId>>,
     result_ids_by_call: BTreeMap<String, String>,
     result_ids_by_message: BTreeMap<String, String>,
     mutation_calls_by_operation: BTreeMap<String, String>,
@@ -356,7 +362,7 @@ impl Default for ToolOutputPressureProjectionV1 {
             current_turn_ids: Vec::new(),
             recent_ids: VecDeque::new(),
             recent_tokens: 0,
-            open_tool_calls: BTreeSet::new(),
+            open_tool_calls: BTreeMap::new(),
             result_ids_by_call: BTreeMap::new(),
             result_ids_by_message: BTreeMap::new(),
             mutation_calls_by_operation: BTreeMap::new(),
@@ -402,7 +408,8 @@ impl ToolOutputPressureProjectionV1 {
                             if self.open_tool_calls.len() >= TOOL_OUTPUT_OPEN_CALL_MAX {
                                 bail!("tool-output pressure projection exceeded its open-call cap");
                             }
-                            self.open_tool_calls.insert(call_id);
+                            self.open_tool_calls
+                                .insert(call_id, message.logical_run_id.clone());
                         }
                     }
                     SessionLogEntry::ToolResultV3(result) => {
@@ -410,12 +417,14 @@ impl ToolOutputPressureProjectionV1 {
                             TOOL_OUTPUT_PRESSURE_MAX_RESULTS.saturating_sub(1),
                         )?;
                         validate_pressure_result_capacity(self.items.len())?;
-                        let pair_closed = self.open_tool_calls.remove(&result.call_id);
+                        let declared_run = self.open_tool_calls.remove(&result.call_id);
+                        let pair_closed = declared_run.is_some();
                         let item = pressure_item(
                             record.event_id(),
                             record.stream_sequence(),
                             self.turn_index,
                             pair_closed,
+                            declared_run.flatten(),
                             result,
                         );
                         let key = item.source_event_id.clone();
@@ -770,7 +779,7 @@ impl ToolOutputPressureProjectionV1 {
             self.apply_signal_to_item(&item_id, signal);
             return Ok(());
         }
-        if !self.open_tool_calls.contains(call_id) {
+        if !self.open_tool_calls.contains_key(call_id) {
             return Ok(());
         }
         self.pending_signals_by_call
@@ -893,6 +902,7 @@ fn artifact_binding_from_item(
         artifact_sha256: item.artifact_sha256.clone()?,
         persisted_bytes: item.persisted_bytes,
         call_id: item.call_id.clone(),
+        logical_run_id: item.logical_run_id.clone(),
         tool_name: item.tool_name.clone(),
         artifact_availability: item.artifact_availability,
         archived,
@@ -904,6 +914,7 @@ fn pressure_item(
     stream_sequence: u64,
     turn_index: u64,
     pair_closed: bool,
+    logical_run_id: Option<crate::LogicalRunId>,
     result: super::ToolResultRecordedV3,
 ) -> ToolOutputPressureItemV1 {
     let preview_excerpt = bounded_pressure_excerpt(&result.initial_model_view.preview);
@@ -940,6 +951,7 @@ fn pressure_item(
         source_stream_sequence: stream_sequence,
         message_id: result.message_id,
         call_id: result.call_id,
+        logical_run_id,
         tool_name: result.tool_name,
         artifact_ref,
         artifact_sha256,
@@ -1069,6 +1081,9 @@ pub struct ToolOutputAgedViewV1 {
     pub source_stream_sequence: u64,
     pub source_message_id: String,
     pub call_id: String,
+    /// Host-bound run of the declaring assistant batch; absent means unknown history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_run_id: Option<crate::LogicalRunId>,
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_ref: Option<ToolArtifactRefV1>,
@@ -1361,6 +1376,7 @@ fn aged_view_from_pressure_item(item: &ToolOutputPressureItemV1) -> Result<ToolO
         source_stream_sequence: item.source_stream_sequence,
         source_message_id: item.message_id.clone(),
         call_id: item.call_id.clone(),
+        logical_run_id: item.logical_run_id.clone(),
         tool_name: item.tool_name.clone(),
         artifact_ref: item.artifact_ref.clone(),
         artifact_sha256: item.artifact_sha256.clone(),

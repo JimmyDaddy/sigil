@@ -231,7 +231,7 @@ where
         return Ok(None);
     }
 
-    validate_task_continuation_binding(session, binding)?;
+    let execution = validate_task_continuation_binding(session, binding)?;
     let guidance_projection =
         crate::project_conversation_prompt_for_persistence(binding.exact_guidance.expose_secret());
     if guidance_projection.prompt_hash != binding.prompt_hash
@@ -242,11 +242,14 @@ where
     }
     let continuation_kind = crate::continue_existing_task_control_kind(call)?;
     let is_resume = continuation_kind == crate::TaskContinuationControlKind::ResumeTask;
-    let recoverable_guidance = crate::recoverable_task_guidance(
-        session,
-        &binding.task_id,
-        (!is_resume).then_some(binding.exact_guidance.expose_secret()),
-    );
+    let recoverable_guidance = match &execution {
+        crate::TaskExecutionBindingV1::Direct { .. } => Ok(None),
+        crate::TaskExecutionBindingV1::Plan { .. } => crate::recoverable_task_guidance(
+            session,
+            &binding.task_id,
+            (!is_resume).then_some(binding.exact_guidance.expose_secret()),
+        ),
+    };
     match recoverable_guidance {
         Ok(Some(_)) if !is_resume => {
             return reject_task_continuation_recovery(
@@ -271,11 +274,15 @@ where
             );
         }
     }
-    let recovered_selection = match crate::recoverable_task_guidance_review(
-        session,
-        &binding.task_id,
-        (!is_resume).then_some(binding.exact_guidance.expose_secret()),
-    ) {
+    let recoverable_review = match &execution {
+        crate::TaskExecutionBindingV1::Direct { .. } => Ok(None),
+        crate::TaskExecutionBindingV1::Plan { .. } => crate::recoverable_task_guidance_review(
+            session,
+            &binding.task_id,
+            (!is_resume).then_some(binding.exact_guidance.expose_secret()),
+        ),
+    };
+    let recovered_selection = match recoverable_review {
         Ok(Some(review)) => match review.authority {
             RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selected) => {
                 Some((*selected, review.guidance))
@@ -894,7 +901,7 @@ fn validate_binding_against_session(
 fn validate_task_continuation_binding(
     session: &Session,
     binding: &TaskContinuationHandoffBinding,
-) -> Result<()> {
+) -> Result<crate::TaskExecutionBindingV1> {
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("task continuation source belongs to a different session");
     }
@@ -935,7 +942,25 @@ fn validate_task_continuation_binding(
     {
         bail!("task continuation target changed after routing was frozen");
     }
-    Ok(())
+    if let Some(version) = binding.plan_version {
+        if plan_status != Some(crate::TaskPlanStatus::Accepted) {
+            bail!("task continuation requires the accepted plan generation");
+        }
+        return Ok(crate::TaskExecutionBindingV1::Plan {
+            plan_version: version,
+        });
+    }
+    let admission = task
+        .direct_execution_admission
+        .as_ref()
+        .ok_or_else(|| anyhow!("task continuation has no execution authority"))?;
+    admission.validate()?;
+    if !admission.matches_objective(&task.objective) {
+        bail!("direct execution admission does not match the durable Task objective");
+    }
+    Ok(crate::TaskExecutionBindingV1::Direct {
+        admission_id: admission.admission_id.clone(),
+    })
 }
 
 fn ensure_task_started<H>(
@@ -985,3 +1010,7 @@ where
 {
     handler.commit_controls(session, controls).map(|_| ())
 }
+
+#[cfg(test)]
+#[path = "tests/task_handoff_tests.rs"]
+mod tests;

@@ -10,10 +10,9 @@ use crate::{
 };
 
 pub const REQUEST_PLAN_REVIEW_TOOL_NAME: &str = "request_plan_review";
+/// Retired tool name retained only for explicit protocol rejection and durable history.
 pub const SUBMIT_PLAN_DRAFT_TOOL_NAME: &str = "submit_plan_draft";
-/// Model-visible tool used by a submit-only finalizer to confirm a previously preserved,
-/// attempt-bound complete candidate. The candidate body is supplied by the host context; the
-/// model only emits the bounded confirmation enum.
+/// Retired confirmation name retained only for explicit rejection and durable history.
 pub const CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME: &str = "confirm_plan_review_candidate";
 pub const MAX_PLAN_REVIEW_REASON_CODES: usize = 6;
 
@@ -511,11 +510,6 @@ pub struct PlanReviewDraftContext {
     pub source: crate::PlanSourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<String>,
-    /// Complete candidate text already preserved by the host. When present, the model may only
-    /// confirm the candidate through `confirm_plan_review_candidate`; it must not restate or
-    /// replace the body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_content: Option<String>,
 }
 
 /// Stable model-visible contract for one read-only plan review run.
@@ -525,14 +519,14 @@ pub struct PlanReviewDraftContext {
 /// and never becomes DAG authority.
 #[must_use]
 pub fn plan_review_system_prompt_contract_material() -> &'static str {
-    "You are running a read-only plan review for the current request. Perform targeted workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Continue until you can submit a result or the caller's ordinary model-turn budget is exhausted. Around the eighth research turn, reassess whether the evidence supports a result or a clarification request; this is a soft checkpoint and does not remove tools or force completion. Prefer submitting one validated result by calling submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. For draft, content is the complete readable Plan body; for no_plan, content is the reason. When the host supplies a complete preserved candidate and advertises confirm_plan_review_candidate, call that tool with decision accept; do not restate or modify the candidate body. If you cannot reliably call the advertised typed tool, return the complete readable Plan as final text; the host will preserve it as a candidate for review without treating its prose as Task DAG authority. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
+    "You are running a read-only plan review for the current request. Perform targeted workspace research with the read-only tools advertised in this request; reuse evidence already present in the session and do not restart broad reconnaissance. Continue until you can submit a result or the caller's ordinary model-turn budget is exhausted. Around the eighth research turn, reassess whether the evidence supports a result or a clarification request; this is a soft checkpoint and does not remove tools or force completion. Prefer submitting one validated result by calling submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. For draft, content is the complete readable Plan body; for no_plan, content is the reason. If you cannot reliably call the advertised typed tool, return the complete readable Plan as final text; the host will preserve it as a candidate for review without treating its prose as Task DAG authority. Optional intents remain unaccepted proposals. You must not modify the workspace, execute shell commands, spawn agents, or create tasks; the host owns the plan identity, hash, timestamps, permissions and the durable artifact. The user will review the plan and decide whether to create a durable task."
 }
 
 /// Stable host-owned contract injected when an automatic plan review run finished without a
 /// typed result; the retry is bounded to one additional turn.
 #[must_use]
 pub fn plan_review_no_draft_retry_contract_material() -> &'static str {
-    "The research phase is complete and this is the single plan-finalization turn. Do not request more workspace research or repeat reconnaissance. If a complete preserved candidate is supplied and confirm_plan_review_candidate is advertised, call it with decision accept; this is the only confirmation needed and the candidate body must remain byte-for-byte unchanged. Otherwise call submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. The only tool available in this turn is the advertised finalization tool. If you cannot reliably call that tool, return the complete readable Plan as final text instead; the host will preserve it for user review without treating prose as Task DAG authority. Return no_plan only when the recorded evidence is truthfully insufficient to propose any Plan."
+    "The research phase is complete and this is the single plan-finalization turn. Do not request more workspace research or repeat reconnaissance. Use the full research conversation already present in this same session. Call submit_plan_review_result with schema_version 1, outcome draft or no_plan, and complete bounded content. The only tool available in this turn is the advertised finalization tool. If you cannot reliably call that tool, return the complete readable Plan as final text instead; the host will preserve it as unconfirmed evidence; text alone cannot create a ready Plan. Return no_plan only when the recorded evidence is truthfully insufficient to propose any Plan."
 }
 
 /// Derives the retry-stable child session reference for one plan review attempt.
@@ -648,109 +642,6 @@ pub fn request_plan_review_tool_spec() -> ToolSpec {
     }
 }
 
-/// Model-visible schema for the internal `submit_plan_draft` tool.
-///
-/// The host intercepts and audits this tool; it never enters the ordinary tool registry and never
-/// obtains workspace effect. The fenced `sigil-plan-v2` rendering is only a user-visible display
-/// format, not a model-to-host control channel.
-#[must_use]
-pub fn submit_plan_draft_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
-        description: "Submit the readable plan review draft for this request. Use schema_version 2 with a summary and at least one clear step outline; role, dependency, mode, isolation, intent aliases, target paths, risks and suggested checks are optional execution hints. The host owns plan identity, hash, timestamps and the durable artifact. User approval is independent from Task/DAG/intent compilation; incomplete execution hints may block only the post-approval Task materializer, never submission of an otherwise readable plan."
-            .to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "schema_version": {"type": "integer", "const": 2},
-                "summary": {"type": "string", "minLength": 1},
-                "steps": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step_id": {"type": "string"},
-                            "title": {"type": "string"},
-                            "display_name": {
-                                "type": "string",
-                                "maxLength": crate::TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
-                                "description": "Optional short presentation-only step name. Longer execution detail belongs in title or detail."
-                            },
-                            "detail": {"type": "string"},
-                            "role": {"type": "string", "enum": ["planner", "executor", "subagent_read", "subagent_write"]},
-                            "depends_on": {"type": "array", "items": {"type": "string"}},
-                            "intent_aliases": {"type": "array", "items": {"type": "string"}},
-                            "mode": {"type": "string", "enum": ["read", "write", "review"]},
-                            "isolation": {"type": "string", "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"]},
-                            "target_paths": {"type": "array", "items": {"type": "string"}},
-                            "suggested_checks": {"type": "array", "items": {"oneOf": [
-                                {"type": "string"},
-                                {"type": "object", "properties": {"check_spec_id": {"type": "string"}, "command": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}, "effect": {"type": "string", "enum": ["read_only", "workspace_write"]}, "source_line": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
-                            ]}},
-                            "risk": {"type": "string"},
-                            "notes": {"type": "array", "items": {"type": "string"}},
-                            "acceptance": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["title"],
-                        "additionalProperties": false
-                    }
-                },
-                "intents": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "intent_alias": {"type": "string"},
-                            "title": {"type": "string"},
-                            "statement": {"type": "string"},
-                            "acceptance_criteria": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "criterion_alias": {"type": "string"},
-                                        "statement": {"type": "string"},
-                                        "required": {"type": "boolean"}
-                                    },
-                                    "required": ["criterion_alias", "statement", "required"],
-                                    "additionalProperties": false
-                                }
-                            },
-                            "depends_on_aliases": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": ["intent_alias", "title", "statement", "acceptance_criteria"],
-                        "additionalProperties": false
-                    }
-                },
-                "target_paths": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-                "suggested_checks": {
-                    "type": "array",
-                    "items": {"oneOf": [
-                        {"type": "string"},
-                        {"type": "object", "properties": {
-                            "check_spec_id": {"type": "string"},
-                            "command": {"type": "string"},
-                            "args": {"type": "array", "items": {"type": "string"}},
-                            "cwd": {"type": "string"},
-                            "effect": {"type": "string", "enum": ["read_only", "workspace_write"]},
-                            "source_line": {"type": "string"}
-                        }, "required": ["command"], "additionalProperties": false}
-                    ]}
-                },
-                "risk": {"type": "string"},
-                "notes": {"type": "array", "items": {"type": "string"}}
-            },
-            "required": ["schema_version", "summary", "steps", "target_paths", "suggested_checks"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
 /// Model-visible schema for the provider-neutral Plan review result envelope.
 ///
 /// The host owns the Plan identity, source lineage, hash, timestamp, and every execution
@@ -769,30 +660,6 @@ pub fn submit_plan_review_result_tool_spec() -> ToolSpec {
                 "content": {"type": "string", "minLength": 1, "maxLength": 65536}
             },
             "required": ["schema_version", "outcome", "content"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-/// Model-visible schema for confirming one complete host-preserved Plan candidate.
-///
-/// The candidate body is bound in [`PlanReviewDraftContext`]. This tool intentionally accepts no
-/// content field, so confirmation cannot silently alter the hash-bound candidate text.
-#[must_use]
-pub fn confirm_plan_review_candidate_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME.to_owned(),
-        description: "Confirm the complete Plan candidate already supplied by the host. Emit decision accept only; the host owns the exact candidate body, identity, hash, timestamps, permissions, and execution authority.".to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "decision": {"type": "string", "enum": ["accept"]}
-            },
-            "required": ["decision"],
             "additionalProperties": false
         }),
         category: ToolCategory::Custom,
@@ -1646,6 +1513,24 @@ fn recover_plan_review_finalizer_draft(
     let Some(parent_dir) = parent.store_path().and_then(std::path::Path::parent) else {
         return Ok(None);
     };
+    let research_path = attempt.child_session_ref.resolve(parent_dir);
+    if research_path.exists() {
+        let records = crate::JsonlSessionStore::read_event_records(&research_path)?;
+        if let Some(draft) = recover_plan_review_draft_from_child_records(attempt, &records)? {
+            return Ok(Some(draft));
+        }
+        for record in &records {
+            if matches!(
+                record.session_log_entry()?,
+                Some(crate::SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft)))
+                    if draft.plan_id == attempt.plan_id
+            ) {
+                // A current submission that did not settle cannot be replaced by an older
+                // isolated-finalizer result belonging to the same attempt.
+                return Ok(None);
+            }
+        }
+    }
     let mut refs = attempt
         .finalizer_session_ref
         .clone()
@@ -1675,22 +1560,153 @@ fn recover_plan_review_finalizer_draft(
             if draft.plan_id != attempt.plan_id {
                 continue;
             }
-            if draft.source.source_turn.as_ref() != Some(&attempt.source_turn)
-                || draft.source.route_decision_id != attempt.route_decision_id
-                || draft.source.plan_review_id.as_ref() != Some(&attempt.plan_review_id)
-                || draft.workspace_snapshot_id != attempt.workspace_snapshot_id
-            {
-                anyhow::bail!(
-                    "plan review finalizer child {} contains a draft with mismatched lineage",
-                    child_ref.as_path().display()
-                );
-            }
+            validate_recovered_plan_review_draft_lineage(&draft, attempt)?;
             return Ok(Some(draft));
         }
     }
     Ok(None)
 }
 
+fn validate_recovered_plan_review_draft_lineage(
+    draft: &crate::PlanDraftCreatedEntry,
+    attempt: &PlanReviewAttemptEntry,
+) -> Result<()> {
+    if draft.plan_id != attempt.plan_id
+        || draft.source.source_turn.as_ref() != Some(&attempt.source_turn)
+        || draft.source.route_decision_id != attempt.route_decision_id
+        || draft.source.plan_review_id.as_ref() != Some(&attempt.plan_review_id)
+        || draft.workspace_snapshot_id != attempt.workspace_snapshot_id
+    {
+        bail!("plan review child contains a draft with mismatched lineage");
+    }
+    Ok(())
+}
+
+/// Recovers a completely settled current typed draft from authority-owned child records.
+///
+/// The caller must obtain this exact child's records through its existing resource authority.
+/// This function neither resolves physical paths nor changes parent state. Research prose, a
+/// partial submission, and a child run that subsequently failed are not successful Plan results.
+/// Historical isolated-finalizer formats remain handled by their separate SessionRef reader.
+///
+/// # Errors
+///
+/// Returns an error for malformed records, conflicting drafts or mismatched source lineage.
+pub fn recover_plan_review_draft_from_child_records(
+    attempt: &PlanReviewAttemptEntry,
+    records: &[crate::SessionStreamRecord],
+) -> Result<Option<crate::PlanDraftCreatedEntry>> {
+    if !matches!(
+        attempt.status,
+        PlanReviewAttemptStatus::Started | PlanReviewAttemptStatus::Finalizing
+    ) {
+        return Ok(None);
+    }
+    let entries = records
+        .iter()
+        .map(crate::SessionStreamRecord::session_log_entry)
+        .collect::<Result<Vec<_>>>()?;
+    let mut candidate = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(crate::SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft))) = entry
+        else {
+            continue;
+        };
+        if draft.plan_id != attempt.plan_id {
+            continue;
+        }
+        validate_recovered_plan_review_draft_lineage(draft, attempt)?;
+        if let Some((_, previous)) = candidate {
+            if previous != draft {
+                bail!("plan review child contains conflicting durable drafts");
+            }
+        } else {
+            candidate = Some((index, draft));
+        }
+    }
+    let Some((draft_index, draft)) = candidate else {
+        return Ok(None);
+    };
+    let Some(assistant) = entries[..draft_index]
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Some(crate::SessionLogEntry::Assistant(assistant)) => Some(assistant),
+            _ => None,
+        })
+    else {
+        return Ok(None);
+    };
+    let submitted = assistant.tool_calls.iter().find_map(|call| {
+        if call.name != crate::PLAN_REVIEW_RESULT_TOOL_NAME {
+            return None;
+        }
+        crate::submit_plan_review_result(
+            &call.args_json,
+            attempt.plan_id.clone(),
+            draft.source.clone(),
+            draft.created_at_ms,
+            draft.workspace_snapshot_id.clone(),
+        )
+        .ok()
+        .map(|result| (call, result))
+    });
+    let Some((call, crate::PlanReviewResult::Draft(expected))) = submitted else {
+        return Ok(None);
+    };
+    if expected.as_ref() != draft {
+        bail!("plan review child draft does not match its successful typed submission");
+    }
+    let mut execution_completed = false;
+    let mut result_settled = false;
+    let mut run_completed = false;
+    for (entry, record) in entries[draft_index + 1..]
+        .iter()
+        .zip(&records[draft_index + 1..])
+    {
+        match entry {
+            Some(crate::SessionLogEntry::Assistant(_)) => return Ok(None),
+            Some(crate::SessionLogEntry::Control(ControlEntry::ToolExecution(execution)))
+                if execution.call_id == call.id && execution.tool_name == call.name =>
+            {
+                if execution.status != crate::ToolExecutionStatus::Completed {
+                    return Ok(None);
+                }
+                execution_completed = true;
+            }
+            Some(crate::SessionLogEntry::ToolResultV3(result)) if result.call_id == call.id => {
+                if result.tool_name != call.name
+                    || result.facts.status != "ok"
+                    || result.facts.error.is_some()
+                {
+                    return Ok(None);
+                }
+                result_settled = execution_completed;
+            }
+            _ => {}
+        }
+        let event = record.stored_event();
+        if crate::DurableEventType::from_event_type(&event.event_type)
+            == Some(crate::DurableEventType::RunFinalized)
+        {
+            if event
+                .payload
+                .get("run_status")
+                .and_then(serde_json::Value::as_str)
+                != Some("completed")
+            {
+                return Ok(None);
+            }
+            run_completed = result_settled;
+        }
+    }
+    Ok(run_completed.then(|| draft.clone()))
+}
+
 #[cfg(test)]
 #[path = "tests/conversation_route_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/plan_review_recovery_tests.rs"]
+mod plan_review_recovery_tests;

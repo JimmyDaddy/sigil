@@ -169,6 +169,8 @@ pub enum ContinuationEvidenceStatus {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContinuationSnapshotScope {
     SnapshotIndependent,
+    /// Workspace observation was unavailable; content must be rechecked against current files.
+    SnapshotUnavailable,
     CapturedAt(crate::WorkspaceSnapshotId),
 }
 
@@ -343,6 +345,7 @@ SOURCE_INDEX={source_json}"
         tool_calls: Vec::new(),
         tool_call_id: None,
         assistant_kind: None,
+        logical_run_id: None,
         image_attachments: Vec::new(),
         tool_result_payload: None,
     })
@@ -647,13 +650,19 @@ impl ContinuationCheckpointV1 {
         }
         let valid_for_snapshot = task_memory.valid_for_snapshot.clone();
         let in_progress =
-            model_items_from_output(catalog, &valid_for_snapshot, output.in_progress)?;
-        let pending_actions =
-            model_items_from_output(catalog, &valid_for_snapshot, output.pending_actions)?;
-        let provider_continuity =
-            model_items_from_output(catalog, &valid_for_snapshot, output.provider_continuity)?;
+            model_items_from_output(catalog, valid_for_snapshot.as_deref(), output.in_progress)?;
+        let pending_actions = model_items_from_output(
+            catalog,
+            valid_for_snapshot.as_deref(),
+            output.pending_actions,
+        )?;
+        let provider_continuity = model_items_from_output(
+            catalog,
+            valid_for_snapshot.as_deref(),
+            output.provider_continuity,
+        )?;
         let model_notes =
-            model_items_from_output(catalog, &valid_for_snapshot, output.model_notes)?;
+            model_items_from_output(catalog, valid_for_snapshot.as_deref(), output.model_notes)?;
         let session_anchor = SessionAnchorV1::derive(records, task_memory, completed_at_unix_ms)?;
         let narrative_items = [
             in_progress.as_slice(),
@@ -682,7 +691,7 @@ impl ContinuationCheckpointV1 {
             kind: ContinuationCheckpointKind::PortableSemantic,
             language: language.into(),
             task_memory_id: Some(task_memory.memory_id.clone()),
-            valid_for_snapshot: Some(valid_for_snapshot.clone()),
+            valid_for_snapshot: valid_for_snapshot.clone(),
             source_plan_cursor: Some(plan.base_stream_cursor.clone()),
             adaptive_tail: Some(plan.adaptive_tail.clone()),
             prior_folded_through: plan.prior_folded_through.clone(),
@@ -737,6 +746,7 @@ impl ContinuationCheckpointV1 {
             tool_calls: Vec::new(),
             tool_call_id: None,
             assistant_kind: None,
+            logical_run_id: None,
             image_attachments: Vec::new(),
             tool_result_payload: None,
         })
@@ -810,8 +820,8 @@ impl ContinuationCheckpointV1 {
         {
             bail!("continuation checkpoint snapshot id is empty");
         }
-        if self.task_memory_id.is_some() != self.valid_for_snapshot.is_some() {
-            bail!("continuation checkpoint memory and snapshot bindings must appear together");
+        if self.valid_for_snapshot.is_some() && self.task_memory_id.is_none() {
+            bail!("continuation checkpoint snapshot requires a memory binding");
         }
         if self.session_anchor.is_some() != self.continuity_v2.is_some() {
             bail!("continuation checkpoint anchor and V2 continuity must appear together");
@@ -833,7 +843,8 @@ impl ContinuationCheckpointV1 {
                 }
             }
             ContinuationCheckpointKind::ProviderNative => {
-                if self.task_memory_id.is_none()
+                if self.valid_for_snapshot.is_none()
+                    || self.task_memory_id.is_none()
                     || self.source_plan_cursor.is_some()
                     || self.adaptive_tail.is_some()
                     || self.prior_folded_through.is_some()
@@ -935,7 +946,7 @@ impl ContinuationCheckpointV1 {
                 validate_model_item_against_catalog(
                     item,
                     catalog,
-                    &task_memory.valid_for_snapshot,
+                    task_memory.valid_for_snapshot.as_deref(),
                 )?;
             }
         }
@@ -991,7 +1002,7 @@ impl ContinuationCheckpointV1 {
         self.validate_shape()?;
         task_memory.validate()?;
         if self.task_memory_id.as_deref() != Some(task_memory.memory_id.as_str())
-            || self.valid_for_snapshot.as_deref() != Some(task_memory.valid_for_snapshot.as_str())
+            || self.valid_for_snapshot.as_deref() != task_memory.valid_for_snapshot.as_deref()
         {
             bail!("continuation checkpoint does not match task memory binding");
         }
@@ -999,9 +1010,16 @@ impl ContinuationCheckpointV1 {
     }
 }
 
+fn model_snapshot_scope(snapshot: Option<&str>) -> ContinuationSnapshotScope {
+    match snapshot {
+        Some(snapshot) => ContinuationSnapshotScope::CapturedAt(snapshot.to_owned()),
+        None => ContinuationSnapshotScope::SnapshotUnavailable,
+    }
+}
+
 fn model_items_from_output(
     catalog: &ContinuationSourceCatalog,
-    valid_for_snapshot: &str,
+    valid_for_snapshot: Option<&str>,
     output: Vec<ContinuationModelOutputItemV1>,
 ) -> Result<Vec<ContinuationItemV1>> {
     if output.len() > MAX_CONTINUATION_CHECKPOINT_SECTION_ITEMS {
@@ -1036,9 +1054,7 @@ fn model_items_from_output(
                 sensitivity,
                 redaction: ContinuationRedaction::Unmodified,
                 egress_decision_event_id: None,
-                snapshot_scope: ContinuationSnapshotScope::CapturedAt(
-                    valid_for_snapshot.to_owned(),
-                ),
+                snapshot_scope: model_snapshot_scope(valid_for_snapshot),
                 evidence_status: ContinuationEvidenceStatus::ModelGeneratedUnverified,
                 priority: item.priority,
             };
@@ -1078,15 +1094,14 @@ fn grounded_narrative_item(
 fn validate_model_item_against_catalog(
     item: &ContinuationItemV1,
     catalog: &ContinuationSourceCatalog,
-    valid_for_snapshot: &str,
+    valid_for_snapshot: Option<&str>,
 ) -> Result<()> {
     if item.origin != ContinuationItemOrigin::ModelGenerated
         || item.authority != ContinuationItemAuthority::ModelGeneratedUnverified
         || item.evidence_status != ContinuationEvidenceStatus::ModelGeneratedUnverified
         || item.egress_decision_event_id.is_some()
         || item.redaction != ContinuationRedaction::Unmodified
-        || item.snapshot_scope
-            != ContinuationSnapshotScope::CapturedAt(valid_for_snapshot.to_owned())
+        || item.snapshot_scope != model_snapshot_scope(valid_for_snapshot)
         || contains_authority_claim(&item.text)
     {
         bail!("continuation model item violates the unverified authority contract");
@@ -2010,14 +2025,12 @@ fn validate_memory_activation(
     if recorded.entry.memory.branch_id != entry.branch_id {
         bail!("task memory branch does not match AppliedV2 branch");
     }
-    if entry.valid_for_snapshot.as_deref()
-        != Some(recorded.entry.memory.valid_for_snapshot.as_str())
-    {
+    if entry.valid_for_snapshot.as_deref() != recorded.entry.memory.valid_for_snapshot.as_deref() {
         bail!("task memory snapshot does not match AppliedV2 snapshot");
     }
     if entry.checkpoint.task_memory_id.as_deref() != Some(recorded.entry.memory.memory_id.as_str())
         || entry.checkpoint.valid_for_snapshot.as_deref()
-            != Some(recorded.entry.memory.valid_for_snapshot.as_str())
+            != recorded.entry.memory.valid_for_snapshot.as_deref()
     {
         bail!("continuation checkpoint does not match activated task memory");
     }

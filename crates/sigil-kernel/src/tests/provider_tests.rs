@@ -14,6 +14,44 @@ use super::{
 };
 
 #[test]
+fn assistant_batch_run_binding_survives_safe_persistence_and_reload() -> Result<()> {
+    let run_id = crate::LogicalRunId::new("assistant-batch-run")?;
+    let mut message = ModelMessage::assistant_with_kind(
+        None,
+        vec![ToolCall {
+            id: "batch-call".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"README.md"}"#.to_owned(),
+        }],
+        crate::AssistantMessageKind::ToolPreamble,
+    );
+    message.logical_run_id = Some(run_id.clone());
+    let (durable, _) = crate::project_message_for_persistence(message)?;
+    let encoded = serde_json::to_vec(&durable)?;
+    let reloaded: ModelMessage = serde_json::from_slice(&encoded)?;
+    assert_eq!(reloaded.logical_run_id, Some(run_id));
+    assert_eq!(reloaded.id, durable.id);
+    assert_eq!(reloaded.tool_calls[0].id, "batch-call");
+    Ok(())
+}
+
+#[test]
+fn legacy_assistant_batch_has_unknown_run_binding() -> Result<()> {
+    let message: ModelMessage = serde_json::from_value(serde_json::json!({
+        "id": "legacy-batch",
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [{"id": "old-call", "name": "ls", "args_json": "{}"}],
+        "tool_call_id": null,
+        "assistant_kind": "tool_preamble"
+    }))?;
+    assert_eq!(message.logical_run_id, None);
+    let encoded = serde_json::to_value(&message)?;
+    assert!(encoded.get("logical_run_id").is_none());
+    Ok(())
+}
+
+#[test]
 fn session_stats_track_latest_prompt_tokens_separately_from_totals() {
     let mut stats = SessionStats::default();
     stats.apply_usage(&UsageStats {

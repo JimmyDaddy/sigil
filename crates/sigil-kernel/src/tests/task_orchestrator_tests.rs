@@ -82,6 +82,7 @@ fn direct_execution_prompt_keeps_the_same_task_and_applies_current_follow_up() {
 
 #[derive(Clone, Default)]
 struct CapturingDirectContinuationRunner {
+    outcome: crate::AgentRunOutcome,
     inputs: Arc<Mutex<Vec<AgentRunInput>>>,
 }
 
@@ -107,7 +108,7 @@ impl TaskChildSessionRunner for CapturingDirectContinuationRunner {
             attempt_id,
             final_text: "direct continuation completed".to_owned(),
             final_message_id: Some("direct-continuation-final".to_owned()),
-            outcome: crate::AgentRunOutcome::default(),
+            outcome: self.outcome.clone(),
             disposition: crate::AgentRunDisposition::FinalAnswer,
         })
     }
@@ -180,6 +181,7 @@ async fn direct_continuation_keeps_checklist_tool_context_after_follow_up() -> R
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
+    let source_scope = session.session_scope_id().to_owned();
     let output = orchestrator
         .continue_direct_run(
             &mut session,
@@ -189,7 +191,14 @@ async fn direct_continuation_keeps_checklist_tool_context_after_follow_up() -> R
                 objective: objective.to_owned(),
             },
             options(),
-            Some("What is the current verification doing?"),
+            Some((
+                "What is the current verification doing?",
+                &crate::ConversationTurnRef::new(
+                    source_scope.clone(),
+                    "direct-guidance-message",
+                    "direct-guidance-run",
+                )?,
+            )),
             &mut handler,
             &mut approval,
         )
@@ -567,9 +576,7 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
         readiness
             .policy_hash
             .expect("task readiness should bind the policy"),
-        readiness
-            .workspace_snapshot_id
-            .expect("changed task readiness should bind the workspace snapshot"),
+        readiness.workspace_snapshot_id,
     );
     Ok(TaskVerificationRerunFixture {
         _temp: temp,
@@ -2199,7 +2206,7 @@ async fn synthesis_does_not_start_before_integration_parent_verification() -> Re
             SequentialTaskRequest {
                 task_id: task_id.clone(),
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "do not synthesize before parent checks".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -2815,7 +2822,7 @@ async fn continue_resumes_started_synthesis_in_its_existing_child_session() -> R
             SequentialTaskRequest {
                 task_id: task_id.clone(),
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "resume final synthesis without replacing its child".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -3699,7 +3706,7 @@ async fn sequential_task_orchestrator_continues_dependent_steps_until_completed(
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "fix typo".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -5225,7 +5232,7 @@ async fn ready_read_batch_starts_together_and_defers_dependent_write() -> Result
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "read before write".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -5345,7 +5352,7 @@ async fn read_batch_commits_independent_success_before_blocking_failed_dependent
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "preserve independent read results".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -5435,7 +5442,7 @@ async fn changeset_only_ready_steps_batch_proposals_without_parent_workspace_mut
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "propose independent changes".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options.clone(),
             options.clone(),
@@ -5721,7 +5728,7 @@ async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_st
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "blocked by lease".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             run_options.clone(),
             run_options.clone(),
@@ -5817,7 +5824,7 @@ async fn task_write_isolation_blocks_dependents_after_failed_write() -> Result<(
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "failed write blocks dependent".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -7414,7 +7421,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_denied_route
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "delegate write".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -7468,7 +7475,7 @@ async fn subagent_write_step_rejects_non_changeset_isolation_before_approved_rou
             SequentialTaskRequest {
                 task_id: TaskId::new("task_1")?,
                 parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-                objective: "delegate write".to_owned(),
+                objective: "inspect implementation".to_owned(),
             },
             options(),
             options(),
@@ -8698,8 +8705,8 @@ fn exact_task_verification_rerun_reuses_durable_check_lifecycle() -> Result<()> 
         request.check_spec_hash
     );
     assert_eq!(
-        output.verification.receipt.binding.workspace_snapshot_id,
-        request.workspace_snapshot_id
+        Some(&output.verification.receipt.binding.workspace_snapshot_id),
+        request.workspace_snapshot_id.as_ref()
     );
     let statuses = session
         .entries()
@@ -8729,19 +8736,22 @@ fn exact_task_verification_rerun_reuses_durable_check_lifecycle() -> Result<()> 
     let projection = session.verification_state_projection();
     assert!(projection.receipt_link(receipt_id).is_some_and(|link| {
         !link.receipt_event_id.is_empty()
-            && link.workspace_snapshot_id == request.workspace_snapshot_id
+            && Some(&link.workspace_snapshot_id) == request.workspace_snapshot_id.as_ref()
             && link.changeset_id.is_none()
             && link.changeset_apply_event_id.is_none()
     }));
-    let error = futures::executor::block_on(rerun_task_verification_check(
+    let rerun = futures::executor::block_on(rerun_task_verification_check(
         &mut session,
         &mut handler,
         &backend,
         &workspace,
         &request,
-    ))
-    .expect_err("a successful rendered binding must not execute twice");
-    assert!(error.to_string().contains("already succeeded"));
+    ))?;
+    assert_eq!(
+        rerun.check_run.status,
+        crate::VerificationCheckRunStatus::Succeeded
+    );
+    assert_ne!(rerun.check_run.run_id, output.check_run.run_id);
     assert_eq!(
         session
             .entries()
@@ -8751,13 +8761,13 @@ fn exact_task_verification_rerun_reuses_durable_check_lifecycle() -> Result<()> 
                 SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
             ))
             .count(),
-        3
+        6
     );
     Ok(())
 }
 
 #[test]
-fn exact_task_verification_rerun_rejects_workspace_drift_before_queue() -> Result<()> {
+fn exact_task_verification_rerun_observes_current_workspace_after_drift() -> Result<()> {
     let TaskVerificationRerunFixture {
         _temp,
         workspace,
@@ -8768,21 +8778,110 @@ fn exact_task_verification_rerun_rejects_workspace_drift_before_queue() -> Resul
     let mut handler = RecordingEventHandler::default();
     let backend = FakeTaskExecutionBackend;
 
-    let error = futures::executor::block_on(rerun_task_verification_check(
+    let output = futures::executor::block_on(rerun_task_verification_check(
         &mut session,
         &mut handler,
         &backend,
         &workspace,
         &request,
-    ))
-    .expect_err("workspace drift must reject the rendered rerun binding");
+    ))?;
+    assert_eq!(
+        output.check_run.status,
+        crate::VerificationCheckRunStatus::Succeeded
+    );
+    assert_ne!(
+        Some(&output.verification.receipt.binding.workspace_snapshot_id),
+        request.workspace_snapshot_id.as_ref()
+    );
+    let current = crate::build_workspace_snapshot(
+        &workspace,
+        crate::stable_workspace_id(&workspace)?,
+        &session
+            .verification_state_projection()
+            .latest_policy(&EvidenceScope::Task(request.task_id.as_str().to_owned()))
+            .expect("policy")
+            .policy
+            .verification_scope,
+        0,
+    )?;
+    assert_eq!(
+        Some(output.verification.receipt.binding.workspace_snapshot_id),
+        current.workspace_snapshot_id
+    );
+    Ok(())
+}
 
-    assert!(error.to_string().contains("workspace changed"));
-    assert!(!session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(_))
-    )));
-    assert!(handler.events.is_empty());
+#[test]
+fn verification_rerun_action_survives_missing_rendered_snapshot() -> Result<()> {
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        request,
+    } = task_verification_rerun_fixture()?;
+    let scope = EvidenceScope::Step(format!(
+        "{}:{}",
+        request.task_id.as_str(),
+        request.step_id.as_str()
+    ));
+    let mut readiness = session
+        .verification_state_projection()
+        .latest_readiness(&scope)
+        .expect("readiness")
+        .clone();
+    readiness.workspace_snapshot_id = None;
+    session.append_control(ControlEntry::ReadinessEvaluated(readiness))?;
+    let view = crate::verification_product_view(session.entries()).expect("verification card");
+    let Some(crate::VerificationProductAction::Rerun(request)) = view.action else {
+        panic!("missing workspace observation must not hide the rerun action");
+    };
+    assert!(request.workspace_snapshot_id.is_none());
+    assert!(request.has_exact_identity());
+    let output = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut RecordingEventHandler::default(),
+        &FakeTaskExecutionBackend,
+        &workspace,
+        &request,
+    ))?;
+    assert_eq!(
+        output.check_run.status,
+        crate::VerificationCheckRunStatus::Succeeded
+    );
+    assert!(
+        !output
+            .verification
+            .receipt
+            .binding
+            .workspace_snapshot_id
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn verification_rerun_with_incomplete_current_snapshot_records_inconclusive_evidence() -> Result<()>
+{
+    let TaskVerificationRerunFixture {
+        _temp,
+        workspace,
+        mut session,
+        request,
+    } = task_verification_rerun_fixture()?;
+    std::os::unix::fs::symlink("missing-target", workspace.join("unreadable.rs"))?;
+    let output = futures::executor::block_on(rerun_task_verification_check(
+        &mut session,
+        &mut RecordingEventHandler::default(),
+        &FakeTaskExecutionBackend,
+        &workspace,
+        &request,
+    ))?;
+    assert_eq!(
+        output.check_run.status,
+        crate::VerificationCheckRunStatus::Inconclusive
+    );
+    assert!(output.verification.receipt.mutates_verification_scope);
     Ok(())
 }
 
@@ -10412,6 +10511,10 @@ fn seed_two_step_task(
     Ok(())
 }
 
+/// Seeds the durable Task generation the continuation fixtures operate on.
+///
+/// Continuation requests must repeat the durable `TaskRunEntry.objective` recorded here: committed
+/// plan recovery rejects a request that identifies a different task generation.
 fn seed_task_with_steps(
     session: &mut Session,
     status: TaskRunStatus,
@@ -10467,6 +10570,7 @@ fn task_step_entry_index(
     })
 }
 
+/// Seeds the same durable Task generation as [`seed_task_with_steps`] with a single step.
 fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Result<()> {
     session.append_control(ControlEntry::TaskRun(crate::TaskRunEntry {
         task_id: TaskId::new("task_1")?,
@@ -10600,3 +10704,397 @@ fn capabilities() -> ProviderCapabilities {
         tool_name_max_chars: 64,
     }
 }
+
+fn direct_completion_fixture() -> Result<(
+    tempfile::TempDir,
+    Session,
+    SequentialTaskRequest,
+    AgentRunOptions,
+)> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("fixture", "model").with_store(store);
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("direct-completion")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect and verify the requested result".to_owned(),
+    };
+    let admission = crate::TaskDirectExecutionAdmittedV1::planner_fallback(
+        request.task_id.clone(),
+        &request.objective,
+        "planner-completion",
+        1,
+    );
+    session.append_controls(vec![
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: request.task_id.clone(),
+            parent_session_ref: request.parent_session_ref.clone(),
+            objective: request.objective.clone(),
+            title: None,
+            status: TaskRunStatus::Paused,
+            reason: None,
+        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
+    ])?;
+    let mut options = options();
+    options.workspace_root = workspace;
+    Ok((temp, session, request, options))
+}
+
+fn direct_completion_check(
+    session: &mut Session,
+    task_id: &TaskId,
+    command: &str,
+    auto_run: bool,
+) -> Result<()> {
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: command.to_owned(),
+            args: Vec::new(),
+            cwd: None,
+        },
+        source_event_id: "direct-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "direct-check",
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "direct-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task(task_id.as_str().to_owned()),
+            trusted,
+            "direct-config",
+        ),
+    ))?;
+    if auto_run {
+        append_trusted_only_policy_for_task(session, task_id.as_str())?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_rejects_blocked_outcome_even_with_final_answer() -> Result<()> {
+    for outcome in [
+        crate::AgentRunOutcome {
+            terminal_reason: crate::AgentRunTerminalReason::FinalAnswerBlocked,
+            ..Default::default()
+        },
+        crate::AgentRunOutcome {
+            interrupted_tool_calls: vec!["uncertain-call".to_owned()],
+            ..Default::default()
+        },
+    ] {
+        let (_temp, mut session, request, options) = direct_completion_fixture()?;
+        let runner = CapturingDirectContinuationRunner {
+            outcome,
+            ..Default::default()
+        };
+        let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(runner);
+        let output = orchestrator
+            .continue_direct_run(
+                &mut session,
+                request.clone(),
+                options,
+                None,
+                &mut RecordingEventHandler::default(),
+                &mut AutoApproveHandler,
+            )
+            .await?;
+        assert_eq!(output.status, TaskRunStatus::Paused);
+        let task = session
+            .task_state_projection()
+            .tasks
+            .remove(&request.task_id)
+            .expect("task");
+        assert!(
+            task.direct_execution_attempts
+                .values()
+                .all(|attempt| attempt.status != TaskParticipantAttemptStatus::Completed)
+        );
+        assert!(
+            task.plans.is_empty(),
+            "this is the real Direct path without a step"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_requires_configured_check_and_accepts_valid_receipt() -> Result<()>
+{
+    for (command, auto_run, expected) in [
+        ("true", false, TaskRunStatus::Paused),
+        ("false", true, TaskRunStatus::Paused),
+        ("true", true, TaskRunStatus::Completed),
+    ] {
+        let (_temp, mut session, request, options) = direct_completion_fixture()?;
+        direct_completion_check(&mut session, &request.task_id, command, auto_run)?;
+        let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+            CapturingDirectContinuationRunner::default(),
+        )
+        .with_execution_backend(Arc::new(FakeTaskExecutionBackend));
+        let output = orchestrator
+            .continue_direct_run(
+                &mut session,
+                request.clone(),
+                options,
+                None,
+                &mut RecordingEventHandler::default(),
+                &mut AutoApproveHandler,
+            )
+            .await?;
+        assert_eq!(
+            output.status, expected,
+            "command={command}, auto_run={auto_run}"
+        );
+        let projection = session.verification_state_projection();
+        let readiness = projection
+            .latest_readiness(&EvidenceScope::Task(request.task_id.as_str().to_owned()))
+            .expect("Task readiness");
+        assert_eq!(
+            readiness.evaluation.verification_verdict == VerificationVerdict::Passed,
+            expected == TaskRunStatus::Completed
+        );
+        assert!(
+            session.task_state_projection().tasks[&request.task_id]
+                .plans
+                .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_without_checks_is_not_applicable() -> Result<()> {
+    let (_temp, mut session, request, options) = direct_completion_fixture()?;
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        CapturingDirectContinuationRunner::default(),
+    );
+    let output = orchestrator
+        .continue_direct_run(
+            &mut session,
+            request.clone(),
+            options,
+            None,
+            &mut RecordingEventHandler::default(),
+            &mut AutoApproveHandler,
+        )
+        .await?;
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    let projection = session.verification_state_projection();
+    assert_eq!(
+        projection
+            .latest_readiness(&EvidenceScope::Task(request.task_id.as_str().to_owned()))
+            .expect("readiness")
+            .evaluation
+            .verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_keeps_unknown_effect_paused_after_probe_terminal() -> Result<()> {
+    for (terminal, other_task, expected) in [
+        (None, false, TaskRunStatus::Paused),
+        (
+            Some(crate::EffectReconciliationOutcomeV1::StillUncertain),
+            false,
+            TaskRunStatus::Paused,
+        ),
+        (
+            Some(crate::EffectReconciliationOutcomeV1::ObservedApplied),
+            false,
+            TaskRunStatus::Completed,
+        ),
+        (
+            Some(crate::EffectReconciliationOutcomeV1::ObservedNotApplied),
+            false,
+            TaskRunStatus::Completed,
+        ),
+        (None, true, TaskRunStatus::Completed),
+    ] {
+        let (_temp, mut session, request, options) = direct_completion_fixture()?;
+        let required = crate::EffectReconciliationRequiredEntryV1 {
+            schema_version: crate::EFFECT_RECONCILIATION_SCHEMA_VERSION,
+            reconciliation_id: "direct-effect-recovery".to_owned(),
+            effect_id: "old-attempt-call".to_owned(),
+            effect_digest: format!("sha256:{}", "a".repeat(64)),
+            replay_contract_fingerprint: "tool-replay-v1:non_replayable_unknown_effect".to_owned(),
+            reason_code: "tool_outcome_uncertain".to_owned(),
+            requested_at_unix_ms: 1,
+            logical_run_id: None,
+            task_id: Some(if other_task {
+                "other-task".to_owned()
+            } else {
+                request.task_id.as_str().to_owned()
+            }),
+            step_id: None,
+            participant_attempt_id: None,
+            base_workspace_observation_id: None,
+            current_workspace_observation_id: None,
+            known_receipt_ids: Vec::new(),
+            allowed_probe_kinds: Vec::new(),
+            probe_budget_ms: 0,
+        };
+        let recorder = MutationEventRecorder::new(session.durable_store().expect("fixture store"));
+        recorder.append_effect_reconciliation_required(&required)?;
+        if let Some(outcome) = terminal {
+            recorder.append_effect_reconciliation_terminal(
+                &crate::EffectReconciliationTerminalEntryV1 {
+                    schema_version: crate::EFFECT_RECONCILIATION_SCHEMA_VERSION,
+                    reconciliation_id: required.reconciliation_id.clone(),
+                    effect_id: required.effect_id.clone(),
+                    effect_digest: required.effect_digest.clone(),
+                    outcome,
+                    probe_receipt_digest: None,
+                    probe_id: None,
+                },
+            )?;
+        }
+        let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+            CapturingDirectContinuationRunner::default(),
+        );
+        let output = orchestrator
+            .continue_direct_run(
+                &mut session,
+                request,
+                options,
+                None,
+                &mut RecordingEventHandler::default(),
+                &mut AutoApproveHandler,
+            )
+            .await?;
+        assert_eq!(
+            output.status, expected,
+            "terminal={terminal:?}, other_task={other_task}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_does_not_keep_repaired_check_failure_blocked() -> Result<()> {
+    let (_temp, mut session, request, options) = direct_completion_fixture()?;
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        CapturingDirectContinuationRunner::default(),
+    )
+    .with_execution_backend(Arc::new(FakeTaskExecutionBackend));
+    direct_completion_check(&mut session, &request.task_id, "false", true)?;
+    let first = orchestrator
+        .continue_direct_run(
+            &mut session,
+            request.clone(),
+            options.clone(),
+            None,
+            &mut RecordingEventHandler::default(),
+            &mut AutoApproveHandler,
+        )
+        .await?;
+    assert_eq!(first.status, TaskRunStatus::Paused);
+    direct_completion_check(&mut session, &request.task_id, "true", true)?;
+    let second = orchestrator
+        .continue_direct_run(
+            &mut session,
+            request.clone(),
+            options,
+            None,
+            &mut RecordingEventHandler::default(),
+            &mut AutoApproveHandler,
+        )
+        .await?;
+    assert_eq!(second.status, TaskRunStatus::Completed);
+    let task = session
+        .task_state_projection()
+        .tasks
+        .remove(&request.task_id)
+        .expect("task");
+    assert_eq!(task.direct_execution_attempts.len(), 2);
+    let receipts = session.verification_state_projection();
+    assert!(
+        receipts
+            .receipts
+            .values()
+            .any(|entry| entry.receipt.check_status == crate::ReceiptStatus::Failed)
+    );
+    assert!(
+        receipts
+            .receipts
+            .values()
+            .any(|entry| entry.receipt.check_status == crate::ReceiptStatus::Succeeded)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_task_completion_requires_current_recovery_blocker_resolution() -> Result<()> {
+    let (_temp, mut session, request, options) = direct_completion_fixture()?;
+    session.append_recovery_blocker_raised(crate::RecoveryBlockerRaisedV1 {
+        blocker: crate::RecoveryBlockerV1 {
+            schema_version: crate::RECOVERY_BLOCKER_SCHEMA_VERSION,
+            blocker_id: "direct-blocker".to_owned(),
+            domain: crate::RecoveryDomainV1::EffectReconciliation,
+            scope: crate::FailureScopeV1::Task {
+                task_id: request.task_id.clone(),
+            },
+            recoverability: crate::RecoverabilityV1::ReconcileEffect,
+            settlement: crate::EffectSettlementV1::OutcomeUncertain,
+            reason_code: "effect_outcome_uncertain".to_owned(),
+            safe_summary: "effect requires reconciliation".to_owned(),
+            evidence_digest: format!("sha256:{}", "a".repeat(64)),
+            effect_id: None,
+            available_actions: vec![crate::RecoveryActionV1::ReconcileEffect],
+            created_at_ms: 1,
+        },
+    })?;
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        CapturingDirectContinuationRunner::default(),
+    );
+    let first = orchestrator
+        .continue_direct_run(
+            &mut session,
+            request.clone(),
+            options.clone(),
+            None,
+            &mut RecordingEventHandler::default(),
+            &mut AutoApproveHandler,
+        )
+        .await?;
+    assert_eq!(first.status, TaskRunStatus::Paused);
+    session.append_recovery_blocker_resolution_started(
+        crate::RecoveryBlockerResolutionStartedV1 {
+            blocker_id: "direct-blocker".to_owned(),
+            action: crate::RecoveryActionV1::ReconcileEffect,
+            attempt_id: "direct-probe".to_owned(),
+            started_at_ms: 2,
+        },
+    )?;
+    session.append_recovery_blocker_resolved(crate::RecoveryBlockerResolvedV1 {
+        blocker_id: "direct-blocker".to_owned(),
+        resolution_receipt_digest: format!("sha256:{}", "b".repeat(64)),
+        resolved_at_ms: 3,
+    })?;
+    let second = orchestrator
+        .continue_direct_run(
+            &mut session,
+            request,
+            options,
+            None,
+            &mut RecordingEventHandler::default(),
+            &mut AutoApproveHandler,
+        )
+        .await?;
+    assert_eq!(second.status, TaskRunStatus::Completed);
+    Ok(())
+}
+
+#[path = "task_orchestrator_direct_guidance_source_tests.rs"]
+mod direct_guidance_source_tests;

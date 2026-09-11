@@ -18,7 +18,7 @@ fn sample_task_memory() -> TaskMemoryV1 {
     TaskMemoryV1 {
         memory_id: "mem-1".to_owned(),
         branch_id: Some("main".to_owned()),
-        valid_for_snapshot: "snapshot-1".to_owned(),
+        valid_for_snapshot: Some("snapshot-1".to_owned()),
         supersedes: None,
         source_event_ids: vec!["event-1".to_owned()],
         objective: "Implement plugin trust hardening".to_owned(),
@@ -266,9 +266,9 @@ fn compaction_memory_validation_rejects_malformed_edges() {
     memory.memory_id = String::new();
     assert!(memory.validate().is_err());
     memory.memory_id = "mem-1".to_owned();
-    memory.valid_for_snapshot = String::new();
+    memory.valid_for_snapshot = Some(String::new());
     assert!(memory.validate().is_err());
-    memory.valid_for_snapshot = "snapshot-1".to_owned();
+    memory.valid_for_snapshot = Some("snapshot-1".to_owned());
     memory.objective = String::new();
     assert!(memory.validate().is_err());
 }
@@ -324,7 +324,7 @@ fn compaction_extraction_builds_task_memory_from_structured_durable_events() -> 
         &records,
         TaskMemoryExtractionInput {
             memory_id: "memory-1".to_owned(),
-            valid_for_snapshot: "snapshot-2".to_owned(),
+            valid_for_snapshot: Some("snapshot-2".to_owned()),
             branch_id: Some("main".to_owned()),
             supersedes: None,
             objective: None,
@@ -418,7 +418,7 @@ fn compaction_extraction_keeps_active_task_objective_and_accepted_plan() -> Resu
         &records,
         TaskMemoryExtractionInput {
             memory_id: "memory-active".to_owned(),
-            valid_for_snapshot: "snapshot-active".to_owned(),
+            valid_for_snapshot: Some("snapshot-active".to_owned()),
             branch_id: None,
             supersedes: None,
             objective: None,
@@ -463,7 +463,7 @@ fn compaction_extraction_keeps_failed_steps_as_attempt_refs_without_verification
         &[stored_session_entry(1, "event-failed-tool", failed_tool)?],
         TaskMemoryExtractionInput {
             memory_id: "memory-2".to_owned(),
-            valid_for_snapshot: "snapshot-3".to_owned(),
+            valid_for_snapshot: Some("snapshot-3".to_owned()),
             branch_id: None,
             supersedes: Some("memory-1".to_owned()),
             objective: Some("Run tests".to_owned()),
@@ -524,7 +524,7 @@ fn compaction_extraction_handles_failed_task_blocked_step_and_changeset() -> Res
         &records,
         TaskMemoryExtractionInput {
             memory_id: "memory-durable".to_owned(),
-            valid_for_snapshot: "snapshot-durable".to_owned(),
+            valid_for_snapshot: Some("snapshot-durable".to_owned()),
             branch_id: None,
             supersedes: None,
             objective: None,
@@ -580,7 +580,7 @@ fn compaction_extraction_handles_directory_mutation_and_invalid_payload() -> Res
         )?],
         TaskMemoryExtractionInput {
             memory_id: "memory-dir".to_owned(),
-            valid_for_snapshot: "snapshot-dir".to_owned(),
+            valid_for_snapshot: Some("snapshot-dir".to_owned()),
             branch_id: None,
             supersedes: None,
             objective: Some("Track generated directory".to_owned()),
@@ -603,7 +603,7 @@ fn compaction_extraction_handles_directory_mutation_and_invalid_payload() -> Res
         &[SessionStreamRecord::Stored(invalid)],
         TaskMemoryExtractionInput {
             memory_id: "memory-invalid".to_owned(),
-            valid_for_snapshot: "snapshot-invalid".to_owned(),
+            valid_for_snapshot: Some("snapshot-invalid".to_owned()),
             branch_id: None,
             supersedes: None,
             objective: Some("Invalid".to_owned()),

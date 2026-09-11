@@ -85,7 +85,7 @@ pub fn verification_product_view(entries: &[SessionLogEntry]) -> Option<Verifica
                 trusted.trusted_check.check_spec.check_spec_id.clone(),
                 trusted.trusted_check.check_spec.check_spec_hash.clone(),
                 readiness.policy_hash.clone()?,
-                readiness.workspace_snapshot_id.clone()?,
+                readiness.workspace_snapshot_id.clone(),
             ),
         ))
     });

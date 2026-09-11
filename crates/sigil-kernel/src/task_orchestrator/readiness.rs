@@ -24,6 +24,30 @@ pub(super) async fn run_task_step_verification_checks<H>(
 where
     H: EventHandler + Send,
 {
+    run_task_scope_verification_checks(
+        session,
+        handler,
+        verification_execution_port,
+        &request.task_id,
+        task_step_evidence_scope(&request.task_id, &step.step_id),
+        options,
+        readiness,
+    )
+    .await
+}
+
+pub(super) async fn run_task_scope_verification_checks<H>(
+    session: &mut Session,
+    handler: &mut H,
+    verification_execution_port: Option<&dyn VerificationExecutionPortV1>,
+    task_id: &TaskId,
+    scope: EvidenceScope,
+    options: &AgentRunOptions,
+    readiness: &ReadinessEvaluatedEntry,
+) -> Result<bool>
+where
+    H: EventHandler + Send,
+{
     let check_ids = readiness
         .evaluation
         .required_actions
@@ -41,8 +65,8 @@ where
     })?;
 
     let projection = session.verification_state_projection();
-    let step_scope = task_step_evidence_scope(&request.task_id, &step.step_id);
-    let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+    let step_scope = scope;
+    let task_scope = EvidenceScope::Task(task_id.as_str().to_owned());
     let workspace_id = stable_workspace_id(&options.workspace_root)?;
     let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let policy_entry = projection
@@ -90,10 +114,11 @@ where
     Ok(true)
 }
 
-/// Reruns one task verification check only when its rendered projection binding is still current.
+/// Reruns one trusted task verification check against the current workspace.
 ///
 /// The request is rejected before appending a queued lifecycle record when the task/step scope,
-/// trusted check hash, policy hash, or workspace snapshot has drifted.
+/// trusted check hash, or policy hash has drifted. The rendered workspace observation is advisory;
+/// the runner captures fresh evidence for this execution.
 ///
 /// # Errors
 ///
@@ -148,9 +173,6 @@ where
     if readiness.policy_hash.as_deref() != Some(request.policy_hash.as_str()) {
         bail!("verification policy changed since the rerun action was rendered");
     }
-    if readiness.workspace_snapshot_id.as_deref() != Some(request.workspace_snapshot_id.as_str()) {
-        bail!("verification workspace snapshot changed since the rerun action was rendered");
-    }
 
     let policy_entry = projection
         .latest_policy(&step_scope)
@@ -203,9 +225,6 @@ where
     }) {
         bail!("verification check is already queued or running");
     }
-    if latest_run.is_some_and(|run| run.status == VerificationCheckRunStatus::Succeeded) {
-        bail!("verification check already succeeded for the rendered binding");
-    }
     let action_allows_run =
         readiness
             .evaluation
@@ -221,7 +240,9 @@ where
     let retryable_terminal = latest_run.is_some_and(|run| {
         matches!(
             run.status,
-            VerificationCheckRunStatus::Failed | VerificationCheckRunStatus::Inconclusive
+            VerificationCheckRunStatus::Failed
+                | VerificationCheckRunStatus::Inconclusive
+                | VerificationCheckRunStatus::Succeeded
         )
     });
     if !action_allows_run && !retryable_terminal {
@@ -234,11 +255,6 @@ where
         &policy.verification_scope,
         0,
     )?;
-    if current_snapshot.workspace_snapshot_id.as_deref()
-        != Some(request.workspace_snapshot_id.as_str())
-    {
-        bail!("verification workspace changed since the rerun action was rendered");
-    }
 
     let trust_entry = projection.workspace_trust.get(&workspace_id);
     let workspace_trust = trust_entry
@@ -257,7 +273,7 @@ where
             trusted_check: &check_entry.trusted_check,
             policy: &policy,
             policy_hash: Some(&request.policy_hash),
-            workspace_snapshot_id: Some(&request.workspace_snapshot_id),
+            workspace_snapshot_id: current_snapshot.workspace_snapshot_id.as_deref(),
             workspace_trust,
             workspace_trust_snapshot_id: &workspace_trust_snapshot_id,
         },
@@ -685,7 +701,7 @@ pub(super) async fn task_step_failure_readiness_nonblocking(
     .await
 }
 
-pub(super) fn task_step_evidence_scope(task_id: &TaskId, step_id: &TaskStepId) -> EvidenceScope {
+pub(crate) fn task_step_evidence_scope(task_id: &TaskId, step_id: &TaskStepId) -> EvidenceScope {
     EvidenceScope::Step(format!("{}:{}", task_id.as_str(), step_id.as_str()))
 }
 
@@ -812,4 +828,178 @@ pub(super) fn latest_relevant_successful_verification_sequence(
         .map(|receipt| receipt.receipt.recorded_at_stream_sequence)
         .max()
         .unwrap_or(0)
+}
+
+/// Evaluates the original Task scope; a direct task never needs a synthetic plan or step.
+pub(super) async fn direct_task_completion_readiness(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    outcome: &AgentRunOutcome,
+    options: &AgentRunOptions,
+) -> Result<(
+    ReadinessEvaluatedEntry,
+    VerificationAutoRunPolicy,
+    Option<String>,
+)> {
+    let mut snapshot = Session::from_entries(
+        session.provider_name().to_owned(),
+        session.model_name().to_owned(),
+        session.entries().to_vec(),
+    );
+    if let Some(store) = session.durable_store() {
+        snapshot = snapshot.with_store(store);
+    }
+    let request = request.clone();
+    let outcome = outcome.clone();
+    let options = options.clone();
+    tokio::task::spawn_blocking(move || {
+        let effect_blocker = direct_task_effect_blocker(&snapshot, &request.task_id, &outcome)?;
+        let scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+        let workspace_id = stable_workspace_id(&options.workspace_root)?;
+        let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
+        let projection = snapshot.verification_state_projection();
+        let policy = projection
+            .latest_policy(&scope)
+            .map(|entry| entry.policy.clone())
+            .unwrap_or_else(|| {
+                task_step_default_policy(&projection, &scope, &scope, &workspace_scope)
+            });
+        let auto_run = policy.auto_run;
+        let policy_hash = policy.stable_hash()?;
+        let last_verified = latest_relevant_successful_verification_sequence(
+            &projection,
+            std::slice::from_ref(&scope),
+            &policy,
+            &policy_hash,
+        );
+        let mutations = durable_workspace_mutation_evidence(
+            &snapshot,
+            &request.task_id,
+            &policy.verification_scope,
+            &outcome.tool_call_ids,
+            last_verified,
+        )?;
+        let has_mutation = !outcome.changed_files.is_empty() || !mutations.is_empty();
+        let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
+        input.workspace_trust = projection
+            .workspace_trust
+            .get(&workspace_id)
+            .map_or(WorkspaceTrust::Unknown, |entry| entry.trust);
+        let trust_ids = check_scope_trust_ids(&projection, &[scope.clone(), workspace_scope]);
+        input.workspace_trust_approval_event_id = trust_ids.approval_event_id;
+        input.workspace_trust_sandbox_decision_id = trust_ids.sandbox_decision_id;
+        if has_mutation || !input.policy.required_checks.is_empty() {
+            let workspace = build_workspace_snapshot_for_event(
+                &options.workspace_root,
+                workspace_id,
+                &input.policy.verification_scope,
+                0,
+                format!("direct-readiness:{}", request.task_id.as_str()),
+                snapshot.next_stream_sequence_hint().unwrap_or(1),
+            )?;
+            input.current_workspace_snapshot_id = workspace.workspace_snapshot_id;
+            input.workspace_knowledge = workspace.workspace_knowledge;
+            if let Some(evidence) = workspace.unknown_dirty_evidence {
+                input.mutations.push(evidence);
+            }
+        }
+        input.mutations.extend(mutations);
+        // This outcome fallback invalidates verification conservatively; it does not certify
+        // a durable mutation or authorize effect settlement.
+        if has_mutation && input.mutations.is_empty() {
+            input.mutations.push(WorkspaceMutationEvidence {
+                event_id: format!("direct-changed-files:{}", request.task_id.as_str()),
+                source_event_type: "task_direct_changed_files".to_owned(),
+                source_label: None,
+                recovery_hint: None,
+                scope_hash: input.policy.verification_scope.scope_hash.clone(),
+                recorded_at_stream_sequence: 1,
+                from_workspace_snapshot_id: input.current_workspace_snapshot_id.clone(),
+                to_workspace_snapshot_id: None,
+                tool_effect: crate::ToolEffect::WorkspaceWrite,
+                unknown_dirty: false,
+            });
+        }
+        if input
+            .mutations
+            .iter()
+            .any(|mutation| mutation.unknown_dirty)
+        {
+            input.workspace_knowledge = WorkspaceKnowledge::UnknownDirty;
+        }
+        input.verification_receipts = relevant_verification_receipts(
+            &projection,
+            std::slice::from_ref(&scope),
+            &input.policy,
+            &policy_hash,
+        );
+        Ok((
+            ReadinessEvaluatedEntry {
+                scope,
+                evaluation: evaluate_readiness(&input),
+                policy_hash: Some(policy_hash),
+                workspace_snapshot_id: input.current_workspace_snapshot_id,
+            },
+            auto_run,
+            effect_blocker,
+        ))
+    })
+    .await
+    .map_err(|error| anyhow!("direct Task readiness worker failed: {error}"))?
+}
+
+fn direct_task_effect_blocker(
+    session: &Session,
+    task_id: &TaskId,
+    outcome: &AgentRunOutcome,
+) -> Result<Option<String>> {
+    let task_projection = session.task_state_projection();
+    let task = task_projection
+        .tasks
+        .get(task_id)
+        .ok_or_else(|| anyhow!("direct completion Task authority is unavailable"))?;
+    let mut run_ids = BTreeSet::new();
+    for attempt in task.direct_execution_attempts.values() {
+        let run_id = crate::task_direct_execution_logical_run_id(&attempt.attempt_id);
+        run_ids.extend(session.recorded_evidence_run_ids(&run_id)?);
+        run_ids.insert(run_id);
+    }
+    if let Some(effects) = session.try_effect_reconciliation_projection_from_durable()? {
+        for required in effects.unsettled() {
+            if required.task_id.as_deref() == Some(task_id.as_str())
+                || required
+                    .logical_run_id
+                    .as_ref()
+                    .is_some_and(|id| run_ids.contains(id))
+                || outcome.tool_call_ids.contains(&required.effect_id)
+            {
+                return Ok(Some(format!(
+                    "effect reconciliation required: {}",
+                    required.reconciliation_id
+                )));
+            }
+        }
+    }
+    if let Some(blockers) = session.try_recovery_blocker_projection_from_durable()? {
+        for blocker in blockers.active() {
+            let applies = match &blocker.scope {
+                crate::FailureScopeV1::Task { task_id: id }
+                | crate::FailureScopeV1::Step { task_id: id, .. } => id == task_id,
+                crate::FailureScopeV1::ToolEffect {
+                    task_id: id,
+                    effect_id,
+                    ..
+                } => id.as_ref() == Some(task_id) || outcome.tool_call_ids.contains(effect_id),
+                crate::FailureScopeV1::Run { logical_run_id } => run_ids.contains(logical_run_id),
+                _ => false,
+            };
+            if applies {
+                return Ok(Some(format!(
+                    "recovery blocker unresolved: {}",
+                    blocker.blocker_id
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
