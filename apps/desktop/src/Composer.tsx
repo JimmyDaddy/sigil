@@ -352,7 +352,7 @@ export function Composer({
       : `${optionProvider} · ${optionConnection}`;
     const routeIdentity = `${route} · ${identity}`;
     return option.availability === "configured_unavailable"
-      ? `${routeIdentity} · ${t("unavailable")}`
+      ? `${routeIdentity} · ${t("modelNotListed")}`
       : routeIdentity;
   };
   const selectedModelValue = modelOption === undefined ? "" : modelOptionValue(modelOption);

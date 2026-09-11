@@ -60,10 +60,6 @@ export function ProviderSetup({
 
   const isCustom = template === "open_ai_compatible";
   const effectiveModelId = modelId === "__manual__" ? manualModelId.trim() : modelId;
-  const selectedModelUnavailable = modelId !== "__manual__"
-    && catalog?.models.some((model) => (
-      model.modelId === modelId && model.availability === "configured_unavailable"
-    )) === true;
   const contextWindowValue = contextWindowTokens.trim();
   const contextWindowValid = contextWindowValue === ""
     || (/^\d+$/.test(contextWindowValue) && Number(contextWindowValue) > 0);
@@ -76,7 +72,6 @@ export function ProviderSetup({
   const canSave = effectiveModelId.length > 0
     && state !== "saving"
     && catalog !== undefined
-    && !selectedModelUnavailable
     && contextWindowValid;
   const progress = step === "provider" ? 1 : step === "authentication" ? 2 : 3;
 
@@ -161,12 +156,12 @@ export function ProviderSetup({
     setModelId((current) => {
       if (current === "__manual__") return current;
       if (current !== "" && next.models.some((model) => (
-        model.modelId === current && model.availability !== "configured_unavailable"
+        model.modelId === current
       ))) {
         return current;
       }
       return next.suggestedModel
-        ?? next.models.find((model) => model.availability !== "configured_unavailable")?.modelId
+        ?? next.models[0]?.modelId
         ?? "__manual__";
     });
     setStep("model");
@@ -370,7 +365,6 @@ export function ProviderSetup({
                 ].filter(Boolean).join(" · ")}
                 value={model.modelId}
                 checked={modelId === model.modelId}
-                disabled={model.availability === "configured_unavailable"}
                 onChange={() => {
                   setModelId(model.modelId);
                   setContextWindowTokens("");

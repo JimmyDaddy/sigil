@@ -110,7 +110,6 @@ export function SettingsPage({
       || selected === undefined
       || !modelOptionIsSelectable(selected)
       || connection === undefined
-      || !["ready", "unverified"].includes(connection.readiness)
     ) {
       notify({ tone: "error", message: t("settingsSaveFailed") });
       return;
@@ -336,8 +335,7 @@ export function SettingsPage({
                     disabled={
                       !modelOptionIsSelectable(option)
                       || !providerInventory?.connections.some(
-                        (connection) => connection.id === option.modelRef.connectionId
-                          && ["ready", "unverified"].includes(connection.readiness),
+                        (connection) => connection.id === option.modelRef.connectionId,
                       )
                     }
                   >
@@ -353,7 +351,7 @@ export function SettingsPage({
                       ? option.modelName
                       : `${option.displayName} · ${option.modelName}`}
                     {option.availability === "configured_unavailable"
-                      ? ` · ${t("unavailable")}`
+                      ? ` · ${t("modelNotListed")}`
                       : ""}
                   </option>
                 ))}

@@ -14,6 +14,7 @@ interface TimelineRowBase {
   text: string;
   skill?: MessageView["skill"];
   status?: string;
+  contentTruncated?: boolean;
 }
 
 export type ConversationTimelineRow =
@@ -51,7 +52,7 @@ export function projectConversationRows(
       key: buffer.identity,
       kind: buffer.channel === "reasoning" ? "reasoning" : "progress",
       label: buffer.channel === "reasoning" ? t("working") : "Sigil",
-      text: selectDeltaText(buffer),
+      text: `${selectDeltaText(buffer)}${buffer.truncated === true ? "\n…" : ""}`,
       status: "streaming",
     }],
   }));
@@ -107,6 +108,7 @@ function projectDisplayItem(
           text,
           skill: content.skill,
           status: previewStatus,
+          contentTruncated: content.truncated,
         }];
       }
       const kind = content.assistantPhase === "tool_preamble" || content.assistantPhase === "progress"
@@ -118,6 +120,7 @@ function projectDisplayItem(
         label: kind === "progress" ? t("progress") : "Sigil",
         text,
         status: previewStatus ?? (item.status === "streaming" ? "streaming" : undefined),
+        contentTruncated: content.truncated,
       }];
     }
     case "reasoning":
@@ -126,6 +129,7 @@ function projectDisplayItem(
         kind: "reasoning",
         label: item.status === "streaming" ? t("working") : t("reasoning"),
         text: content.text,
+        contentTruncated: content.truncated,
         status: content.truncated
           ? `preview · ${content.originalContentBytes} bytes`
           : item.status === "streaming" ? "streaming" : undefined,

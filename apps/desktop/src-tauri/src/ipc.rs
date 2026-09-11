@@ -1351,6 +1351,41 @@ pub(crate) struct DesktopTranscriptRequest {
     pub(crate) limit: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopMessageContentRequest {
+    pub(crate) display_id: String,
+    pub(crate) offset: Option<u64>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) content_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopMessageContentPage {
+    pub(crate) display_id: String,
+    pub(crate) message_id: String,
+    pub(crate) content_version: String,
+    pub(crate) offset: u64,
+    pub(crate) next_offset: Option<u64>,
+    pub(crate) total_bytes: u64,
+    pub(crate) text: String,
+}
+
+impl From<sigil_desktop::DesktopMessageContentPage> for DesktopMessageContentPage {
+    fn from(value: sigil_desktop::DesktopMessageContentPage) -> Self {
+        Self {
+            display_id: value.display_id,
+            message_id: value.message_id,
+            content_version: value.content_version,
+            offset: value.offset,
+            next_offset: value.next_offset,
+            total_bytes: value.total_bytes,
+            text: value.text,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTranscriptPage {
@@ -2162,7 +2197,7 @@ pub(crate) struct DesktopVerificationRerunBinding {
     pub(crate) check_spec_id: String,
     pub(crate) check_spec_hash: String,
     pub(crate) policy_hash: String,
-    pub(crate) workspace_snapshot_id: String,
+    pub(crate) workspace_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -24,6 +24,8 @@ export interface LiveDeltaBuffer {
   firstRunSequence: string;
   lastRunSequence: string;
   fragments: ReadonlyMap<string, string>;
+  previewSnapshot?: boolean;
+  truncated?: boolean;
 }
 
 export interface LiveTerminalSignal {
@@ -64,6 +66,13 @@ export interface LiveEventState {
   anchor?: LiveProvisionalAnchor;
   semanticItems: ReadonlyMap<string, LiveConversationDisplayItem>;
   deltaBuffers: ReadonlyMap<string, LiveDeltaBuffer>;
+  liveSnapshots: ReadonlyMap<string, TimelineEvent>;
+  durableRunSequences: ReadonlyMap<string, string>;
+  previewOwners: ReadonlyMap<string, {
+    attemptId: string; revision: string; textRetired?: boolean; reasoningRetired?: boolean;
+    closed?: boolean; retiredToolArguments?: ReadonlySet<string>; retiredTools?: ReadonlySet<string>;
+  }>;
+  retiredPreviewSequences: ReadonlyMap<string, string>;
   /** Pending approval events containing the exact guard required by the control route. */
   controlEvents: ReadonlyMap<string, TimelineEvent>;
   /** Exact per-call high-water marks, including resolved and fail-closed tombstones. */
@@ -103,6 +112,10 @@ export function createLiveEventState(sessionId: string): LiveEventState {
     sessionId,
     semanticItems: new Map(),
     deltaBuffers: new Map(),
+    liveSnapshots: new Map(),
+    durableRunSequences: new Map(),
+    previewOwners: new Map(),
+    retiredPreviewSequences: new Map(),
     controlEvents: new Map(),
     approvalLifecycles: new Map(),
     approvalSnapshotRevisions: new Map(),
@@ -447,6 +460,7 @@ function receiveAnchor(
   if (anchor !== undefined) {
     for (const [key, buffer] of deltaBuffers) {
       if (buffer.runId !== anchor.runId) continue;
+      if (buffer.previewSnapshot === true) continue;
       const fragments = new Map(
         [...buffer.fragments].filter(([sequence]) => (
           compareRunSequence(sequence, anchor.runSequence) > 0
@@ -464,6 +478,15 @@ function receiveAnchor(
 
 function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): LiveEventState {
   if (event.sessionId !== state.sessionId || !isDecimalSequence(event.runSequence)) return state;
+  if (event.livePreview !== undefined) return receivePreviewSnapshot(state, event);
+  if (event.replayable) {
+    const durableRunSequences = new Map(state.durableRunSequences);
+    const previous = durableRunSequences.get(event.runId) ?? "0";
+    if (compareRunSequence(event.runSequence, previous) > 0) {
+      durableRunSequences.set(event.runId, event.runSequence);
+      state = { ...state, durableRunSequences };
+    }
+  }
 
   const controlUpdate = updateControlEvents(state, event);
   let next = updateTerminalTasks(updateTaskEvents(controlUpdate.state, event), event);
@@ -479,7 +502,7 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   }
   const terminalSignal = terminalSignalFromTimelineEvent(event);
   if (terminalSignal !== undefined) {
-    return receiveTerminalSignal(next, terminalSignal);
+    return receiveTerminalSignal(retirePreviewSnapshots(next, event), terminalSignal);
   }
 
   if (event.kind === "assistant_delta" || event.kind === "reasoning_delta") {
@@ -487,6 +510,7 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
   }
 
   if (event.kind === "assistant_message") {
+    next = retirePreviewSnapshots(next, event);
     next = clearRunDeltaChannelThrough(
       next,
       event.runId,
@@ -494,17 +518,128 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
       event.runSequence,
     );
   } else if (isToolBoundary(event.kind)) {
+    if (event.kind === "tool_completed" || event.kind === "tool_result") {
+      next = retirePreviewSnapshots(next, event);
+    }
     next = clearRunDeltaChannelThrough(next, event.runId, "assistant", event.runSequence);
   } else if (event.kind === "provider_turn_partial_output_discarded") {
+    next = retirePreviewSnapshots(next, event);
     next = clearRunDeltaBuffersThrough(next, event.runId, event.runSequence);
   } else if (event.kind === "run_started") {
+    next = retirePreviewSnapshots(next, event);
+    const previewOwners = new Map(next.previewOwners);
+    previewOwners.delete(event.runId);
+    next = { ...next, previewOwners };
     next = clearRunDeltaBuffersThrough(next, event.runId, event.runSequence);
+  } else if (event.kind === "user_input_changed" && event.status === "requested") {
+    next = retirePreviewSnapshots(next, event);
   }
 
   const item = semanticLiveItemFromTimelineEvent(event);
   return item === undefined || !controlUpdate.applySemantic
     ? next
     : receiveSemanticItem(next, item);
+}
+
+function receivePreviewSnapshot(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  const preview = event.livePreview;
+  if (preview === undefined || event.replayable || event.replayId !== undefined
+    || !isDecimalSequence(preview.revision) || preview.revision === "0"
+    || !isDecimalSequence(preview.baseSequence) || preview.baseSequence !== event.runSequence
+    || preview.attemptId.length === 0 || preview.slotId.length === 0
+    || preview.attemptId.length > 256 || preview.slotId.length > 256
+    || new TextEncoder().encode(event.text ?? "").length > 65_536
+    || state.terminalSignals.has(event.runId)) return state;
+  let applied = state.durableRunSequences.get(event.runId) ?? "0";
+  if (state.anchor?.runId === event.runId && compareRunSequence(state.anchor.runSequence, applied) > 0) {
+    applied = state.anchor.runSequence;
+  }
+  if (compareRunSequence(preview.baseSequence, applied) > 0
+    || compareRunSequence(preview.baseSequence, state.retiredPreviewSequences.get(event.runId) ?? "0") < 0) return state;
+  const owner = state.previewOwners.get(event.runId);
+  if (owner?.attemptId === preview.attemptId && (owner.closed
+    || event.kind === "assistant_delta" && owner.textRetired
+    || event.kind === "reasoning_delta" && owner.reasoningRetired
+    || owner.retiredTools?.has(preview.slotId)
+    || event.kind === "tool_call_args_delta" && owner.retiredToolArguments?.has(preview.slotId))) return state;
+  if (owner !== undefined && owner.attemptId !== preview.attemptId
+    && compareRunSequence(preview.revision, owner.revision) <= 0) return state;
+  const key = `${event.runId}\0${preview.slotId}`;
+  const previous = state.liveSnapshots.get(key)?.livePreview;
+  if (previous?.attemptId === preview.attemptId && compareRunSequence(preview.revision, previous.revision) <= 0) return state;
+
+  let deltaBuffers = new Map(state.deltaBuffers);
+  const liveSnapshots = new Map(state.liveSnapshots);
+  if (owner !== undefined && owner.attemptId !== preview.attemptId) {
+    deltaBuffers = new Map([...deltaBuffers].filter(([, buffer]) => buffer.runId !== event.runId));
+    for (const [key, snapshot] of liveSnapshots) {
+      if (snapshot.runId === event.runId) liveSnapshots.delete(key);
+    }
+  }
+  liveSnapshots.set(key, event);
+  const runSnapshots = [...liveSnapshots.entries()].filter(([, snapshot]) => snapshot.runId === event.runId)
+    .sort(([, left], [, right]) => compareRunSequence(left.livePreview?.revision ?? "0", right.livePreview?.revision ?? "0"));
+  for (const [oldest] of runSnapshots.slice(0, Math.max(0, runSnapshots.length - 4))) liveSnapshots.delete(oldest);
+  const previewOwners = new Map(state.previewOwners);
+  previewOwners.set(event.runId, {
+    ...(owner?.attemptId === preview.attemptId ? owner : {}),
+    attemptId: preview.attemptId,
+    revision: owner === undefined || compareRunSequence(preview.revision, owner.revision) > 0 ? preview.revision : owner.revision,
+  });
+  if (event.kind === "assistant_delta" || event.kind === "reasoning_delta") {
+    const channel = event.kind === "assistant_delta" ? "assistant" : "reasoning";
+    deltaBuffers.set(deltaBufferKey(event.runId, channel), {
+      ...rebuildDeltaBuffer(event.runId, channel, new Map([[preview.baseSequence, event.text ?? ""]])),
+      previewSnapshot: true,
+      truncated: preview.truncated,
+    });
+  }
+  const semanticItems = new Map(state.semanticItems);
+  if (event.kind === "tool_progress" || event.kind === "tool_call_args_delta") {
+    for (const [id, item] of semanticItems) {
+      if (item.runId !== event.runId || item.content.type !== "tool" || item.content.callId !== event.itemId) continue;
+      semanticItems.set(id, event.kind === "tool_call_args_delta"
+        ? { ...item, toolInput: event.text }
+        : { ...item, status: toolStatus(event), content: { ...item.content, output: event.text } });
+    }
+  }
+  return { ...state, liveSnapshots, previewOwners, deltaBuffers, semanticItems };
+}
+
+function retirePreviewSnapshots(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  const replacedChannel = event.kind === "assistant_message"
+    ? event.assistantKind === "reasoning_trace" ? "reasoning" : "assistant"
+    : undefined;
+  const replacedTool = event.kind === "tool_completed" || event.kind === "tool_result"
+    ? event.itemId : undefined;
+  const liveSnapshots = filterMap(state.liveSnapshots, (snapshot) => snapshot.runId !== event.runId
+    || replacedTool !== undefined && snapshot.itemId !== replacedTool
+    || replacedChannel !== undefined && (snapshot.kind === "reasoning_delta" ? "reasoning" : "assistant") !== replacedChannel);
+  const deltaBuffers = filterMap(state.deltaBuffers, (buffer) => buffer.runId !== event.runId
+    || buffer.previewSnapshot !== true || replacedTool !== undefined
+    || replacedChannel !== undefined && buffer.channel !== replacedChannel);
+  const retiredPreviewSequences = new Map(state.retiredPreviewSequences);
+  const previous = retiredPreviewSequences.get(event.runId) ?? "0";
+  if (compareRunSequence(event.runSequence, previous) > 0) retiredPreviewSequences.set(event.runId, event.runSequence);
+  const previewOwners = new Map(state.previewOwners);
+  const owner = previewOwners.get(event.runId);
+  if (owner !== undefined) {
+    const retired = { ...owner };
+    if (event.kind === "assistant_message") {
+      if (replacedChannel === "reasoning") retired.reasoningRetired = true;
+      else retired.textRetired = true;
+    } else if (replacedTool !== undefined) {
+      if (event.kind === "tool_completed") {
+        retired.retiredToolArguments = new Set([...owner.retiredToolArguments ?? [], replacedTool].slice(0, 4));
+      } else {
+        retired.retiredTools = new Set([...owner.retiredTools ?? [], replacedTool].slice(0, 4));
+      }
+    } else {
+      retired.closed = true;
+    }
+    previewOwners.set(event.runId, retired);
+  }
+  return { ...state, deltaBuffers, liveSnapshots, retiredPreviewSequences, previewOwners };
 }
 
 const MAX_TERMINAL_TASK_HISTORY_CARDS = 8;
@@ -871,6 +1006,7 @@ function replaceApprovalLifecycle(
 }
 
 function discardRun(state: LiveEventState, runId: string): LiveEventState {
+  const liveSnapshots = filterMap(state.liveSnapshots, (event) => event.runId !== runId);
   const semanticItems = filterMap(state.semanticItems, (item) => item.runId !== runId);
   const deltaBuffers = filterMap(state.deltaBuffers, (buffer) => buffer.runId !== runId);
   const controlEvents = filterMap(state.controlEvents, (event) => event.runId !== runId);
@@ -886,6 +1022,7 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     && controlEvents.size === state.controlEvents.size
     && approvalLifecycles.size === state.approvalLifecycles.size
     && terminalSignals.size === state.terminalSignals.size
+    && liveSnapshots.size === state.liveSnapshots.size
   ) return state;
   return {
     ...state,
@@ -894,6 +1031,7 @@ function discardRun(state: LiveEventState, runId: string): LiveEventState {
     controlEvents,
     approvalLifecycles,
     terminalSignals,
+    liveSnapshots,
   };
 }
 

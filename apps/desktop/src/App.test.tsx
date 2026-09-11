@@ -286,6 +286,15 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       skipped: 0,
       items: input.items.map((item) => ({ sessionRef: item.sessionRef, outcome: "completed" })),
     }),
+    messageContent: async (_workspaceId, _sessionId, request) => ({
+      displayId: request.displayId,
+      messageId: "test-message",
+      contentVersion: "test-version",
+      offset: 0,
+      nextOffset: null,
+      totalBytes: 0,
+      text: "",
+    }),
     transcript: async () => ({
       totalMessages: 0,
       messages: [],
@@ -1645,7 +1654,7 @@ describe("desktop workspace and history shell", () => {
     await user.click(screen.getByRole("button", { name: "Change connection" }));
     await user.click(screen.getByRole("button", { name: "Continue to models" }));
 
-    expect(await screen.findByText(/Stale cached catalog/)).toBeTruthy();
+    expect(await screen.findByText(/Cached catalog · refresh available/)).toBeTruthy();
     expect(screen.getByRole("radio", { name: /Local Stale Coder/ })).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save and continue" }) as HTMLButtonElement).disabled)
       .toBe(false);
@@ -2652,6 +2661,64 @@ describe("desktop workspace and history shell", () => {
     expect(displayQueries).toEqual([undefined, "cursor-before-3"]);
   });
 
+  it.each(["initial", "older", "terminal"] as const)("aborts the actual %s history bridge request when the conversation unmounts", async (phase) => {
+    const user = userEvent.setup();
+    let pendingSignal: AbortSignal | undefined;
+    let eventListener: ((event: TimelineEvent) => void) | undefined;
+    let calls = 0;
+    const owner = { runId: "run-cancel-history", ownerRevision: `sha256:${"a".repeat(64)}` };
+    const display: DesktopBridge["display"] = async (_workspace, _session, _request, signal) => {
+      calls += 1;
+      if (phase === "initial" || calls > 1) {
+        pendingSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+      return {
+        schemaVersion: 1, requestScope: "history-cancel-scope", throughSessionStreamSequence: "1",
+        totalItems: phase === "older" ? "2" : "1",
+        items: [{
+          schemaVersion: 1, displayId: "history-cancel-row", displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "history-cancel-event", kind: "user_message", source: "durable_transcript", status: "recorded",
+          content: { type: "message", role: "user", text: "History ready", imageAttachmentCount: 0, truncated: false, originalContentBytes: 13 },
+        }],
+        nextCursor: phase === "older" ? "older-history-cursor" : undefined,
+        hasMore: phase === "older", gapFacts: [],
+      };
+    };
+    const bridge = bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      catalog: async () => ({ ...emptyCatalog, entries: [{
+        sessionRef: "cancel-history.jsonl", sessionId: "durable-cancel-history", sourceState: "ready", sourceBytes: 512,
+        sourceModifiedAtUnixMs: 1_784_419_200_000, title: "Cancelable history", userMessageCount: 1, assistantMessageCount: 0, toolResultCount: 0, pinned: false,
+      }] }),
+      openSession: async () => ({ id: "http-cancel-history", label: "Cancelable history", runCount: 1 }),
+      display,
+      continuity: async () => ({ durableFrontier: { throughStreamSequence: 1 }, foregroundOwner: phase === "terminal" ? owner : undefined, retainedTerminalRuns: [], recoveryActions: [] }),
+      attachRun: async () => ({ run: { id: owner.runId, sessionId: "http-cancel-history", status: "running", permissionMode: "manual", streamSequence: 1 }, events: [], streamState: "live", hasGap: false }),
+      subscribeRunEvents: async (listener) => { eventListener = listener; return () => undefined; },
+    });
+    const view = render(<App bridge={bridge} />);
+    await user.click(await screen.findByRole("button", { name: /^Cancelable history/ }));
+    if (phase !== "initial") {
+      expect(await screen.findByText("History ready")).toBeTruthy();
+      if (phase === "older") {
+        const timeline = screen.getByRole("log", { name: "Conversation timeline" });
+        fireEvent.wheel(timeline);
+        timeline.scrollTop = 0;
+        fireEvent.scroll(timeline);
+      } else {
+        await waitFor(() => expect(eventListener).toBeDefined());
+        act(() => eventListener?.({ workspaceId: workspace.id, sessionId: "http-cancel-history", runId: owner.runId, sequence: 2, runSequence: "2", replayable: true, kind: "run_finished" }));
+      }
+    }
+    await waitFor(() => expect(pendingSignal).toBeDefined());
+    expect(pendingSignal?.aborted).toBe(false);
+    view.unmount();
+    expect(pendingSignal?.aborted).toBe(true);
+  });
+
   it("recovers an initial canonical display after a bounded transient retry", async () => {
     const user = userEvent.setup();
     const display = vi.fn()
@@ -2725,10 +2792,10 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText("Saved messages are unavailable")).toBeNull();
   });
 
-  it("preserves a non-transient canonical display error without retrying it", async () => {
+  it.each(["conversation_display_cursor_invalid", "conversation_display_corrupt"])("preserves non-transient canonical display error %s without retrying it", async (code) => {
     const user = userEvent.setup();
     const display = vi.fn().mockRejectedValue({
-      code: "conversation_display_cursor_invalid",
+      code,
       message: "The canonical display cursor is invalid.",
     });
     const bridge = bridgeWith({
@@ -2953,7 +3020,7 @@ describe("desktop workspace and history shell", () => {
         },
       },
     ));
-    expect(screen.getByText("Review the resumed edit")).toBeTruthy();
+    expect(await screen.findByText("Review the resumed edit")).toBeTruthy();
 
     act(() => eventListener?.(activeEvent));
     expect(screen.getAllByText("Resume this work")).toHaveLength(1);
@@ -3212,6 +3279,142 @@ describe("desktop workspace and history shell", () => {
     await user.type(input, "No stale owner window");
     expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it.each(["confirmed", "failed"] as const)(
+    "preserves a terminal wake while its initial owner confirmation is %s",
+    async (confirmationOutcome) => {
+      const user = userEvent.setup();
+      const runId = "run-terminal-during-confirmation";
+      let completed = false;
+      let eventListener: ((event: TimelineEvent) => void) | undefined;
+      let confirmOwner: ((continuity: ConversationContinuity) => void) | undefined;
+      let failConfirmation: ((error: Error) => void) | undefined;
+      const owner: ConversationContinuity = {
+        durableFrontier: { throughStreamSequence: 0 },
+        foregroundOwner: { runId, ownerRevision: `sha256:${"d".repeat(64)}` },
+        retainedTerminalRuns: [],
+        recoveryActions: ["retry_current", "continue_read_only"],
+      };
+      const continuity = vi.fn<DesktopBridge["continuity"]>()
+        .mockResolvedValueOnce(owner)
+        .mockImplementationOnce(() => new Promise((resolve, reject) => {
+          // The response captured the running owner before the terminal event arrived.
+          confirmOwner = resolve;
+          failConfirmation = reject;
+        }))
+        .mockResolvedValue({
+          durableFrontier: { throughStreamSequence: 2 },
+          retainedTerminalRuns: [],
+          recoveryActions: [],
+        });
+      const attachRun = vi.fn<DesktopBridge["attachRun"]>(async (_workspaceId, input) => ({
+        run: {
+          id: input.runId,
+          sessionId: input.sessionId,
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 0,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }));
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        continuity,
+        attachRun,
+        display: async (): Promise<ConversationDisplayPage> => ({
+          schemaVersion: 1,
+          requestScope: "terminal-during-confirmation-scope",
+          throughSessionStreamSequence: completed ? "2" : "0",
+          totalItems: completed ? "2" : "0",
+          items: completed ? [{
+            schemaVersion: 1,
+            displayId: "confirmation-final-answer",
+            displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+            sourceEventId: "confirmation-final-answer-event",
+            kind: "assistant_message",
+            source: "durable_transcript",
+            runId,
+            status: "succeeded",
+            content: {
+              type: "message",
+              role: "assistant",
+              text: "Completed while the owner confirmation was pending.",
+              assistantPhase: "final_answer",
+              imageAttachmentCount: 0,
+              truncated: false,
+              originalContentBytes: 50,
+            },
+          }, {
+            schemaVersion: 1,
+            displayId: "confirmation-terminal",
+            displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+            sourceEventId: "confirmation-terminal-event",
+            kind: "terminal",
+            source: "durable_run_event",
+            runId,
+            status: "succeeded",
+            content: { type: "terminal", summaryTruncated: false },
+          }] : [],
+          terminalFrontier: completed ? {
+            runId,
+            sessionStreamSequence: "2",
+            status: "succeeded",
+          } : undefined,
+          hasMore: false,
+          gapFacts: [],
+        }),
+        subscribeRunEvents: async (listener) => {
+          eventListener = listener;
+          return () => undefined;
+        },
+      })} />);
+
+      await screen.findByText("No matching conversation.");
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await waitFor(() => expect(confirmOwner).toBeDefined());
+      act(() => {
+        completed = true;
+        eventListener?.({
+          workspaceId: workspace.id,
+          sessionId: "http-session-new",
+          runId,
+          sequence: 2,
+          runSequence: "2",
+          replayable: true,
+          kind: "run_finished",
+        });
+      });
+      expect(await screen.findByText("Completed while the owner confirmation was pending.")).toBeTruthy();
+      expect(continuity).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        if (confirmationOutcome === "confirmed") confirmOwner?.(owner);
+        else failConfirmation?.(new Error("The owner confirmation failed."));
+      });
+      if (confirmationOutcome === "confirmed") {
+        await waitFor(() => {
+          expect(continuity).toHaveBeenCalledTimes(3);
+          expect(document.querySelector('[data-continuity-lifecycle="idle"]')).toBeTruthy();
+        });
+        expect(document.querySelector('[data-continuity-owner-run-id]')).toBeNull();
+        expect(document.querySelector('[data-continuity-pending-terminal-run-id]')).toBeNull();
+        await user.type(await readyComposer(), "Continue after the completed run");
+        expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+      } else {
+        expect(await screen.findByText("Live controls need attention")).toBeTruthy();
+        await act(async () => {
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        });
+        expect(continuity).toHaveBeenCalledTimes(2);
+        expect(document.querySelector('[data-continuity-lifecycle="read_only_recovery"]')).toBeTruthy();
+      }
+      expect(attachRun).toHaveBeenCalledTimes(1);
+      expect(screen.getAllByText("Completed while the owner confirmation was pending.")).toHaveLength(1);
+      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+    },
+  );
 
   it("keeps a failed live attachment read-only until an explicit fresh retry succeeds", async () => {
     const user = userEvent.setup();
@@ -4233,6 +4436,344 @@ describe("desktop workspace and history shell", () => {
     expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(6);
     expect(screen.queryByText("Finish before attach")).toBeNull();
   });
+
+  it.each(["queued", "delivered"] as const)(
+    "discovers a completed queued successor without predecessor events when its receipt is %s",
+    async (receiptStatus) => {
+      const user = userEvent.setup();
+      let completed = false;
+      const predecessor = "run-retained-predecessor";
+      const successor = "run-queued-successor";
+      const prompt = "Continue after the retained terminal";
+      const retainedTerminalRuns: ConversationContinuity["retainedTerminalRuns"] = [{
+        runId: predecessor,
+        terminalTasks: [{
+          taskId: "terminal-retained-predecessor",
+          generation: 2,
+          status: "running",
+          readiness: "ready",
+          readinessKind: "output_contains",
+          readyAtMs: 1,
+          totalOutputBytes: 27,
+          emittedAtMs: 2,
+        }],
+      }];
+      const continuity = vi.fn(async (): Promise<ConversationContinuity> => ({
+        durableFrontier: { throughStreamSequence: completed ? 2 : 0 },
+        foregroundOwner: completed ? undefined : {
+          runId: predecessor,
+          ownerRevision: `sha256:${"d".repeat(64)}`,
+        },
+        retainedTerminalRuns,
+        recoveryActions: [],
+      }));
+      const display = vi.fn(async (): Promise<ConversationDisplayPage> => ({
+        schemaVersion: 1,
+        requestScope: "queued-successor-scope",
+        throughSessionStreamSequence: completed ? "2" : "0",
+        totalItems: completed ? "2" : "0",
+        items: completed ? [{
+          schemaVersion: 1,
+          displayId: "queued-successor-answer",
+          displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+          sourceEventId: "queued-successor-answer-event",
+          kind: "assistant_message",
+          source: "durable_transcript",
+          runId: successor,
+          status: "succeeded",
+          content: {
+            type: "message",
+            role: "assistant",
+            text: "The queued successor completed durably.",
+            assistantPhase: "final_answer",
+            imageAttachmentCount: 0,
+            truncated: false,
+            originalContentBytes: 38,
+          },
+        }, {
+          schemaVersion: 1,
+          displayId: "queued-successor-terminal",
+          displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+          sourceEventId: "queued-successor-terminal-event",
+          kind: "terminal",
+          source: "durable_run_event",
+          runId: successor,
+          status: "succeeded",
+          content: {
+            type: "terminal",
+            finalMessageId: "queued-successor-answer",
+            summaryTruncated: false,
+          },
+        }] : [],
+        terminalFrontier: completed ? {
+          runId: successor,
+          sessionStreamSequence: "2",
+          status: "succeeded",
+        } : undefined,
+        hasMore: false,
+        gapFacts: [],
+      }));
+      const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(
+        async (_workspaceId, input) => {
+          // The old attachment stays live for its terminal task. The successor can finish
+          // before enqueue returns, without another event or status from the predecessor.
+          completed = true;
+          return {
+            commandId: "queue-completed-successor",
+            clientId: "sigil-desktop",
+            sessionId: input.sessionId,
+            action: input.action.action,
+            expectedGeneration: input.expectedGeneration,
+            generation: "queue-after-enqueue",
+            queue: {
+              schemaVersion: 1,
+              sessionId: input.sessionId,
+              generation: "queue-after-enqueue",
+              paused: false,
+              totalItems: 1,
+              items: [{
+                entryId: "queued-successor-entry",
+                order: 0,
+                kind: "chat",
+                status: receiptStatus,
+                promptPreview: prompt,
+                promptPreviewTruncated: false,
+                promptMaterial: "persisted_safe",
+                dispatchable: false,
+              }],
+              truncated: false,
+            },
+            replayed: false,
+          };
+        },
+      );
+      const attachRun = vi.fn<DesktopBridge["attachRun"]>(async (_workspaceId, input) => ({
+        run: {
+          id: input.runId,
+          sessionId: input.sessionId,
+          status: "running",
+          permissionMode: "manual",
+          streamSequence: 0,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }));
+      const startRun = vi.fn<DesktopBridge["startRun"]>();
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        continuity,
+        display,
+        attachRun,
+        startRun,
+        commandConversationQueue,
+        // No listener is invoked: the enqueue receipt must wake successor discovery itself.
+        subscribeRunEvents: async () => () => undefined,
+        subscribeRunStreamStatus: async () => () => undefined,
+      })} />);
+
+      await screen.findByText("No matching conversation.");
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await screen.findByRole("button", { name: "Stop run" });
+      const composer = await readyComposer();
+      await user.type(composer, prompt);
+      const enqueue = screen.getByRole("button", { name: "Queue message" });
+      await waitFor(() => expect((enqueue as HTMLButtonElement).disabled).toBe(false));
+      await user.click(enqueue);
+
+      expect(await screen.findByText("The queued successor completed durably.", {}, { timeout: 4_000 })).toBeTruthy();
+      expect(screen.getAllByText("The queued successor completed durably.")).toHaveLength(1);
+      expect(commandConversationQueue).toHaveBeenCalledTimes(1);
+      expect(startRun).not.toHaveBeenCalled();
+      expect(attachRun).toHaveBeenCalledTimes(1);
+      expect(display).toHaveBeenCalledTimes(2);
+      expect(continuity.mock.calls.length).toBeGreaterThanOrEqual(8);
+      expect(continuity.mock.calls.length).toBeLessThanOrEqual(10);
+      expect(document.querySelector('[data-continuity-owner-run-id]')).toBeNull();
+      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Stop task" })).toBeTruthy();
+      expect(document.querySelector(".timeline")?.textContent).not.toContain(prompt);
+    },
+  );
+
+  it.each(["idle", "live"] as const)(
+    "waits through repeated terminal predecessor owners before a queued successor becomes %s",
+    async (handoff) => {
+      const user = userEvent.setup();
+      const predecessor = "run-delayed-predecessor";
+      const successor = "run-delayed-successor";
+      let enqueued = false;
+      let ownerAdvanced = false;
+      let completed = false;
+      let terminalPredecessorProbes = 0;
+      let eventListener: ((event: TimelineEvent) => void) | undefined;
+      const pendingDisplays: Array<(page: ConversationDisplayPage) => void> = [];
+      const defaults = bridgeWith();
+      const page = (): ConversationDisplayPage => ({
+        schemaVersion: 1,
+        requestScope: "delayed-successor-scope",
+        throughSessionStreamSequence: completed ? "3" : enqueued ? "1" : "0",
+        totalItems: completed ? "3" : enqueued ? "1" : "0",
+        items: [
+          ...(enqueued ? [{
+            schemaVersion: 1 as const,
+            displayId: "delayed-predecessor-terminal",
+            displayOrder: { sessionStreamSequence: "1", subindex: 0 },
+            sourceEventId: "delayed-predecessor-terminal-event",
+            kind: "terminal" as const,
+            source: "durable_run_event" as const,
+            runId: predecessor,
+            status: "succeeded" as const,
+            content: { type: "terminal" as const, summaryTruncated: false },
+          }] : []),
+          ...(completed ? [{
+            schemaVersion: 1 as const,
+            displayId: "delayed-successor-answer",
+            displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+            sourceEventId: "delayed-successor-answer-event",
+            kind: "assistant_message" as const,
+            source: "durable_transcript" as const,
+            runId: successor,
+            status: "succeeded" as const,
+            content: {
+              type: "message" as const,
+              role: "assistant" as const,
+              text: "The successor survived the owner handoff.",
+              assistantPhase: "final_answer" as const,
+              imageAttachmentCount: 0,
+              truncated: false,
+              originalContentBytes: 41,
+            },
+          }, {
+            schemaVersion: 1 as const,
+            displayId: "delayed-successor-terminal",
+            displayOrder: { sessionStreamSequence: "3", subindex: 0 },
+            sourceEventId: "delayed-successor-terminal-event",
+            kind: "terminal" as const,
+            source: "durable_run_event" as const,
+            runId: successor,
+            status: "succeeded" as const,
+            content: {
+              type: "terminal" as const,
+              finalMessageId: "delayed-successor-answer",
+              summaryTruncated: false,
+            },
+          }] : []),
+        ],
+        terminalFrontier: completed ? {
+          runId: successor,
+          sessionStreamSequence: "3",
+          status: "succeeded",
+        } : enqueued ? {
+          runId: predecessor,
+          sessionStreamSequence: "1",
+          status: "succeeded",
+        } : undefined,
+        hasMore: false,
+        gapFacts: [],
+      });
+      const continuity = vi.fn(async (): Promise<ConversationContinuity> => {
+        if (enqueued && !ownerAdvanced) {
+          terminalPredecessorProbes += 1;
+          if (terminalPredecessorProbes === 2) {
+            // The authority moves asynchronously. Retrying without the bounded delay
+            // consumes every attempt before this handoff can become visible.
+            window.setTimeout(() => {
+              ownerAdvanced = true;
+              completed = handoff === "idle";
+            }, 100);
+          }
+        }
+        return {
+          durableFrontier: { throughStreamSequence: completed ? 3 : enqueued ? 1 : 0 },
+          foregroundOwner: completed ? undefined : {
+            runId: ownerAdvanced ? successor : predecessor,
+            ownerRevision: `sha256:${(ownerAdvanced ? "e" : "d").repeat(64)}`,
+          },
+          retainedTerminalRuns: [],
+          recoveryActions: [],
+        };
+      });
+      const attachRun = vi.fn<DesktopBridge["attachRun"]>(async (_workspaceId, input) => ({
+        run: {
+          id: input.runId,
+          sessionId: input.sessionId,
+          status: enqueued && input.runId === predecessor ? "finished" : "running",
+          permissionMode: "manual",
+          streamSequence: enqueued && input.runId === predecessor ? 1 : 0,
+        },
+        events: [],
+        streamState: "live",
+        hasGap: false,
+      }));
+      const commandConversationQueue = vi.fn<DesktopBridge["commandConversationQueue"]>(
+        async (workspaceId, input) => {
+          enqueued = true;
+          return defaults.commandConversationQueue(workspaceId, input);
+        },
+      );
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        continuity,
+        attachRun,
+        commandConversationQueue,
+        display: async () => {
+          // Keep the old terminal unresolved until the live successor completes so
+          // this case also exercises the predecessor-to-successor terminal mapping.
+          if (handoff === "live" && enqueued && !completed) {
+            return new Promise((resolve) => pendingDisplays.push(resolve));
+          }
+          return page();
+        },
+        subscribeRunEvents: async (listener) => {
+          eventListener = listener;
+          return () => undefined;
+        },
+        subscribeRunStreamStatus: async () => () => undefined,
+      })} />);
+
+      await screen.findByText("No matching conversation.");
+      await user.click(screen.getByRole("button", { name: "New conversation" }));
+      await screen.findByRole("button", { name: "Stop run" });
+      await user.type(await readyComposer(), "Continue after the delayed owner handoff");
+      await user.click(screen.getByRole("button", { name: "Queue message" }));
+
+      if (handoff === "live") {
+        await waitFor(() => {
+          const conversation = document.querySelector(`[data-continuity-owner-run-id="${successor}"]`);
+          expect(conversation?.getAttribute("data-continuity-lifecycle")).toBe("live");
+          expect(conversation?.getAttribute("data-continuity-pending-terminal-run-id")).toBe(predecessor);
+        });
+        act(() => {
+          completed = true;
+          eventListener?.({
+            workspaceId: workspace.id,
+            sessionId: "http-session-new",
+            runId: successor,
+            sequence: 1,
+            runSequence: "1",
+            replayable: true,
+            kind: "run_finished",
+          });
+          for (const resolve of pendingDisplays) resolve(page());
+        });
+      }
+
+      expect(await screen.findByText("The successor survived the owner handoff.", {}, { timeout: 4_000 })).toBeTruthy();
+      await waitFor(() => {
+        expect(document.querySelector('[data-continuity-lifecycle="idle"]')).toBeTruthy();
+        expect(document.querySelector('[data-continuity-pending-terminal-run-id]')).toBeNull();
+      }, { timeout: 4_000 });
+      expect(terminalPredecessorProbes).toBeGreaterThanOrEqual(2);
+      expect(terminalPredecessorProbes).toBeLessThan(6);
+      expect(attachRun.mock.calls.filter(([, input]) => input.runId === predecessor)).toHaveLength(
+        terminalPredecessorProbes + 1,
+      );
+      expect(commandConversationQueue).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("Live controls need attention")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Stop run" })).toBeNull();
+    },
+  );
 
   it("restarts canonical settlement when a typed terminal races a status-only refresh", async () => {
     const user = userEvent.setup();
@@ -5399,9 +5940,9 @@ describe("desktop workspace and history shell", () => {
     expect(document.querySelector(".sg-notification-viewport")).toBeNull();
   });
 
-  it("shows exact verification evidence and reruns only the rendered binding", async () => {
+  it.each(["snapshot-1", null])("reruns the rendered verification check with workspace observation %s", async (capturedSnapshot) => {
     const user = userEvent.setup();
-    let rerunSnapshot = "";
+    let rerunSnapshot: string | null = "";
     const verification = {
       taskId: "task_1",
       stepId: "verify_1",
@@ -5421,7 +5962,7 @@ describe("desktop workspace and history shell", () => {
           checkSpecId: "cargo-test",
           checkSpecHash: "check-hash",
           policyHash: "policy-hash",
-          workspaceSnapshotId: "snapshot-1",
+          workspaceSnapshotId: capturedSnapshot,
         },
       },
       evidence: {
@@ -5462,7 +6003,7 @@ describe("desktop workspace and history shell", () => {
     expect(screen.queryByText(/^Copy$/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Run recommended check" }));
     expect(await screen.findByText("passed")).toBeTruthy();
-    expect(rerunSnapshot).toBe("snapshot-1");
+    expect(rerunSnapshot).toBe(capturedSnapshot);
   });
 
   it("projects typed Task progress and continues the exact Task with optional guidance", async () => {
@@ -5839,7 +6380,7 @@ describe("desktop workspace and history shell", () => {
     await waitFor(() => expect(screen.queryByText("Refactor the workspace snapshot binding")).toBeNull());
   });
 
-  it("disables run and save but keeps revise and reject for a stale draft", async () => {
+  it.each(["run", "save", "revise", "reject"] as const)("allows %s despite workspace drift", async (action) => {
     const user = userEvent.setup();
     const planDecision = vi.fn(async () => ({
       commandId: "plan-decision-stale",
@@ -5847,7 +6388,7 @@ describe("desktop workspace and history shell", () => {
       sessionId: "http-session-new",
       planId: "plan-review-stale",
       planHash: `sha256:${"e".repeat(64)}`,
-      action: "revise" as const,
+      action,
       revisionRunId: "plan-review-revise-run-1",
       replayed: false,
     }));
@@ -5890,26 +6431,73 @@ describe("desktop workspace and history shell", () => {
     expect(screen.getByText("Explicit /plan")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Review complete plan" }));
     expect(await screen.findByTestId("plan-workbench")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Run plan" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
-    expect(
-      screen.getByText(/workspace changed since it was created\. Revise it to re-plan/),
-    ).toBeTruthy();
-    const reviseButton = screen.getByRole("button", { name: "Revise" });
-    expect(reviseButton.hasAttribute("disabled")).toBe(false);
-    await user.click(reviseButton);
+    expect(screen.getByRole("button", { name: "Run plan" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/You can still run or save this plan/)).toBeTruthy();
+    const labels = { run: "Run plan", save: "Save", revise: "Revise", reject: "Reject" };
+    await user.click(screen.getByRole("button", { name: labels[action] }));
     expect(planDecision).toHaveBeenCalledWith(
       workspace.id,
       "http-session-new",
       "plan-review-stale",
       `sha256:${"e".repeat(64)}`,
-      "revise",
+      action,
     );
-    expect(await screen.findByText(/Plan revision started/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Reject" }).hasAttribute("disabled")).toBe(false);
   });
 
-  it("shows a preserved terminal candidate and binds Retry review to its hash", async () => {
+  it.each(["active", "rejected"] as const)("keeps plan decisions truthful when the request is %s", async (state) => {
+    const user = userEvent.setup();
+    const planHash = `sha256:${"f".repeat(64)}`;
+    const planDecision = vi.fn<DesktopBridge["planDecision"]>();
+    if (state === "rejected") {
+      planDecision.mockRejectedValueOnce(new Error("the foreground run is still settling"));
+    }
+    planDecision.mockResolvedValue({
+      commandId: "plan-retry-command", clientId: "desktop-test", sessionId: "http-session-new",
+      planId: "plan-decision-observation", planHash, action: "revise", replayed: false,
+    });
+    let displayCalls = 0;
+    const bridge = bridgeWith({
+      bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+      display: async () => {
+        displayCalls += 1;
+        return {
+          schemaVersion: 1, requestScope: "http-session-new", throughSessionStreamSequence: "9",
+          totalItems: "0", items: [], hasMore: false, gapFacts: [],
+          planReview: {
+            planId: "plan-decision-observation", planHash, status: "draft_ready" as const,
+            summary: "Review remains available", summaryTruncated: false,
+            allowedActions: ["run", "save", "revise", "reject"] as const,
+            source: "explicit_plan_command" as const, stale: false,
+          },
+        };
+      },
+      planDecision,
+    });
+    render(<App bridge={bridge} />);
+    await screen.findByText("No matching conversation.");
+    await user.click(screen.getByRole("button", { name: "New conversation" }));
+    await screen.findByText("Review remains available");
+    if (state === "active") {
+      await user.type(await readyComposer(), "Continue inspecting the current plan");
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+      for (const name of ["Run plan", "Save", "Revise", "Reject"]) {
+        await waitFor(() => expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true));
+      }
+      await user.click(screen.getByRole("button", { name: "Revise" }));
+      expect(planDecision).not.toHaveBeenCalled();
+      return;
+    }
+    await user.click(screen.getByRole("button", { name: "Revise" }));
+    await waitFor(() => expect(displayCalls).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByText("The plan changed or the decision could not be applied. Review the latest plan state.")).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Revise" }).hasAttribute("disabled")).toBe(false));
+    await user.click(screen.getByRole("button", { name: "Revise" }));
+    await waitFor(() => expect(planDecision).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("The plan changed or the decision could not be applied. Review the latest plan state.")).toBeNull();
+  });
+
+  it.each([true, false])("retries terminal review with candidate present=%s", async (hasCandidate) => {
     const user = userEvent.setup();
     const candidateHash = `sha256:${"f".repeat(64)}`;
     const planDecisionWithCandidate = vi.fn(async (
@@ -5947,14 +6535,16 @@ describe("desktop workspace and history shell", () => {
           status: "paused" as const,
           summary: "The review stopped before typed completion",
           summaryTruncated: false,
-          allowedActions: ["retry_review", "adopt_candidate"] as const,
+          allowedActions: hasCandidate
+            ? ["retry_review", "adopt_candidate"] as const
+            : ["retry_review"] as const,
           source: "automatic_conversation_route" as const,
           stale: false,
-          candidate: {
+          candidate: hasCandidate ? {
             contentHash: candidateHash,
             content: "# Preserved plan\n\n1. Inspect the recovery path.",
             completeness: "complete" as const,
-          },
+          } : undefined,
         },
       }),
       planDecisionWithCandidate,
@@ -5964,14 +6554,18 @@ describe("desktop workspace and history shell", () => {
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     expect(await screen.findByText("The review stopped before typed completion")).toBeTruthy();
-    expect(screen.getByText(/Preserved plan/)).toBeTruthy();
+    if (hasCandidate) {
+      expect(screen.getByText(/Preserved plan/)).toBeTruthy();
+    } else {
+      expect(screen.queryByRole("button", { name: "Adopt candidate" })).toBeNull();
+    }
     await user.click(screen.getByRole("button", { name: "Retry review" }));
     await waitFor(() => expect(planDecisionWithCandidate).toHaveBeenCalledWith(
       workspace.id,
       "http-session-new",
       "plan-review-terminal",
       "",
-      candidateHash,
+      hasCandidate ? candidateHash : undefined,
       "retry_review",
     ));
   });

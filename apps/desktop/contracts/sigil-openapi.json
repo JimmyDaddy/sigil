@@ -19,6 +19,18 @@
           "type": "string"
         }
       },
+      "CancelObservationOnClose": {
+        "description": "Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write.",
+        "in": "header",
+        "name": "x-sigil-cancel-observation-on-close",
+        "required": false,
+        "schema": {
+          "enum": [
+            "1"
+          ],
+          "type": "string"
+        }
+      },
       "RunId": {
         "in": "path",
         "name": "run_id",
@@ -4686,6 +4698,171 @@
         ],
         "type": "object"
       },
+      "LiveRunUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "base_durable_sequence": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "text",
+              "reasoning",
+              "tool_call_arguments",
+              "tool_progress"
+            ],
+            "type": "string"
+          },
+          "live_revision": {
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "preview": {
+            "description": "replacement snapshot bounded to 64 KiB of UTF-8",
+            "maxLength": 65536,
+            "minLength": 1,
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "slot_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "tool_progress": {
+            "additionalProperties": false,
+            "properties": {
+              "call_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "execution_id": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "tool_name": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "total_bytes": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "updated_at_ms": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "execution_id",
+              "call_id",
+              "tool_name",
+              "status",
+              "total_bytes",
+              "updated_at_ms"
+            ],
+            "type": "object"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "session_id",
+          "run_id",
+          "attempt_id",
+          "slot_id",
+          "live_revision",
+          "base_durable_sequence",
+          "kind",
+          "preview"
+        ],
+        "type": "object"
+      },
+      "MessageContentPage": {
+        "additionalProperties": false,
+        "properties": {
+          "content_version": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "display_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "next_offset": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "text": {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          "total_bytes": {
+            "description": "Byte length of the complete safely redacted UTF-8 body",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "display_id",
+          "message_id",
+          "content_version",
+          "offset",
+          "next_offset",
+          "total_bytes",
+          "text"
+        ],
+        "type": "object"
+      },
       "NoticeEvent": {
         "additionalProperties": false,
         "properties": {
@@ -5640,6 +5817,52 @@
       },
       "ProtocolEvent": {
         "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "live_update"
+              ]
+            },
+            "required": [
+              "run_event"
+            ]
+          },
+          {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "run_event"
+                  ]
+                },
+                {
+                  "required": [
+                    "replay_id"
+                  ]
+                },
+                {
+                  "required": [
+                    "approval_request"
+                  ]
+                },
+                {
+                  "required": [
+                    "provisional_id"
+                  ]
+                }
+              ]
+            },
+            "properties": {
+              "event_class": {
+                "const": "transient"
+              }
+            },
+            "required": [
+              "live_update"
+            ]
+          }
+        ],
         "properties": {
           "approval_request": {
             "$ref": "#/components/schemas/PendingApproval"
@@ -5650,6 +5873,9 @@
               "transient"
             ],
             "type": "string"
+          },
+          "live_update": {
+            "$ref": "#/components/schemas/LiveRunUpdate"
           },
           "provisional_id": {
             "pattern": "^live-v1:[0-9a-f]{64}$",
@@ -5662,14 +5888,13 @@
             "$ref": "#/components/schemas/PublicRunEvent"
           },
           "schema_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
           }
         },
         "required": [
           "schema_version",
-          "event_class",
-          "run_event"
+          "event_class"
         ],
         "type": "object"
       },
@@ -10977,7 +11202,10 @@
             "type": "string"
           },
           "workspace_snapshot_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -12430,6 +12658,9 @@
             "$ref": "#/components/parameters/SessionId"
           },
           {
+            "$ref": "#/components/parameters/CancelObservationOnClose"
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
@@ -12612,6 +12843,105 @@
           }
         },
         "summary": "Preview one exact leaf Intent Drop"
+      }
+    },
+    "/sessions/{session_id}/message-content": {
+      "get": {
+        "description": "Resolves a canonical display identity through the same strict session owner. Redacts the complete body before slicing. Nonzero offsets require the content version from the first page; each response contains at most 65536 UTF-8 bytes.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/CancelObservationOnClose"
+          },
+          {
+            "in": "query",
+            "name": "display_id",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "UTF-8 byte offset on a character boundary",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "format": "uint64",
+              "maximum": 2097152,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 65536,
+              "maximum": 65536,
+              "minimum": 4,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque version binding the scope, display identity and immutable source record; required after offset zero",
+            "in": "query",
+            "name": "content_version",
+            "required": false,
+            "schema": {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageContentPage"
+                }
+              }
+            },
+            "description": "One complete-message page"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Saved content version changed or source validation failed"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The source is temporarily unavailable"
+          }
+        },
+        "summary": "Read one bounded UTF-8 page of a complete saved message"
       }
     },
     "/sessions/{session_id}/queue": {
@@ -13092,6 +13422,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/CancelObservationOnClose"
           },
           {
             "in": "query",

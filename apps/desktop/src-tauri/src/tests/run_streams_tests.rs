@@ -1,5 +1,168 @@
 use super::*;
 
+fn preview(
+    revision: u64,
+    base: u64,
+    attempt: &str,
+    slot: &str,
+    text: &str,
+) -> DesktopTimelineEvent {
+    let mut event = timeline(base, DesktopTimelineEventKind::AssistantDelta);
+    event.replayable = false;
+    event.replay_id = None;
+    event.text = Some(text.to_owned());
+    event.item_id = Some(slot.to_owned());
+    event.live_preview = Some(sigil_desktop::DesktopTimelineLivePreview {
+        attempt_id: attempt.to_owned(),
+        slot_id: slot.to_owned(),
+        revision: revision.to_string(),
+        base_sequence: base.to_string(),
+        truncated: false,
+    });
+    event
+}
+
+#[test]
+fn native_tool_result_retires_progress_without_reopening_it() {
+    let mut cursor = RunEventCursor::default();
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    let started = timeline(3, DesktopTimelineEventKind::RunStarted);
+    assert!(cursor.accept(&started));
+    projection.push(started);
+    let mut progress = preview(1000, 3, "attempt", "call-1", "running");
+    progress.kind = DesktopTimelineEventKind::ToolProgress;
+    assert!(cursor.accept(&progress));
+    projection.push(progress.clone());
+    let mut result = timeline(4, DesktopTimelineEventKind::ToolResult);
+    result.item_id = Some("call-1".to_owned());
+    assert!(cursor.accept(&result));
+    projection.push(result);
+    assert!(
+        projection
+            .events
+            .iter()
+            .all(|event| event.live_preview.is_none())
+    );
+    progress.live_preview.as_mut().expect("preview").revision = "100000".to_owned();
+    assert!(!cursor.accept(&progress));
+    progress.sequence = 4;
+    progress.run_sequence = "4".to_owned();
+    progress
+        .live_preview
+        .as_mut()
+        .expect("preview")
+        .base_sequence = "4".to_owned();
+    assert!(
+        !cursor.accept(&progress),
+        "durable tool result closes the semantic slot"
+    );
+}
+
+#[test]
+fn native_live_revisions_never_skip_durable_message_approval_or_terminal() {
+    let mut cursor = RunEventCursor::default();
+    assert!(cursor.accept(&timeline(3, DesktopTimelineEventKind::RunStarted)));
+    for revision in 1..=100_000 {
+        assert!(cursor.accept(&preview(revision, 3, "attempt-1", "text", "snapshot")));
+    }
+    assert_eq!(cursor.durable_sequence, 3);
+    assert!(cursor.accept(&timeline(4, DesktopTimelineEventKind::AssistantMessage)));
+    assert!(!cursor.accept(&preview(100_001, 3, "attempt-1", "text", "late")));
+    assert!(!cursor.accept(&preview(100_001, 4, "attempt-1", "text", "late equal base")));
+    assert!(cursor.accept(&preview(
+        100_002,
+        4,
+        "attempt-2",
+        "text",
+        "next provider turn"
+    )));
+    assert!(cursor.accept(&timeline(5, DesktopTimelineEventKind::ApprovalRequested)));
+    assert!(cursor.accept(&timeline(6, DesktopTimelineEventKind::RunFinished)));
+    assert!(!cursor.accept(&preview(100_002, 6, "attempt-1", "text", "post-terminal")));
+    assert_eq!(cursor.durable_sequence, 6);
+}
+
+#[test]
+fn native_waiting_retires_painted_preview_and_resumed_source_can_restart_revision() {
+    let mut cursor = RunEventCursor::default();
+    let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+    assert!(cursor.accept(&timeline(3, DesktopTimelineEventKind::RunStarted)));
+    let partial = preview(100_000, 3, "old-attempt", "text", "partial");
+    assert!(cursor.accept(&partial));
+    projection.push(partial);
+    let mut waiting = timeline(4, DesktopTimelineEventKind::UserInputChanged);
+    waiting.status = Some("requested".into());
+    assert!(cursor.accept(&waiting));
+    projection.push(waiting);
+    assert!(
+        projection
+            .events
+            .iter()
+            .all(|event| event.live_preview.is_none())
+    );
+    assert!(!cursor.accept(&preview(100_001, 4, "old-attempt", "text", "late")));
+    assert!(cursor.accept(&timeline(5, DesktopTimelineEventKind::RunStarted)));
+    assert!(!cursor.accept(&preview(100_001, 4, "old-attempt", "text", "old source")));
+    assert!(cursor.accept(&preview(1, 5, "resumed-attempt", "text", "resumed")));
+}
+
+#[test]
+fn native_live_cursor_rejects_future_base_stale_attempt_and_duplicate_revision() {
+    let mut cursor = RunEventCursor::default();
+    assert!(!cursor.accept(&preview(1, 1, "attempt-1", "text", "future")));
+    assert!(cursor.accept(&timeline(1, DesktopTimelineEventKind::RunStarted)));
+    assert!(cursor.accept(&preview(10, 1, "attempt-1", "text", "first")));
+    assert!(!cursor.accept(&preview(10, 1, "attempt-1", "text", "duplicate")));
+    assert!(cursor.accept(&preview(11, 1, "attempt-2", "text", "next")));
+    assert!(!cursor.accept(&preview(10, 1, "attempt-1", "text", "old attempt")));
+    for revision in 12..1000 {
+        assert!(cursor.accept(&preview(
+            revision,
+            1,
+            "attempt-2",
+            &format!("slot-{revision}"),
+            "bounded"
+        )));
+        assert!(cursor.live_revisions.len() <= 4);
+    }
+}
+
+#[test]
+fn native_attachment_replaces_snapshots_and_final_content_without_growing_with_deltas() {
+    for updates in [1, 1_000, 100_000] {
+        let mut projection = RunProjection::new(DesktopRunStatus::Running, false);
+        projection.push(timeline(3, DesktopTimelineEventKind::RunStarted));
+        for revision in 1..=updates {
+            projection.push(preview(
+                revision,
+                3,
+                "attempt",
+                "text",
+                "latest full snapshot",
+            ));
+        }
+        assert_eq!(projection.events.len(), 2);
+        assert_eq!(projection.last_sequence, 3);
+        let mut final_event = timeline(4, DesktopTimelineEventKind::AssistantMessage);
+        final_event.text = Some("exact final bytes".to_owned());
+        projection.push(final_event);
+        assert_eq!(projection.events.len(), 2);
+        assert!(
+            projection
+                .events
+                .iter()
+                .all(|event| event.live_preview.is_none())
+        );
+        assert_eq!(
+            projection
+                .events
+                .back()
+                .and_then(|event| event.text.as_deref()),
+            Some("exact final bytes")
+        );
+    }
+}
+
 #[test]
 fn reconnect_backoff_is_bounded_and_stream_keys_are_workspace_scoped() {
     assert_eq!(reconnect_delay(0), Duration::from_millis(250));
@@ -231,6 +394,7 @@ fn timeline(sequence: u64, kind: DesktopTimelineEventKind) -> DesktopTimelineEve
         replayable: true,
         replay_id: Some(format!("event-{sequence}")),
         provisional_id: None,
+        live_preview: None,
         kind,
         text: Some("detail".to_owned()),
         item_id: None,

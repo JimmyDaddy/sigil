@@ -61,6 +61,8 @@ import type {
   ApprovalAction,
   TranscriptPage,
   TranscriptRequest,
+  MessageContentRequest,
+  MessageContentPage,
   VerificationRerunBinding,
   VerificationSummary,
   TaskIntegrationAcceptance,
@@ -143,11 +145,19 @@ export interface DesktopBridge {
     workspaceId: string,
     sessionId: string,
     request: TranscriptRequest,
+    signal?: AbortSignal,
   ): Promise<TranscriptPage>;
+  messageContent(
+    workspaceId: string,
+    sessionId: string,
+    request: MessageContentRequest,
+    signal?: AbortSignal,
+  ): Promise<MessageContentPage>;
   display(
     workspaceId: string,
     sessionId: string,
     request: ConversationDisplayRequest,
+    signal?: AbortSignal,
   ): Promise<ConversationDisplayPage>;
   readToolArtifact(
     workspaceId: string,
@@ -290,6 +300,31 @@ export interface DesktopBridge {
   subscribeUpdate(listener: (snapshot: DesktopUpdateSnapshot) => void): Promise<() => void>;
 }
 
+async function historyQuery<T>(
+  workspaceId: string,
+  sessionId: string,
+  query: (queryId: string) => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const queryId = await invoke<string>("desktop_prepare_history_query", { workspaceId, sessionId });
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => {
+    cancellation ??= invoke<void>("desktop_cancel_history_query", { workspaceId, sessionId, queryId });
+    return cancellation;
+  };
+  const onAbort = () => { void cancel().catch(() => undefined); };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    // Aborting while prepare was in flight revokes its ticket without starting an observation.
+    signal?.throwIfAborted();
+    return await query(queryId);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    await cancel();
+  }
+}
+
 export const desktopBridge: DesktopBridge = {
   bootstrap: () => invoke<DesktopBootstrap>("desktop_bootstrap"),
   updateState: () => invoke<DesktopUpdateSnapshot>("desktop_update_state"),
@@ -357,18 +392,27 @@ export const desktopBridge: DesktopBridge = {
       workspaceId,
       input,
     }),
-  transcript: (workspaceId, sessionId, request) =>
-    invoke<TranscriptPage>("desktop_transcript", {
+  transcript: (workspaceId, sessionId, request, signal) =>
+    historyQuery(workspaceId, sessionId, (queryId) => invoke<TranscriptPage>("desktop_transcript", {
       workspaceId,
       sessionId,
+      queryId,
       request,
-    }),
-  display: (workspaceId, sessionId, request) =>
-    invoke<ConversationDisplayPage>("desktop_display", {
+    }), signal),
+  display: (workspaceId, sessionId, request, signal) =>
+    historyQuery(workspaceId, sessionId, (queryId) => invoke<ConversationDisplayPage>("desktop_display", {
       workspaceId,
       sessionId,
+      queryId,
       request,
-    }),
+    }), signal),
+  messageContent: (workspaceId, sessionId, request, signal) =>
+    historyQuery(workspaceId, sessionId, (queryId) => invoke<MessageContentPage>("desktop_message_content", {
+      workspaceId,
+      sessionId,
+      queryId,
+      request,
+    }), signal),
   readToolArtifact: (workspaceId, sessionId, input) =>
     invoke<ToolArtifactPage>("desktop_read_tool_artifact", {
       workspaceId,

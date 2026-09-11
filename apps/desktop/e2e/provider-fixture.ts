@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { once } from "node:events";
 
 const TITLE_CANARY = "验证桌面审批队列与恢复";
 const INITIAL_RUN_CANARY = "DESKTOP_E2E_INITIAL_DONE";
@@ -22,20 +23,25 @@ const TERMINAL_LIFECYCLE_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_FOREGROUND_DONE";
 const TERMINAL_SUCCESSOR_PROMPT = "DESKTOP_E2E_TERMINAL_SUCCESSOR";
 const TERMINAL_SUCCESSOR_FINAL_CANARY = "DESKTOP_E2E_TERMINAL_SUCCESSOR_DONE";
 const DURABLE_USER_INPUT_PROMPT = "DESKTOP_E2E_DURABLE_USER_INPUT";
-const DURABLE_USER_INPUT_CARD_PROMPT = "Choose the compatibility boundary before continuing.";
-const DURABLE_USER_INPUT_QUESTION = "Which compatibility target must this change preserve?";
-const DURABLE_USER_INPUT_OPTION = "Legacy sessions";
+const DURABLE_USER_INPUT_CARD_PROMPT = "Choose the verification target before continuing.";
+const DURABLE_USER_INPUT_QUESTION = "Which current-format recovery flow must this change verify?";
+const DURABLE_USER_INPUT_OPTION = "Interrupted current sessions";
 const DURABLE_USER_INPUT_FINAL_CANARY = "DESKTOP_E2E_DURABLE_USER_INPUT_DONE";
 const ARTIFACT_PROMPT = "DESKTOP_E2E_LARGE_TOOL_ARTIFACT";
 const ARTIFACT_FINAL_CANARY = "DESKTOP_E2E_LARGE_TOOL_ARTIFACT_DONE";
 const SHELL_ERROR_PROMPT = "DESKTOP_E2E_LARGE_SHELL_ERROR";
 const SHELL_ERROR_OUTPUT_CANARY = "DESKTOP_E2E_SHELL_ERROR_OUTPUT";
 const SHELL_ERROR_FINAL_CANARY = "DESKTOP_E2E_LARGE_SHELL_ERROR_DONE";
+const HIGH_DELTA_PROMPT = "DESKTOP_E2E_HIGH_DELTA";
+const HIGH_DELTA_FINAL_CANARY = "DESKTOP_E2E_HIGH_DELTA_FINAL";
+const PLAN_REVISION_GUIDANCE = "DESKTOP_E2E_PLAN_REVISION: clarify the verification target before revising.";
+const PLAN_REVISION_QUESTION_PROMPT = "Confirm the verification target for this plan revision.";
+const PLAN_REVISION_SUMMARY = "DESKTOP_E2E_PLAN_REVISED_WITH_CURRENT_RECOVERY";
 const DURABLE_USER_INPUT_ARGS = JSON.stringify({
   prompt: DURABLE_USER_INPUT_CARD_PROMPT,
   questions: [{
-    id: "compatibility",
-    header: "Compatibility",
+    id: "verification",
+    header: "Verification",
     question: DURABLE_USER_INPUT_QUESTION,
     description: "Choose the target that constrains the implementation.",
     required: true,
@@ -43,7 +49,7 @@ const DURABLE_USER_INPUT_ARGS = JSON.stringify({
       kind: "single_select",
       options: [
         { id: "current", label: "Current release" },
-        { id: "legacy", label: DURABLE_USER_INPUT_OPTION },
+        { id: "interrupted", label: DURABLE_USER_INPUT_OPTION },
       ],
       allow_other: false,
     },
@@ -68,6 +74,10 @@ const PLAN_REVIEW_REQUEST_ARGS = JSON.stringify({
   reason_codes: ["explicit_review_intent", "architectural_tradeoff"],
 });
 const PLAN_REVIEW_DRAFT_SUMMARY = "DESKTOP_E2E_PLAN_DRAFT";
+const PLAN_REVIEW_RESULT_CONTENT = `${PLAN_REVIEW_DRAFT_SUMMARY}
+
+1. Inspect the runtime architecture and record the relevant boundaries.
+2. Verify the resulting plan against the captured workspace evidence.`;
 const planReviewDraftArgs = (summary: string) => JSON.stringify({
   schema_version: 2,
   summary,
@@ -106,6 +116,9 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
   let directConversationCallSequence = 0;
   let concurrentReads = 0;
   let maxConcurrentReads = 0;
+  let holdNextDirect = false;
+  let directLifecycleFixture = false;
+  let releaseHighDelta: (() => void) | undefined;
   const recordRequest = (kind: string) => {
     requestCounts.set(kind, (requestCounts.get(kind) ?? 0) + 1);
   };
@@ -128,9 +141,26 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       }
       if (request.method === "POST" && request.url?.endsWith("/__reset-evidence")) {
         requestCounts.clear();
+        holdNextDirect = false;
+        directLifecycleFixture = false;
         concurrentReads = 0;
         maxConcurrentReads = 0;
         sendJson(response, { reset: true });
+        return;
+      }
+      if (request.method === "POST" && request.url?.endsWith("/__hold-next-direct")) {
+        holdNextDirect = true;
+        directLifecycleFixture = true;
+        sendJson(response, { held: true });
+        return;
+      }
+      if (request.method === "POST" && request.url?.endsWith("/__release-high-delta")) {
+        if (releaseHighDelta === undefined) {
+          sendJson(response, { error: "no paused high-delta stream" }, 409);
+          return;
+        }
+        releaseHighDelta();
+        sendJson(response, { released: true });
         return;
       }
       if (request.method !== "POST" || !request.url?.endsWith("/chat/completions")) {
@@ -166,6 +196,24 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       ) {
         recordRequest("title");
         sendText(response, TITLE_CANARY);
+      } else if (requestText.includes(HIGH_DELTA_PROMPT)
+        && !toolNames.has("continue_without_task_planning")) {
+        recordRequest("high_delta_stream");
+        const gate = new Promise<void>((resolve) => { releaseHighDelta = resolve; });
+        response.writeHead(200, { "cache-control": "no-cache", "content-type": "text/event-stream" });
+        const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: "x" }, finish_reason: null }] })}\n\n`;
+        for (let batch = 1; batch <= 100; batch += 1) {
+          if (!response.write(chunk.repeat(1000))) await once(response, "drain");
+          requestCounts.set("high_delta_frames", batch * 1000);
+        }
+        const deadline = setTimeout(() => releaseHighDelta?.(), 90_000);
+        try {
+          await gate;
+          response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: `\n\n${HIGH_DELTA_FINAL_CANARY}` }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+        } finally {
+          clearTimeout(deadline);
+          releaseHighDelta = undefined;
+        }
       } else if (
         toolNames.has("bash")
         && requestText.includes(SHELL_ERROR_PROMPT)
@@ -232,14 +280,48 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           "request_plan_review",
           PLAN_REVIEW_REQUEST_ARGS,
         );
-      } else if (toolNames.has("submit_plan_draft")) {
-        recordRequest("plan_draft");
+      } else if (
+        requestText.includes(PLAN_REVISION_GUIDANCE)
+        && toolNames.has("request_user_input")
+        && (requestCounts.get("plan_revision_question") ?? 0) === 0
+      ) {
+        recordRequest("plan_revision_question");
+        const question = JSON.parse(DURABLE_USER_INPUT_ARGS) as Record<string, unknown>;
         sendNamedToolCall(
           response,
-          "desktop-auto-plan-draft",
-          "submit_plan_draft",
-          planReviewDraftArgs(PLAN_REVIEW_DRAFT_SUMMARY),
+          "desktop-e2e-plan-revision-question",
+          "request_user_input",
+          JSON.stringify({ ...question, prompt: PLAN_REVISION_QUESTION_PROMPT }),
         );
+      } else if (
+        toolNames.has("submit_plan_review_result")
+        || toolNames.has("submit_plan_draft")
+      ) {
+        const revised = requestText.includes(PLAN_REVISION_GUIDANCE);
+        const summary = revised ? PLAN_REVISION_SUMMARY : PLAN_REVIEW_DRAFT_SUMMARY;
+        recordRequest("plan_draft");
+        if (revised) recordRequest("plan_revision_completed");
+        if (toolNames.has("submit_plan_review_result")) {
+          sendNamedToolCall(
+            response,
+            "desktop-auto-plan-review-result",
+            "submit_plan_review_result",
+            JSON.stringify({
+              schema_version: 1,
+              outcome: "draft",
+              content: revised
+                ? `${summary}\n\nVerify interrupted current-format session recovery before implementation.`
+                : PLAN_REVIEW_RESULT_CONTENT,
+            }),
+          );
+        } else {
+          sendNamedToolCall(
+            response,
+            "desktop-auto-plan-draft",
+            "submit_plan_draft",
+            planReviewDraftArgs(summary),
+          );
+        }
       } else if (
         toolNames.has("request_task_planning")
         && requestText.includes(AUTO_ORCHESTRATION_PROMPT)
@@ -272,6 +354,13 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         );
       } else if (requestText.includes(APPROVED_PLAN_EXECUTION_PROMPT)) {
         recordRequest("approved_plan_direct_execution");
+        if (holdNextDirect) {
+          holdNextDirect = false;
+          // The real native pause cancels this provider connection; the next attempt is free.
+          await once(response, "close");
+          return;
+        }
+        if (directLifecycleFixture) await new Promise((resolve) => setTimeout(resolve, 500));
         sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
       } else if (requestText.includes("Produce the single user-visible final answer")) {
         recordRequest("auto_synthesis");
@@ -450,6 +539,11 @@ function sendJson(response: ServerResponse, payload: object, status = 200): void
 }
 
 export const desktopProviderCanaries = {
+  planRevisionGuidance: PLAN_REVISION_GUIDANCE,
+  planRevisionQuestionPrompt: PLAN_REVISION_QUESTION_PROMPT,
+  planRevisionSummary: PLAN_REVISION_SUMMARY,
+  highDeltaPrompt: HIGH_DELTA_PROMPT,
+  highDeltaFinal: HIGH_DELTA_FINAL_CANARY,
   artifactFinal: ARTIFACT_FINAL_CANARY,
   artifactPrompt: ARTIFACT_PROMPT,
   approvalCallId: APPROVAL_CALL_ID,

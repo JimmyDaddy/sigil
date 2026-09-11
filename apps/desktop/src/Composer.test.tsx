@@ -403,13 +403,13 @@ describe("structured composer", () => {
     );
   });
 
-  it("keeps callable unverified models selectable without an unactionable warning", async () => {
+  it.each(["unverified", "configured_unavailable"] as const)("keeps %s models selectable", async (availability) => {
     const onModelChange = vi.fn();
     const unverifiedContext: RunContext = {
       ...context,
       modelOptions: context.modelOptions.map((option) =>
         option.modelName === "deepseek-v4-pro"
-          ? { ...option, availability: "unverified", provenance: "bundled" }
+          ? { ...option, availability, provenance: "bundled" }
           : option,
       ),
     };

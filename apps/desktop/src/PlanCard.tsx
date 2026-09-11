@@ -33,14 +33,6 @@ export function PlanCard({
   onDecision,
 }: PlanCardProps) {
   const { t } = useLocale();
-  const actionDisabled = (action: PlanDecisionAction) => {
-    const terminalRecovery = action === "adopt_candidate" || action === "retry_review";
-    return disabled
-      || busy
-      || (!terminalRecovery && review.status !== "draft_ready")
-      || (terminalRecovery && review.candidate === undefined)
-      || (review.stale && (action === "run" || action === "save"));
-  };
   const primaryAction: PlanDecisionAction | undefined = review.allowedActions.includes("run")
     ? "run"
     : review.allowedActions[0];
@@ -116,7 +108,7 @@ export function PlanCard({
         </div>
       )}
 
-      {review.planHash === undefined && review.candidate === undefined ? null : (
+      {review.planHash === undefined && review.allowedActions.length === 0 ? null : (
         <div className="plan-card-toolbar">
           {review.planHash === undefined ? null : (
             <div className="plan-card-review-toggle">
@@ -144,7 +136,7 @@ export function PlanCard({
                   type="button"
                   variant={action === "run" ? "primary" : action === "reject" ? "danger" : "secondary"}
                   data-plan-action={action}
-                  disabled={actionDisabled(action)}
+                  disabled={disabled || busy}
                   onClick={() => onDecision(action)}
                 >
                   {busy && action === primaryAction

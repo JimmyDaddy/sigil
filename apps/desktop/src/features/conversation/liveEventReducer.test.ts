@@ -19,6 +19,92 @@ import {
 
 const SESSION_ID = "session-1";
 
+function previewEvent(revision: string, text: string, overrides: Partial<TimelineEvent> = {}): TimelineEvent {
+  return event({ kind: "assistant_delta", runSequence: "3", sequence: 3, replayable: false,
+    text, livePreview: { attemptId: "attempt-1", slotId: "text", revision, baseSequence: "3", truncated: false },
+    ...overrides });
+}
+
+describe("replacement preview snapshots", () => {
+  it("retires equal-base late frames and accepts the next attempt and a resumed source", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({ kind: "run_started", runSequence: "3", replayable: true }));
+    state = reduceLiveTimelineEvent(state, previewEvent("100000", "partial"));
+    state = reduceLiveTimelineEvent(state, event({ kind: "assistant_message", runSequence: "4", replayable: true, text: "complete" }));
+    const at = (attemptId: string, revision: string, baseSequence: string) => previewEvent(revision, "current", {
+      runSequence: baseSequence, livePreview: { attemptId, revision, baseSequence, slotId: "text", truncated: false },
+    });
+    expect(reduceLiveTimelineEvent(state, at("attempt-1", "100001", "4"))).toBe(state);
+    state = reduceLiveTimelineEvent(state, at("attempt-2", "100002", "4"));
+    expect(selectDeltaBuffers(state)).toHaveLength(1);
+    state = reduceLiveTimelineEvent(state, event({ kind: "user_input_changed", status: "requested", runSequence: "5", replayable: true }));
+    expect(selectDeltaBuffers(state)).toHaveLength(0);
+    expect(reduceLiveTimelineEvent(state, at("attempt-2", "100003", "5"))).toBe(state);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_started", runSequence: "6", replayable: true }));
+    expect(reduceLiveTimelineEvent(state, at("attempt-2", "100003", "5"))).toBe(state);
+    state = reduceLiveTimelineEvent(state, at("resumed-attempt", "1", "6"));
+    expect(selectDeltaBuffers(state)).toHaveLength(1);
+    expect(state.previewOwners.get("run-1")).toMatchObject({ attemptId: "resumed-attempt", revision: "1" });
+  });
+
+  it("updates existing tool status and retires previews when the durable result arrives", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({
+      kind: "tool_completed", runSequence: "3", replayable: true,
+      itemId: "call-1", toolName: "bash", provisionalId: "tool-1",
+    }));
+    const progress = previewEvent("1", "running output", {
+      kind: "tool_progress", itemId: "call-1", toolName: "bash", status: "running",
+      livePreview: { attemptId: "attempt-1", slotId: "call-1", revision: "1", baseSequence: "3", truncated: false },
+    });
+    state = reduceLiveTimelineEvent(state, progress);
+    expect(selectSemanticLiveItems(state)[0]).toMatchObject({ status: "running", content: { output: "running output" } });
+    state = reduceLiveTimelineEvent(state, event({
+      kind: "tool_result", runSequence: "4", replayable: true, itemId: "call-1",
+      toolName: "bash", status: "ok", text: "exact result", provisionalId: "tool-1",
+    }));
+    expect(state.liveSnapshots.size).toBe(0);
+    const completed = state;
+    state = reduceLiveTimelineEvent(state, { ...progress, livePreview: { ...progress.livePreview!, revision: "100000" } });
+    expect(state).toBe(completed);
+    expect(selectSemanticLiveItems(state)[0]).toMatchObject({ status: "succeeded", content: { output: "exact result" } });
+  });
+
+  it("keeps one fragment after 100000 revisions and consumes later low-sequence durable events", () => {
+    let state = reduceLiveTimelineEvent(createLiveEventState(SESSION_ID), event({ kind: "run_started", runSequence: "3", replayable: true }));
+    for (let revision = 1; revision <= 100_000; revision += 1) {
+      state = reduceLiveTimelineEvent(state, previewEvent(String(revision), `complete ${revision}`));
+    }
+    expect(state.durableRunSequences.get("run-1")).toBe("3");
+    expect(state.liveSnapshots.size).toBe(1);
+    expect(selectDeltaBuffers(state)[0].fragments.size).toBe(1);
+    expect(selectDeltaText(selectDeltaBuffers(state)[0])).toBe("complete 100000");
+    state = reduceLiveTimelineEvent(state, event({ kind: "assistant_message", runSequence: "4", replayable: true, text: "final exact bytes", provisionalId: "final-message" }));
+    expect(selectDeltaBuffers(state)).toHaveLength(0);
+    expect(selectSemanticLiveItems(state)[0].content).toMatchObject({ text: "final exact bytes" });
+    state = reduceLiveTimelineEvent(state, previewEvent("100001", "late"));
+    expect(selectDeltaBuffers(state)).toHaveLength(0);
+    state = reduceLiveTimelineEvent(state, event({ kind: "approval_requested", runSequence: "5", replayable: true, itemId: "call-1", approval: exactApproval() }));
+    expect(selectLatestPendingApproval(state)?.runSequence).toBe("5");
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_finished", runSequence: "6", replayable: true }));
+    state = reduceLiveTimelineEvent(state, previewEvent("100002", "after terminal"));
+    expect(selectDeltaBuffers(state)).toHaveLength(0);
+  });
+
+  it("requires the base cut, replaces dropped snapshots, and rejects stale attempts", () => {
+    let state = createLiveEventState(SESSION_ID);
+    expect(reduceLiveTimelineEvent(state, previewEvent("1", "future"))).toBe(state);
+    state = reduceLiveTimelineEvent(state, event({ kind: "run_started", runSequence: "3", replayable: true }));
+    state = reduceLiveTimelineEvent(state, previewEvent("1", "a"));
+    state = reduceLiveTimelineEvent(state, previewEvent("1000", "all text including dropped snapshots"));
+    expect(selectDeltaText(selectDeltaBuffers(state)[0])).toBe("all text including dropped snapshots");
+    state = reduceLiveTimelineEvent(state, previewEvent("1001", "new attempt", { livePreview: { attemptId: "attempt-2", slotId: "text", revision: "1001", baseSequence: "3", truncated: false } }));
+    const newer = state;
+    state = reduceLiveTimelineEvent(state, previewEvent("999", "stale attempt"));
+    expect(state).toBe(newer);
+    state = liveEventReducer(state, { type: "anchor_received", sessionId: SESSION_ID, anchor: { durableFrontier: "cut-3", runId: "run-1", runSequence: "3" } });
+    expect(selectDeltaText(selectDeltaBuffers(state)[0])).toBe("new attempt");
+  });
+});
+
 describe("live event reducer", () => {
   it("keeps bounded terminal task cards generation-monotonic across foreground settlement", () => {
     let state = createLiveEventState(SESSION_ID);

@@ -7,6 +7,7 @@ use sigil_desktop::DesktopWorkspaceManager;
 use tokio::sync::Mutex;
 
 use crate::appearance::AppearanceStore;
+use crate::history_queries::DesktopHistoryQueryOwner;
 use crate::recent::RecentWorkspaceStore;
 use crate::run_streams::DesktopRunStreamOwner;
 
@@ -16,6 +17,7 @@ pub(crate) struct DesktopAppState {
     pub(crate) recent_workspaces: Arc<Mutex<RecentWorkspaceStore>>,
     pub(crate) appearance: Arc<StdMutex<AppearanceStore>>,
     pub(crate) run_streams: DesktopRunStreamOwner,
+    pub(crate) history_queries: DesktopHistoryQueryOwner,
     pub(crate) sigil_binary: PathBuf,
 }
 
@@ -32,6 +34,7 @@ impl DesktopAppState {
             ))),
             appearance: Arc::new(StdMutex::new(appearance)),
             run_streams: DesktopRunStreamOwner::default(),
+            history_queries: DesktopHistoryQueryOwner::default(),
             sigil_binary,
         }
     }

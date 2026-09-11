@@ -2,6 +2,7 @@ import { useLayoutEffect, useState } from "react";
 
 import { useLocale } from "./i18n";
 import { MessageContent } from "./MessageContent";
+import { MessageContentPager, type ReadMessageContent } from "./MessageContentPager";
 
 const DISCLOSURE_PREVIEW_LINES = 3;
 const DISCLOSURE_PREVIEW_CHARACTERS = 360;
@@ -16,16 +17,19 @@ export interface MessageView {
     readonly name: string;
   };
   status?: string;
+  contentTruncated?: boolean;
 }
 
 export function Message({
   message,
   displayId,
   onOpenExternalUrl,
+  onReadContent,
 }: {
   readonly message: MessageView;
   readonly displayId?: string;
   readonly onOpenExternalUrl?: (url: string) => Promise<void>;
+  readonly onReadContent?: ReadMessageContent;
 }) {
   const { t } = useLocale();
   const streaming = message.status === "streaming";
@@ -58,6 +62,8 @@ export function Message({
           contentId={message.key}
           onOpenExternalUrl={onOpenExternalUrl}
         />
+        {message.contentTruncated && displayId !== undefined && onReadContent !== undefined
+          ? <MessageContentPager key={displayId} displayId={displayId} onRead={onReadContent} /> : null}
       </details>
     );
   }
@@ -85,6 +91,8 @@ export function Message({
         contentId={message.key}
         onOpenExternalUrl={onOpenExternalUrl}
       />
+      {message.contentTruncated && displayId !== undefined && onReadContent !== undefined
+        ? <MessageContentPager key={displayId} displayId={displayId} onRead={onReadContent} /> : null}
     </article>
   );
 }

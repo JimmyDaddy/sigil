@@ -89,6 +89,7 @@ export interface ConversationTerminalFrontier {
 export interface ConversationTerminalObservation {
   runId: string;
   status: ConversationTerminalStatus;
+  runSequence?: DecimalSequence;
 }
 
 export type ConversationDisplayPage = Omit<
@@ -169,6 +170,7 @@ export type ConversationContinuityAction =
   | { type: "initial_page_failed"; sessionId: string; code?: string; message: string }
   | { type: "older_page_received"; sessionId: string; page: ConversationDisplayPage }
   | { type: "live_item_received"; sessionId: string; item: LiveConversationDisplayItem }
+  | { type: "run_started"; sessionId: string; runId: string; runSequence: DecimalSequence }
   | {
     type: "terminal_observed";
     sessionId: string;
@@ -262,6 +264,23 @@ export function reduceConversationContinuity(
       return receivePage(state, action.page, "refresh");
     case "live_item_received":
       return receiveLiveItem(state, action.item);
+    case "run_started": {
+      if (!isDecimalSequence(action.runSequence)) return rejectInvalidSequence(state, "runSequence");
+      const waiting = state.observedTerminal;
+      if (
+        waiting?.runId !== action.runId
+        || waiting.status !== "awaiting_user_input"
+        || waiting.runSequence === undefined
+        || compareSequence(action.runSequence, waiting.runSequence) <= 0
+      ) return state;
+      // A replayed initial start cannot retire a later waiting boundary. Only the same run's
+      // ordered resume releases this pending observation; canonical history stays intact.
+      return {
+        ...state,
+        observedTerminal: undefined,
+        refreshState: state.pendingTerminalRunId === undefined ? "idle" : state.refreshState,
+      };
+    }
     case "terminal_observed":
       return observeTerminal(
         state,
@@ -431,6 +450,16 @@ function receivePage(
   const merged = mergeCanonicalItems(state, page.items);
   if ("error" in merged) return rejectContract(state, merged.error);
 
+  const waitingSettledByFinalPage = state.observedTerminal?.status === "awaiting_user_input"
+    && state.canonicalTerminal?.runId === state.observedTerminal.runId
+    && state.canonicalTerminal.status === "awaiting_user_input"
+    && page.terminalFrontier?.runId === state.observedTerminal.runId
+    && page.terminalFrontier.status !== "awaiting_user_input"
+    && compareSequence(
+      page.terminalFrontier.sessionStreamSequence,
+      state.canonicalTerminal.sessionStreamSequence,
+    ) > 0
+    && compareSequence(page.throughSessionStreamSequence, page.terminalFrontier.sessionStreamSequence) >= 0;
   const canonicalTerminal = mergeTerminalFrontier(
     state.canonicalTerminal,
     page.terminalFrontier,
@@ -440,6 +469,10 @@ function receivePage(
     if (
       state.observedTerminal.runId === canonicalTerminal.value.runId
       && state.observedTerminal.status !== canonicalTerminal.value.status
+      && !waitingSettledByFinalPage
+      // A live final may precede its canonical page. Keep it pending against the old waiting
+      // frontier; only a newer durable final can settle it.
+      && canonicalTerminal.value.status !== "awaiting_user_input"
     ) {
       return rejectContract(state, {
         code: "terminal_conflict",
@@ -452,7 +485,7 @@ function receivePage(
     state.throughSessionStreamSequence,
     page.throughSessionStreamSequence,
   );
-  const terminalCoveredByRefreshPage = state.observedTerminal !== undefined
+  const terminalCoveredByRefreshPage = waitingSettledByFinalPage || (state.observedTerminal !== undefined
     ? terminalIsCovered(
       state.observedTerminal,
       page.terminalFrontier,
@@ -462,7 +495,7 @@ function receivePage(
       state.pendingTerminalRunId,
       page.terminalFrontier,
       page.throughSessionStreamSequence,
-    );
+    ));
   const terminalSettled = mode === "refresh"
     && hasPendingTerminal(state)
     && terminalCoveredByRefreshPage;
@@ -724,8 +757,41 @@ function observeTerminal(
       message: "The observed terminal run identity is invalid.",
     });
   }
+  // A delayed replay of an already covered predecessor must not conflict with a successor
+  // that is currently being finalized.
+  if (terminalIsCovered(terminal, state.canonicalTerminal, state.throughSessionStreamSequence)) {
+    return state;
+  }
+  // Canonical completion can overtake the live stream. A completed run cannot resume
+  // an old input boundary, even after settlement has cleared its live observation.
+  if (
+    terminal.status === "awaiting_user_input"
+    && (state.canonicalTerminal?.status === "succeeded"
+      || state.canonicalTerminal?.status === "failed"
+      || state.canonicalTerminal?.status === "cancelled"
+      || state.canonicalTerminal?.status === "interrupted")
+    && terminalRunIsCovered(terminal.runId, state.canonicalTerminal, state.throughSessionStreamSequence)
+  ) {
+    return state;
+  }
   if (state.observedTerminal !== undefined) {
-    if (sameValue(state.observedTerminal, terminal)) return state;
+    const current = state.observedTerminal;
+    if (current.runId === terminal.runId) {
+      if (current.status === terminal.status) {
+        return terminal.runSequence !== undefined
+          && current.runSequence !== undefined
+          && compareSequence(terminal.runSequence, current.runSequence) > 0
+          ? { ...state, observedTerminal: { ...terminal } }
+          : state;
+      }
+      if (current.runSequence !== undefined && terminal.runSequence !== undefined) {
+        const order = compareSequence(terminal.runSequence, current.runSequence);
+        if (current.status === "awaiting_user_input" && order > 0) {
+          return beginTerminalSettlement(state, terminal);
+        }
+        if (terminal.status === "awaiting_user_input" && order < 0) return state;
+      }
+    }
     if (supersededByRunId === state.observedTerminal.runId) return state;
     if (supersedesRunId === state.observedTerminal.runId) {
       return beginTerminalSettlement(state, terminal);
@@ -751,14 +817,12 @@ function observeTerminal(
   if (
     state.canonicalTerminal?.runId === terminal.runId
     && state.canonicalTerminal.status !== terminal.status
+    && state.canonicalTerminal.status !== "awaiting_user_input"
   ) {
     return rejectContract(state, {
       code: "terminal_conflict",
       message: `Run ${terminal.runId} has conflicting live and durable terminal status facts.`,
     });
-  }
-  if (terminalIsCovered(terminal, state.canonicalTerminal, state.throughSessionStreamSequence)) {
-    return state;
   }
   return beginTerminalSettlement(state, terminal);
 }
@@ -774,6 +838,9 @@ function observeTerminalTransport(
       code: "terminal_conflict",
       message: "The terminal transport run identity is invalid.",
     });
+  }
+  if (terminalRunIsCovered(runId, state.canonicalTerminal, state.throughSessionStreamSequence)) {
+    return state;
   }
   if (state.observedTerminal !== undefined) {
     if (state.observedTerminal.runId === runId) return state;
@@ -796,13 +863,6 @@ function observeTerminalTransport(
         code: "terminal_conflict",
         message: "A second terminal transport fact conflicts with the run being finalized.",
     });
-  }
-  // A terminal stream-status event can race behind the canonical refresh that already settled
-  // the same run. Reopening finalization here would strand the UI: the run identity does not
-  // change, so no new refresh trigger is guaranteed. The durable frontier is authoritative and
-  // makes the duplicate transport observation an idempotent no-op.
-  if (terminalRunIsCovered(runId, state.canonicalTerminal, state.throughSessionStreamSequence)) {
-    return state;
   }
   return beginTerminalTransportSettlement(state, runId);
 }
@@ -842,7 +902,12 @@ function mergeTerminalFrontier(
   if (incoming === undefined) return { value: current };
   if (current === undefined) return { value: incoming };
 
+  const order = compareSequence(incoming.sessionStreamSequence, current.sessionStreamSequence);
   if (current.runId === incoming.runId && current.status !== incoming.status) {
+    // Awaiting input is a resumable boundary within one logical run. A later durable final
+    // advances it; an older waiting page may arrive after that final without rolling it back.
+    if (current.status === "awaiting_user_input" && order > 0) return { value: incoming };
+    if (incoming.status === "awaiting_user_input" && order < 0) return { value: current };
     return {
       error: {
         code: "terminal_conflict",
@@ -851,7 +916,6 @@ function mergeTerminalFrontier(
     };
   }
 
-  const order = compareSequence(incoming.sessionStreamSequence, current.sessionStreamSequence);
   if (order < 0) return { value: current };
   if (order > 0) return { value: incoming };
   if (current.runId === incoming.runId && current.status === incoming.status) {
@@ -1003,7 +1067,8 @@ function isValidTerminal(terminal: ConversationTerminalFrontier): boolean {
 }
 
 function isValidTerminalObservation(terminal: ConversationTerminalObservation): boolean {
-  return terminal.runId.length > 0;
+  return terminal.runId.length > 0
+    && (terminal.runSequence === undefined || isDecimalSequence(terminal.runSequence));
 }
 
 function isFinalAssistant(

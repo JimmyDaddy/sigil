@@ -9,6 +9,10 @@ import { dirname, join, resolve } from "node:path";
 import { startDesktopProviderFixture } from "./provider-fixture";
 
 const DESKTOP_E2E_IDENTIFIER = "dev.sigil.desktop.e2e";
+const compositionProfile = process.env.SIGIL_DESKTOP_E2E_PROFILE ?? "standard";
+if (compositionProfile !== "core" && compositionProfile !== "standard") {
+  throw new Error("SIGIL_DESKTOP_E2E_PROFILE must be core or standard");
+}
 const providerFixture = await startDesktopProviderFixture();
 process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL = providerFixture.baseUrl;
 const runtimeRoot = process.env.SIGIL_DESKTOP_E2E_ROOT
@@ -19,7 +23,8 @@ const e2eHome = join(runtimeRoot, "home");
 const workspaceRoot = join(runtimeRoot, "workspace");
 const stateHome = join(runtimeRoot, "state");
 const cacheHome = join(runtimeRoot, "cache");
-const artifactRoot = resolve("..", "..", "target", "desktop-e2e-artifacts");
+const artifactRoot = process.env.SIGIL_DESKTOP_E2E_ARTIFACTS
+  ?? resolve("..", "..", "target", "desktop-e2e-artifacts", compositionProfile === "core" ? "core" : ".");
 const applicationConfigRoot = process.platform === "darwin"
   ? join(e2eHome, "Library", "Application Support", DESKTOP_E2E_IDENTIFIER)
   : process.platform === "win32"
@@ -43,19 +48,31 @@ writeFileSync(
   join(e2eHome, ".sigil", "sigil.toml"),
   `config_version = 2
 
+[composition]
+profile = "${compositionProfile}"
+enhancements = []
+
 [workspace]
 root = "."
+
+[storage]
+state_root = ${JSON.stringify(stateHome)}
+cache_root = ${JSON.stringify(cacheHome)}
 
 [agent]
 connection = "desktop-e2e"
 model = "sigil-e2e-model"
 
+[permission]
+mode = "manual"
+${compositionProfile === "standard" ? `
 [task]
 enabled = true
 routing_policy = "auto"
 multi_agent_mode = "proactive"
 max_subagents = 4
 max_parallel_read_steps = 2
+` : ""}
 
 [connections.desktop-e2e]
 label = "Desktop E2E"
@@ -145,8 +162,6 @@ export const config = {
       env: {
         HOME: e2eHome,
         USERPROFILE: e2eHome,
-        SIGIL_STATE_HOME: stateHome,
-        SIGIL_CACHE_HOME: cacheHome,
       },
       captureBackendLogs: true,
       captureFrontendLogs: true,
@@ -172,6 +187,7 @@ export const config = {
   autoXvfb: false,
   cucumberOpts: {
     import: [resolve("e2e", "steps", "**", "*.ts")],
+    tags: compositionProfile === "core" ? "@core" : "not @core",
     strict: true,
     failFast: false,
     timeout: 120_000,

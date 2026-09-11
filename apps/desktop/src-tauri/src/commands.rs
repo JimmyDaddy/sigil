@@ -29,6 +29,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     appearance::{AppearanceSnapshot, AppearanceStoreError, ThemePreference},
+    history_queries::HistoryQueryError,
     ipc::{
         DesktopAgentActivitySummary, DesktopAppearanceInput, DesktopApprovalActionInput,
         DesktopApprovalDecisionInput, DesktopApprovalDecisionSummary, DesktopBootstrap,
@@ -582,6 +583,10 @@ pub(crate) async fn desktop_close_workspace(
     }
     state.run_streams.stop_workspace(&workspace_id).await;
     let mut manager = state.manager.lock().await;
+    state
+        .history_queries
+        .cancel_workspace(&workspace_id)
+        .map_err(project_history_query_error)?;
     manager
         .close(&workspace_id)
         .await
@@ -1935,70 +1940,215 @@ pub(crate) async fn desktop_delete_invalid_session_source(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_prepare_history_query(
+    workspace_id: String,
+    session_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<String, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    // Workspace close uses this same lock through cancellation and removal, so a ticket cannot
+    // appear between the close sweep and the manager retiring that workspace.
+    let mut manager = state.manager.lock().await;
+    manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    state
+        .history_queries
+        .prepare(&workspace_id, &session_id)
+        .map_err(project_history_query_error)
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_cancel_history_query(
+    workspace_id: String,
+    session_id: String,
+    query_id: String,
+    state: State<'_, DesktopAppState>,
+) -> Result<(), DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    state
+        .history_queries
+        .cancel(&workspace_id, &session_id, &query_id)
+        .map_err(project_history_query_error)
+}
+
+fn project_history_query_error(error: HistoryQueryError) -> DesktopCommandError {
+    let code = match error {
+        HistoryQueryError::Cancelled => "history_query_cancelled",
+        HistoryQueryError::BindingMismatch => "history_query_binding_mismatch",
+        HistoryQueryError::AlreadyClaimed => "history_query_already_started",
+        HistoryQueryError::Capacity => "history_query_capacity",
+        HistoryQueryError::Unavailable => "history_query_unavailable",
+    };
+    DesktopCommandError::new(code, error.to_string())
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_transcript(
     workspace_id: String,
     session_id: String,
+    query_id: String,
     request: DesktopTranscriptRequest,
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopTranscriptPage, DesktopCommandError> {
-    validate_workspace_id(&workspace_id)?;
-    validate_session_id(&session_id)?;
-    if request.before == Some(0)
-        || request
-            .limit
-            .is_some_and(|limit| !(1..=100).contains(&limit))
+    let lease = state
+        .history_queries
+        .claim(&workspace_id, &session_id, &query_id)
+        .map_err(project_history_query_error)?;
+    lease
+        .run(async {
+            validate_workspace_id(&workspace_id)?;
+            validate_session_id(&session_id)?;
+            if request.before == Some(0)
+                || request
+                    .limit
+                    .is_some_and(|limit| !(1..=100).contains(&limit))
+            {
+                return Err(DesktopCommandError::new(
+                    "transcript_query_invalid",
+                    "The conversation history query is invalid.",
+                ));
+            }
+            let client = state
+                .manager
+                .lock()
+                .await
+                .client(&workspace_id)
+                .map_err(project_manager_error)?;
+            client
+                .transcript(
+                    &session_id,
+                    &DesktopTranscriptQuery {
+                        before: request.before,
+                        limit: request.limit,
+                    },
+                )
+                .await
+                .map(Into::into)
+                .map_err(project_client_error)
+        })
+        .await
+        .map_err(project_history_query_error)?
+}
+
+#[tauri::command]
+pub(crate) async fn desktop_message_content(
+    workspace_id: String,
+    session_id: String,
+    query_id: String,
+    request: crate::ipc::DesktopMessageContentRequest,
+    state: State<'_, DesktopAppState>,
+) -> Result<crate::ipc::DesktopMessageContentPage, DesktopCommandError> {
+    let lease = state
+        .history_queries
+        .claim(&workspace_id, &session_id, &query_id)
+        .map_err(project_history_query_error)?;
+    lease
+        .run(async {
+            validate_workspace_id(&workspace_id)?;
+            validate_session_id(&session_id)?;
+            let query = sigil_desktop::DesktopMessageContentQuery {
+                display_id: request.display_id,
+                offset: request.offset.unwrap_or(0),
+                limit: request.limit.unwrap_or(64 * 1024),
+                content_version: request.content_version,
+            };
+            query.validate().map_err(|_| {
+                DesktopCommandError::new(
+                    "message_content_query_invalid",
+                    "The message content query is invalid.",
+                )
+            })?;
+            let client = state
+                .manager
+                .lock()
+                .await
+                .client(&workspace_id)
+                .map_err(project_manager_error)?;
+            client
+                .message_content(&session_id, &query)
+                .await
+                .map(Into::into)
+                .map_err(project_message_content_client_error)
+        })
+        .await
+        .map_err(project_history_query_error)?
+}
+
+fn project_message_content_client_error(error: DesktopClientError) -> DesktopCommandError {
+    if let DesktopClientError::Rejected {
+        code: Some(code), ..
+    } = &error
     {
-        return Err(DesktopCommandError::new(
-            "transcript_query_invalid",
-            "The conversation history query is invalid.",
-        ));
+        let message = match code.as_str() {
+            "message_content_query_invalid" => Some((
+                "message_content_query_invalid",
+                "The message content query is invalid.",
+            )),
+            "message_content_not_found" => Some((
+                "message_content_not_found",
+                "This message is no longer available in this conversation.",
+            )),
+            "message_content_stale" => Some((
+                "message_content_stale",
+                "The saved message changed. Close and reopen its full content.",
+            )),
+            "message_content_corrupt" => Some((
+                "message_content_corrupt",
+                "The saved message failed validation. Open diagnostics before recovering this session.",
+            )),
+            "message_content_unavailable" => Some((
+                "message_content_unavailable",
+                "The message could not be read yet. Try again.",
+            )),
+            _ => None,
+        };
+        if let Some((code, message)) = message {
+            return DesktopCommandError::new(code, message);
+        }
     }
-    let client = state
-        .manager
-        .lock()
-        .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
-        .transcript(
-            &session_id,
-            &DesktopTranscriptQuery {
-                before: request.before,
-                limit: request.limit,
-            },
-        )
-        .await
-        .map(Into::into)
-        .map_err(project_client_error)
+    project_client_error(error)
 }
 
 #[tauri::command]
 pub(crate) async fn desktop_display(
     workspace_id: String,
     session_id: String,
+    query_id: String,
     request: DesktopConversationDisplayRequest,
     state: State<'_, DesktopAppState>,
 ) -> Result<DesktopConversationDisplayPage, DesktopCommandError> {
-    validate_workspace_id(&workspace_id)?;
-    validate_session_id(&session_id)?;
-    validate_conversation_display_request(&request)?;
-    let client = state
-        .manager
-        .lock()
+    let lease = state
+        .history_queries
+        .claim(&workspace_id, &session_id, &query_id)
+        .map_err(project_history_query_error)?;
+    lease
+        .run(async {
+            validate_workspace_id(&workspace_id)?;
+            validate_session_id(&session_id)?;
+            validate_conversation_display_request(&request)?;
+            let client = state
+                .manager
+                .lock()
+                .await
+                .client(&workspace_id)
+                .map_err(project_manager_error)?;
+            client
+                .conversation_display(
+                    &session_id,
+                    &DesktopConversationDisplayQuery {
+                        cursor: request.cursor,
+                        limit: request.limit,
+                    },
+                )
+                .await
+                .map(Into::into)
+                .map_err(project_conversation_display_client_error)
+        })
         .await
-        .client(&workspace_id)
-        .map_err(project_manager_error)?;
-    client
-        .conversation_display(
-            &session_id,
-            &DesktopConversationDisplayQuery {
-                cursor: request.cursor,
-                limit: request.limit,
-            },
-        )
-        .await
-        .map(Into::into)
-        .map_err(project_conversation_display_client_error)
+        .map_err(project_history_query_error)?
 }
 
 fn validate_conversation_display_request(
@@ -2465,8 +2615,10 @@ fn validate_verification_rerun(
         input.request.check_spec_id.as_str(),
         input.request.check_spec_hash.as_str(),
         input.request.policy_hash.as_str(),
-        input.request.workspace_snapshot_id.as_str(),
-    ] {
+    ]
+    .into_iter()
+    .chain(input.request.workspace_snapshot_id.as_deref())
+    {
         if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
             return Err(DesktopCommandError::new(
                 "verification_request_invalid",
@@ -2911,6 +3063,10 @@ fn project_client_error(error: DesktopClientError) -> DesktopCommandError {
 
 fn project_conversation_display_client_error(error: DesktopClientError) -> DesktopCommandError {
     match error {
+        DesktopClientError::Rejected { code: Some(code), .. } if code == "conversation_display_corrupt" => {
+            DesktopCommandError::new("conversation_display_corrupt", "Saved conversation history could not be validated. Open diagnostics before recovering this session.")
+                .with_recovery_actions([DesktopRecoveryAction::OpenDiagnostics, DesktopRecoveryAction::ShowDetails])
+        }
         DesktopClientError::Rejected {
             code: Some(code), ..
         } if code == "invalid_display_cursor" => DesktopCommandError::new(

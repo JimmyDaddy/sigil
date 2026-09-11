@@ -299,6 +299,9 @@
 .message-reasoning .message-content { padding: 10px 12px; border-radius: var(--sg-sys-radius-sm); color: var(--sg-sys-color-on-surface-variant); background: var(--sg-sys-color-surface-input); font-size: 12.5px; line-height: 1.65; }
 .message-reasoning .message-content > p, .message-reasoning .message-content > h1, .message-reasoning .message-content > h2, .message-reasoning .message-content > h3, .message-reasoning .message-content > h4, .message-reasoning .message-content > h5, .message-reasoning .message-content > h6 { color: var(--sg-sys-color-on-surface-variant); }
 .message-content { position: relative; width: 100%; min-width: 0; max-width: 100%; color: var(--sg-sys-color-on-surface); overflow-wrap: anywhere; word-break: break-word; line-height: 1.55; }
+.message-full-content { margin-top: 8px; }
+.message-full-content nav { display: flex; align-items: center; gap: 8px; }
+.message-content-page { max-height: 60vh; overflow: auto; white-space: pre-wrap; font-family: inherit; }
 .message-content > p { margin: 7px 0 0; white-space: pre-wrap; }
 .message-content > h1, .message-content > h2, .message-content > h3, .message-content > h4, .message-content > h5, .message-content > h6 { margin: 14px 0 0; color: var(--sg-sys-color-on-surface); line-height: 1.35; letter-spacing: -.01em; }
 .message-content > h1 { font-size: 19px; }

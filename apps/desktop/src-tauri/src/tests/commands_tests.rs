@@ -685,6 +685,17 @@ fn conversation_display_errors_are_distinct_from_catalog_pagination() {
             .recovery_actions
             .contains(&DesktopRecoveryAction::OpenDiagnostics)
     );
+    let corrupt = project_conversation_display_client_error(DesktopClientError::Rejected {
+        status: 409,
+        code: Some("conversation_display_corrupt".to_owned()),
+        route_recovery: None,
+    });
+    assert_eq!(corrupt.code, "conversation_display_corrupt");
+    assert!(
+        !corrupt
+            .recovery_actions
+            .contains(&DesktopRecoveryAction::RetryCurrent)
+    );
 }
 
 #[test]
@@ -798,7 +809,7 @@ fn session_open_reference_rejects_path_shaped_input() {
 
 #[test]
 fn verification_rerun_requires_one_bounded_exact_binding() {
-    let valid = DesktopVerificationRerunInput {
+    let mut valid = DesktopVerificationRerunInput {
         session_id: "http-session-1".to_owned(),
         request: crate::ipc::DesktopVerificationRerunBinding {
             request_id: format!("verification-rerun-{}", "a".repeat(64)),
@@ -808,10 +819,16 @@ fn verification_rerun_requires_one_bounded_exact_binding() {
             check_spec_id: "cargo-test".to_owned(),
             check_spec_hash: "check-hash".to_owned(),
             policy_hash: "policy-hash".to_owned(),
-            workspace_snapshot_id: "snapshot-1".to_owned(),
+            workspace_snapshot_id: Some("snapshot-1".to_owned()),
         },
     };
     assert!(validate_verification_rerun(&valid).is_ok());
+
+    valid.request.workspace_snapshot_id = None;
+    assert!(validate_verification_rerun(&valid).is_ok());
+    valid.request.workspace_snapshot_id = Some(String::new());
+    assert!(validate_verification_rerun(&valid).is_err());
+    valid.request.workspace_snapshot_id = None;
 
     let mut invalid = valid;
     invalid.request.request_id = "verification-rerun-not-a-digest".to_owned();

@@ -18,6 +18,21 @@ Feature: Desktop workbench remains usable
     And terminal completion releases continuity and history controls
     And the generated semantic title is synchronized into the conversation page
 
+  @core
+  Scenario: Core approves an ordinary file write and dispatches a queued message
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    Then the conversation timeline and composer are usable
+    When I start a run that requires approval
+    Then the approval remains live without losing runtime control
+    When I press Enter with a follow-up while approval is pending
+    Then the follow-up is recorded in the durable queue
+    When I approve the pending command
+    Then the accepted approval stops offering actions before the next run event
+    And the approved action and queued follow-up both settle
+    And terminal completion releases continuity and history controls
+    And Core shows the successful file write with its durable approval and session seal
+
   Scenario: Load and execute workspace extensions
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
@@ -46,6 +61,7 @@ Feature: Desktop workbench remains usable
     And I approve the pending command
     Then Desktop preserves the failing shell result and pages its stderr artifact
 
+  @terminal-lifecycle
   Scenario: Keep a persistent terminal task live after foreground completion
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
@@ -88,6 +104,17 @@ Feature: Desktop workbench remains usable
     Then Desktop resumes exactly one continuation and completes the answer
     And the durable user-input lifecycle is fully settled
 
+  @live-preview
+  Scenario: Coalesce high-rate provider output and restore one complete final answer
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I start a provider stream with one hundred thousand short deltas
+    Then Desktop displays one bounded truncated preview while the provider is paused
+    When I release the paused provider final answer
+    Then Desktop displays exactly one complete high-delta final answer
+    When I reload Desktop after the high-delta answer settles
+    Then Desktop restores exactly one complete high-delta final answer
+
   Scenario: Execute the supervised plan agent
     Given the current-source desktop has restored the isolated workspace
     When I create a new desktop conversation
@@ -96,6 +123,19 @@ Feature: Desktop workbench remains usable
     And the draft plan becomes ready on the Desktop plan card
     When I save the reviewed plan from Desktop
     Then the saved plan remains available without creating a Task
+
+  @plan-revision-input
+  Scenario: Revise a plan through guidance and a recoverable Agent question
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I invoke Desktop plan mode
+    Then the draft plan becomes ready on the Desktop plan card
+    When I revise the draft plan with clarification guidance
+    Then the Plan child asks its durable verification question
+    When I reload Desktop during the Plan clarification
+    Then Desktop restores the Plan clarification without resuming it
+    When I answer the Plan verification question
+    Then the Plan child resumes once and replaces the draft with the revised plan
 
   Scenario: Automatically review and run a draft plan as a durable Task
     Given the current-source desktop has restored the isolated workspace
@@ -118,3 +158,16 @@ Feature: Desktop workbench remains usable
     Then the workspace opens in provider configuration recovery
     When I explicitly replace the invalid provider configuration
     Then the repaired workspace can create a new conversation
+
+  @direct-lifecycle
+  Scenario: Pause and resume one Direct Task without a duplicate attempt after reload
+    Given the current-source desktop has restored the isolated workspace
+    When I create a new desktop conversation
+    And I request automatic multi-Agent execution
+    Then the automatic plan review drafts a durable plan
+    And the draft plan becomes ready on the Desktop plan card
+    When I hold the next Direct Task response
+    And I run the reviewed plan from Desktop
+    And I pause the Direct Task and reload Desktop
+    And I continue the paused Direct Task twice
+    Then one Direct Task completes and survives reload without reexecution

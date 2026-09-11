@@ -335,6 +335,189 @@ describe("conversation continuity reducer", () => {
     expect(unrelated.contractError?.code).toBe("terminal_conflict");
   });
 
+  it("ignores a canonically covered predecessor while another run is finalizing", () => {
+    let state = reduceConversationContinuity(receiveInitial([]), {
+      type: "refresh_page_received",
+      sessionId: SESSION_ID,
+      page: page([], "25", { runId: "draft-run", sessionStreamSequence: "25", status: "succeeded" }),
+    });
+    state = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed", sessionId: SESSION_ID, runId: "review-run",
+    });
+    const pending = state;
+    state = reduceConversationContinuity(state, {
+      type: "terminal_transport_observed", sessionId: SESSION_ID, runId: "draft-run",
+    });
+    expect(state).toBe(pending);
+    state = reduceConversationContinuity(state, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "draft-run", status: "succeeded", runSequence: "10" },
+    });
+    expect(state).toBe(pending);
+    expect(state.pendingTerminalRunId).toBe("review-run");
+    expect(state.contractError).toBeUndefined();
+  });
+
+  it("resumes an ordered waiting boundary without reopening irreversible terminal outcomes", () => {
+    let state = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "awaiting_user_input", runSequence: "5" },
+    });
+    const waiting = state;
+    state = reduceConversationContinuity(state, {
+      type: "run_started", sessionId: SESSION_ID, runId: "review-run", runSequence: "1",
+    });
+    expect(state).toBe(waiting);
+    state = reduceConversationContinuity(state, {
+      type: "run_started", sessionId: SESSION_ID, runId: "review-run", runSequence: "6",
+    });
+    expect(state.observedTerminal).toBeUndefined();
+    state = reduceConversationContinuity(state, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "succeeded", runSequence: "11" },
+    });
+    const finished = state;
+    expect(finished.contractError).toBeUndefined();
+    expect(reduceConversationContinuity(finished, {
+      type: "run_started", sessionId: SESSION_ID, runId: "review-run", runSequence: "12",
+    })).toBe(finished);
+    const conflict = reduceConversationContinuity(finished, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "failed", runSequence: "13" },
+    });
+    expect(conflict.contractError?.code).toBe("terminal_conflict");
+    const replayedWaiting = reduceConversationContinuity(finished, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "awaiting_user_input", runSequence: "5" },
+    });
+    expect(replayedWaiting).toBe(finished);
+  });
+
+  it("settles the resumed final through a newer durable frontier and ignores stale waiting pages", () => {
+    const waitingPage = page([], "44", {
+      runId: "review-run", sessionStreamSequence: "44", status: "awaiting_user_input",
+    });
+    let state = reduceConversationContinuity(receiveInitial([]), {
+      type: "refresh_page_received", sessionId: SESSION_ID, page: waitingPage,
+    });
+    state = reduceConversationContinuity(state, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "succeeded", runSequence: "11" },
+    });
+    expect(state.contractError).toBeUndefined();
+    state = reduceConversationContinuity(state, {
+      type: "refresh_page_received", sessionId: SESSION_ID, page: waitingPage,
+    });
+    expect(state.refreshState).toBe("needed");
+    expect(state.contractError).toBeUndefined();
+    state = reduceConversationContinuity(state, {
+      type: "refresh_page_received", sessionId: SESSION_ID,
+      page: page([assistantFinal("revised-plan-final", "59", "review-run", "Revised plan ready")], "60", {
+        runId: "review-run", sessionStreamSequence: "60", status: "succeeded",
+      }),
+    });
+    expect(state.lifecycle).toBe("idle");
+    expect(state.observedTerminal).toBeUndefined();
+    expect(state.canonicalTerminal?.status).toBe("succeeded");
+    state = reduceConversationContinuity(state, {
+      type: "older_page_received", sessionId: SESSION_ID, page: waitingPage,
+    });
+    expect(state.contractError).toBeUndefined();
+    expect(state.canonicalTerminal?.sessionStreamSequence).toBe("60");
+    expect(selectConversationTimeline(state).map(({ identity }) => identity)).toContain("revised-plan-final");
+    const conflictingPage = reduceConversationContinuity(state, {
+      type: "refresh_page_received", sessionId: SESSION_ID,
+      page: page([], "61", { runId: "review-run", sessionStreamSequence: "61", status: "failed" }),
+    });
+    expect(conflictingPage.contractError?.code).toBe("terminal_conflict");
+  });
+
+  it.each(["succeeded", "failed", "cancelled", "interrupted"] as const)(
+    "ignores replayed waiting after the same run has durably settled as %s",
+    (status) => {
+      let state = reduceConversationContinuity(receiveInitial([]), {
+        type: "terminal_observed", sessionId: SESSION_ID,
+        terminal: { runId: "review-run", status, runSequence: "11" },
+      });
+      state = reduceConversationContinuity(state, {
+        type: "refresh_page_received", sessionId: SESSION_ID,
+        page: page([], "60", { runId: "review-run", sessionStreamSequence: "60", status }),
+      });
+      expect(state.lifecycle).toBe("idle");
+      expect(state.observedTerminal).toBeUndefined();
+      const waitingReplay = {
+        type: "terminal_observed", sessionId: SESSION_ID,
+        terminal: { runId: "review-run", status: "awaiting_user_input", runSequence: "5" },
+      } as const;
+      expect(reduceConversationContinuity(state, waitingReplay)).toBe(state);
+      const conflictingFinal = reduceConversationContinuity(state, {
+        type: "terminal_observed", sessionId: SESSION_ID,
+        terminal: { runId: "review-run", status: status === "succeeded" ? "failed" : "succeeded", runSequence: "13" },
+      });
+      expect(conflictingFinal.contractError?.code).toBe("terminal_conflict");
+
+      const pendingSuccessor = reduceConversationContinuity(state, {
+        type: "terminal_transport_observed", sessionId: SESSION_ID, runId: "successor-run",
+      });
+      expect(pendingSuccessor.pendingTerminalRunId).toBe("successor-run");
+      expect(reduceConversationContinuity(pendingSuccessor, waitingReplay)).toBe(pendingSuccessor);
+      const unrelatedWaiting = reduceConversationContinuity(pendingSuccessor, {
+        ...waitingReplay,
+        terminal: { ...waitingReplay.terminal, runId: "unrelated-run" },
+      });
+      expect(unrelatedWaiting.contractError?.code).toBe("terminal_conflict");
+    },
+  );
+
+  it("requires ordered evidence before replacing an observed waiting outcome", () => {
+    const waiting = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "awaiting_user_input", runSequence: "5" },
+    });
+    const unproven = reduceConversationContinuity(waiting, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "succeeded" },
+    });
+    expect(unproven.contractError?.code).toBe("terminal_conflict");
+    const ordered = reduceConversationContinuity(waiting, {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "succeeded", runSequence: "11" },
+    });
+    expect(ordered.contractError).toBeUndefined();
+    expect(ordered.observedTerminal?.status).toBe("succeeded");
+  });
+
+  it("does not settle a waiting observation from an unproven or older final page", () => {
+    const finalPage = page([], "20", {
+      runId: "review-run", sessionStreamSequence: "20", status: "succeeded",
+    });
+    let waiting = reduceConversationContinuity(receiveInitial([]), {
+      type: "terminal_observed", sessionId: SESSION_ID,
+      terminal: { runId: "review-run", status: "awaiting_user_input", runSequence: "5" },
+    });
+    expect(reduceConversationContinuity(waiting, {
+      type: "refresh_page_received", sessionId: SESSION_ID, page: finalPage,
+    }).contractError?.code).toBe("terminal_conflict");
+    waiting = reduceConversationContinuity(waiting, {
+      type: "initial_page_received", sessionId: SESSION_ID,
+      page: page([], "44", {
+        runId: "review-run", sessionStreamSequence: "44", status: "awaiting_user_input",
+      }),
+    });
+    const older = reduceConversationContinuity(waiting, {
+      type: "refresh_page_received", sessionId: SESSION_ID, page: finalPage,
+    });
+    expect(older.contractError?.code).toBe("terminal_conflict");
+    expect(older.observedTerminal?.status).toBe("awaiting_user_input");
+    const advanced = reduceConversationContinuity(waiting, {
+      type: "refresh_page_received", sessionId: SESSION_ID,
+      page: page([], "60", { runId: "review-run", sessionStreamSequence: "60", status: "succeeded" }),
+    });
+    expect(advanced.contractError).toBeUndefined();
+    expect(advanced.observedTerminal).toBeUndefined();
+    expect(advanced.canonicalTerminal?.sessionStreamSequence).toBe("60");
+  });
+
   it("does not use equal text as a reconciliation identity", () => {
     let state = receiveInitial([reasoningItem("durable-reasoning", "4", "same reasoning")]);
     state = reduceConversationContinuity(state, {

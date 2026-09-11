@@ -591,6 +591,15 @@ export function createCatalogWorkbenchBridge(
       items: input.items.map((item) => ({ sessionRef: item.sessionRef, outcome: "completed" })),
     }),
     transcript: async () => transcript,
+    messageContent: async (_workspaceId, _sessionId, request) => ({
+      displayId: request.displayId,
+      messageId: request.displayId,
+      contentVersion: "catalog-message-v1",
+      offset: 0,
+      nextOffset: null,
+      totalBytes: 0,
+      text: "",
+    }),
     display: async () => displayPage,
     readToolArtifact: async (_workspaceId, sessionId, input) => ({
       schemaVersion: 1,

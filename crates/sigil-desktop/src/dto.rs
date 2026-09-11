@@ -2480,7 +2480,7 @@ pub struct DesktopVerificationRerunRequest {
     pub check_spec_id: String,
     pub check_spec_hash: String,
     pub policy_hash: String,
-    pub workspace_snapshot_id: String,
+    pub workspace_snapshot_id: Option<String>,
 }
 
 /// Verification evidence scope returned by the local server.

@@ -1369,7 +1369,10 @@ export interface paths {
                     /** @description Opaque backwards cursor bound to one fixed durable frontier */
                     cursor?: string;
                 };
-                header?: never;
+                header?: {
+                    /** @description Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write. */
+                    "x-sigil-cancel-observation-on-close"?: components["parameters"]["CancelObservationOnClose"];
+                };
                 path: {
                     session_id: components["parameters"]["SessionId"];
                 };
@@ -1540,6 +1543,78 @@ export interface paths {
                 503: components["responses"]["Unavailable"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/message-content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one bounded UTF-8 page of a complete saved message
+         * @description Resolves a canonical display identity through the same strict session owner. Redacts the complete body before slicing. Nonzero offsets require the content version from the first page; each response contains at most 65536 UTF-8 bytes.
+         */
+        get: {
+            parameters: {
+                query: {
+                    display_id: string;
+                    /** @description UTF-8 byte offset on a character boundary */
+                    offset?: number;
+                    limit?: number;
+                    /** @description Opaque version binding the scope, display identity and immutable source record; required after offset zero */
+                    content_version?: string;
+                };
+                header?: {
+                    /** @description Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write. */
+                    "x-sigil-cancel-observation-on-close"?: components["parameters"]["CancelObservationOnClose"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One complete-message page */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MessageContentPage"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                /** @description Saved content version changed or source validation failed */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description The source is temporarily unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2074,7 +2149,10 @@ export interface paths {
                     /** @description Exclusive one-based message ordinal for the next older page */
                     before?: number;
                 };
-                header?: never;
+                header?: {
+                    /** @description Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write. */
+                    "x-sigil-cancel-observation-on-close"?: components["parameters"]["CancelObservationOnClose"];
+                };
                 path: {
                     session_id: components["parameters"]["SessionId"];
                 };
@@ -3466,6 +3544,46 @@ export interface components {
             /** Format: uint64 */
             version: number;
         };
+        LiveRunUpdate: {
+            attempt_id: string;
+            /** Format: uint64 */
+            base_durable_sequence: number;
+            /** @enum {string} */
+            kind: "text" | "reasoning" | "tool_call_arguments" | "tool_progress";
+            /** Format: uint64 */
+            live_revision: number;
+            /** @description replacement snapshot bounded to 64 KiB of UTF-8 */
+            preview: string;
+            run_id: string;
+            /** @constant */
+            schema_version: 1;
+            session_id: string;
+            slot_id: string;
+            tool_progress?: {
+                call_id: string;
+                execution_id: string;
+                status: string;
+                tool_name: string;
+                total_bytes: number | null;
+                updated_at_ms: number | null;
+            };
+            truncated?: boolean;
+        };
+        MessageContentPage: {
+            content_version: string;
+            display_id: string;
+            message_id: string;
+            /** Format: uint64 */
+            next_offset: number | null;
+            /** Format: uint64 */
+            offset: number;
+            text: string;
+            /**
+             * Format: uint64
+             * @description Byte length of the complete safely redacted UTF-8 body
+             */
+            total_bytes: number;
+        };
         NoticeEvent: {
             message: string;
             /** @constant */
@@ -3631,12 +3749,16 @@ export interface components {
             approval_request?: components["schemas"]["PendingApproval"];
             /** @enum {string} */
             event_class: "durable" | "transient";
+            live_update?: components["schemas"]["LiveRunUpdate"];
             provisional_id?: string;
             replay_id?: string;
-            run_event: components["schemas"]["PublicRunEvent"];
+            run_event?: components["schemas"]["PublicRunEvent"];
             /** @constant */
-            schema_version: 2;
-        };
+            schema_version: 3;
+        } & (unknown | {
+            /** @constant */
+            event_class?: "transient";
+        });
         /** @enum {string} */
         ProviderConfigMode: "v2" | "invalid";
         ProviderConnectionEntry: {
@@ -4838,7 +4960,7 @@ export interface components {
             request_id: string;
             step_id: string;
             task_id: string;
-            workspace_snapshot_id: string;
+            workspace_snapshot_id: string | null;
         };
         VerificationReviewApprovalAction: {
             /** @constant */
@@ -4930,6 +5052,8 @@ export interface components {
     parameters: {
         ApplicationClientId: string;
         CallId: string;
+        /** @description Set to 1 to cancel this read when the client closes its sending half. Without this opt-in, normal HTTP half-close semantics are preserved. Cancellation stops future read batches, never an admitted write. */
+        CancelObservationOnClose: "1";
         RunId: string;
         SessionId: string;
     };

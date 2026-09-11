@@ -19,6 +19,7 @@ import { ExtensionWorkbench } from "./ExtensionWorkbench";
 import { IntentStackInspector } from "./IntentStackInspector";
 import { useLocale, type Translate } from "./i18n";
 import { Message, type MessageView } from "./Message";
+import type { ReadMessageContent } from "./MessageContentPager";
 import { PlanCard } from "./PlanCard";
 import { UserInputCard } from "./UserInputCard";
 import { TaskControlPanel } from "./TaskControlPanel";
@@ -228,6 +229,15 @@ export function ConversationPanel({
   const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
   const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
   const [planDecisionBlocker, setPlanDecisionBlocker] = useState<TaskBlocker | undefined>(undefined);
+  useEffect(() => {
+    setPlanDecisionFailure(false);
+  }, [
+    durablePlanReview?.planId,
+    durablePlanReview?.planHash,
+    durablePlanReview?.candidate?.contentHash,
+    durablePlanReview?.status,
+    durablePlanReview?.revision?.status,
+  ]);
   const [durableUserInputs, setDurableUserInputs] = useState<UserInputRequest[]>([]);
   const [selectedUserInputKey, setSelectedUserInputKey] = useState<string>();
   const durableUserInput = durableUserInputs.find(
@@ -319,6 +329,7 @@ export function ConversationPanel({
   const recoveryTriggerRef = useRef<HTMLButtonElement>(null);
   const canonicalRefreshAttempts = useRef(0);
   const canonicalRefreshRunId = useRef<string | undefined>(undefined);
+  const olderHistoryQuery = useRef<AbortController | undefined>(undefined);
   const canonicalSettlementCandidate = useRef<string | undefined>(undefined);
   const pendingPromptCounter = useRef(0);
   const conversationQueueEpoch = useRef(0);
@@ -664,13 +675,14 @@ export function ConversationPanel({
 
   useEffect(() => {
     let disposed = false;
+    const query = new AbortController();
     const loadCanonicalDisplay = async () => {
       setDisplayBusy(true);
       let failure: CanonicalDisplayFailure | undefined;
       try {
         for (let attempt = 0; attempt <= CANONICAL_DISPLAY_RETRY_DELAYS_MS.length; attempt += 1) {
           try {
-            const page = await bridge.display(workspaceId, session.id, { limit: 50 });
+            const page = await bridge.display(workspaceId, session.id, { limit: 50 }, query.signal);
             if (disposed) return;
             const canonicalPage = toContinuityPage(page);
             dispatchContinuity({
@@ -686,10 +698,10 @@ export function ConversationPanel({
             setDurableTaskControl(canonicalPage.taskControl);
             setDurablePlanReview(canonicalPage.planReview);
             reconcileDurableUserInputs(canonicalPage);
-            setPlanDecisionFailure(false);
             setDisplayError(false);
             return;
           } catch (error) {
+            if (disposed) return;
             failure = canonicalDisplayFailure(error);
             const retryDelay = CANONICAL_DISPLAY_RETRY_DELAYS_MS[attempt];
             if (!failure.retryable || retryDelay === undefined) break;
@@ -722,6 +734,7 @@ export function ConversationPanel({
     void loadCanonicalDisplay();
     return () => {
       disposed = true;
+      query.abort();
     };
   }, [bridge, displayReload, finishInitialLoadIfReady, session.id, workspaceId]);
 
@@ -802,6 +815,7 @@ export function ConversationPanel({
     let disposed = false;
     let liveConnectionFailed = false;
     let continuityReprobeScheduled = false;
+    let continuityReprobeRequested = false;
     let continuityProbeInFlight = true;
     let allowedRecoveryActions: ContinuityRecoveryAction[] = [];
     const unsubscribers: Array<() => void> = [];
@@ -912,8 +926,8 @@ export function ConversationPanel({
           if (predecessorRunId !== undefined && predecessorRunId !== successorRunId) {
             successorByRunId.current.set(predecessorRunId, successorRunId);
             predecessorByRunId.current.set(successorRunId, predecessorRunId);
+            pendingPredecessorRunId.current = undefined;
           }
-          pendingPredecessorRunId.current = undefined;
           activeRunIdRef.current = successorRunId;
           pendingContinuityOwner.current = continuity;
           setContinuityReload((value) => value + 1);
@@ -926,9 +940,25 @@ export function ConversationPanel({
           continue;
         }
         resolveIdleContinuity(projectionExpected, startedProjectionRunId);
-        continuityReprobeScheduled = false;
         return;
       }
+    };
+    const drainContinuityReprobe = () => {
+      if (
+        disposed || !continuityReprobeRequested
+        || continuityProbeInFlight || continuityReprobeScheduled
+      ) return;
+      continuityReprobeRequested = false;
+      continuityReprobeScheduled = true;
+      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
+      setContinuityMessage(undefined);
+      void reprobeContinuity().catch((error: unknown) => {
+        continuityReprobeRequested = false;
+        enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error);
+      }).finally(() => {
+        continuityReprobeScheduled = false;
+        drainContinuityReprobe();
+      });
     };
     const scheduleContinuityReprobe = (runId?: string) => {
       if (disposed) return;
@@ -936,13 +966,8 @@ export function ConversationPanel({
         pendingPredecessorRunId.current = activeRunIdRef.current;
       }
       activeRunIdRef.current = runId;
-      if (continuityProbeInFlight || continuityReprobeScheduled) return;
-      continuityReprobeScheduled = true;
-      dispatchContinuity({ type: "owner_probe_started", sessionId: session.id });
-      setContinuityMessage(undefined);
-      void reprobeContinuity().catch((error: unknown) => {
-        enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error);
-      });
+      continuityReprobeRequested = true;
+      drainContinuityReprobe();
     };
     const ingestEvent = (event: TimelineEvent) => {
       if (
@@ -968,6 +993,14 @@ export function ConversationPanel({
         || supersededByRunId === activeRunId;
 
       dispatchLiveEvent({ type: "event_received", sessionId: session.id, event });
+      if (event.kind === "run_started" && event.runSequence !== undefined) {
+        dispatchContinuity({
+          type: "run_started",
+          sessionId: session.id,
+          runId: event.runId,
+          runSequence: event.runSequence,
+        });
+      }
       const liveItem = semanticLiveItemFromTimelineEvent(event);
       if (liveItem !== undefined) {
         if (
@@ -1025,7 +1058,7 @@ export function ConversationPanel({
         dispatchContinuity({
           type: "terminal_observed",
           sessionId: session.id,
-          terminal: { runId: terminal.runId, status: terminal.status },
+          terminal: { runId: terminal.runId, status: terminal.status, runSequence: terminal.runSequence },
           supersedesRunId,
           supersededByRunId,
         });
@@ -1134,6 +1167,9 @@ export function ConversationPanel({
         ? QUEUED_SUCCESSOR_PROBE_DELAYS_MS.length + 1
         : 3;
       for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+        // A fresh query covers subscription replay that preceded it. Events arriving
+        // during attachment/confirmation still require a follow-up owner query.
+        if (pendingContinuityOwner.current === undefined) continuityReprobeRequested = false;
         const continuity = pendingContinuityOwner.current
           ?? await bridge.continuity(workspaceId, session.id);
         pendingContinuityOwner.current = undefined;
@@ -1157,8 +1193,8 @@ export function ConversationPanel({
         if (predecessorRunId !== undefined && predecessorRunId !== owner.runId) {
           successorByRunId.current.set(predecessorRunId, owner.runId);
           predecessorByRunId.current.set(owner.runId, predecessorRunId);
+          pendingPredecessorRunId.current = undefined;
         }
-        pendingPredecessorRunId.current = undefined;
         activeRunIdRef.current = owner.runId;
         dispatchContinuity({
           type: "owner_probe_resolved",
@@ -1202,6 +1238,11 @@ export function ConversationPanel({
               });
             }
             activeRunIdRef.current = undefined;
+            const retryDelay = QUEUED_SUCCESSOR_PROBE_DELAYS_MS[attempt];
+            if (projectionExpected && retryDelay !== undefined) {
+              await waitForCanonicalProjection(retryDelay);
+              if (disposed) return;
+            }
             continue;
           } else if (liveConnectionFailed || attachment.streamState === "error") {
             enterRecovery(attachment.streamMessage ?? t("liveControlsUnavailable"));
@@ -1235,9 +1276,13 @@ export function ConversationPanel({
       throw new Error("continuity owner changed repeatedly");
     };
     void setup()
-      .catch((error: unknown) => enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error))
+      .catch((error: unknown) => {
+        continuityReprobeRequested = false;
+        enterRecovery(errorMessage(error) ?? t("liveControlsUnavailable"), error);
+      })
       .finally(() => {
         continuityProbeInFlight = false;
+        drainContinuityReprobe();
       });
     return () => {
       disposed = true;
@@ -1255,6 +1300,7 @@ export function ConversationPanel({
     ) return;
 
     let cancelled = false;
+    const query = new AbortController();
     canonicalRefreshRunId.current = pendingRunId;
     pendingTimelineAnchor.current = timelinePinnedToEnd.current
       ? undefined
@@ -1267,7 +1313,7 @@ export function ConversationPanel({
         if (retryDelay > 0) await waitForCanonicalProjection(retryDelay);
           if (cancelled) return;
           try {
-            const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }));
+            const page = toContinuityPage(await bridge.display(workspaceId, session.id, { limit: 50 }, query.signal));
             if (cancelled) return;
             setDisplayError(false);
             dispatchContinuity({ type: "refresh_page_received", sessionId: session.id, page });
@@ -1289,6 +1335,7 @@ export function ConversationPanel({
             return;
           }
         } catch {
+          if (cancelled) return;
           // A bounded retry absorbs the short window between terminal transport and durable projection.
         }
       }
@@ -1304,6 +1351,7 @@ export function ConversationPanel({
     void refresh();
     return () => {
       cancelled = true;
+      query.abort();
       if (canonicalRefreshRunId.current === pendingRunId) {
         canonicalRefreshRunId.current = undefined;
       }
@@ -1326,6 +1374,11 @@ export function ConversationPanel({
       dispatchLiveEvent({ type: "run_discarded", sessionId: session.id, runId: candidate });
     }
   }, [continuityState.contractError, continuityState.observedTerminal, continuityState.pendingTerminalRunId, continuityState.refreshState, session.id]);
+
+  const readMessageContent = useCallback<ReadMessageContent>(
+    (request, signal) => bridge.messageContent(workspaceId, session.id, request, signal),
+    [bridge, workspaceId, session.id],
+  );
 
   const rows = useMemo(() => {
     const next = projectConversationRows(
@@ -1435,22 +1488,34 @@ export function ConversationPanel({
     }
   }, [continuityState, rememberTrustedTimelineViewport, rows]);
 
+  useEffect(() => () => {
+    olderHistoryQuery.current?.abort();
+    olderHistoryQuery.current = undefined;
+  }, [bridge, displayReload, session.id, workspaceId]);
+
   const loadEarlier = useCallback(async () => {
-    if (continuityState.nextCursor === undefined || displayBusy || displayError) return;
+    if (continuityState.nextCursor === undefined || displayBusy || displayError || olderHistoryQuery.current !== undefined) return;
+    const query = new AbortController();
+    olderHistoryQuery.current = query;
     pendingTimelineAnchor.current = captureTimelineAnchor(timelineRef.current);
     setDisplayBusy(true);
     try {
       const page = toContinuityPage(await bridge.display(workspaceId, session.id, {
         cursor: continuityState.nextCursor,
         limit: 50,
-      }));
+      }, query.signal));
+      if (query.signal.aborted) return;
       dispatchContinuity({ type: "older_page_received", sessionId: session.id, page });
       setDisplayError(false);
     } catch {
+      if (query.signal.aborted) return;
       pendingTimelineAnchor.current = undefined;
       setDisplayError(true);
     } finally {
-      setDisplayBusy(false);
+      if (olderHistoryQuery.current === query) {
+        olderHistoryQuery.current = undefined;
+        if (!query.signal.aborted) setDisplayBusy(false);
+      }
     }
   }, [bridge, continuityState.nextCursor, displayBusy, displayError, session.id, workspaceId]);
 
@@ -1516,7 +1581,15 @@ export function ConversationPanel({
         action,
       });
       setConversationQueue(receipt.queue);
-      queuedSuccessorExpected.current = queueHasPendingDelivery(receipt.queue);
+      const enqueued = action.action === "enqueue";
+      queuedSuccessorExpected.current = enqueued || queueHasPendingDelivery(receipt.queue);
+      if (enqueued) {
+        // The predecessor may already have finished while its background terminal
+        // stream remains live. Queue admission must discover the successor itself.
+        pendingPredecessorRunId.current = activeRunIdRef.current;
+        pendingContinuityOwner.current = undefined;
+        setContinuityReload((value) => value + 1);
+      }
       setConversationQueueError(false);
       return true;
     } catch {
@@ -1794,11 +1867,11 @@ export function ConversationPanel({
     const terminalRecovery = action === "adopt_candidate" || action === "retry_review";
     if (
       review === undefined
+      || active
       || planDecisionBusy
       || !review.allowedActions.includes(action)
-      || (review.stale && (action === "run" || action === "save"))
-      || (!terminalRecovery && (review.status !== "draft_ready" || review.planHash === undefined))
-      || (terminalRecovery && review.candidate === undefined)
+      || (!terminalRecovery && review.planHash === undefined)
+      || (action === "adopt_candidate" && review.candidate === undefined)
       || pendingApproval?.approval !== undefined
     ) return;
     setPlanDecisionBusy(true);
@@ -2407,7 +2480,7 @@ export function ConversationPanel({
         <PlanCard
           key={durablePlanReview.planId}
           review={durablePlanReview}
-          disabled={submissionBlocked || pendingApproval?.approval !== undefined}
+          disabled={active || submissionBlocked || pendingApproval?.approval !== undefined}
           busy={planDecisionBusy}
           failure={planDecisionFailure}
           blocker={planDecisionBlocker}
@@ -2697,7 +2770,8 @@ export function ConversationPanel({
                   })}
               />
             )
-            : <Message key={row.key} displayId={row.key} message={row} onOpenExternalUrl={bridge.openExternalUrl} />)
+            : <Message key={row.key} displayId={row.key} message={row}
+              onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent} />)
         ) : null}
         {terminalTasks.map(({ runId, task }) => (
           <TerminalTaskCard

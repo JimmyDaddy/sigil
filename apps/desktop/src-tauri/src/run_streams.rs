@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -67,6 +67,149 @@ struct RunProjection {
     stream_message: Option<&'static str>,
     run_status: DesktopRunStatus,
     task_pause_observed: bool,
+}
+
+/// The public cursor advances only on durable payloads. Preview slots have independent
+/// revisions and cannot reopen a message replaced by a later committed publication.
+#[derive(Default)]
+struct RunEventCursor {
+    durable_sequence: u64,
+    retired_preview_sequence: u64,
+    terminal: bool,
+    attempt: Option<String>,
+    latest_live_revision: u64,
+    live_revisions: BTreeMap<String, u64>,
+    retired_tool_slots: BTreeSet<String>,
+    retired_tool_arguments: BTreeSet<String>,
+    text_retired: bool,
+    reasoning_retired: bool,
+    attempt_closed: bool,
+}
+
+impl RunEventCursor {
+    fn accept(&mut self, event: &DesktopTimelineEvent) -> bool {
+        if let Some(preview) = &event.live_preview {
+            let (Ok(revision), Ok(base)) = (
+                preview.revision.parse::<u64>(),
+                preview.base_sequence.parse::<u64>(),
+            ) else {
+                return false;
+            };
+            if self.terminal
+                || revision == 0
+                || base > self.durable_sequence
+                || base < self.retired_preview_sequence
+            {
+                return false;
+            }
+            if self.attempt.as_deref() != Some(&preview.attempt_id) {
+                if revision <= self.latest_live_revision {
+                    return false;
+                }
+                self.attempt = Some(preview.attempt_id.clone());
+                self.live_revisions.clear();
+                self.retired_tool_slots.clear();
+                self.retired_tool_arguments.clear();
+                self.text_retired = false;
+                self.reasoning_retired = false;
+                self.attempt_closed = false;
+            }
+            if self.attempt_closed
+                || self.retired_tool_slots.contains(&preview.slot_id)
+                || (event.kind == DesktopTimelineEventKind::AssistantDelta && self.text_retired)
+                || (event.kind == DesktopTimelineEventKind::ReasoningDelta
+                    && self.reasoning_retired)
+                || (event.kind == DesktopTimelineEventKind::ToolCallArgsDelta
+                    && self.retired_tool_arguments.contains(&preview.slot_id))
+            {
+                return false;
+            }
+            if self
+                .live_revisions
+                .get(&preview.slot_id)
+                .is_some_and(|previous| *previous >= revision)
+            {
+                return false;
+            }
+            if !self.live_revisions.contains_key(&preview.slot_id)
+                && self.live_revisions.len() == 4
+                && let Some(oldest) = self
+                    .live_revisions
+                    .iter()
+                    .min_by_key(|(_, revision)| **revision)
+                    .map(|(slot, _)| slot.clone())
+            {
+                self.live_revisions.remove(&oldest);
+            }
+            self.live_revisions
+                .insert(preview.slot_id.clone(), revision);
+            self.latest_live_revision = self.latest_live_revision.max(revision);
+            return true;
+        }
+        if event.sequence <= self.durable_sequence {
+            return false;
+        }
+        if event.replayable {
+            self.durable_sequence = event.sequence;
+            if event.kind == DesktopTimelineEventKind::RunStarted {
+                *self = Self {
+                    durable_sequence: event.sequence,
+                    retired_preview_sequence: event.sequence,
+                    ..Self::default()
+                };
+            }
+            if event.kind == DesktopTimelineEventKind::AssistantMessage {
+                if event.assistant_kind.as_deref() == Some("reasoning_trace") {
+                    self.reasoning_retired = true;
+                } else {
+                    self.text_retired = true;
+                }
+            }
+            if event.kind == DesktopTimelineEventKind::ToolCompleted
+                && let Some(slot) = &event.item_id
+                && self.retired_tool_arguments.len() < 4
+            {
+                self.retired_tool_arguments.insert(slot.clone());
+            }
+            if event.kind == DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
+                || (event.kind == DesktopTimelineEventKind::UserInputChanged
+                    && event.status.as_deref() == Some("requested"))
+            {
+                self.attempt_closed = true;
+                self.retired_preview_sequence = event.sequence;
+                self.live_revisions.clear();
+            }
+            if event.kind == DesktopTimelineEventKind::ToolResult
+                && let Some(slot) = &event.item_id
+                && self.retired_tool_slots.len() < 4
+            {
+                self.retired_tool_slots.insert(slot.clone());
+            }
+            if matches!(
+                event.kind,
+                DesktopTimelineEventKind::AssistantMessage
+                    | DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
+                    | DesktopTimelineEventKind::ToolCompleted
+                    | DesktopTimelineEventKind::ToolResult
+            ) {
+                self.retired_preview_sequence = event.sequence;
+                self.live_revisions.clear();
+            }
+            if matches!(
+                event.kind,
+                DesktopTimelineEventKind::RunFinished
+                    | DesktopTimelineEventKind::RunFailed
+                    | DesktopTimelineEventKind::RunBlocked
+                    | DesktopTimelineEventKind::RunPaused
+                    | DesktopTimelineEventKind::RunInterrupted
+                    | DesktopTimelineEventKind::RunCancelled
+            ) {
+                self.terminal = true;
+                self.live_revisions.clear();
+            }
+        }
+        true
+    }
 }
 
 struct RunSnapshotReconciliation {
@@ -455,14 +598,72 @@ impl RunProjection {
     }
 
     fn push(&mut self, event: DesktopTimelineEvent) {
-        if self
-            .events
-            .iter()
-            .any(|current| event_identity(current) == event_identity(&event))
+        if let Some(preview) = &event.live_preview {
+            self.events.retain(|old| {
+                old.live_preview.as_ref().is_none_or(|old_preview| {
+                    old_preview.attempt_id == preview.attempt_id
+                        && old_preview.slot_id != preview.slot_id
+                })
+            });
+            while self
+                .events
+                .iter()
+                .filter(|event| event.live_preview.is_some())
+                .count()
+                >= 4
+            {
+                if let Some(index) = self
+                    .events
+                    .iter()
+                    .position(|event| event.live_preview.is_some())
+                {
+                    self.events.remove(index);
+                }
+            }
+            self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
+        } else if matches!(
+            event.kind,
+            DesktopTimelineEventKind::AssistantMessage
+                | DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
+                | DesktopTimelineEventKind::ToolCompleted
+                | DesktopTimelineEventKind::ToolResult
+                | DesktopTimelineEventKind::RunFinished
+                | DesktopTimelineEventKind::RunFailed
+                | DesktopTimelineEventKind::RunBlocked
+                | DesktopTimelineEventKind::RunPaused
+                | DesktopTimelineEventKind::RunInterrupted
+                | DesktopTimelineEventKind::RunCancelled
+                | DesktopTimelineEventKind::RunStarted
+        ) || (event.kind == DesktopTimelineEventKind::UserInputChanged
+            && event.status.as_deref() == Some("requested"))
         {
+            self.events.retain(|old| {
+                old.live_preview.is_none()
+                    || matches!(
+                        event.kind,
+                        DesktopTimelineEventKind::ToolCompleted
+                            | DesktopTimelineEventKind::ToolResult
+                    ) && old.item_id != event.item_id
+                    || event.kind == DesktopTimelineEventKind::AssistantMessage
+                        && old.kind
+                            != if event.assistant_kind.as_deref() == Some("reasoning_trace") {
+                                DesktopTimelineEventKind::ReasoningDelta
+                            } else {
+                                DesktopTimelineEventKind::AssistantDelta
+                            }
+            });
+            self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
+        }
+        if self.events.iter().any(|current| {
+            event.live_preview.is_none()
+                && current.live_preview.is_none()
+                && event_identity(current) == event_identity(&event)
+        }) {
             return;
         }
-        self.last_sequence = self.last_sequence.max(event.sequence);
+        if event.replayable {
+            self.last_sequence = self.last_sequence.max(event.sequence);
+        }
         if let Some(replay_id) = event.replay_id.as_ref() {
             self.last_replay_id = Some(replay_id.clone());
         }
@@ -601,9 +802,13 @@ async fn follow_run(
     owner_revision: String,
     initial_run: DesktopRunSnapshot,
     mut cursor: Option<String>,
-    mut last_sequence: u64,
+    last_sequence: u64,
 ) {
     let run_id = initial_run.id.clone();
+    let mut event_cursor = RunEventCursor {
+        durable_sequence: last_sequence,
+        ..RunEventCursor::default()
+    };
     publish_status(
         &owner,
         &app,
@@ -717,7 +922,7 @@ async fn follow_run(
                         }
                     }
                     cursor = None;
-                    last_sequence = 0;
+                    event_cursor.durable_sequence = 0;
                     publish_status(
                         &owner,
                         &app,
@@ -732,9 +937,6 @@ async fn follow_run(
                 }
                 Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
             };
-            if protocol_event.run_event.sequence <= last_sequence {
-                continue;
-            }
             observed_event = true;
             attempts = 0;
             let durable_cursor = protocol_event.replay_id.clone();
@@ -747,7 +949,9 @@ async fn follow_run(
                 Ok(event) => event,
                 Err(_) => break,
             };
-            last_sequence = timeline.sequence;
+            if !event_cursor.accept(&timeline) {
+                continue;
+            }
             let settled = owner.record_event(timeline.clone()).await;
             if app.emit(DESKTOP_RUN_EVENT_NAME, timeline).is_err() {
                 return;
@@ -848,6 +1052,7 @@ async fn terminal_snapshot(
         replayable: false,
         replay_id: None,
         provisional_id: None,
+        live_preview: None,
         kind,
         text: None,
         item_id: None,
@@ -895,6 +1100,7 @@ fn terminal_snapshot_timeline(
         replayable: false,
         replay_id: None,
         provisional_id: None,
+        live_preview: None,
         kind: DesktopTimelineEventKind::TerminalLifecycle,
         text: None,
         item_id: Some(task.task_id.clone()),

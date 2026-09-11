@@ -629,6 +629,23 @@ export interface TranscriptRequest {
   limit?: number;
 }
 
+export interface MessageContentRequest {
+  displayId: string;
+  offset?: number;
+  limit?: number;
+  contentVersion?: string;
+}
+
+export interface MessageContentPage {
+  displayId: string;
+  messageId: string;
+  contentVersion: string;
+  offset: number;
+  nextOffset: number | null;
+  totalBytes: number;
+  text: string;
+}
+
 export type ConversationDisplayItemKind =
   | "user_message"
   | "reasoning"
@@ -1441,7 +1458,8 @@ export function providerModelRefsEqual(
 }
 
 export function modelOptionIsSelectable(option: ModelOption): boolean {
-  return option.availability !== "configured_unavailable";
+  // Catalog omissions are advisory, including legacy "configured_unavailable" entries.
+  return option.modelRef.connectionId.trim().length > 0 && option.modelRef.modelId.trim().length > 0;
 }
 
 export interface RunSummary {
@@ -1495,7 +1513,7 @@ export interface VerificationRerunBinding {
   checkSpecId: string;
   checkSpecHash: string;
   policyHash: string;
-  workspaceSnapshotId: string;
+  workspaceSnapshotId: string | null;
 }
 
 export type VerificationAction =
@@ -1743,6 +1761,7 @@ export type TimelineEventKind =
   | "integration_lane_changed"
   | "assistant_delta"
   | "reasoning_delta"
+  | "tool_call_args_delta"
   | "assistant_message"
   | "tool_started"
   | "tool_completed"
@@ -1933,6 +1952,13 @@ export interface TimelineEvent {
   replayable: boolean;
   replayId?: string;
   provisionalId?: string;
+  livePreview?: {
+    attemptId: string;
+    slotId: string;
+    revision: string;
+    baseSequence: string;
+    truncated: boolean;
+  };
   kind: TimelineEventKind;
   text?: string;
   itemId?: string;
