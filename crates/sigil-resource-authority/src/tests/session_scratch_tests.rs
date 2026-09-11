@@ -152,6 +152,26 @@ fn descendant_symlink_is_rejected_without_sibling_poisoning() {
 }
 
 #[test]
+fn ordinary_namespace_preparation_ignores_invalid_siblings() {
+    let temp = tempfile::tempdir().expect("temp");
+    let authority = SessionScratchAuthorityV1::new(temp.path().join("scratch"));
+    let provision = authority
+        .ensure_session_namespace(Some("healthy"), 100)
+        .expect("healthy namespace");
+    assert!(provision.directory.is_dir());
+    std::fs::write(
+        authority.root().join("sessions").join("broken"),
+        b"not a namespace",
+    )
+    .expect("broken sibling");
+
+    let reopened = authority
+        .ensure_session_namespace(Some("healthy"), 100)
+        .expect("sibling failure must remain observational");
+    assert_eq!(reopened.directory, provision.directory);
+}
+
+#[test]
 fn active_lease_blocks_delete() {
     let temp = tempfile::tempdir().expect("temp");
     let authority = SessionScratchAuthorityV1::new(temp.path().join("scratch"));

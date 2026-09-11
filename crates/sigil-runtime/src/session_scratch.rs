@@ -66,6 +66,26 @@ impl sigil_tools_builtin::ScratchNamespaceProvider for AuthorityScratchNamespace
         })
     }
 
+    fn ensure_session_namespace_for_command(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &sigil_tools_builtin::ScratchQuota,
+    ) -> Result<sigil_tools_builtin::SessionScratchProvision> {
+        let provision = self
+            .authority
+            .ensure_session_namespace(session_scope_id, quota.per_session_bytes)
+            .map_err(authority_error)?;
+        Ok(sigil_tools_builtin::SessionScratchProvision {
+            dir: provision.directory,
+            usage: sigil_tools_builtin::ScratchUsage {
+                session_bytes: provision.usage.session_bytes,
+                workspace_bytes: provision.usage.workspace_bytes,
+                session_entry_count: provision.usage.session_entry_count,
+                workspace_entry_count: provision.usage.workspace_entry_count,
+            },
+        })
+    }
+
     fn measure_scratch_usage(
         &self,
         session_key: &str,

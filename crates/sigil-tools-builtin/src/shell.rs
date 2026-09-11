@@ -339,7 +339,8 @@ impl Tool for BashTool {
         let provision_scope = session_scope_id.clone();
         let provision_quota = self.scratch_quota;
         let provision = tokio::task::spawn_blocking(move || {
-            scratch_control.ensure_session_scratch(provision_scope.as_deref(), &provision_quota)
+            scratch_control
+                .ensure_session_namespace_for_command(provision_scope.as_deref(), &provision_quota)
         })
         .await
         .context("scratch provisioning task panicked")?;

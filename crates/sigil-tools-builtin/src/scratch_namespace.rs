@@ -134,6 +134,15 @@ pub trait ScratchNamespaceProvider: Send + Sync + std::fmt::Debug {
         session_scope_id: Option<&str>,
         quota: &ScratchQuota,
     ) -> Result<SessionScratchProvision>;
+    /// Prepares an ordinary command namespace. Providers may keep workspace-wide measurements as
+    /// observations here; managed writers use the full quota-aware method above.
+    fn ensure_session_namespace_for_command(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision> {
+        self.ensure_session_scratch(session_scope_id, quota)
+    }
     fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage>;
     fn gc_scratch_namespaces(
         &self,
@@ -460,6 +469,15 @@ impl ScratchNamespaceControl {
     ) -> Result<SessionScratchProvision> {
         self.provider
             .ensure_session_scratch(session_scope_id, quota)
+    }
+
+    pub fn ensure_session_namespace_for_command(
+        &self,
+        session_scope_id: Option<&str>,
+        quota: &ScratchQuota,
+    ) -> Result<SessionScratchProvision> {
+        self.provider
+            .ensure_session_namespace_for_command(session_scope_id, quota)
     }
 
     pub fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage> {

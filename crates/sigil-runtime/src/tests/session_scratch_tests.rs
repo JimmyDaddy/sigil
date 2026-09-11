@@ -39,6 +39,26 @@ fn authority_provider_lease_blocks_gc_for_active_tool() {
 }
 
 #[test]
+fn ordinary_shell_namespace_preparation_does_not_scan_siblings() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path().join("scratch");
+    let control = authority_scratch_control(root.clone());
+    let quota = sigil_tools_builtin::ScratchQuota {
+        per_session_bytes: 1024,
+        workspace_hard_bytes: 1,
+    };
+    control
+        .ensure_session_namespace_for_command(Some("healthy"), &quota)
+        .expect("provision healthy namespace");
+    std::fs::write(root.join("sessions").join("broken"), b"not a namespace")
+        .expect("broken sibling");
+
+    control
+        .ensure_session_namespace_for_command(Some("healthy"), &quota)
+        .expect("ordinary shell must not be blocked by sibling observation");
+}
+
+#[test]
 fn authority_entry_limit_keeps_counts_in_the_existing_tool_diagnostic() {
     let error = authority_error(
         sigil_resource_authority::session_scratch::SessionScratchErrorV1::EntryLimitExceeded {

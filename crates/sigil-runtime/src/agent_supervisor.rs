@@ -38,7 +38,6 @@ pub(crate) use projection::{AgentResultMaterialization, materialize_child_agent_
 pub use task_discovery::{MAX_TASK_DISCOVERY_PROBES, REQUEST_TASK_DISCOVERY_TOOL_NAME};
 pub use task_runner::AgentSupervisorTaskChildRunner;
 pub(crate) use task_runner::build_child_session;
-#[cfg(test)]
 pub(crate) use task_runner::task_child_status_from_outcome;
 use thread_state::AgentSupervisorState;
 pub use thread_state::{

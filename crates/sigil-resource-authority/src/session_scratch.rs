@@ -225,6 +225,32 @@ impl SessionScratchAuthorityV1 {
         Ok(SessionScratchProvisionV1 { directory, usage })
     }
 
+    /// Prepares one ordinary command's session namespace without using sibling measurements as an
+    /// admission condition.  Workspace-wide physical usage is an observation; managed writers
+    /// remain responsible for their own authority-issued capacity reservations.
+    pub fn ensure_session_namespace(
+        &self,
+        session_scope_id: Option<&str>,
+        per_session_bytes: u64,
+    ) -> Result<SessionScratchProvisionV1, SessionScratchErrorV1> {
+        let key = session_scope_key(session_scope_id);
+        let sessions = self.root.join(SESSION_NAMESPACE_DIR);
+        let directory = sessions.join(&key);
+        ensure_directory(&self.root)?;
+        ensure_directory(&sessions)?;
+        ensure_directory(&directory)?;
+        let usage = self.measure_session_only(&key)?;
+        if usage.session_bytes > per_session_bytes {
+            return Err(ScratchQuotaExceededError {
+                scope: ScratchQuotaScope::Session,
+                usage_bytes: usage.session_bytes,
+                quota_bytes: per_session_bytes,
+            }
+            .into());
+        }
+        Ok(SessionScratchProvisionV1 { directory, usage })
+    }
+
     pub fn measure(
         &self,
         session_key: &str,
@@ -265,6 +291,28 @@ impl SessionScratchAuthorityV1 {
             .workspace_entry_count
             .saturating_add(usage.session_entry_count);
         Ok(usage)
+    }
+
+    fn measure_session_only(
+        &self,
+        session_key: &str,
+    ) -> Result<SessionScratchUsageV1, SessionScratchErrorV1> {
+        let sessions = self.root.join(SESSION_NAMESPACE_DIR);
+        if !sessions.is_dir() {
+            return Ok(SessionScratchUsageV1::default());
+        }
+        let session_directory = sessions.join(session_key);
+        let session = if is_plain_directory(&session_directory) {
+            walk(&session_directory, DEFAULT_MAX_ENTRIES)?
+        } else {
+            WalkState::default()
+        };
+        Ok(SessionScratchUsageV1 {
+            session_bytes: session.bytes,
+            workspace_bytes: session.bytes,
+            session_entry_count: session.entries,
+            workspace_entry_count: session.entries,
+        })
     }
 
     pub fn gc(

@@ -68,6 +68,21 @@ fn bash_tool(test_root: &Path) -> BashTool {
     }
 }
 
+#[test]
+fn ordinary_scratch_namespace_preparation_has_a_dedicated_entrypoint() {
+    let temp = tempfile::tempdir().expect("temp");
+    let control = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+        temp.path().join("scratch"),
+    );
+    let provision = control
+        .ensure_session_namespace_for_command(
+            Some("session"),
+            &crate::scratch_namespace::ScratchQuota::default(),
+        )
+        .expect("ordinary namespace");
+    assert!(provision.dir.is_dir());
+}
+
 fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
     Ok(BashTool {
         scratch_label: "cache/tmp".to_owned(),
