@@ -50,9 +50,17 @@ const SHELL_SEMANTIC_REGISTRY_VERSION: u32 = 2;
 const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 2;
 const FILE_PRESENCE_EXECUTION_BINDING_KEY: &str = "file_presence_execution_binding";
 const FILE_PRESENCE_EXECUTION_PROFILE_VERSION: u32 = 1;
+#[cfg(test)]
+#[allow(dead_code)]
 const WORKSPACE_CHECK_MIN_AVAILABLE_BYTES: u64 = 1024 * 1024 * 1024;
+#[cfg(test)]
+#[allow(dead_code)]
 const WORKSPACE_CHECK_TARGET_HEADROOM_DIVISOR: u64 = 16;
+#[cfg(test)]
+#[allow(dead_code)]
 const WORKSPACE_CHECK_MAX_TARGET_HEADROOM_BYTES: u64 = 3 * 1024 * 1024 * 1024;
+#[cfg(test)]
+#[allow(dead_code)]
 const WORKSPACE_CHECK_TARGET_SCAN_CEILING_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -319,40 +327,11 @@ impl Tool for BashTool {
             || ctx
                 .prepared_permission_plan()
                 .is_some_and(|plan| plan.operation == ToolOperation::ExecuteWorkspaceCheckCommand);
-        if workspace_check {
-            let workspace_root = ctx.workspace_root.clone();
-            let resource_probe = tokio::task::spawn_blocking(move || {
-                workspace_check_resource_probe(&workspace_root)
-            })
-            .await
-            .context("workspace resource preflight task panicked")?;
-            match resource_probe {
-                Ok(probe) => {
-                    if let Some(result) =
-                        workspace_check_resource_error(&call_id, &self.spec().name, command, &probe)
-                    {
-                        return Ok(result);
-                    }
-                }
-                Err(error) => {
-                    return Ok(ToolResult::error(
-                        call_id,
-                        self.spec().name,
-                        ToolErrorKind::Io,
-                        "workspace validation could not inspect local disk capacity",
-                    )
-                    .with_error_details(
-                        true,
-                        json!({
-                            "code": "disk_capacity_probe_failed",
-                            "resource": "disk_space",
-                            "reason": error.to_string(),
-                            "action": "verify that the workspace volume is available, then retry"
-                        }),
-                    ));
-                }
-            }
-        }
+        // Disk measurements are observations, not an execution admission policy.  A workspace
+        // check must reach the requested command even when free-space probing is unavailable or
+        // below a heuristic headroom threshold; the managed scratch writer and the OS remain the
+        // authorities for real capacity failures.
+        let _ = workspace_check;
         // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
         // checked) before any child can write into it. Quota failures are recoverable tool
         // errors, never a silent fallback to the system temp directory.
@@ -550,6 +529,8 @@ fn attach_capture_storage_failure(result: &mut ToolResult, observed_bytes: u64, 
     });
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkspaceCheckResourceProbe {
     available_bytes: u64,
@@ -557,6 +538,8 @@ struct WorkspaceCheckResourceProbe {
     target_scan_truncated: bool,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 impl WorkspaceCheckResourceProbe {
     fn required_available_bytes(self) -> u64 {
         WORKSPACE_CHECK_MIN_AVAILABLE_BYTES.saturating_add(
@@ -572,6 +555,8 @@ impl WorkspaceCheckResourceProbe {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn workspace_check_resource_probe(workspace_root: &Path) -> Result<WorkspaceCheckResourceProbe> {
     let available_bytes = fs2::available_space(workspace_root).with_context(|| {
         format!(
@@ -588,6 +573,8 @@ fn workspace_check_resource_probe(workspace_root: &Path) -> Result<WorkspaceChec
     })
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn bounded_directory_size(path: &Path) -> (u64, bool) {
     if !path.is_dir() {
         return (0, false);
@@ -608,37 +595,15 @@ fn bounded_directory_size(path: &Path) -> (u64, bool) {
     (total, false)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn workspace_check_resource_error(
-    call_id: &str,
-    tool_name: &str,
-    command: &str,
-    probe: &WorkspaceCheckResourceProbe,
+    _call_id: &str,
+    _tool_name: &str,
+    _command: &str,
+    _probe: &WorkspaceCheckResourceProbe,
 ) -> Option<ToolResult> {
-    if probe.has_capacity() {
-        return None;
-    }
-    let required_available_bytes = probe.required_available_bytes();
-    Some(
-        ToolResult::error(
-            call_id,
-            tool_name,
-            ToolErrorKind::ResourceExhausted,
-            "workspace validation was paused because the workspace volume is low on disk space",
-        )
-        .with_error_details(
-            true,
-            json!({
-                "code": "disk_space_exhausted",
-                "resource": "disk_space",
-                "available_bytes": probe.available_bytes,
-                "required_available_bytes": required_available_bytes,
-                "target_bytes_lower_bound": probe.target_bytes_lower_bound,
-                "target_scan_truncated": probe.target_scan_truncated,
-                "command_sha256": sha256_hex(command.as_bytes()),
-                "action": "free disk space or remove disposable build artifacts, then resume the Task"
-            }),
-        ),
-    )
+    None
 }
 
 fn reject_non_finite_bash_command(command: &str, shell: &ResolvedShell) -> Result<()> {

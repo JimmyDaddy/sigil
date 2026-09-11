@@ -2,7 +2,7 @@ use super::*;
 use sigil_kernel::ToolResultStatus;
 
 #[test]
-fn workspace_check_disk_preflight_blocks_low_space_with_actionable_error() {
+fn workspace_check_disk_measurement_does_not_block_low_space() {
     let probe = WorkspaceCheckResourceProbe {
         available_bytes: 128 * 1024 * 1024,
         target_bytes_lower_bound: 16 * 1024 * 1024 * 1024,
@@ -14,26 +14,8 @@ fn workspace_check_disk_preflight_blocks_low_space_with_actionable_error() {
         "bash",
         "cargo clippy --all-targets -- -D warnings",
         &probe,
-    )
-    .expect("low disk space should pause the validation command");
-    let ToolResultStatus::Error(error) = result.status else {
-        panic!("resource preflight should return an error result");
-    };
-    assert_eq!(error.kind, ToolErrorKind::ResourceExhausted);
-    assert!(error.retryable);
-    assert_eq!(error.details["code"], "disk_space_exhausted");
-    assert_eq!(error.details["resource"], "disk_space");
-    assert!(
-        error.details["required_available_bytes"]
-            .as_u64()
-            .expect("required bytes should be numeric")
-            > probe.available_bytes
     );
-    assert!(error.details["action"].as_str().is_some_and(|action| {
-        action.contains("free disk space") && action.contains("resume the Task")
-    }));
-    assert!(error.details.get("command").is_none());
-    assert!(error.details["command_sha256"].as_str().is_some());
+    assert!(result.is_none());
 }
 
 #[test]
