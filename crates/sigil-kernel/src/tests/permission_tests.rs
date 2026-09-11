@@ -1628,6 +1628,24 @@ fn session_grant_availability_reports_one_typed_reason_or_none() {
         Some(ToolApprovalSessionGrantUnavailableReasonCode::ContainmentBindingUnavailable)
     );
 
+    let mut network_decision = decision.clone();
+    network_decision.access = ToolAccess::Read;
+    network_decision.network_effect = Some(NetworkEffect::Read);
+    network_decision.network_policy_decision = ApprovalMode::Ask;
+    network_decision.operation = ToolOperation::NetworkRequest;
+    network_decision.risk = PermissionRisk::High;
+    network_decision.subjects = vec![ToolSubject::mcp_tool("websearch")];
+    let mut network_plan = plan.clone();
+    network_plan.tool_name = "websearch".to_owned();
+    network_plan.operation = ToolOperation::NetworkRequest;
+    network_plan.effects = BTreeSet::from([ToolPermissionEffect::NetworkRead]);
+    network_plan.subjects = network_decision.subjects.clone();
+    network_plan.analysis_bindings.clear();
+    assert!(
+        tool_approval_session_grant_availability_for_plan(&network_decision, &network_plan)
+            .is_available()
+    );
+
     plan.analysis_bindings = BTreeMap::from([
         ("execution_backend".to_owned(), "local".to_owned()),
         ("execution_profile".to_owned(), "workspace".to_owned()),

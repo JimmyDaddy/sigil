@@ -2504,7 +2504,10 @@ pub fn tool_approval_session_grant_availability_for_plan(
     if plan.has_non_grantable_effect() {
         return ToolApprovalSessionGrantAvailability::unavailable(Reason::NonGrantableEffect);
     }
-    if plan.session_grant_containment_binding().is_none() {
+    // Network-read grants are bound by their exact endpoint/MCP subjects and route policy. They
+    // do not execute through a local shell containment backend, so requiring shell backend,
+    // profile, and environment metadata here would reject otherwise complete network plans.
+    if plan.network_effect().is_none() && plan.session_grant_containment_binding().is_none() {
         return ToolApprovalSessionGrantAvailability::unavailable(
             Reason::ContainmentBindingUnavailable,
         );
