@@ -156,6 +156,27 @@ impl McpCallToolResult {
         })
     }
 
+    /// Parses the legacy stdio result shape that used a plain string for `content`.
+    ///
+    /// Streamable HTTP remains strict to the current MCP content-block contract, while the
+    /// stdio adapter keeps compatibility with older local servers that returned a text scalar.
+    pub(crate) fn parse_stdio(value: &Value) -> Result<Self, McpStreamableHttpError> {
+        match Self::parse(value) {
+            Ok(result) => Ok(result),
+            Err(McpStreamableHttpError::MissingRequiredContent)
+                if value.get("content").and_then(Value::as_str).is_some() =>
+            {
+                let mut normalized = value.clone();
+                normalized["content"] = Value::Array(vec![serde_json::json!({
+                    "type": "text",
+                    "text": value.get("content").and_then(Value::as_str).unwrap_or_default(),
+                })]);
+                Self::parse(&normalized)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Converts one validated MCP result using the shared bounded, redacted output contract.
     pub fn into_tool_result(
         &self,

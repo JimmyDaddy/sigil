@@ -208,7 +208,7 @@ impl Tool for McpTool {
         let result = response
             .get("result")
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
-        let parsed = McpCallToolResult::parse(result)?;
+        let parsed = McpCallToolResult::parse_stdio(result)?;
         Ok(parsed.into_tool_result(
             result,
             McpCallToolResultContext {

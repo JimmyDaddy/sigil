@@ -101,3 +101,17 @@ fn call_tool_result_requires_bounded_known_content_blocks() {
         Err(McpStreamableHttpError::MissingRequiredContent)
     ));
 }
+
+#[test]
+fn stdio_result_parser_normalizes_legacy_text_content() {
+    let parsed = McpCallToolResult::parse_stdio(&json!({
+        "content": "legacy stdio result",
+        "isError": false
+    }))
+    .expect("legacy stdio text content should be normalized");
+    assert_eq!(
+        parsed.content,
+        vec![json!({"type": "text", "text": "legacy stdio result"})]
+    );
+    assert!(!parsed.is_error);
+}
