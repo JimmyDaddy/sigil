@@ -844,7 +844,7 @@ async fn desktop_workspace_manager_reuses_one_real_server_and_routes_typed_http(
         &config_path,
         &workspace,
     );
-    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
 
     let first = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
@@ -940,7 +940,7 @@ async fn desktop_typed_client_completes_first_run_provider_setup_against_real_se
     let workspace = test_workspace("desktop-provider-first-run");
     let config_path = workspace.join("missing-sigil.toml");
     let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-first-run-coder");
-    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
     let opened = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
             sigil_desktop::DesktopLaunchRequest::new(
@@ -1044,7 +1044,7 @@ async fn desktop_typed_client_explicitly_replaces_invalid_config_against_real_se
     fs::write(&config_path, "[legacy\nprovider = \"unsupported\"\n")
         .expect("invalid config fixture should write");
     let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-repair-coder");
-    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
     let opened = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
             sigil_desktop::DesktopLaunchRequest::new(
@@ -1127,7 +1127,7 @@ async fn desktop_config_repair_refuses_to_overwrite_a_concurrently_valid_config(
     let config_path = workspace.join("sigil.toml");
     fs::write(&config_path, "[invalid").expect("invalid config fixture should write");
     let (provider_endpoint, provider) = spawn_model_catalog_fixture("local-race-coder");
-    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
     let opened = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
             sigil_desktop::DesktopLaunchRequest::new(
@@ -1197,7 +1197,7 @@ async fn desktop_typed_client_streams_and_replays_real_run_events() {
         .expect("preview config")
         .replace("request_timeout_secs = 5", "request_timeout_secs = 60");
     fs::write(&config_path, config).expect("preview request timeout");
-    let mut manager = sigil_desktop::DesktopWorkspaceManager::default();
+    let manager = sigil_desktop::DesktopWorkspaceManager::default();
     let opened = manager
         .open(sigil_desktop::DesktopWorkspaceOpenRequest::new(
             sigil_desktop::DesktopLaunchRequest::new(

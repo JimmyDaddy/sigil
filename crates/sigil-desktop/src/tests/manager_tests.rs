@@ -48,3 +48,15 @@ fn discarded_open_ticket_releases_only_its_lifecycle_markers() {
     assert!(!state.opening_roots.contains(&canonical_root));
     assert!(state.workspaces.is_empty());
 }
+
+#[test]
+fn workspace_manager_lists_without_mutable_access() {
+    let manager = DesktopWorkspaceManager::default();
+
+    assert!(
+        manager
+            .list()
+            .expect("empty manager should list")
+            .is_empty()
+    );
+}

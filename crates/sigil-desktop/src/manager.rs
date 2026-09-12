@@ -274,11 +274,10 @@ impl DesktopWorkspaceManager {
     ) -> Result<DesktopWorkspaceSummary, DesktopWorkspaceManagerError> {
         if let Some((_, workspace)) = ticket.existing.as_mut()
             && workspace.process.is_running()
+            && let Err(error) = workspace.process.shutdown_in_place().await
         {
-            if let Err(error) = workspace.process.shutdown_in_place().await {
-                self.restore_open_ticket(ticket);
-                return Err(error.into());
-            }
+            self.restore_open_ticket(ticket);
+            return Err(error.into());
         }
         let launch = ticket.launch.clone();
         let process = match self.launcher.launch(launch).await {
