@@ -591,6 +591,7 @@ where
                                                             ),
                                                             tool_calls: output.result.tool_calls,
                                                             final_message_id: None,
+                            completion_claim: None,
                                                         }),
                                                         plan_mode,
                                                         plan_review: false,
@@ -668,6 +669,7 @@ where
                                             final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
                                             tool_calls: output.result.tool_calls,
                                             final_message_id: output.result.final_message_id,
+                            completion_claim: None,
                                         }),
                                         plan_mode,
                                         plan_review: false,
@@ -2209,6 +2211,7 @@ where
                                 final_text: "Plan candidate adopted".to_owned(),
                                 tool_calls: 0,
                                 final_message_id: None,
+                                completion_claim: None,
                             },
                             entries,
                         });

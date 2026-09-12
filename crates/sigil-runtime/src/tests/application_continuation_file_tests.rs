@@ -387,13 +387,18 @@ impl Provider for ReadingTaskProvider {
                     request_contains(&request, TASK_TEXT),
                     "continued Task lost file authority"
                 );
-                vec![
-                    Ok(ProviderChunk::TextDelta(
-                        "task file read complete".to_owned(),
-                    )),
-                    Ok(ProviderChunk::Done),
-                ]
+                scripted_task_completion_chunks(
+                    &request,
+                    "task file read complete",
+                    "continued-task-completion",
+                )
             }
+            2 => vec![
+                Ok(ProviderChunk::TextDelta(
+                    "task file read complete".to_owned(),
+                )),
+                Ok(ProviderChunk::Done),
+            ],
             _ => anyhow::bail!("unexpected Task executor turn"),
         };
         Ok(Box::pin(stream::iter(chunks)))
@@ -462,8 +467,8 @@ async fn task_continuation_executes_real_managed_file_read() -> Result<()> {
     assert_eq!(output.task_status, TaskRunStatus::Completed);
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        2,
-        "the Task must consume one real read result"
+        3,
+        "the Task must consume one real read result and one claim follow-up"
     );
     drop(control);
     Ok(())

@@ -511,6 +511,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             final_text: draft.inline_text.clone().unwrap_or_default(),
             tool_calls: 0,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: review_session.entries().to_vec(),
     })?;
@@ -559,6 +560,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             final_text: "   ".to_owned(),
             tool_calls: 1,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -596,6 +598,7 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -713,6 +716,7 @@ fn unstructured_plan_finished_does_not_create_pending_surface() -> Result<()> {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -1390,6 +1394,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             final_text: "kernel review complete".to_owned(),
             tool_calls: 0,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: restored_entries("restored-provider", "restored-model"),
     })?;
@@ -1416,6 +1421,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             final_text: "restored final".to_owned(),
             tool_calls: 1,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: vec![
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
@@ -1706,6 +1712,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             final_text: "done".to_owned(),
             tool_calls: 2,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: entries.clone(),
     })?;
@@ -1961,6 +1968,7 @@ fn run_finished_does_not_duplicate_visible_final_answer_or_drop_thinking() -> Re
             final_text: "final summary".to_owned(),
             tool_calls: 0,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -5447,6 +5455,7 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
             final_text: "done".to_owned(),
             tool_calls: 1,
             final_message_id: None,
+            completion_claim: None,
         },
         entries: restored_entries("deepseek", "deepseek-v4-flash"),
     })?;

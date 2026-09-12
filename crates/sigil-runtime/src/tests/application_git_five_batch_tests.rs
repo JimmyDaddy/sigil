@@ -80,6 +80,13 @@ impl Provider for FiveBatchProvider {
                         .is_some_and(|text| text.contains("batch 5"))),
                     "final answer requires actual commit evidence"
                 );
+                return Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
+                    &request,
+                    "Five batches committed; package test passed.",
+                    "five-batch-completion",
+                ))));
+            }
+            9 => {
                 return Ok(Box::pin(stream::iter(vec![
                     Ok(ProviderChunk::TextDelta(
                         "Five batches committed; package test passed.".to_owned(),
@@ -257,7 +264,7 @@ async fn direct_task_resumes_real_git_hook_failure_and_commits_five_batches_once
             assert_eq!(output.task_status, TaskRunStatus::Completed);
         }
     }
-    assert_eq!(stages.load(Ordering::SeqCst), 9);
+    assert_eq!(stages.load(Ordering::SeqCst), 10);
     let history = git(workspace, &["log", "--reverse", "--format=%s"])?;
     assert_eq!(
         history.lines().collect::<Vec<_>>(),

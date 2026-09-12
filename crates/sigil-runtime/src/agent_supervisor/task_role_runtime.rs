@@ -68,16 +68,6 @@ impl TaskRoleDemand {
         }
     }
 
-    pub(super) const fn planner_only() -> Self {
-        Self {
-            planner: true,
-            executor: false,
-            subagent_read: false,
-            subagent_write: false,
-            synthesis: false,
-        }
-    }
-
     pub(super) const fn executor_only() -> Self {
         Self {
             planner: false,
@@ -120,7 +110,10 @@ pub async fn prepare_task_planner_user_input_continuation(
         role_provider_builder,
         verification_execution_port,
         super::task_execution::ResolvedTaskExecutionRoute::NeedsPlanning,
-        TaskRoleDemand::planner_only(),
+        // The planner answer may select any executor role for the newly accepted plan. Build the
+        // complete role surface before resuming so the subsequent step batch is not blocked by an
+        // executor provider that was omitted from the planner-only preflight.
+        TaskRoleDemand::all(),
     )
     .await?;
     let mut child = super::build_child_session(parent_session, &route.child_session_ref)?;

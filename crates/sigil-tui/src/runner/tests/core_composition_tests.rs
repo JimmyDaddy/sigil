@@ -4,9 +4,9 @@ use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::EventHandler;
 use sigil_kernel::{
-    Agent, ControlEntry, ConversationInputKind, ConversationInputStatus, ConversationInputTarget,
-    JsonlSessionStore, ProviderChunk, ReasoningEffort, RootConfig, RunEvent,
-    RuntimeCompositionConfig, SessionLogEntry, ToolCall, ToolRegistry,
+    Agent, AssistantMessageKind, ControlEntry, ConversationInputKind, ConversationInputStatus,
+    ConversationInputTarget, JsonlSessionStore, ProviderChunk, ReasoningEffort, RootConfig,
+    RunEvent, RuntimeCompositionConfig, SessionLogEntry, ToolCall, ToolRegistry,
 };
 use tempfile::tempdir;
 
@@ -578,9 +578,25 @@ fn core_worker_runs_chat_queue_after_rejecting_plan_and_task_without_role_runtim
     gate.notify_one();
 
     let mut answers = Vec::new();
+    let mut final_message_ids = std::collections::HashSet::new();
     while answers.len() < 2 {
         match worker.recv_with_timeout(Duration::from_secs(10))? {
-            WorkerMessage::RunFinished { result, .. } => answers.push(result.final_text),
+            WorkerMessage::Event(event) => {
+                if let RunEvent::AssistantMessage(message) = event.as_ref()
+                    && message.assistant_kind == Some(AssistantMessageKind::FinalAnswer)
+                    && final_message_ids.insert(message.id.clone())
+                {
+                    answers.push(message.content.clone().unwrap_or_default());
+                }
+            }
+            WorkerMessage::RunFinished { result, .. }
+                if result
+                    .final_message_id
+                    .as_ref()
+                    .is_none_or(|id| final_message_ids.insert(id.clone())) =>
+            {
+                answers.push(result.final_text)
+            }
             WorkerMessage::RunFailed(error) => bail!("core conversation failed: {error}"),
             _ => {}
         }

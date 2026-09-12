@@ -17,6 +17,7 @@ pub struct TaskDirectExecutionSessionRunOutput {
     pub attempt_id: String,
     pub final_text: String,
     pub final_message_id: Option<String>,
+    pub completion_claim: Option<crate::TaskCompletionClaimV1>,
     pub outcome: AgentRunOutcome,
     pub disposition: crate::AgentRunDisposition,
 }
@@ -413,6 +414,7 @@ pub struct TaskChildSessionRunOutput {
     pub outcome: AgentRunOutcome,
     pub child_session_ref: SessionRef,
     pub final_answer_ref: Option<AgentFinalAnswerRef>,
+    pub completion_claim: Option<crate::TaskCompletionClaimV1>,
     pub artifact_refs: Vec<AgentArtifactRef>,
     pub changeset_proposal: Option<TaskChildChangeSetProposal>,
     pub isolated_parent_snapshot_id: Option<String>,
@@ -488,6 +490,7 @@ pub struct TaskSynthesisSessionRunOutput {
     pub outcome: AgentRunOutcome,
     pub child_session_ref: SessionRef,
     pub final_answer_ref: AgentFinalAnswerRef,
+    pub completion_claim: Option<crate::TaskCompletionClaimV1>,
     pub artifact_refs: Vec<AgentArtifactRef>,
 }
 
@@ -539,6 +542,7 @@ pub(super) struct StepRunOutput {
     pub(super) final_text: String,
     pub(super) outcome: AgentRunOutcome,
     pub(super) final_answer_ref: Option<AgentFinalAnswerRef>,
+    pub(super) completion_claim: Option<crate::TaskCompletionClaimV1>,
     pub(super) artifact_refs: Vec<AgentArtifactRef>,
     pub(super) changeset_proposal: Option<TaskChildChangeSetProposal>,
     pub(super) isolated_parent_snapshot_id: Option<String>,

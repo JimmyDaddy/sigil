@@ -38,7 +38,7 @@ impl Provider for VerificationProvider {
     }
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
         let chunks = if self.wrapper && index == 0 {
@@ -60,12 +60,11 @@ impl Provider for VerificationProvider {
                 Ok(ProviderChunk::Done),
             ]
         } else {
-            vec![
-                Ok(ProviderChunk::TextDelta(
-                    "Execution observation recorded.".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ]
+            scripted_task_completion_chunks(
+                &request,
+                "Execution observation recorded.",
+                "verification-completion",
+            )
         };
         Ok(Box::pin(stream::iter(chunks)))
     }

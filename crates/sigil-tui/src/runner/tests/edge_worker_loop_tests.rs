@@ -729,6 +729,7 @@ fn agent_result_continuation_requires_final_answer_disposition() {
         final_text: String::new(),
         tool_calls: 0,
         final_message_id: None,
+        completion_claim: None,
     };
     let interrupted = AgentRunOutput {
         result: result.clone(),

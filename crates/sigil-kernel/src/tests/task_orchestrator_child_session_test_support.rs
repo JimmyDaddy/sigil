@@ -1,6 +1,97 @@
 use super::scheduler::has_blocking_tool_error;
 use super::*;
-use crate::task_participant_child_task_id;
+use crate::{
+    TASK_COMPLETION_CLAIM_SCHEMA_VERSION, TaskCompletionClaimStatusV1,
+    TaskCompletionClaimSubjectV1, TaskCompletionClaimV1, TaskCompletionRequirementClaimV1,
+    TaskCompletionRequirementOutcomeV1, TaskCompletionRequirementSourceV1,
+    task_participant_child_task_id,
+};
+
+pub(crate) fn test_direct_completion_claim(
+    request: &TaskDirectExecutionSessionRunRequest,
+) -> TaskCompletionClaimV1 {
+    TaskCompletionClaimV1 {
+        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+        subject: TaskCompletionClaimSubjectV1::Direct {
+            task_id: request.task.task_id.clone(),
+            admission_id: request.admission.admission_id.clone(),
+        },
+        attempt_id: request.attempt.attempt_id.clone(),
+        evidence_frontier: format!("sha256:{}", "0".repeat(64)),
+        status: TaskCompletionClaimStatusV1::Completed,
+        requirements: vec![TaskCompletionRequirementClaimV1 {
+            source: TaskCompletionRequirementSourceV1::DirectObjective {
+                admission_id: request.admission.admission_id.clone(),
+                objective_hash: request.admission.objective_hash.clone(),
+            },
+            required: true,
+            outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
+            artifact_refs: Vec::new(),
+            event_refs: Vec::new(),
+            explanation: "test fixture completed the admitted objective".to_owned(),
+        }],
+        artifact_refs: Vec::new(),
+        explanation: String::new(),
+    }
+}
+
+pub(crate) fn test_step_completion_claim(
+    request: &TaskChildSessionRunRequest,
+) -> TaskCompletionClaimV1 {
+    TaskCompletionClaimV1 {
+        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+        subject: TaskCompletionClaimSubjectV1::Step {
+            task_id: request.task.task_id.clone(),
+            plan_version: request.plan_version,
+            step_id: request.step.step_id.clone(),
+        },
+        attempt_id: request.attempt_id.as_str().to_owned(),
+        evidence_frontier: format!("sha256:{}", "0".repeat(64)),
+        status: TaskCompletionClaimStatusV1::Completed,
+        requirements: vec![TaskCompletionRequirementClaimV1 {
+            source: TaskCompletionRequirementSourceV1::TaskStepOutcome {
+                task_id: request.task.task_id.clone(),
+                plan_version: request.plan_version,
+                step_id: request.step.step_id.clone(),
+            },
+            required: true,
+            outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
+            artifact_refs: Vec::new(),
+            event_refs: Vec::new(),
+            explanation: "test fixture completed the accepted plan step".to_owned(),
+        }],
+        artifact_refs: Vec::new(),
+        explanation: String::new(),
+    }
+}
+
+pub(crate) fn test_synthesis_completion_claim(
+    request: &TaskSynthesisSessionRunRequest,
+) -> TaskCompletionClaimV1 {
+    TaskCompletionClaimV1 {
+        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
+        subject: TaskCompletionClaimSubjectV1::Task {
+            task_id: request.task.task_id.clone(),
+            plan_version: request.plan_version,
+        },
+        attempt_id: request.attempt_id.as_str().to_owned(),
+        evidence_frontier: format!("sha256:{}", "0".repeat(64)),
+        status: TaskCompletionClaimStatusV1::Completed,
+        requirements: vec![TaskCompletionRequirementClaimV1 {
+            source: TaskCompletionRequirementSourceV1::TaskPlanOutcome {
+                task_id: request.task.task_id.clone(),
+                plan_version: request.plan_version,
+            },
+            required: true,
+            outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
+            artifact_refs: Vec::new(),
+            event_refs: Vec::new(),
+            explanation: "test fixture synthesized the accepted plan result".to_owned(),
+        }],
+        artifact_refs: Vec::new(),
+        explanation: String::new(),
+    }
+}
 
 pub(crate) struct TestAgentTaskChildSessionRunner {
     planner: BoxedAgent,
@@ -50,6 +141,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
         {
             bail!("direct execution request does not match its durable Task authority");
         }
+        let completion_claim = test_direct_completion_claim(&request);
         let output = self
             .executor
             .run_with_approval_input(
@@ -64,6 +156,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             attempt_id: request.attempt.attempt_id,
             final_text: output.result.final_text,
             final_message_id: output.result.final_message_id,
+            completion_claim: Some(completion_claim),
             outcome: output.outcome,
             disposition: output.disposition,
         })
@@ -138,6 +231,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let completion_claim = test_step_completion_claim(&request);
         let TaskChildSessionRunRequest {
             task,
             attempt_id,
@@ -241,6 +335,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             final_text: output.result.final_text,
             outcome: output.outcome,
             final_answer_ref: None,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
             changeset_proposal,
             isolated_parent_snapshot_id,
@@ -270,6 +365,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             outcome: step_output.outcome,
             child_session_ref: child_session_ref.clone(),
             final_answer_ref,
+            completion_claim: step_output.completion_claim.clone(),
             artifact_refs: Vec::new(),
             changeset_proposal: step_output.changeset_proposal,
             isolated_parent_snapshot_id: step_output.isolated_parent_snapshot_id,
@@ -287,6 +383,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let completion_claim = test_synthesis_completion_claim(&request);
         let mut child_session = build_child_session(parent_session, &request.child_session_ref)?;
         let output = self
             .synthesis
@@ -315,6 +412,7 @@ impl TaskChildSessionRunner for TestAgentTaskChildSessionRunner {
             outcome: output.outcome,
             child_session_ref: request.child_session_ref,
             final_answer_ref,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
         })
     }

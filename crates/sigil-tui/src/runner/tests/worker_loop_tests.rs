@@ -274,6 +274,7 @@ fn durable_revision_success_survives_a_real_post_run_audit_append_failure() {
                 final_text: "original durable revision result".to_owned(),
                 tool_calls: 0,
                 final_message_id: None,
+                completion_claim: None,
             },
         )),
         audit_result,

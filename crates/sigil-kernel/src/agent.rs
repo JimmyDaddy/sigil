@@ -42,10 +42,12 @@ use crate::{
         ToolApprovalTerminalStatusV2, ToolApprovalUserDecision, ToolExecutionStatus,
     },
     task::{
-        TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
-        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskGuidanceAssessmentContext, TaskId,
-        TaskParticipantAttemptId, TaskPlanStatus, TaskPlanUpdateContext, TaskRunStatus,
-        TaskStepCheckpointV2, TaskStepId, task_guidance_apply_tool_spec,
+        TASK_COMPLETION_CLAIM_TOOL_NAME, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
+        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskCompletionClaimSubjectV1,
+        TaskCompletionRequirementFieldV1, TaskCompletionRequirementSourceV1,
+        TaskGuidanceAssessmentContext, TaskId, TaskParticipantAttemptId, TaskPlanStatus,
+        TaskPlanUpdateContext, TaskRunStatus, TaskStepCheckpointV2, TaskStepContractBoundEntryV2,
+        TaskStepId, task_completion_claim_tool_spec, task_guidance_apply_tool_spec,
         task_plan_update_tool_spec_for_worktree,
     },
     task_checklist::{
@@ -85,6 +87,7 @@ mod provider_stream;
 mod readiness;
 mod run_lifecycle;
 mod task_checklist;
+mod task_completion_claim;
 mod task_guidance;
 mod task_handoff;
 mod task_plan;
@@ -117,6 +120,7 @@ use run_lifecycle::{
     append_paused_run_lifecycle_events, append_run_lifecycle_events,
 };
 use task_checklist::handle_task_checklist_update_call;
+use task_completion_claim::handle_task_completion_claim_call;
 use task_guidance::{
     append_tool_ignored_after_task_guidance_acceptance, handle_task_guidance_apply_call,
     task_guidance_apply_call_is_accepted,
@@ -288,6 +292,8 @@ pub struct AgentRunResult {
     pub final_text: String,
     pub tool_calls: usize,
     pub final_message_id: Option<String>,
+    /// Model-reported Task completion claim, if this run used the typed claim tool.
+    pub completion_claim: Option<crate::TaskCompletionClaimV1>,
 }
 
 /// Host-owned purpose for one model run.
@@ -365,6 +371,153 @@ pub struct TaskSynthesisContext {
     pub task_id: TaskId,
     pub plan_version: u32,
     pub attempt_id: TaskParticipantAttemptId,
+}
+
+fn task_completion_claim_authority(
+    purpose: Option<&AgentRunPurpose>,
+) -> Option<(TaskCompletionClaimSubjectV1, String)> {
+    match purpose? {
+        AgentRunPurpose::TaskDirectExecution(context) => Some((
+            TaskCompletionClaimSubjectV1::Direct {
+                task_id: context.task_id.clone(),
+                admission_id: context.admission_id.clone(),
+            },
+            context.attempt_id.clone(),
+        )),
+        AgentRunPurpose::TaskParticipant(context) => Some((
+            TaskCompletionClaimSubjectV1::Step {
+                task_id: context.task_id.clone(),
+                plan_version: context.plan_version,
+                step_id: context.step_id.clone(),
+            },
+            context.attempt_id.as_str().to_owned(),
+        )),
+        AgentRunPurpose::TaskSynthesis(context) => Some((
+            TaskCompletionClaimSubjectV1::Task {
+                task_id: context.task_id.clone(),
+                plan_version: context.plan_version,
+            },
+            context.attempt_id.as_str().to_owned(),
+        )),
+        _ => None,
+    }
+}
+
+/// Renders the exact authority and source identities a Task model may place in its completion
+/// claim. These are durable ids and hashes already present in the host projection; no user text
+/// or provider material is copied into the prompt.
+fn task_completion_claim_binding_material(
+    session: &Session,
+    purpose: Option<&AgentRunPurpose>,
+) -> Option<String> {
+    let (subject, attempt_id) = task_completion_claim_authority(purpose)?;
+    let mut sources = Vec::new();
+    match purpose? {
+        AgentRunPurpose::TaskDirectExecution(context) => {
+            let objective_hash = session
+                .task_state_projection()
+                .tasks
+                .get(&context.task_id)
+                .and_then(|task| task.direct_execution_admission.as_ref())
+                .filter(|admission| admission.admission_id == context.admission_id)
+                .map(|admission| admission.objective_hash.clone());
+            if let Some(objective_hash) = objective_hash {
+                sources.push(
+                    serde_json::to_value(TaskCompletionRequirementSourceV1::DirectObjective {
+                        admission_id: context.admission_id.clone(),
+                        objective_hash,
+                    })
+                    .ok()?,
+                );
+            }
+        }
+        AgentRunPurpose::TaskParticipant(context) => {
+            let projection = session.task_state_projection();
+            if let Some(plan) = projection
+                .tasks
+                .get(&context.task_id)
+                .and_then(|task| task.plans.get(&context.plan_version))
+            {
+                let bindings = plan
+                    .step_contracts
+                    .iter()
+                    .map(|(step_id, contract)| TaskStepContractBoundEntryV2 {
+                        task_id: context.task_id.clone(),
+                        plan_version: context.plan_version,
+                        step_id: step_id.clone(),
+                        contract: contract.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if bindings.is_empty() {
+                    sources.push(
+                        serde_json::to_value(TaskCompletionRequirementSourceV1::TaskStepOutcome {
+                            task_id: context.task_id.clone(),
+                            plan_version: context.plan_version,
+                            step_id: context.step_id.clone(),
+                        })
+                        .ok()?,
+                    );
+                } else {
+                    let contract_set_sha256 =
+                        crate::task::task_contract_set_sha256(&bindings).ok()?;
+                    if let Some(contract) = plan.step_contracts.get(&context.step_id) {
+                        for (field, count) in [
+                            (
+                                TaskCompletionRequirementFieldV1::Deliverable,
+                                contract.deliverables.len(),
+                            ),
+                            (
+                                TaskCompletionRequirementFieldV1::AcceptanceCriterion,
+                                contract.acceptance_criteria.len(),
+                            ),
+                        ] {
+                            for index in 0..count {
+                                sources.push(
+                                    serde_json::to_value(
+                                        TaskCompletionRequirementSourceV1::TaskStepContract {
+                                            task_id: context.task_id.clone(),
+                                            plan_version: context.plan_version,
+                                            step_id: context.step_id.clone(),
+                                            field,
+                                            index: u32::try_from(index).ok()?,
+                                            contract_set_sha256: contract_set_sha256.clone(),
+                                        },
+                                    )
+                                    .ok()?,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if sources.is_empty() {
+                sources.push(
+                    serde_json::to_value(TaskCompletionRequirementSourceV1::TaskStepOutcome {
+                        task_id: context.task_id.clone(),
+                        plan_version: context.plan_version,
+                        step_id: context.step_id.clone(),
+                    })
+                    .ok()?,
+                );
+            }
+        }
+        AgentRunPurpose::TaskSynthesis(context) => {
+            sources.push(
+                serde_json::to_value(TaskCompletionRequirementSourceV1::TaskPlanOutcome {
+                    task_id: context.task_id.clone(),
+                    plan_version: context.plan_version,
+                })
+                .ok()?,
+            );
+        }
+        _ => return None,
+    }
+    Some(format!(
+        "Task completion claim binding (copy these exact identities; do not invent values):\nsubject={}\nattempt_id={}\nallowed requirement source templates={}\nSet each requirement's required/outcome fields from the evidence you actually have. If no finer-grained contract source is listed, use the supplied step or plan outcome source.",
+        serde_json::to_string(&subject).ok()?,
+        attempt_id,
+        serde_json::to_string(&sources).ok()?
+    ))
 }
 
 /// Typed disposition that callers must inspect before finalizing a root run.
@@ -2316,6 +2469,9 @@ where
         let user_url_capability_registrar =
             user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
 
+        let completion_claim_authority = task_completion_claim_authority(purpose.as_ref());
+        let mut completion_claim = None;
+
         let (task_handoff_binding, plan_review_binding, task_continuation_binding) =
             match purpose.as_ref() {
                 Some(AgentRunPurpose::Conversation(context))
@@ -2552,6 +2708,12 @@ where
             | Some(AgentRunPurpose::TaskSynthesis(_))
             | None => {}
         }
+        if let Some(binding_material) =
+            task_completion_claim_binding_material(session, purpose.as_ref())
+        {
+            let insert_at = usize::min(1, transient_context.len());
+            transient_context.insert(insert_at, ModelMessage::system(binding_material));
+        }
         if task_guidance_assessment.is_some()
             && tools.spec_for(TASK_GUIDANCE_APPLY_TOOL_NAME).is_some()
         {
@@ -2581,6 +2743,13 @@ where
                     ));
                 }
             }
+        }
+        if completion_claim_authority.is_some()
+            && tools.spec_for(TASK_COMPLETION_CLAIM_TOOL_NAME).is_some()
+        {
+            return Err(anyhow!(
+                "tool registry collides with reserved internal tool {TASK_COMPLETION_CLAIM_TOOL_NAME}"
+            ));
         }
 
         if cancellation
@@ -2802,6 +2971,7 @@ where
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
+                        completion_claim: None,
                     },
                     outcome,
                     disposition: AgentRunDisposition::Interrupted,
@@ -2916,6 +3086,9 @@ where
                 }
                 if task_checklist_update.is_some() {
                     tool_specs.push(update_task_checklist_tool_spec());
+                }
+                if completion_claim_authority.is_some() {
+                    tool_specs.push(task_completion_claim_tool_spec());
                 }
                 if plan_review_draft.is_some() {
                     tool_specs.push(submit_plan_review_result_tool_spec());
@@ -3867,6 +4040,40 @@ where
                         )?;
                         continue;
                     }
+                    if call.name == TASK_COMPLETION_CLAIM_TOOL_NAME {
+                        let Some((expected_subject, expected_attempt_id)) =
+                            completion_claim_authority.as_ref()
+                        else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "task_completion_claim is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            assistant_batch_results.push((call.clone(), result));
+                            continue;
+                        };
+                        handle_task_completion_claim_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            expected_subject,
+                            expected_attempt_id,
+                            &mut completion_claim,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
                     if call.name == PLAN_REVIEW_RESULT_TOOL_NAME {
                         let Some(context) = plan_review_draft.as_ref() else {
                             let mut result = ToolResult::error(
@@ -4037,6 +4244,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::AwaitingUserInput(request),
@@ -4059,6 +4267,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartDurableTask(action),
@@ -4072,6 +4281,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::RunPendingPlan(action),
@@ -4085,6 +4295,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::PendingPlanDecisionRequired(action),
@@ -4098,6 +4309,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::ContinueDurableTask(Box::new(action)),
@@ -4111,6 +4323,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartPlanReview(action),
@@ -4138,6 +4351,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::Blocked,
@@ -4222,6 +4436,7 @@ where
                                 .to_owned(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::TaskPlanAccepted,
@@ -4245,6 +4460,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::FinalAnswer,
@@ -4273,6 +4489,7 @@ where
                             final_text: "plan draft submitted; awaiting your decision".to_owned(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::PlanReviewDraftSubmitted(
@@ -4304,6 +4521,7 @@ where
                                     .to_owned(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::TaskPlanAccepted,
@@ -4362,6 +4580,7 @@ where
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
+                        completion_claim: None,
                     },
                     outcome,
                     disposition: AgentRunDisposition::Blocked,
@@ -4397,6 +4616,7 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
+                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::Blocked,
@@ -4447,6 +4667,7 @@ where
                         final_text: crate::safe_persistence_text(&assistant_text),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
+                        completion_claim: None,
                     },
                     outcome,
                     disposition: AgentRunDisposition::Blocked,
@@ -4543,6 +4764,7 @@ where
                     final_text: assistant_text,
                     tool_calls: total_tool_calls,
                     final_message_id: Some(final_message_id),
+                    completion_claim: completion_claim.take(),
                 },
                 outcome,
                 disposition: AgentRunDisposition::FinalAnswer,

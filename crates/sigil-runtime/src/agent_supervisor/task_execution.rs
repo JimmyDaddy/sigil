@@ -862,7 +862,8 @@ where
             &task.task_id,
             guidance.is_some()
                 || guidance_promotion.is_some()
-                || continuation_guidance_receipt.is_some(),
+                || continuation_guidance_receipt.is_some()
+                || recoverable_review.is_some(),
         )?
     } else {
         TaskRoleDemand::all()

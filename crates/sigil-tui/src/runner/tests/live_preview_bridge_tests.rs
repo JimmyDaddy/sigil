@@ -54,6 +54,7 @@ fn native_delta_partition_count_does_not_grow_worker_queue() -> Result<()> {
                 final_text: text,
                 tool_calls: 0,
                 final_message_id: Some(id),
+                completion_claim: None,
             },
             outcome: sigil_kernel::AgentRunOutcome::default(),
         }))?;

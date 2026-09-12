@@ -368,6 +368,19 @@ pub(super) fn step_reason_from_output(
     output: &StepRunOutput,
 ) -> Option<String> {
     if status == TaskStepStatus::Blocked
+        && output
+            .completion_claim
+            .as_ref()
+            .is_none_or(|claim| !claim.declares_completed_delivery())
+        && !output.final_text.trim().is_empty()
+        && output.changeset_proposal.is_none()
+        && output.outcome.tool_errors.is_empty()
+    {
+        return Some(
+            "participant completion claim is missing or does not declare delivery".to_owned(),
+        );
+    }
+    if status == TaskStepStatus::Blocked
         && output.outcome.terminal_reason == AgentRunTerminalReason::RepairReplanRequired
     {
         return Some(

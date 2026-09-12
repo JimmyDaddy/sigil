@@ -25,7 +25,7 @@ impl Provider for DirectExecutionProvider {
     }
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let stage = self.0.fetch_add(1, Ordering::SeqCst);
         let (name, args) = match stage {
@@ -33,6 +33,13 @@ impl Provider for DirectExecutionProvider {
             1..=8 => ("read_file", serde_json::json!({"path": "observation.txt"})),
             9 => ("bash", serde_json::json!({"command": "true"})),
             10 => {
+                return Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
+                    &request,
+                    "Inspection and follow-up check complete",
+                    "direct-execution-completion",
+                ))));
+            }
+            11 => {
                 return Ok(Box::pin(stream::iter(vec![
                     Ok(ProviderChunk::TextDelta(
                         "Inspection and follow-up check complete".to_owned(),
@@ -205,8 +212,8 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
     }
     assert_eq!(
         calls.load(Ordering::SeqCst),
-        11,
-        "a failed check and eight repeated inspection batches must not impose an implicit limit"
+        12,
+        "the completion claim adds one final provider turn after the ten tool turns"
     );
     let entries = JsonlSessionStore::read_entries(&session_path)?;
     let results: Vec<_> = entries
@@ -216,7 +223,7 @@ async fn assert_direct_execution_turn_limit(configured_limit: bool) -> Result<()
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 10);
+    assert_eq!(results.len(), 11);
     assert!(results[0].facts.error.is_some());
     assert!(
         results[1..]

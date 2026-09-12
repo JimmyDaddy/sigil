@@ -1190,7 +1190,7 @@ where
                 session,
                 TaskDirectExecutionSessionRunRequest {
                     task: request.clone(),
-                    admission,
+                    admission: admission.clone(),
                     attempt: attempt.clone(),
                     input,
                     options: executor_options.clone(),
@@ -1270,46 +1270,59 @@ where
         }
         let mut completion_blocker = None;
         if status == TaskRunStatus::Completed {
+            if let Some(claim) = output.completion_claim.as_ref() {
+                if let Err(error) = validate_direct_completion_claim(claim, &attempt, &admission) {
+                    completion_blocker = Some(format!("direct completion claim rejected: {error}"));
+                }
+            } else {
+                completion_blocker = Some(
+                    "direct execution must submit a typed completion claim before completion"
+                        .to_owned(),
+                );
+            }
             let projection = session.task_state_projection();
             let task = projection
                 .tasks
                 .get(&request.task_id)
                 .ok_or_else(|| anyhow!("direct completion Task is unavailable"))?;
-            if task.direct_execution_attempts.get(&attempt.attempt_id) != Some(&attempt)
-                || task
-                    .direct_execution_admission
-                    .as_ref()
-                    .is_none_or(|admission| admission.admission_id != attempt.admission_id)
+            if completion_blocker.is_none()
+                && (task.direct_execution_attempts.get(&attempt.attempt_id) != Some(&attempt)
+                    || task
+                        .direct_execution_admission
+                        .as_ref()
+                        .is_none_or(|admission| admission.admission_id != attempt.admission_id))
             {
                 bail!("direct completion authority changed during execution");
             }
-            if output
-                .outcome
-                .terminal_reason
-                .blocks_successful_completion()
-                || !output.outcome.interrupted_tool_calls.is_empty()
+            if completion_blocker.is_none()
+                && (output
+                    .outcome
+                    .terminal_reason
+                    .blocks_successful_completion()
+                    || !output.outcome.interrupted_tool_calls.is_empty())
             {
                 completion_blocker = Some("direct execution has unsettled run output".to_owned());
-            } else if self
-                .cancellation
-                .as_ref()
-                .is_some_and(|handle| !handle.cleanup_complete() || handle.active_effects() != 0)
+            } else if completion_blocker.is_none()
+                && self.cancellation.as_ref().is_some_and(|handle| {
+                    !handle.cleanup_complete() || handle.active_effects() != 0
+                })
             {
                 completion_blocker = Some("direct execution effects have not settled".to_owned());
-            } else if projection
-                .evaluate_root_terminal(
-                    &request.task_id,
-                    TaskRunStatus::Completed,
-                    Some(&crate::task::TaskRootTerminalCandidateV1::DirectExecution {
-                        attempt_id: attempt.attempt_id.clone(),
-                        status: TaskParticipantAttemptStatus::Completed,
-                    }),
-                )
-                .is_some_and(|evaluation| !evaluation.allows_completed())
+            } else if completion_blocker.is_none()
+                && projection
+                    .evaluate_root_terminal(
+                        &request.task_id,
+                        TaskRunStatus::Completed,
+                        Some(&crate::task::TaskRootTerminalCandidateV1::DirectExecution {
+                            attempt_id: attempt.attempt_id.clone(),
+                            status: TaskParticipantAttemptStatus::Completed,
+                        }),
+                    )
+                    .is_some_and(|evaluation| !evaluation.allows_completed())
             {
                 completion_blocker =
                     Some("direct execution has unfinished Task dependencies".to_owned());
-            } else {
+            } else if completion_blocker.is_none() {
                 let (mut readiness, auto_run, blocker) =
                     super::readiness::direct_task_completion_readiness(
                         session,
@@ -2043,6 +2056,7 @@ where
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                None,
             )?;
             append_task_controls(
                 session,
@@ -2487,6 +2501,7 @@ where
                                 final_text: output.final_text,
                                 outcome: output.outcome,
                                 final_answer_ref: output.final_answer_ref,
+                                completion_claim: output.completion_claim,
                                 artifact_refs: output.artifact_refs,
                                 changeset_proposal: output.changeset_proposal,
                                 isolated_parent_snapshot_id: output.isolated_parent_snapshot_id,
@@ -2906,7 +2921,7 @@ where
     where
         H: EventHandler + Send,
     {
-        let initial_status = if synchronize_step_recovery_blockers(
+        let mut initial_status = if synchronize_step_recovery_blockers(
             session,
             &request.task_id,
             &step.step_id,
@@ -2917,6 +2932,21 @@ where
         } else {
             step_status_from_outcome(&output)
         };
+        if initial_status == TaskStepStatus::Completed {
+            let claim_valid = output.completion_claim.as_ref().is_some_and(|claim| {
+                validate_plan_completion_claim(
+                    session,
+                    claim,
+                    attempt,
+                    plan_version,
+                    Some(&step.step_id),
+                )
+                .is_ok()
+            });
+            if !claim_valid {
+                initial_status = TaskStepStatus::Blocked;
+            }
+        }
         let participant_status = participant_status_from_step_output(initial_status, &output);
         let participant_result = participant_result_entry(
             attempt,
@@ -2925,6 +2955,7 @@ where
             output.artifact_refs.clone(),
             output.outcome.changed_files.clone(),
             Vec::new(),
+            output.completion_claim.clone(),
         )?;
         append_participant_result_and_terminal(
             session,
@@ -3240,7 +3271,7 @@ where
                 });
             }
         };
-        let initial_status = if synchronize_step_recovery_blockers(
+        let mut initial_status = if synchronize_step_recovery_blockers(
             session,
             &request.task_id,
             &step.step_id,
@@ -3251,6 +3282,21 @@ where
         } else {
             step_status_from_outcome(&output)
         };
+        if initial_status == TaskStepStatus::Completed {
+            let claim_valid = output.completion_claim.as_ref().is_some_and(|claim| {
+                validate_plan_completion_claim(
+                    session,
+                    claim,
+                    &attempt,
+                    plan_version,
+                    Some(&step.step_id),
+                )
+                .is_ok()
+            });
+            if !claim_valid {
+                initial_status = TaskStepStatus::Blocked;
+            }
+        }
         let participant_result = participant_result_entry(
             &attempt,
             &output.final_text,
@@ -3258,6 +3304,7 @@ where
             output.artifact_refs.clone(),
             output.outcome.changed_files.clone(),
             Vec::new(),
+            output.completion_claim.clone(),
         )?;
         append_participant_result_and_terminal(
             session,
@@ -3510,6 +3557,7 @@ where
             final_text: output.final_text,
             outcome: output.outcome,
             final_answer_ref: output.final_answer_ref,
+            completion_claim: output.completion_claim,
             artifact_refs: output.artifact_refs,
             changeset_proposal: output.changeset_proposal,
             isolated_parent_snapshot_id: output.isolated_parent_snapshot_id,
@@ -4065,6 +4113,31 @@ where
         )?;
         return Ok(TaskRunStatus::Paused);
     }
+    let claim_validation = output.completion_claim.as_ref().map_or_else(
+        || {
+            Err(anyhow!(
+                "final synthesis must submit a typed completion claim"
+            ))
+        },
+        |claim| validate_plan_completion_claim(session, claim, attempt, plan_version, None),
+    );
+    if let Err(error) = claim_validation {
+        append_participant_terminal(
+            session,
+            handler,
+            attempt,
+            TaskParticipantAttemptStatus::Blocked,
+            Some(format!("synthesis completion claim rejected: {error}")),
+        )?;
+        append_task_run(
+            session,
+            handler,
+            request,
+            TaskRunStatus::Paused,
+            Some("final synthesis did not provide an acceptable completion claim".to_owned()),
+        )?;
+        return Ok(TaskRunStatus::Paused);
+    }
     let result = participant_result_entry(
         attempt,
         &final_text,
@@ -4072,6 +4145,7 @@ where
         output.artifact_refs,
         output.outcome.changed_files,
         Vec::new(),
+        output.completion_claim,
     )?;
     append_participant_result_and_terminal(
         session,
@@ -5502,6 +5576,7 @@ pub(super) fn participant_result_entry(
     artifact_refs: Vec<AgentArtifactRef>,
     changed_paths: Vec<String>,
     verification_refs: Vec<String>,
+    completion_claim: Option<crate::TaskCompletionClaimV1>,
 ) -> Result<TaskParticipantResultEntry> {
     let safe_final_text = crate::safe_persistence_text(final_text);
     let normalized_final_text = safe_final_text.trim();
@@ -5571,7 +5646,7 @@ pub(super) fn participant_result_entry(
             })
             .filter(|reference| !reference.is_empty())
             .collect(),
-        completion_claim: None,
+        completion_claim,
     };
     entry.validate_shape()?;
     Ok(entry)
@@ -5582,6 +5657,201 @@ fn bounded_participant_result_field(value: &str, max_chars: usize) -> String {
         .chars()
         .take(max_chars)
         .collect()
+}
+
+fn validate_direct_completion_claim(
+    claim: &crate::TaskCompletionClaimV1,
+    attempt: &crate::TaskDirectExecutionAttemptV1,
+    admission: &crate::TaskDirectExecutionAdmittedV1,
+) -> Result<()> {
+    claim.validate_for_direct_attempt(attempt, admission)?;
+    if !claim.declares_completed_delivery() {
+        bail!("direct completion claim does not declare completed delivery");
+    }
+    for requirement in &claim.requirements {
+        if !requirement.required
+            || requirement.outcome != crate::TaskCompletionRequirementOutcomeV1::Fulfilled
+        {
+            bail!("direct completion claim does not mark the admitted objective fulfilled");
+        }
+        match &requirement.source {
+            crate::TaskCompletionRequirementSourceV1::DirectObjective {
+                admission_id,
+                objective_hash,
+            } if admission_id == &admission.admission_id
+                && objective_hash == &admission.objective_hash => {}
+            _ => bail!("direct completion claim references an unbound requirement source"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_plan_completion_claim(
+    session: &Session,
+    claim: &crate::TaskCompletionClaimV1,
+    attempt: &TaskParticipantAttemptEntry,
+    plan_version: u32,
+    step_id: Option<&TaskStepId>,
+) -> Result<()> {
+    claim.validate_for_participant_attempt(attempt)?;
+    if !claim.declares_completed_delivery() {
+        bail!("plan completion claim does not declare completed delivery");
+    }
+    let projection = session.task_state_projection();
+    let task = projection
+        .tasks
+        .get(&attempt.task_id)
+        .ok_or_else(|| anyhow!("completion claim Task is unavailable"))?;
+    let plan = task
+        .plans
+        .get(&plan_version)
+        .filter(|plan| plan.status == TaskPlanStatus::Accepted)
+        .ok_or_else(|| anyhow!("completion claim plan is unavailable"))?;
+    let bindings = task
+        .plans
+        .get(&plan_version)
+        .map(|plan| {
+            plan.step_contracts
+                .iter()
+                .map(|(step_id, contract)| crate::TaskStepContractBoundEntryV2 {
+                    task_id: attempt.task_id.clone(),
+                    plan_version,
+                    step_id: step_id.clone(),
+                    contract: contract.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let expected_contract_set_hash = if bindings.is_empty() {
+        None
+    } else {
+        Some(crate::task::task_contract_set_sha256(&bindings)?)
+    };
+    let mut claimed_sources = BTreeSet::new();
+    for requirement in &claim.requirements {
+        if !requirement.required
+            || requirement.outcome != crate::TaskCompletionRequirementOutcomeV1::Fulfilled
+        {
+            bail!("plan completion claim does not mark every reported requirement fulfilled");
+        }
+        match &requirement.source {
+            crate::TaskCompletionRequirementSourceV1::TaskStepContract {
+                task_id: source_task_id,
+                plan_version: source_plan_version,
+                step_id: source_step_id,
+                field,
+                index,
+                contract_set_sha256,
+            } if source_task_id == &attempt.task_id
+                && *source_plan_version == plan_version
+                && step_id.is_none_or(|expected| expected == source_step_id)
+                && expected_contract_set_hash.as_deref() == Some(contract_set_sha256) =>
+            {
+                let contract = plan
+                    .step_contracts
+                    .get(source_step_id)
+                    .ok_or_else(|| anyhow!("completion claim references an unknown step"))?;
+                let item_count = match field {
+                    crate::TaskCompletionRequirementFieldV1::Deliverable => {
+                        contract.deliverables.len()
+                    }
+                    crate::TaskCompletionRequirementFieldV1::AcceptanceCriterion => {
+                        contract.acceptance_criteria.len()
+                    }
+                };
+                if (*index as usize) >= item_count {
+                    bail!("completion claim requirement index is outside its contract");
+                }
+                claimed_sources.insert(serde_json::to_string(&requirement.source)?);
+            }
+            crate::TaskCompletionRequirementSourceV1::IntentCriterion { intent_ref, .. }
+                if plan
+                    .steps
+                    .iter()
+                    .filter(|step| step_id.is_none_or(|expected| expected == &step.step_id))
+                    .any(|step| step.intent_refs.contains(intent_ref)) =>
+            {
+                claimed_sources.insert(serde_json::to_string(&requirement.source)?);
+            }
+            crate::TaskCompletionRequirementSourceV1::TaskStepOutcome {
+                task_id: source_task_id,
+                plan_version: source_plan_version,
+                step_id: source_step_id,
+            } if source_task_id == &attempt.task_id
+                && *source_plan_version == plan_version
+                && step_id.is_none_or(|expected| expected == source_step_id)
+                && plan
+                    .steps
+                    .iter()
+                    .any(|step| step.step_id == *source_step_id) =>
+            {
+                claimed_sources.insert(serde_json::to_string(&requirement.source)?);
+            }
+            crate::TaskCompletionRequirementSourceV1::TaskPlanOutcome {
+                task_id: source_task_id,
+                plan_version: source_plan_version,
+            } if source_task_id == &attempt.task_id && *source_plan_version == plan_version => {
+                claimed_sources.insert(serde_json::to_string(&requirement.source)?);
+            }
+            _ => bail!("completion claim references an unbound plan requirement source"),
+        }
+    }
+    let expected_sources = if let Some(expected_step_id) = step_id {
+        let contract = plan.step_contracts.get(expected_step_id);
+        match contract {
+            Some(contract)
+                if !contract.deliverables.is_empty()
+                    || !contract.acceptance_criteria.is_empty() =>
+            {
+                let contract_set_sha256 = expected_contract_set_hash
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("completion claim contract set is unavailable"))?;
+                let mut sources = BTreeSet::new();
+                for (field, count) in [
+                    (
+                        crate::TaskCompletionRequirementFieldV1::Deliverable,
+                        contract.deliverables.len(),
+                    ),
+                    (
+                        crate::TaskCompletionRequirementFieldV1::AcceptanceCriterion,
+                        contract.acceptance_criteria.len(),
+                    ),
+                ] {
+                    for index in 0..count {
+                        sources.insert(serde_json::to_string(
+                            &crate::TaskCompletionRequirementSourceV1::TaskStepContract {
+                                task_id: attempt.task_id.clone(),
+                                plan_version,
+                                step_id: expected_step_id.clone(),
+                                field,
+                                index: u32::try_from(index)?,
+                                contract_set_sha256: contract_set_sha256.to_owned(),
+                            },
+                        )?);
+                    }
+                }
+                sources
+            }
+            _ => BTreeSet::from([serde_json::to_string(
+                &crate::TaskCompletionRequirementSourceV1::TaskStepOutcome {
+                    task_id: attempt.task_id.clone(),
+                    plan_version,
+                    step_id: expected_step_id.clone(),
+                },
+            )?]),
+        }
+    } else {
+        BTreeSet::from([serde_json::to_string(
+            &crate::TaskCompletionRequirementSourceV1::TaskPlanOutcome {
+                task_id: attempt.task_id.clone(),
+                plan_version,
+            },
+        )?])
+    };
+    if !expected_sources.is_subset(&claimed_sources) {
+        bail!("plan completion claim does not cover the bound plan requirements");
+    }
+    Ok(())
 }
 
 fn validate_isolated_planner_output(
@@ -5694,6 +5964,7 @@ where
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     let terminal_controls = participant_result_and_terminal_controls(
         attempt,

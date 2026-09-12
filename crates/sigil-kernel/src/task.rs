@@ -18,6 +18,8 @@ use crate::{
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
 pub const TASK_GUIDANCE_APPLY_TOOL_NAME: &str = "task_guidance_apply";
+/// Reserved internal tool used by Task runs to bind model-reported delivery to durable authority.
+pub const TASK_COMPLETION_CLAIM_TOOL_NAME: &str = "task_completion_claim";
 /// Durable schema carried by task-step execution-contract sidecars.
 pub const TASK_STEP_CONTRACT_V2_SCHEMA_VERSION: u16 = 2;
 const TASK_STEP_CONTRACT_MAX_ITEMS: usize = 64;
@@ -3020,6 +3022,16 @@ pub enum TaskCompletionRequirementSourceV1 {
         index: u32,
         contract_set_sha256: String,
     },
+    /// Step-level delivery identity used when an accepted plan carries no finer-grained
+    /// deliverable or acceptance-criterion contract. The host still checks the step's durable
+    /// outcome, effect settlement, and readiness before accepting completion.
+    TaskStepOutcome {
+        task_id: TaskId,
+        plan_version: u32,
+        step_id: TaskStepId,
+    },
+    /// Plan-level delivery identity used by the final synthesis participant.
+    TaskPlanOutcome { task_id: TaskId, plan_version: u32 },
     DirectObjective {
         admission_id: String,
         objective_hash: String,
@@ -3072,6 +3084,35 @@ impl TaskCompletionRequirementSourceV1 {
                 validate_sha256_fingerprint(
                     "task completion claim contract-set hash",
                     contract_set_sha256,
+                )?;
+            }
+            Self::TaskStepOutcome {
+                task_id,
+                plan_version,
+                step_id,
+            } => {
+                if *plan_version == 0 {
+                    bail!("task completion claim plan version must be non-zero");
+                }
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
+                )?;
+                validate_stable_task_claim_token(
+                    "task completion claim step id",
+                    step_id.as_str(),
+                )?;
+            }
+            Self::TaskPlanOutcome {
+                task_id,
+                plan_version,
+            } => {
+                if *plan_version == 0 {
+                    bail!("task completion claim plan version must be non-zero");
+                }
+                validate_stable_task_claim_token(
+                    "task completion claim task id",
+                    task_id.as_str(),
                 )?;
             }
             Self::DirectObjective {
@@ -3296,6 +3337,95 @@ impl TaskCompletionClaimV1 {
             _ => bail!("task completion claim subject is not the admitted direct execution"),
         }
     }
+}
+
+/// Returns the provider-neutral schema for the Task completion claim tool.
+#[must_use]
+pub fn task_completion_claim_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
+        description: "Report which immutable Task requirements were fulfilled. This claim is required before the host can settle a Task as completed; it must reference only the bound Task/step authority and evidence already produced by the run.".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema_version", "subject", "attempt_id", "evidence_frontier", "status", "requirements"],
+            "properties": {
+                "schema_version": {"type": "integer", "const": TASK_COMPLETION_CLAIM_SCHEMA_VERSION},
+                "subject": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["task", "step", "direct"]},
+                        "task_id": {"type": "string", "minLength": 1},
+                        "plan_version": {"type": "integer", "minimum": 1},
+                        "step_id": {"type": "string", "minLength": 1},
+                        "admission_id": {"type": "string", "minLength": 1}
+                    }
+                },
+                "attempt_id": {"type": "string", "minLength": 1},
+                "evidence_frontier": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
+                "status": {"type": "string", "enum": ["completed", "partial", "blocked"]},
+                "requirements": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["source", "required", "outcome"],
+                        "properties": {
+                            "source": {"type": "object"},
+                            "required": {"type": "boolean"},
+                            "outcome": {"type": "string", "enum": ["fulfilled", "unfulfilled", "not_applicable"]},
+                            "artifact_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS},
+                            "event_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS, "items": {"type": "string", "minLength": 1, "maxLength": TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS}},
+                            "explanation": {"type": "string", "maxLength": TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS}
+                        }
+                    }
+                },
+                "artifact_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS},
+                "explanation": {"type": "string", "maxLength": TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS}
+            }
+        }),
+        category: ToolCategory::Custom,
+        access: ToolAccess::Read,
+        network_effect: None,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+/// Parses and binds one model completion claim to the host-selected subject and attempt.
+pub fn task_completion_claim_from_call(
+    call: &ToolCall,
+    expected_subject: &TaskCompletionClaimSubjectV1,
+    expected_attempt_id: &str,
+) -> Result<TaskCompletionClaimV1> {
+    if call.name != TASK_COMPLETION_CLAIM_TOOL_NAME {
+        bail!(
+            "unexpected internal task completion claim tool {}",
+            call.name
+        );
+    }
+    let claim: TaskCompletionClaimV1 = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid task completion claim arguments: {error}"))?;
+    claim.validate_shape()?;
+    if &claim.subject != expected_subject || claim.attempt_id != expected_attempt_id {
+        bail!("task completion claim is bound to another Task subject or attempt");
+    }
+    Ok(claim)
+}
+
+/// Bounded model-visible acknowledgement for an accepted completion claim.
+pub fn task_completion_claim_result_content(claim: &TaskCompletionClaimV1) -> String {
+    json!({
+        "subject": claim.subject,
+        "attempt_id": claim.attempt_id,
+        "status": claim.status,
+        "requirements": claim.requirements.len(),
+        "next_action": "return the concise final result; the host will verify evidence and settle completion"
+    })
+    .to_string()
 }
 
 fn validate_stable_task_claim_token(label: &str, value: &str) -> Result<()> {

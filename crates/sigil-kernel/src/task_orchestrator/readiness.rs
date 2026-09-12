@@ -681,6 +681,7 @@ pub(super) async fn task_step_failure_readiness_nonblocking(
         final_text: String::new(),
         outcome: AgentRunOutcome::default(),
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         changeset_proposal: None,
         isolated_parent_snapshot_id: None,

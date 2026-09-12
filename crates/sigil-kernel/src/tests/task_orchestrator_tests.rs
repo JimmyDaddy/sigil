@@ -51,6 +51,9 @@ use crate::{
 use super::runner::{
     direct_execution_prompt, synchronize_step_recovery_blockers, task_participant_input_message_id,
 };
+use super::task_orchestrator_child_session_test_support::{
+    test_direct_completion_claim, test_step_completion_claim, test_synthesis_completion_claim,
+};
 use super::{
     StepRunOutput, TaskChildSessionBatchCommitEnvelope, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskIntegrationRunOutput,
@@ -100,6 +103,7 @@ impl TaskChildSessionRunner for CapturingDirectContinuationRunner {
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
     {
+        let completion_claim = test_direct_completion_claim(&request);
         let attempt_id = request.attempt.attempt_id;
         self.inputs
             .lock()
@@ -109,6 +113,7 @@ impl TaskChildSessionRunner for CapturingDirectContinuationRunner {
             attempt_id,
             final_text: "direct continuation completed".to_owned(),
             final_message_id: Some("direct-continuation-final".to_owned()),
+            completion_claim: Some(completion_claim),
             outcome: self.outcome.clone(),
             disposition: crate::AgentRunDisposition::FinalAnswer,
         })
@@ -567,6 +572,7 @@ fn task_verification_rerun_fixture() -> Result<TaskVerificationRerunFixture> {
     options.workspace_root = workspace.clone();
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -639,6 +645,7 @@ impl TaskChildSessionRunner for StaticChangesetChildRunner {
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
     {
+        let completion_claim = test_step_completion_claim(&request);
         if let Some(path) = &self.mutate_parent_file {
             std::fs::write(request.options.workspace_root.join(path), b"mutated")?;
         }
@@ -674,6 +681,7 @@ impl TaskChildSessionRunner for StaticChangesetChildRunner {
             outcome: self.outcome.clone(),
             child_session_ref: request.child_session_ref,
             final_answer_ref: None,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
             changeset_proposal,
             isolated_parent_snapshot_id,
@@ -694,12 +702,14 @@ impl TaskChildSessionRunner for WrongIdentityChildRunner {
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
     {
+        let completion_claim = test_step_completion_claim(&request);
         Ok(TaskChildSessionRunOutput {
             attempt_id: TaskParticipantAttemptId::new("attempt-wrong")?,
             final_text: "stale output".to_owned(),
             outcome: crate::AgentRunOutcome::default(),
             child_session_ref: request.child_session_ref,
             final_answer_ref: None,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
             changeset_proposal: None,
             isolated_parent_snapshot_id: None,
@@ -734,12 +744,14 @@ impl TaskChildSessionRunner for RetryingReadChildRunner {
             )?
             .into());
         }
+        let completion_claim = test_step_completion_claim(&request);
         Ok(TaskChildSessionRunOutput {
             attempt_id: request.attempt_id,
             final_text: "retry completed".to_owned(),
             outcome: crate::AgentRunOutcome::default(),
             child_session_ref: request.child_session_ref,
             final_answer_ref: None,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
             changeset_proposal: None,
             isolated_parent_snapshot_id: None,
@@ -758,6 +770,7 @@ impl TaskChildSessionRunner for RetryingReadChildRunner {
         A: crate::ApprovalHandler + Send,
     {
         let final_text = "task completed after retry".to_owned();
+        let completion_claim = test_synthesis_completion_claim(&request);
         Ok(crate::TaskSynthesisSessionRunOutput {
             attempt_id: request.attempt_id,
             outcome: crate::AgentRunOutcome::default(),
@@ -769,6 +782,7 @@ impl TaskChildSessionRunner for RetryingReadChildRunner {
                 char_count: final_text.chars().count(),
             },
             artifact_refs: Vec::new(),
+            completion_claim: Some(completion_claim),
             final_text,
         })
     }
@@ -891,6 +905,7 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
             .into());
         }
         let final_text = "task completed after planner and synthesis retries".to_owned();
+        let completion_claim = test_synthesis_completion_claim(&request);
         Ok(crate::TaskSynthesisSessionRunOutput {
             attempt_id: request.attempt_id,
             outcome: crate::AgentRunOutcome::default(),
@@ -902,6 +917,7 @@ impl TaskChildSessionRunner for RetryingPlannerSynthesisChildRunner {
                 char_count: final_text.chars().count(),
             },
             artifact_refs: Vec::new(),
+            completion_claim: Some(completion_claim),
             final_text,
         })
     }
@@ -920,10 +936,12 @@ impl TaskChildSessionRunner for AlwaysRateLimitedControlChildRunner {
         H: crate::EventHandler + Send,
         A: crate::ApprovalHandler + Send,
     {
+        let completion_claim = test_direct_completion_claim(&request);
         Ok(crate::TaskDirectExecutionSessionRunOutput {
             attempt_id: request.attempt.attempt_id,
             final_text: "direct Task completed after bounded planner retries".to_owned(),
             final_message_id: Some("direct-task-final".to_owned()),
+            completion_claim: Some(completion_claim),
             outcome: crate::AgentRunOutcome::default(),
             disposition: crate::AgentRunDisposition::FinalAnswer,
         })
@@ -1147,6 +1165,7 @@ impl TaskChildSessionRunner for SuspendingPlannerChildRunner {
         A: crate::ApprovalHandler + Send,
     {
         let final_text = "task completed after planner clarification".to_owned();
+        let completion_claim = test_synthesis_completion_claim(&request);
         Ok(crate::TaskSynthesisSessionRunOutput {
             attempt_id: request.attempt_id,
             outcome: crate::AgentRunOutcome::default(),
@@ -1158,6 +1177,7 @@ impl TaskChildSessionRunner for SuspendingPlannerChildRunner {
                 char_count: final_text.chars().count(),
             },
             artifact_refs: Vec::new(),
+            completion_claim: Some(completion_claim),
             final_text,
         })
     }
@@ -1249,12 +1269,14 @@ fn changeset_batch_child_output(
     request: TaskChildSessionRunRequest,
 ) -> Result<TaskChildSessionRunOutput> {
     let change_id = format!("change-{}", request.step.step_id.as_str());
+    let completion_claim = test_step_completion_claim(&request);
     Ok(TaskChildSessionRunOutput {
         attempt_id: request.attempt_id,
         final_text: format!("{} proposed", request.step.step_id.as_str()),
         outcome: crate::AgentRunOutcome::default(),
         child_session_ref: request.child_session_ref,
         final_answer_ref: None,
+        completion_claim: Some(completion_claim),
         artifact_refs: Vec::new(),
         changeset_proposal: Some(decode_changeset_only_child_output(
             &changeset_only_child_final_text(&change_id),
@@ -1264,12 +1286,14 @@ fn changeset_batch_child_output(
 }
 
 fn successful_read_child_output(request: TaskChildSessionRunRequest) -> TaskChildSessionRunOutput {
+    let completion_claim = test_step_completion_claim(&request);
     TaskChildSessionRunOutput {
         attempt_id: request.attempt_id,
         final_text: format!("{} completed", request.step.step_id.as_str()),
         outcome: crate::AgentRunOutcome::default(),
         child_session_ref: request.child_session_ref,
         final_answer_ref: None,
+        completion_claim: Some(completion_claim),
         artifact_refs: Vec::new(),
         changeset_proposal: None,
         isolated_parent_snapshot_id: None,
@@ -1350,6 +1374,7 @@ fn downstream_step_prompt_uses_durable_dependency_results_without_handoff_files(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
@@ -1481,6 +1506,7 @@ fn downstream_step_prompt_inlines_hash_verified_final_report_artifact() -> Resul
         }],
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
@@ -1542,6 +1568,7 @@ fn downstream_step_prompt_falls_back_to_excerpt_for_tampered_final_report() -> R
         }],
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
@@ -1626,6 +1653,7 @@ fn participant_result_constructor_bounds_parent_reference_lists() -> Result<()> 
         Vec::new(),
         oversized_paths,
         Vec::new(),
+        None,
     )?;
 
     assert_eq!(
@@ -1677,6 +1705,7 @@ fn participant_result_constructor_marks_and_stably_trims_oversized_summary() -> 
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     )?;
 
     assert!(result.summary_truncated);
@@ -4831,6 +4860,7 @@ async fn crashed_safe_guidance_settlement_recovers_into_plain_continue_once() ->
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     let settlement = task_guidance_review_settlement_controls(
         Vec::new(),
@@ -5100,6 +5130,7 @@ fn crashed_guidance_replan_settlement_recovers_carried_steps_atomically() -> Res
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     let settlement = task_guidance_review_settlement_controls(
         vec![
@@ -6080,6 +6111,7 @@ fn unchanged_worktree_child_does_not_request_empty_merge_review() -> Result<()> 
         final_text: "no changes needed".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         changeset_proposal: None,
         isolated_parent_snapshot_id: Some("snapshot-parent".to_owned()),
@@ -6374,6 +6406,7 @@ fn blocked_step_is_reprojected_from_completed_participant_evidence() -> Result<(
         Vec::new(),
         Vec::new(),
         vec!["verification:complete-audit".to_owned()],
+        None,
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
@@ -6508,6 +6541,7 @@ fn legacy_blocked_step_with_final_answer_is_not_reprojected_without_a_resolution
         }],
         Vec::new(),
         Vec::new(),
+        None,
     )?;
     result.terminal_status = Some(TaskParticipantAttemptStatus::Blocked);
     session.append_control(ControlEntry::TaskParticipantResult(result))?;
@@ -6589,6 +6623,7 @@ fn active_durable_recovery_blocker_prevents_final_text_from_completing_a_step() 
             ..crate::AgentRunOutcome::default()
         },
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         changeset_proposal: None,
         isolated_parent_snapshot_id: None,
@@ -7939,6 +7974,7 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     let step_id = TaskStepId::new("step_1")?;
     let output = |outcome| StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: String::new(),
         outcome,
@@ -7948,6 +7984,7 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     };
     let recovered_output = |outcome| StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "recovered".to_owned(),
         outcome,
@@ -8228,6 +8265,7 @@ fn task_step_readiness_allows_known_changed_files_without_checks() -> Result<()>
     };
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -8304,6 +8342,7 @@ fn task_step_readiness_allows_durable_mutation_without_checks() -> Result<()> {
 
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -8386,6 +8425,7 @@ fn task_step_readiness_allows_post_task_mutation_without_checks() -> Result<()> 
 
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "cancelled".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -8445,6 +8485,7 @@ fn task_step_readiness_treats_durable_mutation_replay_failure_as_unknown_dirty()
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -8538,6 +8579,7 @@ fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Res
     ))?;
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -8655,6 +8697,7 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
     ))?;
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -9425,6 +9468,7 @@ fn task_step_status_completes_when_known_mutation_has_no_required_checks() -> Re
     let session = Session::new("deepseek", "deepseek-v4-flash");
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -9495,6 +9539,7 @@ fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
     let session = Session::new("deepseek", "deepseek-v4-flash");
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "recovered".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -9576,6 +9621,7 @@ fn task_step_explicit_verification_config_blocks_read_only_step_until_check_runs
     ))?;
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
@@ -9678,6 +9724,7 @@ fn task_step_default_policy_uses_only_current_task_scope() -> Result<()> {
     ))?;
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -9762,6 +9809,7 @@ fn task_step_readiness_uses_projected_workspace_trust() -> Result<()> {
     ))?;
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
@@ -9822,6 +9870,7 @@ fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
     let session = Session::new("deepseek", "deepseek-v4-flash");
     let output = StepRunOutput {
         final_answer_ref: None,
+        completion_claim: None,
         artifact_refs: Vec::new(),
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome {
@@ -10575,8 +10624,15 @@ fn seed_two_step_task(
             reason: None,
         };
         session.append_control(ControlEntry::TaskParticipantAttempt(attempt.clone()))?;
-        let mut result =
-            participant_result_entry(&attempt, "done", None, Vec::new(), Vec::new(), Vec::new())?;
+        let mut result = participant_result_entry(
+            &attempt,
+            "done",
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )?;
         result.terminal_status = Some(TaskParticipantAttemptStatus::Completed);
         session.append_control(ControlEntry::TaskParticipantResult(result))?;
         attempt.status = TaskParticipantAttemptStatus::Completed;

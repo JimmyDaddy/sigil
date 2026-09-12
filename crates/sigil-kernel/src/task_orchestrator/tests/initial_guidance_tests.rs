@@ -4,6 +4,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use crate::task_orchestrator::task_orchestrator_child_session_test_support::{
+    test_step_completion_claim, test_synthesis_completion_claim,
+};
+
 const GUIDANCE: &str = "Keep the original objective and inspect the retry boundary first";
 
 fn seeded_session(store: crate::JsonlSessionStore) -> Result<(Session, SequentialTaskRequest)> {
@@ -145,12 +149,14 @@ impl TaskChildSessionRunner for GuidanceRunner {
         A: ApprovalHandler + Send,
     {
         self.dispatched_steps.fetch_add(1, Ordering::SeqCst);
+        let completion_claim = test_step_completion_claim(&request);
         Ok(TaskChildSessionRunOutput {
             attempt_id: request.attempt_id,
             final_text: "Inspection complete".to_owned(),
             outcome: crate::AgentRunOutcome::default(),
             child_session_ref: request.child_session_ref,
             final_answer_ref: None,
+            completion_claim: Some(completion_claim),
             artifact_refs: Vec::new(),
             changeset_proposal: None,
             isolated_parent_snapshot_id: None,
@@ -169,6 +175,7 @@ impl TaskChildSessionRunner for GuidanceRunner {
         A: ApprovalHandler + Send,
     {
         let final_text = "Task inspection complete".to_owned();
+        let completion_claim = test_synthesis_completion_claim(&request);
         Ok(TaskSynthesisSessionRunOutput {
             attempt_id: request.attempt_id,
             outcome: crate::AgentRunOutcome::default(),
@@ -180,6 +187,7 @@ impl TaskChildSessionRunner for GuidanceRunner {
                 char_count: final_text.chars().count(),
             },
             artifact_refs: Vec::new(),
+            completion_claim: Some(completion_claim),
             final_text,
         })
     }

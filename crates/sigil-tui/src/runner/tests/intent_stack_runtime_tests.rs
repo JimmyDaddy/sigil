@@ -16,7 +16,8 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config, spawn_test_worker,
+        PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config,
+        scripted_completion_claim_chunks, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, submit_plan_review_result_chunks,
         test_root_config,
     },
@@ -143,6 +144,7 @@ impl Provider for IntentDogfoodRoleProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let completion_claim = || scripted_completion_claim_chunks(&request, "intent-completion");
         let latest_user_prompt = request
             .messages
             .iter()
@@ -151,6 +153,9 @@ impl Provider for IntentDogfoodRoleProvider {
             .and_then(|message| message.content.as_deref())
             .unwrap_or_default();
         if latest_user_prompt.contains("Produce the single user-visible final answer") {
+            if let Some(claim) = completion_claim() {
+                return Ok(chunks(claim));
+            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta("Intent Stack dogfood task complete.".to_owned()),
                 ProviderChunk::Done,
@@ -159,6 +164,9 @@ impl Provider for IntentDogfoodRoleProvider {
         if latest_user_prompt
             .contains("Execute the following complete, user-approved Task objective now")
         {
+            if let Some(claim) = completion_claim() {
+                return Ok(chunks(claim));
+            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta(
                     "Direct executor received the complete approved Plan.".to_owned(),
@@ -197,6 +205,9 @@ impl Provider for IntentDogfoodRoleProvider {
             .iter()
             .any(|message| message.role == MessageRole::Tool);
         if tool_used {
+            if let Some(claim) = completion_claim() {
+                return Ok(chunks(claim));
+            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta(format!("{step_id} completed")),
                 ProviderChunk::Done,

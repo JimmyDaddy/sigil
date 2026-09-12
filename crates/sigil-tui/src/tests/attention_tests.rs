@@ -26,6 +26,7 @@ fn agent_run_result() -> AgentRunResult {
         final_text: "private reply canary".to_owned(),
         tool_calls: 0,
         final_message_id: None,
+        completion_claim: None,
     }
 }
 

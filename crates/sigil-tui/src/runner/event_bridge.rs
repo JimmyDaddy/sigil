@@ -162,6 +162,7 @@ impl ChannelEventHandler {
                         final_text: String::new(),
                         tool_calls: 0,
                         final_message_id: None,
+                        completion_claim: None,
                     },
                     outcome: sigil_kernel::AgentRunOutcome::default(),
                 })

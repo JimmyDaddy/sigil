@@ -42,6 +42,7 @@ fn durable_publication_count_and_final_bytes_are_independent_of_delta_partition(
                 final_text: full_text.clone(),
                 tool_calls: 0,
                 final_message_id: Some(message_id),
+                completion_claim: None,
             },
             outcome: sigil_kernel::AgentRunOutcome::default(),
         })?;

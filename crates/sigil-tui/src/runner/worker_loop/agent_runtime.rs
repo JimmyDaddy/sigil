@@ -187,6 +187,7 @@ pub(in crate::runner) fn manual_agent_invocation_result(
         final_text,
         tool_calls: 0,
         final_message_id: None,
+        completion_claim: None,
     }
 }
 
@@ -900,6 +901,7 @@ pub(in crate::runner) fn tui_plan_review_result_from_durable_revision_outcome(
                 final_text: format!("Plan ready: {}", draft.summary),
                 tool_calls: 0,
                 final_message_id: None,
+                completion_claim: None,
             }),
         ),
         sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft => Ok(
@@ -907,6 +909,7 @@ pub(in crate::runner) fn tui_plan_review_result_from_durable_revision_outcome(
                 final_text: "Plan review closed without a draft; no task was created.".to_owned(),
                 tool_calls: 0,
                 final_message_id: None,
+                completion_claim: None,
             }),
         ),
         sigil_runtime::PlanReviewRunOutcome::Cancelled => Ok(PlanReviewExecutionResult::Cancelled),
@@ -1172,6 +1175,7 @@ where
                     final_text: format!("Plan ready: {}", draft.summary),
                     tool_calls: 0,
                     final_message_id: None,
+                    completion_claim: None,
                 },
             ))
         }
@@ -1189,6 +1193,7 @@ where
                         .to_owned(),
                     tool_calls: 0,
                     final_message_id: None,
+                    completion_claim: None,
                 },
             ))
         }
@@ -1705,6 +1710,7 @@ where
                                                 ),
                                                 tool_calls: 0,
                                                 final_message_id: None,
+                            completion_claim: None,
                                             }),
                                             plan_mode: false,
                                             plan_review: false,
@@ -1773,6 +1779,7 @@ where
                                 final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
                                 tool_calls: output.result.tool_calls,
                                 final_message_id: output.result.final_message_id,
+                            completion_claim: None,
                             }),
                             plan_mode: false,
                             plan_review: false,

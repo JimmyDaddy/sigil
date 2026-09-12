@@ -73,11 +73,16 @@ impl Provider for WriteTransportProvider {
                     // Deliberately unclassified: there is no safe automatic resend proof.
                     anyhow::bail!("unclassified transport interruption after settled write");
                 }
-                Ok(Box::pin(stream::iter(vec![
-                    Ok(ProviderChunk::TextDelta(FINAL_TEXT.to_owned())),
-                    Ok(ProviderChunk::Done),
-                ])))
+                Ok(Box::pin(stream::iter(scripted_task_completion_chunks(
+                    &request,
+                    FINAL_TEXT,
+                    "transport-recovery-completion",
+                ))))
             }
+            3 => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(FINAL_TEXT.to_owned())),
+                Ok(ProviderChunk::Done),
+            ]))),
             stage => anyhow::bail!("unexpected provider resend at stage {stage}"),
         }
     }
@@ -213,7 +218,7 @@ async fn direct_task_write_then_transport_failure_restarts_without_repeating_mut
     .await?;
     assert_eq!(output.task_status, TaskRunStatus::Completed);
     drop(control);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert_eq!(
         std::fs::read_to_string(root.path().join("settled.txt"))?,
         FILE_TEXT

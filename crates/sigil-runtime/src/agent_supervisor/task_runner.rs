@@ -931,6 +931,7 @@ impl AgentSupervisorTaskChildRunner {
                         materialized,
                         outcome,
                         usage: usage_summary_from_stats(prepared.child_session.stats()),
+                        completion_claim: output.result.completion_claim,
                         changeset_proposal,
                     })
                 }
@@ -1497,6 +1498,7 @@ impl AgentSupervisorTaskChildRunner {
             outcome: success.outcome,
             child_session_ref: prepared.child_session_ref,
             final_answer_ref: success.materialized.final_answer_ref,
+            completion_claim: success.completion_claim,
             artifact_refs: success.materialized.extra_artifacts,
             changeset_proposal: success.changeset_proposal,
             isolated_parent_snapshot_id,
@@ -2060,6 +2062,7 @@ struct ParallelTaskChildSuccess {
     materialized: super::AgentResultMaterialization,
     outcome: sigil_kernel::AgentRunOutcome,
     usage: AgentUsageSummary,
+    completion_claim: Option<sigil_kernel::TaskCompletionClaimV1>,
     changeset_proposal: Option<sigil_kernel::TaskChildChangeSetProposal>,
 }
 
@@ -2284,6 +2287,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             attempt_id,
             final_text: output.result.final_text,
             final_message_id: output.result.final_message_id,
+            completion_claim: output.result.completion_claim,
             outcome: output.outcome,
             disposition: output.disposition,
         })
@@ -3418,6 +3422,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                     outcome: parent_outcome,
                     child_session_ref: child_session_ref.clone(),
                     final_answer_ref: materialized.final_answer_ref,
+                    completion_claim: output.result.completion_claim,
                     artifact_refs: materialized.extra_artifacts,
                     changeset_proposal,
                     isolated_parent_snapshot_id,
@@ -3709,6 +3714,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 outcome,
                 child_session_ref: request.child_session_ref.clone(),
                 final_answer_ref,
+                completion_claim: output.result.completion_claim,
                 artifact_refs: Vec::new(),
             })
         })();

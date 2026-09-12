@@ -535,6 +535,7 @@ pub(in crate::runner) fn revision_terminal_worker_message(
                     final_text: final_text.clone(),
                     tool_calls: 0,
                     final_message_id: None,
+                    completion_claim: None,
                 },
                 entries,
             }
