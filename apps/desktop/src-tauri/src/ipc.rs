@@ -302,7 +302,7 @@ impl From<DesktopProviderSetupProtocolInput> for DesktopProviderSetupProtocol {
 
 /// Secret-bearing renderer input. It intentionally has no `Debug`, `Clone`, or serialization.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderSetupCatalogInput {
     template: DesktopProviderSetupTemplateInput,
     protocol: Option<DesktopProviderSetupProtocolInput>,
@@ -328,7 +328,7 @@ impl DesktopProviderSetupCatalogInput {
 
 /// Secret-bearing renderer input. It intentionally has no `Debug`, `Clone`, or serialization.
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderSetupSaveInput {
     template: DesktopProviderSetupTemplateInput,
     protocol: Option<DesktopProviderSetupProtocolInput>,
@@ -343,7 +343,7 @@ pub(crate) struct DesktopProviderSetupSaveInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderDefaultModelSaveInput {
     model_ref: DesktopProviderModelRefInput,
     context_window_tokens: Option<u32>,
@@ -568,13 +568,13 @@ fn support_status_label(value: DesktopSupportStatus) -> &'static str {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAppearanceInput {
     pub(crate) preference: ThemePreference,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopExternalUrlInput {
     pub(crate) url: String,
 }
@@ -593,7 +593,7 @@ pub(crate) struct DesktopWorkspaceSelection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct DesktopCatalogRequest {
     pub(crate) limit: Option<u16>,
     pub(crate) cursor: Option<String>,
@@ -659,14 +659,14 @@ struct DesktopCatalogEntry {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct DesktopSessionCreateInput {
     pub(crate) label: Option<String>,
     pub(crate) model_ref: Option<DesktopProviderModelRefInput>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProviderModelRefInput {
     pub(crate) connection_id: String,
     pub(crate) model_id: String,
@@ -689,7 +689,7 @@ impl From<sigil_desktop::DesktopProviderModelRef> for DesktopProviderModelRefSum
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionOpenInput {
     pub(crate) session_ref: String,
     pub(crate) session_id: String,
@@ -700,7 +700,7 @@ pub(crate) struct DesktopSessionOpenInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionRenameInput {
     pub(crate) session_ref: String,
     pub(crate) session_id: String,
@@ -708,14 +708,14 @@ pub(crate) struct DesktopSessionRenameInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionDeleteInput {
     pub(crate) session_ref: String,
     pub(crate) session_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionQuarantineInput {
     pub(crate) session_ref: String,
     pub(crate) source_bytes: u64,
@@ -723,7 +723,7 @@ pub(crate) struct DesktopSessionQuarantineInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionInvalidSourceDeleteInput {
     pub(crate) session_ref: String,
     pub(crate) source_bytes: u64,
@@ -731,7 +731,7 @@ pub(crate) struct DesktopSessionInvalidSourceDeleteInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionCatalogBatchItemInput {
     pub(crate) session_ref: String,
     #[serde(default)]
@@ -743,14 +743,14 @@ pub(crate) struct DesktopSessionCatalogBatchItemInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionCatalogBatchPlanInput {
     pub(crate) action: DesktopSessionCatalogBatchAction,
     pub(crate) items: Vec<DesktopSessionCatalogBatchItemInput>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSessionCatalogBatchExecuteInput {
     pub(crate) plan_id: String,
     pub(crate) action: DesktopSessionCatalogBatchAction,
@@ -921,7 +921,7 @@ pub(crate) struct DesktopConversationQueueItem {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopConversationQueueCommandInput {
     pub(crate) session_id: String,
     pub(crate) expected_generation: String,
@@ -932,8 +932,7 @@ pub(crate) struct DesktopConversationQueueCommandInput {
 #[serde(
     tag = "action",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
+    rename_all_fields = "camelCase"
 )]
 pub(crate) enum DesktopConversationQueueActionInput {
     Enqueue {
@@ -1195,7 +1194,7 @@ pub(crate) struct DesktopConversationForkPointView {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopCheckpointRestorePreviewInput {
     pub(crate) session_id: String,
     pub(crate) checkpoint_id: String,
@@ -1236,7 +1235,7 @@ pub(crate) struct DesktopCheckpointReverseDiff {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopConversationRecoveryCommandInput {
     pub(crate) session_id: String,
     pub(crate) action: DesktopConversationRecoveryActionInput,
@@ -1246,8 +1245,7 @@ pub(crate) struct DesktopConversationRecoveryCommandInput {
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
+    rename_all_fields = "camelCase"
 )]
 pub(crate) enum DesktopConversationRecoveryActionInput {
     ApplyCompaction {
@@ -1350,14 +1348,14 @@ pub(crate) struct DesktopConversationForkReceipt {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct DesktopTranscriptRequest {
     pub(crate) before: Option<u64>,
     pub(crate) limit: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopMessageContentRequest {
     pub(crate) display_id: String,
     pub(crate) offset: Option<u64>,
@@ -1418,7 +1416,7 @@ pub(crate) struct DesktopTranscriptMessage {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase")]
 pub(crate) struct DesktopConversationDisplayRequest {
     pub(crate) cursor: Option<String>,
     pub(crate) limit: Option<u16>,
@@ -1453,8 +1451,7 @@ pub(crate) struct DesktopConversationDisplayPage {
 #[serde(
     rename_all = "snake_case",
     rename_all_fields = "camelCase",
-    tag = "kind",
-    deny_unknown_fields
+    tag = "kind"
 )]
 pub(crate) enum DesktopToolArtifactSelector {
     ByteSlice {
@@ -1467,14 +1464,21 @@ pub(crate) enum DesktopToolArtifactSelector {
     },
     SearchLiteral {
         query: String,
+        #[serde(default)]
         start_offset: u64,
-        max_matches: u16,
+        #[serde(default = "default_tool_artifact_search_matches")]
+        max_matches: u64,
+        #[serde(default)]
         context_lines: u16,
     },
 }
 
+fn default_tool_artifact_search_matches() -> u64 {
+    50
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopToolArtifactReadInput {
     pub(crate) artifact_ref: String,
     pub(crate) selector: DesktopToolArtifactSelector,
@@ -1610,6 +1614,14 @@ pub(crate) enum DesktopConversationDisplayContent {
         tool_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_started_at_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_updated_at_ms: Option<u64>,
         truncated: bool,
         original_content_bytes: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1678,7 +1690,7 @@ pub(crate) struct DesktopConversationLiveProvisionalAnchor {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunStartInput {
     pub(crate) session_id: String,
     pub(crate) prompt: String,
@@ -1693,7 +1705,7 @@ pub(crate) struct DesktopRunStartInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTaskContinuationInput {
     pub(crate) session_id: String,
     pub(crate) task_id: String,
@@ -1702,7 +1714,7 @@ pub(crate) struct DesktopTaskContinuationInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopSkillBindingInput {
     pub(crate) skill_id: String,
     pub(crate) skill_sha256: String,
@@ -1710,14 +1722,14 @@ pub(crate) struct DesktopSkillBindingInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentBindingInput {
     pub(crate) profile_id: String,
     pub(crate) snapshot_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunAttachInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -1930,14 +1942,14 @@ pub(crate) struct DesktopRunAttachment {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopRunCancelInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTerminalTaskCancelInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -1959,7 +1971,7 @@ pub(crate) struct DesktopTerminalTaskCancelSummary {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTaskPauseInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -1971,16 +1983,14 @@ pub(crate) struct DesktopTaskPauseInput {
 #[serde(
     rename_all = "snake_case",
     rename_all_fields = "camelCase",
-    tag = "kind",
-    deny_unknown_fields
+    tag = "kind"
 )]
 pub(crate) enum DesktopTaskExecutionBindingInput {
-    Plan { plan_version: u32 },
     Direct { admission_id: String },
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopApprovalDecisionInput {
     pub(crate) session_id: String,
     pub(crate) run_id: String,
@@ -2023,7 +2033,7 @@ pub(crate) struct DesktopApprovalDecisionSummary {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopPlanDecisionInput {
     pub(crate) session_id: String,
     pub(crate) plan_id: String,
@@ -2055,12 +2065,9 @@ pub(crate) struct DesktopPlanDecisionSummary {
     pub(crate) action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_id: Option<String>,
-    /// RFC-0067: durable Task phase right after admission.
+    /// Direct Task phase right after Plan approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) task_phase: Option<sigil_desktop::DesktopTaskExecutionPhase>,
-    /// RFC-0067: typed blocker when admission held the Task.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) task_blocker: Option<sigil_desktop::DesktopTaskBlocker>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2124,7 +2131,6 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
             status: match value.status {
                 sigil_desktop::DesktopPlanReviewStatus::Started => "started",
                 sigil_desktop::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
-                sigil_desktop::DesktopPlanReviewStatus::Finalizing => "finalizing",
                 sigil_desktop::DesktopPlanReviewStatus::DraftReady => "draft_ready",
                 sigil_desktop::DesktopPlanReviewStatus::CompileFailed => "compile_failed",
                 sigil_desktop::DesktopPlanReviewStatus::CompletedWithoutDraft => {
@@ -2181,7 +2187,6 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
                     sigil_desktop::DesktopPlanRevisionStatus::WaitingForInput => {
                         "waiting_for_input"
                     }
-                    sigil_desktop::DesktopPlanRevisionStatus::Finalizing => "finalizing",
                     sigil_desktop::DesktopPlanRevisionStatus::Failed => "failed",
                     sigil_desktop::DesktopPlanRevisionStatus::Cancelled => "cancelled",
                     sigil_desktop::DesktopPlanRevisionStatus::Succeeded => "succeeded",
@@ -2193,7 +2198,7 @@ impl From<sigil_desktop::DesktopPlanReview> for DesktopPlanReview {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopVerificationRerunBinding {
     pub(crate) request_id: String,
     pub(crate) task_id: String,
@@ -2206,7 +2211,7 @@ pub(crate) struct DesktopVerificationRerunBinding {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopVerificationRerunInput {
     pub(crate) session_id: String,
     pub(crate) request: DesktopVerificationRerunBinding,
@@ -2273,7 +2278,7 @@ pub(crate) struct DesktopVerificationEvidenceSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTaskIntegrationReviewBinding {
     pub(crate) request_id: String,
     pub(crate) task_id: String,
@@ -2283,7 +2288,7 @@ pub(crate) struct DesktopTaskIntegrationReviewBinding {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTaskIntegrationAcceptInput {
     pub(crate) session_id: String,
     pub(crate) request: DesktopTaskIntegrationReviewBinding,
@@ -3096,14 +3101,10 @@ impl From<NativeConversationTaskControl> for DesktopConversationTaskControl {
                 DesktopPublicTaskPhase::Planning => "planning",
                 DesktopPublicTaskPhase::Execution => "execution",
                 DesktopPublicTaskPhase::Integration => "integration",
-                DesktopPublicTaskPhase::Synthesis => "synthesis",
                 DesktopPublicTaskPhase::Terminal => "terminal",
             },
             status: value.status,
             execution: value.execution.map(|execution| match execution {
-                sigil_desktop::DesktopTaskExecutionBinding::Plan { plan_version } => {
-                    DesktopTimelineTaskExecutionBinding::Plan { plan_version }
-                }
                 sigil_desktop::DesktopTaskExecutionBinding::Direct { admission_id } => {
                     DesktopTimelineTaskExecutionBinding::Direct { admission_id }
                 }
@@ -3233,6 +3234,10 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 call_id,
                 tool_name,
                 output,
+                input,
+                execution_id,
+                execution_started_at_ms,
+                execution_updated_at_ms,
                 truncated,
                 original_content_bytes,
                 artifact_ref,
@@ -3247,6 +3252,10 @@ impl From<NativeConversationDisplayContent> for DesktopConversationDisplayConten
                 call_id,
                 tool_name,
                 output,
+                input,
+                execution_id,
+                execution_started_at_ms,
+                execution_updated_at_ms,
                 truncated,
                 original_content_bytes,
                 artifact_ref,
@@ -3343,6 +3352,7 @@ fn conversation_display_status(status: NativeConversationDisplayStatus) -> &'sta
     match status {
         NativeConversationDisplayStatus::Recorded => "recorded",
         NativeConversationDisplayStatus::Requested => "requested",
+        NativeConversationDisplayStatus::Running => "running",
         NativeConversationDisplayStatus::WaitingForApproval => "waiting_for_approval",
         NativeConversationDisplayStatus::Approved => "approved",
         NativeConversationDisplayStatus::Denied => "denied",

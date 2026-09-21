@@ -133,9 +133,11 @@ fn typed_live_envelope_keeps_all_current_preview_kinds() {
             }
         });
         if kind == "tool_progress" {
+            payload["live_update"]["attempt_id"] = Value::Null;
+            payload["live_update"]["slot_id"] = json!("execution-1");
             payload["live_update"]["tool_progress"] = json!({
                 "execution_id": "execution-1", "call_id": "call-1", "tool_name": "terminal_start",
-                "status": "running", "total_bytes": 20, "updated_at_ms": 1,
+                "status": "running", "total_bytes": 20, "updated_at_ms": 1, "preview_is_output": true,
             });
         }
         let projected = serde_json::from_value::<DesktopProtocolEvent>(payload)
@@ -149,7 +151,10 @@ fn typed_live_envelope_keeps_all_current_preview_kinds() {
         let live = projected
             .live_preview
             .expect("attempt-bound preview metadata");
-        assert_eq!(live.attempt_id, "current-provider-attempt");
+        assert_eq!(
+            live.attempt_id.as_deref(),
+            (kind != "tool_progress").then_some("current-provider-attempt")
+        );
         assert_eq!(live.revision, "10");
     }
 }
@@ -685,10 +690,9 @@ fn every_current_public_event_variant_deserializes_without_opaque_event_parsing(
                 "prompt": "Choose a workspace",
                 "questions": [{
                     "id": "workspace",
-                    "header": "Workspace",
                     "question": "Which workspace?",
-                    "required": true,
-                    "field": {"kind": "text", "multiline": false, "max_chars": 512}
+                    "options": [],
+                    "multiple": false
                 }],
                 "allowed_actions": ["submit", "decline", "cancel_run"],
                 "requested_at_unix_ms": 1,
@@ -819,5 +823,103 @@ fn authority_unavailable_recovery_uses_stable_snake_case_and_starts_new_session(
             "recoveryBinding": "authority-recovery-binding",
             "retryable": false
         })
+    );
+}
+
+#[test]
+fn exec_command_projection_preserves_command_and_yielded_execution_identity() {
+    let command = envelope(DesktopProtocolEventClass::Durable, json!({
+        "type": "tool_call_completed",
+        "call": {"id": "call-exec", "name": "exec_command", "args_json": "{\"command\":\"cargo test --workspace\"}"}
+    })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("safe command");
+    assert_eq!(
+        command.tool_input.as_deref(),
+        Some("cargo test --workspace")
+    );
+    for status in ["running", "exited", "failed", "cancelled"] {
+        let result = envelope(DesktopProtocolEventClass::Durable, json!({
+            "type": "tool_result",
+            "result": {"call_id": "call-exec", "tool_name": "exec_command", "content": "bounded output", "status": "ok",
+                "metadata": {"details": {"execution_id": "execution-owned", "status": status, "started_at_ms": 1_000, "updated_at_ms": 2_000, "private_path": "/private/ignored"}}}
+        })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("execution result");
+        assert_eq!(result.execution_id.as_deref(), Some("execution-owned"));
+        assert_eq!(result.status.as_deref(), Some(status));
+        assert_eq!(result.execution_started_at_ms, Some(1_000));
+        assert_eq!(result.execution_updated_at_ms, Some(2_000));
+        assert!(
+            !serde_json::to_string(&result)
+                .expect("serializable")
+                .contains("/private/ignored")
+        );
+    }
+    let ordinary = envelope(DesktopProtocolEventClass::Durable, json!({
+        "type": "tool_result",
+        "result": {"call_id": "read", "tool_name": "read_file", "content": "text", "status": "ok", "metadata": {"details": null}}
+    })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("ordinary null metadata");
+    assert_eq!(ordinary.status.as_deref(), Some("ok"));
+}
+
+#[test]
+fn command_failure_is_not_hidden_by_an_exited_process_phase() {
+    let projected = envelope(DesktopProtocolEventClass::Durable, json!({
+        "type": "tool_result",
+        "result": {"call_id": "call-exec", "tool_name": "exec_wait", "content": "exit 7", "status": {"error": {"code": "tool_execution_failed", "message": "exit 7"}},
+            "metadata": {"details": {"execution_id": "execution-owned", "status": "exited"}}}
+    })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("execution result");
+    assert_eq!(projected.status.as_deref(), Some("error"));
+}
+
+#[test]
+fn command_status_preview_does_not_invent_stdout() {
+    for is_output in [false, true] {
+        let payload = json!({
+            "schema_version": DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION, "event_class": "transient",
+            "live_update": {
+                "schema_version": 1, "session_id": "session-1", "run_id": "run-1",
+                "slot_id": "execution-1", "live_revision": 1, "base_durable_sequence": 1,
+                "kind": "tool_progress", "preview": "running", "truncated": false,
+                "tool_progress": {"execution_id": "execution-1", "call_id": "call-1", "tool_name": "exec_command",
+                    "status": "running", "total_bytes": 0, "updated_at_ms": 1, "preview_is_output": is_output}
+            }
+        });
+        let projected = serde_json::from_value::<DesktopProtocolEvent>(payload)
+            .expect("wire")
+            .into_timeline("workspace", "session-1", "run-1", "renderer-session")
+            .expect("projection");
+        assert_eq!(projected.text.as_deref(), is_output.then_some("running"));
+        assert_eq!(projected.execution_id.as_deref(), Some("execution-1"));
+        assert_eq!(projected.item_id.as_deref(), Some("call-1"));
+        assert!(
+            projected
+                .live_preview
+                .expect("progress")
+                .attempt_id
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn scoped_command_approval_association_preserves_authoritative_identity() {
+    let event = envelope(DesktopProtocolEventClass::Durable, json!({
+        "type": "approval_resolved", "call_id": "provider-call", "display_call_id": "child-scoped-call",
+        "approval_request_id": "approval-owned", "approved": false, "reason": "denied"
+    })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("approval event");
+    assert_eq!(event.item_id.as_deref(), Some("provider-call"));
+    assert_eq!(event.display_call_id.as_deref(), Some("child-scoped-call"));
+    assert_eq!(event.approval_request_id.as_deref(), Some("approval-owned"));
+}
+
+#[test]
+fn rejected_output_poll_does_not_fail_the_running_command_card() {
+    let event = envelope(DesktopProtocolEventClass::Durable, json!({
+        "type": "tool_result", "result": {"call_id": "read-call", "tool_name": "exec_read",
+        "status": "error", "content": "output unchanged; use exec_wait", "metadata": {"details": {"execution_id": "execution-running"}}}
+    })).into_timeline("workspace-1", "session-1", "run-1", "http-session-1").expect("control error");
+    assert_eq!(event.status.as_deref(), Some("error"));
+    assert_eq!(event.item_id.as_deref(), Some("read-call"));
+    assert!(
+        event.execution_id.is_none(),
+        "control errors must not overwrite process lifecycle"
     );
 }

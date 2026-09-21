@@ -2,21 +2,24 @@ import { useCallback, useEffect, useState } from "react";
 
 import type { DesktopBridge } from "../../bridge";
 import { useLocale } from "../../i18n";
-import type { SupportDoctorReport, SupportStatus } from "../../types";
+import type { SessionSummary, SupportDoctorReport, SupportStatus } from "../../types";
 import { LoadingState, useNotifications } from "../../ui/feedback";
 import { Icon, type IconName } from "../../ui/icons";
 import { Button } from "../../ui/primitives";
 import { ApplicationPage } from "../navigation/ApplicationPage";
+import { ControlLogRecoveryCard } from "./ControlLogRecoveryCard";
 
 const ISSUE_TRACKER_URL = "https://github.com/JimmyDaddy/sigil/issues";
 
 export function SupportPage({
   bridge,
   workspaceId,
+  session,
   onBack,
 }: {
   readonly bridge: DesktopBridge;
   readonly workspaceId: string;
+  readonly session?: SessionSummary;
   readonly onBack: () => void;
 }) {
   const { t } = useLocale();
@@ -90,6 +93,8 @@ export function SupportPage({
           </Button>
         </div>}
     >
+
+      <ControlLogRecoveryCard key={`${workspaceId}/${session?.id ?? "none"}`} bridge={bridge} workspaceId={workspaceId} session={session} />
 
       {loading ? (
         <div className="application-page-loading">

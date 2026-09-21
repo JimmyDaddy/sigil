@@ -402,6 +402,9 @@ export function semanticLiveItemFromTimelineEvent(
           output: event.text,
         },
         toolInput: event.toolInput,
+        executionId: event.executionId,
+        executionStartedAtMs: event.executionStartedAtMs,
+        executionUpdatedAtMs: event.executionUpdatedAtMs,
       };
     case "approval_requested":
     case "approval_resolved": {
@@ -490,6 +493,9 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
 
   const controlUpdate = updateControlEvents(state, event);
   let next = updateTerminalTasks(updateTaskEvents(controlUpdate.state, event), event);
+  if (controlUpdate.applySemantic || event.displayCallId !== undefined) {
+    next = updateCommandApproval(next, event);
+  }
   if (event.kind === "route_recovery_required" && event.routeRecovery !== undefined) {
     next = { ...next, routeRecovery: event };
   } else if (event.kind === "run_started" && next.routeRecovery !== undefined) {
@@ -541,20 +547,43 @@ function receiveTimelineEvent(state: LiveEventState, event: TimelineEvent): Live
     : receiveSemanticItem(next, item);
 }
 
+function updateCommandApproval(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  if (event.kind !== "approval_requested" && event.kind !== "approval_resolved") return state;
+  const callId = event.displayCallId ?? event.approval?.callId ?? event.itemId;
+  if (callId === undefined) return state;
+  const semanticItems = new Map(state.semanticItems);
+  for (const [id, item] of semanticItems) {
+    if (item.runId !== event.runId || item.content.type !== "tool" || item.content.callId !== callId
+      || !["bash", "exec_command", "terminal_start"].includes(item.content.toolName ?? "")
+      || !["requested", "pending", "waiting_for_approval"].includes(item.status)
+      || compareRunSequence(event.runSequence, item.runSequence) <= 0) continue;
+    const requestId = event.approval?.approvalRequestId ?? event.approvalRequestId;
+    if (event.kind === "approval_resolved" && item.toolApprovalRequestId !== requestId) continue;
+    semanticItems.set(id, { ...item, runSequence: event.runSequence,
+      toolApprovalRequestId: event.kind === "approval_requested" ? requestId : undefined,
+      status: event.kind === "approval_requested" ? "waiting_for_approval"
+        : event.status === "approved" || event.status === "approved_for_session" ? "requested" : "denied" });
+  }
+  return { ...state, semanticItems };
+}
+
 function receivePreviewSnapshot(state: LiveEventState, event: TimelineEvent): LiveEventState {
   const preview = event.livePreview;
   if (preview === undefined || event.replayable || event.replayId !== undefined
     || !isDecimalSequence(preview.revision) || preview.revision === "0"
     || !isDecimalSequence(preview.baseSequence) || preview.baseSequence !== event.runSequence
-    || preview.attemptId.length === 0 || preview.slotId.length === 0
-    || preview.attemptId.length > 256 || preview.slotId.length > 256
+    || preview.slotId.length === 0 || preview.slotId.length > 256
     || new TextEncoder().encode(event.text ?? "").length > 65_536
     || state.terminalSignals.has(event.runId)) return state;
   let applied = state.durableRunSequences.get(event.runId) ?? "0";
   if (state.anchor?.runId === event.runId && compareRunSequence(state.anchor.runSequence, applied) > 0) {
     applied = state.anchor.runSequence;
   }
-  if (compareRunSequence(preview.baseSequence, applied) > 0
+  if (compareRunSequence(preview.baseSequence, applied) > 0) return state;
+  if (event.kind === "tool_progress" && event.executionId !== undefined) {
+    return receiveExecutionPreview(state, event);
+  }
+  if (preview.attemptId === undefined || preview.attemptId.length === 0 || preview.attemptId.length > 256
     || compareRunSequence(preview.baseSequence, state.retiredPreviewSequences.get(event.runId) ?? "0") < 0) return state;
   const owner = state.previewOwners.get(event.runId);
   if (owner?.attemptId === preview.attemptId && (owner.closed
@@ -573,11 +602,11 @@ function receivePreviewSnapshot(state: LiveEventState, event: TimelineEvent): Li
   if (owner !== undefined && owner.attemptId !== preview.attemptId) {
     deltaBuffers = new Map([...deltaBuffers].filter(([, buffer]) => buffer.runId !== event.runId));
     for (const [key, snapshot] of liveSnapshots) {
-      if (snapshot.runId === event.runId) liveSnapshots.delete(key);
+      if (snapshot.runId === event.runId && snapshot.executionId === undefined) liveSnapshots.delete(key);
     }
   }
   liveSnapshots.set(key, event);
-  const runSnapshots = [...liveSnapshots.entries()].filter(([, snapshot]) => snapshot.runId === event.runId)
+  const runSnapshots = [...liveSnapshots.entries()].filter(([, snapshot]) => snapshot.runId === event.runId && snapshot.executionId === undefined)
     .sort(([, left], [, right]) => compareRunSequence(left.livePreview?.revision ?? "0", right.livePreview?.revision ?? "0"));
   for (const [oldest] of runSnapshots.slice(0, Math.max(0, runSnapshots.length - 4))) liveSnapshots.delete(oldest);
   const previewOwners = new Map(state.previewOwners);
@@ -606,6 +635,34 @@ function receivePreviewSnapshot(state: LiveEventState, event: TimelineEvent): Li
   return { ...state, liveSnapshots, previewOwners, deltaBuffers, semanticItems };
 }
 
+function receiveExecutionPreview(state: LiveEventState, event: TimelineEvent): LiveEventState {
+  const preview = event.livePreview!;
+  const executionId = event.executionId!;
+  if (executionId.length === 0 || executionId.length > 256 || preview.attemptId !== undefined) return state;
+  const key = `${event.runId}\0execution:${executionId}`;
+  const previous = state.liveSnapshots.get(key)?.livePreview;
+  if (previous !== undefined && compareRunSequence(preview.revision, previous.revision) <= 0) return state;
+  const semanticItems = new Map(state.semanticItems);
+  let matched = false;
+  for (const [id, item] of semanticItems) {
+    if (item.runId !== event.runId || item.content.type !== "tool" || item.content.callId !== event.itemId
+      || item.executionId !== undefined && item.executionId !== executionId
+      || ["succeeded", "completed", "failed", "cancelled", "interrupted", "denied"].includes(item.status)) continue;
+    matched = true;
+    semanticItems.set(id, { ...item, executionId,
+      executionStartedAtMs: item.executionStartedAtMs ?? event.executionStartedAtMs,
+      executionUpdatedAtMs: event.executionUpdatedAtMs ?? item.executionUpdatedAtMs,
+      status: toolStatus(event), content: { ...item.content, output: event.text ?? item.content.output } });
+  }
+  if (!matched) return state;
+  const liveSnapshots = new Map(state.liveSnapshots);
+  liveSnapshots.set(key, event);
+  const executions = [...liveSnapshots.entries()].filter(([, snapshot]) => snapshot.runId === event.runId && snapshot.executionId !== undefined)
+    .sort(([, left], [, right]) => compareRunSequence(left.livePreview?.revision ?? "0", right.livePreview?.revision ?? "0"));
+  for (const [oldest] of executions.slice(0, Math.max(0, executions.length - 4))) liveSnapshots.delete(oldest);
+  return { ...state, semanticItems, liveSnapshots };
+}
+
 function retirePreviewSnapshots(state: LiveEventState, event: TimelineEvent): LiveEventState {
   const replacedChannel = event.kind === "assistant_message"
     ? event.assistantKind === "reasoning_trace" ? "reasoning" : "assistant"
@@ -613,6 +670,8 @@ function retirePreviewSnapshots(state: LiveEventState, event: TimelineEvent): Li
   const replacedTool = event.kind === "tool_completed" || event.kind === "tool_result"
     ? event.itemId : undefined;
   const liveSnapshots = filterMap(state.liveSnapshots, (snapshot) => snapshot.runId !== event.runId
+    || snapshot.executionId !== undefined && event.kind !== "run_finished" && event.kind !== "run_failed" && event.kind !== "run_cancelled"
+      && !(event.kind === "tool_result" && event.executionId === snapshot.executionId)
     || replacedTool !== undefined && snapshot.itemId !== replacedTool
     || replacedChannel !== undefined && (snapshot.kind === "reasoning_delta" ? "reasoning" : "assistant") !== replacedChannel);
   const deltaBuffers = filterMap(state.deltaBuffers, (buffer) => buffer.runId !== event.runId
@@ -673,7 +732,16 @@ function receiveTerminalTask(
     if (candidate === undefined) break;
     terminalTasks.delete(terminalTaskKey(candidate.runId, candidate.task.taskId));
   }
-  return { ...state, terminalTasks };
+  const semanticItems = new Map(state.semanticItems);
+  for (const [id, item] of semanticItems) {
+    if (item.runId !== runId || item.executionId !== task.taskId || item.content.type !== "tool") continue;
+    semanticItems.set(id, { ...item,
+      executionUpdatedAtMs: task.emittedAtMs,
+      status: task.status === "exited" ? task.exitCode === 0 ? "succeeded" : "failed"
+        : task.status === "starting" ? "running" : task.status,
+    });
+  }
+  return { ...state, terminalTasks, semanticItems };
 }
 
 function terminalTaskKey(runId: string, taskId: string): string {
@@ -754,9 +822,10 @@ function receiveSemanticItem(
   const semanticItems = new Map(state.semanticItems);
   semanticItems.set(
     item.provisionalId,
-    item.toolInput === undefined && existing?.toolInput !== undefined
-      ? { ...item, toolInput: existing.toolInput }
-      : item,
+    { ...item, toolInput: item.toolInput ?? existing?.toolInput,
+      executionId: item.executionId ?? existing?.executionId,
+      executionStartedAtMs: existing?.executionStartedAtMs ?? item.executionStartedAtMs,
+      executionUpdatedAtMs: item.executionUpdatedAtMs ?? existing?.executionUpdatedAtMs },
   );
   return { ...state, semanticItems };
 }
@@ -1153,6 +1222,11 @@ function toolStatus(event: TimelineEvent): LiveConversationDisplayItem["status"]
     return "requested";
   }
   switch (event.status) {
+    case "starting":
+    case "running":
+      return "running";
+    case "interrupted":
+      return "interrupted";
     case "approved":
       return "approved";
     case "denied":

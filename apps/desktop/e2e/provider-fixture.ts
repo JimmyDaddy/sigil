@@ -55,21 +55,7 @@ const DURABLE_USER_INPUT_ARGS = JSON.stringify({
     },
   }],
 });
-const AUTO_READ_STEP_IDS = ["desktop_inspect_kernel", "desktop_inspect_runtime"] as const;
-const AUTO_HANDOFF_ARGS = JSON.stringify({
-  reason_codes: ["parallel_research", "multi_stage_change"],
-});
-const AUTO_PLAN_ARGS = JSON.stringify({
-  plan_version: 1,
-  status: "accepted",
-  steps: AUTO_READ_STEP_IDS.map((stepId) => ({
-    step_id: stepId,
-    title: `Inspect ${stepId.replace("desktop_inspect_", "")}`,
-    role: "subagent_read",
-    mode: "read",
-    isolation: "shared_read_only",
-  })),
-});
+const AUTO_START_TASK_ARGS = JSON.stringify({ title: "Desktop E2E direct task" });
 const PLAN_REVIEW_REQUEST_ARGS = JSON.stringify({
   reason_codes: ["explicit_review_intent", "architectural_tradeoff"],
 });
@@ -78,20 +64,6 @@ const PLAN_REVIEW_RESULT_CONTENT = `${PLAN_REVIEW_DRAFT_SUMMARY}
 
 1. Inspect the runtime architecture and record the relevant boundaries.
 2. Verify the resulting plan against the captured workspace evidence.`;
-const planReviewDraftArgs = (summary: string) => JSON.stringify({
-  schema_version: 2,
-  summary,
-  steps: AUTO_READ_STEP_IDS.map((stepId) => ({
-    step_id: stepId,
-    title: `Inspect ${stepId.replace("desktop_inspect_", "")}`,
-    role: "subagent_read",
-    mode: "read",
-    isolation: "shared_read_only",
-  })),
-  target_paths: [],
-  suggested_checks: [],
-});
-
 interface ChatMessage {
   readonly role?: string;
   readonly content?: unknown;
@@ -103,7 +75,6 @@ interface ChatCompletionRequest {
 }
 
 interface FixtureEvidence {
-  readonly maxConcurrentReads: number;
   readonly requestCounts: Readonly<Record<string, number>>;
 }
 
@@ -113,9 +84,6 @@ export interface DesktopProviderFixture {
 
 export async function startDesktopProviderFixture(): Promise<DesktopProviderFixture> {
   const requestCounts = new Map<string, number>();
-  let directConversationCallSequence = 0;
-  let concurrentReads = 0;
-  let maxConcurrentReads = 0;
   let holdNextDirect = false;
   let directLifecycleFixture = false;
   let releaseHighDelta: (() => void) | undefined;
@@ -128,7 +96,6 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       if (request.method === "GET") {
         if (request.url?.endsWith("/__evidence")) {
           sendJson(response, {
-            maxConcurrentReads,
             requestCounts: Object.fromEntries(requestCounts),
           } satisfies FixtureEvidence);
           return;
@@ -143,8 +110,6 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         requestCounts.clear();
         holdNextDirect = false;
         directLifecycleFixture = false;
-        concurrentReads = 0;
-        maxConcurrentReads = 0;
         sendJson(response, { reset: true });
         return;
       }
@@ -196,8 +161,7 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
       ) {
         recordRequest("title");
         sendText(response, TITLE_CANARY);
-      } else if (requestText.includes(HIGH_DELTA_PROMPT)
-        && !toolNames.has("continue_without_task_planning")) {
+      } else if (requestText.includes(HIGH_DELTA_PROMPT)) {
         recordRequest("high_delta_stream");
         const gate = new Promise<void>((resolve) => { releaseHighDelta = resolve; });
         response.writeHead(200, { "cache-control": "no-cache", "content-type": "text/event-stream" });
@@ -293,64 +257,33 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
           "request_user_input",
           JSON.stringify({ ...question, prompt: PLAN_REVISION_QUESTION_PROMPT }),
         );
-      } else if (
-        toolNames.has("submit_plan_review_result")
-        || toolNames.has("submit_plan_draft")
-      ) {
+      } else if (toolNames.has("submit_plan_review_result")) {
         const revised = requestText.includes(PLAN_REVISION_GUIDANCE);
         const summary = revised ? PLAN_REVISION_SUMMARY : PLAN_REVIEW_DRAFT_SUMMARY;
-        recordRequest("plan_draft");
+        recordRequest("plan_review_result");
         if (revised) recordRequest("plan_revision_completed");
-        if (toolNames.has("submit_plan_review_result")) {
-          sendNamedToolCall(
-            response,
-            "desktop-auto-plan-review-result",
-            "submit_plan_review_result",
-            JSON.stringify({
-              schema_version: 1,
-              outcome: "draft",
-              content: revised
-                ? `${summary}\n\nVerify interrupted current-format session recovery before implementation.`
-                : PLAN_REVIEW_RESULT_CONTENT,
-            }),
-          );
-        } else {
-          sendNamedToolCall(
-            response,
-            "desktop-auto-plan-draft",
-            "submit_plan_draft",
-            planReviewDraftArgs(summary),
-          );
-        }
+        sendNamedToolCall(
+          response,
+          "desktop-auto-plan-review-result",
+          "submit_plan_review_result",
+          JSON.stringify({
+            schema_version: 1,
+            outcome: "draft",
+            content: revised
+              ? `${summary}\n\nVerify interrupted current-format session recovery before implementation.`
+              : PLAN_REVIEW_RESULT_CONTENT,
+          }),
+        );
       } else if (
-        toolNames.has("request_task_planning")
+        toolNames.has("start_task")
         && requestText.includes(AUTO_ORCHESTRATION_PROMPT)
       ) {
         recordRequest("auto_conversation");
         sendNamedToolCall(
           response,
           "desktop-auto-handoff",
-          "request_task_planning",
-          AUTO_HANDOFF_ARGS,
-        );
-      } else if (toolNames.has("continue_without_task_planning")) {
-        recordRequest("direct_conversation_routing");
-        directConversationCallSequence += 1;
-        sendNamedToolCall(
-          response,
-          `desktop-direct-conversation-${directConversationCallSequence}`,
-          "continue_without_task_planning",
-          JSON.stringify({
-            reason: "does_not_meet_task_planning_criteria",
-          }),
-        );
-      } else if (toolNames.has("task_plan_update")) {
-        recordRequest("auto_planner");
-        sendNamedToolCall(
-          response,
-          "desktop-auto-plan",
-          "task_plan_update",
-          AUTO_PLAN_ARGS,
+          "start_task",
+          AUTO_START_TASK_ARGS,
         );
       } else if (requestText.includes(APPROVED_PLAN_EXECUTION_PROMPT)) {
         recordRequest("approved_plan_direct_execution");
@@ -362,22 +295,6 @@ export async function startDesktopProviderFixture(): Promise<DesktopProviderFixt
         }
         if (directLifecycleFixture) await new Promise((resolve) => setTimeout(resolve, 500));
         sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
-      } else if (requestText.includes("Produce the single user-visible final answer")) {
-        recordRequest("auto_synthesis");
-        sendText(response, AUTO_ORCHESTRATION_FINAL_CANARY);
-      } else if (requestText.includes("Role: subagent_read")) {
-        const stepId = AUTO_READ_STEP_IDS.find((candidate) =>
-          requestText.includes(`Step: ${candidate}`),
-        );
-        if (stepId === undefined) {
-          throw new Error("Desktop orchestration read request did not bind a known step");
-        }
-        recordRequest(`auto_read:${stepId}`);
-        concurrentReads += 1;
-        maxConcurrentReads = Math.max(maxConcurrentReads, concurrentReads);
-        await new Promise((resolve) => setTimeout(resolve, 350));
-        concurrentReads -= 1;
-        sendText(response, `bounded result for ${stepId}`);
       } else if (requestText.includes(SKILL_INSTRUCTION_MARKER)) {
         recordRequest("workspace_skill");
         sendText(response, SKILL_RUN_CANARY);
@@ -551,7 +468,6 @@ export const desktopProviderCanaries = {
   agentRun: AGENT_RUN_CANARY,
   autoOrchestrationFinal: AUTO_ORCHESTRATION_FINAL_CANARY,
   autoOrchestrationPrompt: AUTO_ORCHESTRATION_PROMPT,
-  autoReadStepIds: AUTO_READ_STEP_IDS,
   durableUserInputCardPrompt: DURABLE_USER_INPUT_CARD_PROMPT,
   durableUserInputFinal: DURABLE_USER_INPUT_FINAL_CANARY,
   durableUserInputOption: DURABLE_USER_INPUT_OPTION,

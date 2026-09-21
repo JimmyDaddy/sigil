@@ -74,6 +74,11 @@ description = "Allows the main local window to resolve one exact server-guarded 
 commands.allow = ["desktop_resolve_approval"]
 
 [[permission]]
+identifier = "allow-desktop-control-log-recovery"
+description = "Allows the main window to preview and explicitly confirm one exact server-owned command-history rotation without filesystem or generic HTTP access."
+commands.allow = ["desktop_recover_control_log"]
+
+[[permission]]
 identifier = "allow-desktop-plan-decision"
 description = "Allows the main local window to inspect one exact plan and submit one hash-bound Run, Save, Revise, or Reject decision for a draft plan."
 commands.allow = ["desktop_plan_detail", "desktop_plan_decision"]

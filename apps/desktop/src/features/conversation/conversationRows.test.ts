@@ -1,10 +1,78 @@
 import { describe, expect, it } from "vitest";
 
 import { translateEnglish } from "../../i18n";
-import type { ConversationTimelineItem } from "./continuityReducer";
+import type { ConversationTimelineItem, LiveConversationDisplayItem } from "./continuityReducer";
 import { projectConversationRows } from "./conversationRows";
+import restoredCommand from "./fixtures/restored-command.json";
 
 describe("canonical conversation rows", () => {
+  it("restores a command and coalesces follow-up execution facts without a live overlay", () => {
+    const make = (key: string, name: string): ConversationTimelineItem => ({ identity: key, source: "durable", item: {
+      schemaVersion: 1, displayId: key, displayOrder: { sessionStreamSequence: key === "start" ? "2" : "3", subindex: 0 },
+      sourceEventId: `event-${key}`, source: "durable_transcript", kind: "tool", runId: "run-restored", status: "running",
+      content: { type: "tool", toolName: name, input: key === "start" ? restoredCommand.input : undefined,
+        executionId: restoredCommand.executionId, executionStartedAtMs: restoredCommand.executionStartedAtMs,
+        executionUpdatedAtMs: restoredCommand.executionUpdatedAtMs, output: restoredCommand.output,
+        truncated: false, originalContentBytes: 0 },
+    } });
+    const rows = projectConversationRows([make("start", "exec_command"), make("wait", "exec_wait")], [], translateEnglish);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "tool", label: "exec_command", input: restoredCommand.input,
+      status: restoredCommand.status, executionId: restoredCommand.executionId,
+      executionStartedAtMs: restoredCommand.executionStartedAtMs, executionUpdatedAtMs: restoredCommand.executionUpdatedAtMs });
+  });
+
+  it("coalesces the same execution across runs and keeps its terminal state against late running receipts", () => {
+    const make = (key: string, runId: string, status: "running" | "completed"): ConversationTimelineItem => ({ identity: key, source: "durable", item: {
+      schemaVersion: 1, displayId: key, displayOrder: { sessionStreamSequence: "2", subindex: 0 },
+      sourceEventId: `event-${key}`, source: "durable_transcript", kind: "tool", runId, status,
+      content: { type: "tool", toolName: key === "start" ? "exec_command" : "exec_wait", input: key === "start" ? restoredCommand.input : undefined,
+        executionId: restoredCommand.executionId, executionStartedAtMs: 1000, executionUpdatedAtMs: status === "completed" ? 4000 : 2000,
+        truncated: false, originalContentBytes: 0 },
+    } });
+    const rows = projectConversationRows([make("start", "run-a", "running"), make("wait", "run-b", "completed"), make("stale", "run-a", "running")], [], translateEnglish);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ key: "start", kind: "tool", label: "exec_command", input: restoredCommand.input,
+      status: "completed", executionId: restoredCommand.executionId, executionStartedAtMs: 1000, executionUpdatedAtMs: 4000 });
+  });
+
+  it("keeps a canonical terminal command when an old execution overlay is still retained", () => {
+    const snapshot: LiveConversationDisplayItem = { provisionalId: "slot", runId: "run-a", runSequence: "1", kind: "tool", status: "running",
+      executionId: restoredCommand.executionId, executionStartedAtMs: 1000, executionUpdatedAtMs: 2000,
+      content: { type: "tool", toolName: "exec_command", output: "old output", truncated: false, originalContentBytes: 0 } };
+    const durable: ConversationTimelineItem = { identity: "settled", source: "durable", item: {
+      schemaVersion: 1, displayId: "settled", displayOrder: { sessionStreamSequence: "5", subindex: 0 },
+      sourceEventId: "event-settled", source: "durable_transcript", kind: "tool", runId: "run-a", status: "interrupted", reconciles: ["slot"],
+      content: { type: "tool", toolName: "exec_command", input: restoredCommand.input, executionId: restoredCommand.executionId,
+        executionStartedAtMs: 1000, executionUpdatedAtMs: 4000, output: "final output", truncated: false, originalContentBytes: 12 },
+    } };
+    for (const [canonicalStatus, staleStatus] of [["interrupted", "running"], ["interrupted", "succeeded"], ["failed", "cancelled"]] as const) {
+      const settled: ConversationTimelineItem = { ...durable, item: { ...durable.item, status: canonicalStatus } };
+      expect(projectConversationRows([settled], [], translateEnglish, [{ ...snapshot, status: staleStatus }])).toMatchObject([
+        { kind: "tool", status: canonicalStatus, text: "final output", executionUpdatedAtMs: 4000, input: restoredCommand.input },
+      ]);
+      const foreignLive: ConversationTimelineItem = { identity: "foreign-slot", source: "live", item: {
+        ...snapshot, provisionalId: "foreign-slot", runId: "run-b", status: staleStatus,
+        content: { type: "tool", toolName: "exec_wait", executionId: restoredCommand.executionId,
+          output: "stale foreign output", executionUpdatedAtMs: 2000, truncated: false, originalContentBytes: 0 },
+      } };
+      expect(projectConversationRows([settled, foreignLive], [], translateEnglish)).toMatchObject([
+        { kind: "tool", status: canonicalStatus, text: "final output", executionUpdatedAtMs: 4000 },
+      ]);
+    }
+  });
+
+  it("keeps live succeeded terminal state against a late running receipt from another run", () => {
+    const make = (key: string, runId: string, status: "succeeded" | "running"): ConversationTimelineItem => ({ identity: key, source: "live", item: {
+      provisionalId: key, runId, runSequence: "1", kind: "tool", status,
+      content: { type: "tool", toolName: "exec_command", executionId: restoredCommand.executionId, input: restoredCommand.input,
+        executionStartedAtMs: 1000, executionUpdatedAtMs: status === "succeeded" ? 4000 : 2000, truncated: false, originalContentBytes: 0 },
+    } });
+    expect(projectConversationRows([make("done", "run-a", "succeeded"), make("stale", "run-b", "running")], [], translateEnglish)).toMatchObject([
+      { kind: "tool", status: "succeeded", executionUpdatedAtMs: 4000 },
+    ]);
+  });
+
   it("renders the canonical order without comparing duplicate text", () => {
     const items: ConversationTimelineItem[] = [
       durableMessage("user-1", "user", "same"),

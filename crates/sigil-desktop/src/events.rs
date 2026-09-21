@@ -26,7 +26,7 @@ pub enum DesktopProtocolEventClass {
 
 /// Typed HTTP protocol envelope consumed from the server-owned SSE stream.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProtocolEvent {
     pub schema_version: u32,
     pub event_class: DesktopProtocolEventClass,
@@ -45,7 +45,7 @@ pub struct DesktopProtocolEvent {
 
 /// Typed public run envelope consumed by the native client.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPublicRunEvent {
     pub schema_version: u32,
     pub session_id: String,
@@ -62,7 +62,6 @@ pub enum DesktopPublicTaskPhase {
     Planning,
     Execution,
     Integration,
-    Synthesis,
     Terminal,
 }
 
@@ -89,7 +88,7 @@ pub struct DesktopPublicTaskChecklistItem {
 
 /// Renderer-facing task-plan step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineTaskPlanStep {
     pub step_id: String,
     pub title: String,
@@ -125,6 +124,44 @@ pub struct DesktopPublicToolResult {
     pub content: String,
     #[serde(deserialize_with = "deserialize_tool_result_status")]
     pub status: String,
+    #[serde(default)]
+    pub metadata: DesktopPublicToolResultMetadata,
+}
+
+fn deserialize_command_result_details<'de, D>(
+    deserializer: D,
+) -> Result<DesktopPublicCommandResultDetails, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(DesktopPublicCommandResultDetails {
+        execution_id: value
+            .get("execution_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        started_at_ms: value.get("started_at_ms").and_then(Value::as_u64),
+        updated_at_ms: value.get("updated_at_ms").and_then(Value::as_u64),
+    })
+}
+
+/// Only bounded command lifecycle fields are retained from the public result metadata.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DesktopPublicToolResultMetadata {
+    #[serde(default, deserialize_with = "deserialize_command_result_details")]
+    pub details: DesktopPublicCommandResultDetails,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct DesktopPublicCommandResultDetails {
+    pub execution_id: Option<String>,
+    pub status: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub updated_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -397,6 +434,8 @@ pub enum DesktopPublicRunEventKind {
     },
     ApprovalRequested {
         call: DesktopPublicToolCall,
+        #[serde(default)]
+        display_call_id: Option<String>,
         session_grant_available: bool,
         session_grant_unavailable_reason: Option<DesktopSessionGrantUnavailableReason>,
         #[serde(default)]
@@ -419,6 +458,8 @@ pub enum DesktopPublicRunEventKind {
     },
     ApprovalResolved {
         call_id: String,
+        #[serde(default)]
+        display_call_id: Option<String>,
         approval_request_id: String,
         approved: bool,
         #[serde(default)]
@@ -510,7 +551,7 @@ pub enum DesktopPublicConversationRoute {
 
 /// Typed task projection safe to send to the local renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineTask {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
@@ -555,17 +596,15 @@ pub struct DesktopTimelineTask {
 #[serde(
     rename_all = "snake_case",
     rename_all_fields = "camelCase",
-    tag = "kind",
-    deny_unknown_fields
+    tag = "kind"
 )]
 pub enum DesktopTimelineTaskExecutionBinding {
-    Plan { plan_version: u32 },
     Direct { admission_id: String },
 }
 
 /// Renderer-facing non-authoritative checklist item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineTaskChecklistItem {
     pub item_id: String,
     pub text: String,
@@ -574,7 +613,7 @@ pub struct DesktopTimelineTaskChecklistItem {
 
 /// Narrow approval summary safe to send to the local renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineApproval {
     pub call_id: String,
     pub tool_name: String,
@@ -617,7 +656,7 @@ pub struct DesktopTimelineApproval {
 
 /// Bounded, credential-free timeline event emitted by the native desktop backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineEvent {
     pub workspace_id: String,
     pub session_id: String,
@@ -638,7 +677,15 @@ pub struct DesktopTimelineEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_updated_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -665,9 +712,10 @@ pub struct DesktopTimelineEvent {
 
 /// Revision and identity of a replacement preview, never a durable replay cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineLivePreview {
-    pub attempt_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub slot_id: String,
     pub revision: String,
     pub base_sequence: String,
@@ -706,7 +754,7 @@ pub enum DesktopProviderTurnRecoveryAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPublicProviderTurnRecoveryView {
     pub phase: DesktopProviderTurnRecoveryPhase,
     #[serde(default)]
@@ -726,7 +774,7 @@ pub struct DesktopPublicProviderTurnRecoveryView {
 /// Renderer-safe signal that clears only live fragments from a failed provider attempt. The
 /// discarded contents never cross the bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPublicProviderTurnPartialOutputDiscardedView {
     pub text_discarded: bool,
     pub reasoning_discarded: bool,
@@ -736,7 +784,7 @@ pub struct DesktopPublicProviderTurnPartialOutputDiscardedView {
 /// Renderer-safe recovery state. It intentionally excludes attempt ids, request material, and
 /// raw provider diagnostics while retaining the typed actions required for product parity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineProviderTurnRecovery {
     pub phase: DesktopProviderTurnRecoveryPhase,
     pub active_retry_count: u32,
@@ -799,7 +847,7 @@ pub enum DesktopRouteTransitionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPublicSessionRouteTransitionView {
     pub kind: DesktopRouteTransitionKind,
     #[serde(default)]
@@ -810,7 +858,7 @@ pub struct DesktopPublicSessionRouteTransitionView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineRouteTransition {
     pub kind: DesktopRouteTransitionKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -847,7 +895,7 @@ pub enum DesktopRouteRecoveryAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineRouteRecovery {
     pub code: DesktopRouteRecoveryCode,
     pub actions: Vec<DesktopRouteRecoveryAction>,
@@ -857,7 +905,7 @@ pub struct DesktopTimelineRouteRecovery {
 
 /// Exact bounded execution transition projected from an opaque public control payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineToolExecution {
     pub call_id: String,
     pub tool_name: String,
@@ -866,7 +914,7 @@ pub struct DesktopTimelineToolExecution {
 
 /// Bounded terminal owner facts safe to forward to the renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopTimelineTerminalTask {
     pub task_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -922,6 +970,20 @@ impl DesktopProtocolEvent {
                 }
                 _ => None,
             });
+        let execution_id = match event {
+            DesktopPublicRunEventKind::ToolResult { result }
+                if command_result_has_execution_state(result) =>
+            {
+                result
+                    .metadata
+                    .details
+                    .execution_id
+                    .as_deref()
+                    .map(bounded_machine_label)
+                    .transpose()?
+            }
+            _ => None,
+        };
         let tool_input = tool_call.and_then(project_tool_input);
         let assistant_kind = match event {
             DesktopPublicRunEventKind::AssistantMessage { message } => {
@@ -939,6 +1001,18 @@ impl DesktopProtocolEvent {
             DesktopPublicRunEventKind::ProviderTurnRecoveryChanged { recovery } => {
                 Some(DesktopTimelineProviderTurnRecovery::try_from(recovery)?)
             }
+            _ => None,
+        };
+        let display_call_id = match event {
+            DesktopPublicRunEventKind::ApprovalRequested {
+                display_call_id, ..
+            }
+            | DesktopPublicRunEventKind::ApprovalResolved {
+                display_call_id, ..
+            } => display_call_id
+                .as_deref()
+                .map(bounded_machine_label)
+                .transpose()?,
             _ => None,
         };
         let approval_request_id = match event {
@@ -1043,7 +1117,6 @@ impl DesktopProtocolEvent {
                     match status {
                         crate::DesktopPlanReviewStatus::Started => "started",
                         crate::DesktopPlanReviewStatus::WaitingForInput => "waiting_for_input",
-                        crate::DesktopPlanReviewStatus::Finalizing => "finalizing",
                         crate::DesktopPlanReviewStatus::DraftReady => "draft_ready",
                         crate::DesktopPlanReviewStatus::CompileFailed => "compile_failed",
                         crate::DesktopPlanReviewStatus::CompletedWithoutDraft => {
@@ -1196,7 +1269,7 @@ impl DesktopProtocolEvent {
                 DesktopTimelineEventKind::ToolResult,
                 Some(bounded_text(&result.content)),
                 Some(bounded_text(&result.call_id)),
-                Some(bounded_text(&result.status)),
+                Some(command_result_status(result)),
             ),
             DesktopPublicRunEventKind::ApprovalRequested { call, .. } => (
                 DesktopTimelineEventKind::ApprovalRequested,
@@ -1207,6 +1280,7 @@ impl DesktopProtocolEvent {
             DesktopPublicRunEventKind::ApprovalResolved {
                 call_id,
                 approval_request_id: _,
+                display_call_id: _,
                 approved,
                 reason,
             } => (
@@ -1314,6 +1388,17 @@ impl DesktopProtocolEvent {
                 (DesktopTimelineEventKind::Other, None, None, None)
             }
         };
+        let (execution_started_at_ms, execution_updated_at_ms) = match event {
+            DesktopPublicRunEventKind::ToolResult { result }
+                if result.tool_name.starts_with("exec_") =>
+            {
+                (
+                    result.metadata.details.started_at_ms,
+                    result.metadata.details.updated_at_ms,
+                )
+            }
+            _ => (None, None),
+        };
         let task = project_task_event(event)?;
         let approval = if kind == DesktopTimelineEventKind::ApprovalRequested {
             Some(self.approval_view(tool_name.as_deref())?)
@@ -1333,7 +1418,11 @@ impl DesktopProtocolEvent {
             kind,
             text,
             item_id,
+            display_call_id,
             tool_name,
+            execution_id,
+            execution_started_at_ms,
+            execution_updated_at_ms,
             status,
             assistant_kind,
             tool_input,
@@ -1427,6 +1516,28 @@ impl DesktopProtocolEvent {
             .tool_progress
             .as_ref()
             .map(|progress| progress.status.clone());
+        let execution_started_at_ms = update
+            .tool_progress
+            .as_ref()
+            .and_then(|progress| progress.started_at_ms);
+        let execution_updated_at_ms = update
+            .tool_progress
+            .as_ref()
+            .and_then(|progress| progress.updated_at_ms);
+        let text = update
+            .tool_progress
+            .as_ref()
+            .is_none_or(|progress| progress.preview_is_output)
+            .then(|| update.preview.as_str().to_owned());
+        let execution_id = update
+            .tool_progress
+            .as_ref()
+            .map(|progress| progress.execution_id.clone());
+        let item_id = update
+            .tool_progress
+            .as_ref()
+            .map(|progress| progress.call_id.clone())
+            .unwrap_or_else(|| update.slot_id.clone());
         let kind = match update.kind {
             sigil_application::LiveRunUpdateKind::Text => DesktopTimelineEventKind::AssistantDelta,
             sigil_application::LiveRunUpdateKind::Reasoning => {
@@ -1456,9 +1567,13 @@ impl DesktopProtocolEvent {
                 truncated: update.truncated,
             }),
             kind,
-            text: Some(update.preview.as_str().to_owned()),
-            item_id: Some(update.slot_id),
+            text,
+            item_id: Some(item_id),
+            display_call_id: None,
             tool_name,
+            execution_id,
+            execution_started_at_ms,
+            execution_updated_at_ms,
             status,
             assistant_kind: None,
             tool_input: None,
@@ -1489,6 +1604,7 @@ impl DesktopProtocolEvent {
         }
         let DesktopPublicRunEventKind::ApprovalRequested {
             call,
+            display_call_id: _,
             session_grant_available,
             session_grant_unavailable_reason,
             effects,
@@ -1691,7 +1807,11 @@ impl DesktopPendingApproval {
             kind: DesktopTimelineEventKind::ApprovalRequested,
             text: None,
             item_id: Some(call_id.clone()),
+            display_call_id: None,
             tool_name: Some(tool_name.clone()),
+            execution_id: None,
+            execution_started_at_ms: None,
+            execution_updated_at_ms: None,
             status: Some("waiting".to_owned()),
             assistant_kind: None,
             tool_input: None,
@@ -1799,10 +1919,45 @@ fn project_tool_execution_control(
     }))
 }
 
+fn command_result_has_execution_state(result: &DesktopPublicToolResult) -> bool {
+    result.tool_name.starts_with("exec_")
+        && result.metadata.details.execution_id.is_some()
+        && match result.metadata.details.status.as_deref() {
+            Some("starting" | "running") => result.status == "ok",
+            Some("exited" | "cancelled" | "failed" | "interrupted") => true,
+            _ => false,
+        }
+}
+
+fn command_result_status(result: &DesktopPublicToolResult) -> String {
+    if command_result_has_execution_state(result)
+        && let Some(status @ ("cancelled" | "interrupted" | "failed")) =
+            result.metadata.details.status.as_deref()
+    {
+        return status.to_owned();
+    }
+    // Tool failure (including nonzero exit or incomplete cleanup) takes precedence over
+    // a process phase such as exited. A yielded successful invocation may remain running.
+    if result.status != "ok" {
+        return bounded_text(&result.status);
+    }
+    if result.tool_name.starts_with("exec_")
+        && result.metadata.details.execution_id.is_some()
+        && let Some(status) = result.metadata.details.status.as_deref()
+        && matches!(
+            status,
+            "starting" | "running" | "exited" | "cancelled" | "failed" | "interrupted"
+        )
+    {
+        return status.to_owned();
+    }
+    bounded_text(&result.status)
+}
+
 fn project_tool_input(call: &DesktopPublicToolCall) -> Option<String> {
     let args = serde_json::from_str::<Value>(&call.args_json).ok()?;
     let value = match call.name.as_str() {
-        "bash" | "shell" | "terminal_start" => {
+        "exec_command" | "bash" | "shell" | "terminal_start" => {
             let command = args.get("command")?.as_str()?;
             if command_contains_credential_shape(command) {
                 "[credential-shaped command arguments redacted]".to_owned()
@@ -1821,6 +1976,7 @@ fn project_tool_input(call: &DesktopPublicToolCall) -> Option<String> {
         "glob" => project_named_string_fields(&args, &["pattern", "path"])?,
         "ls" | "list_files" => project_named_string_fields(&args, &["path"])?,
         "websearch" | "web_search" => project_named_string_fields(&args, &["query"])?,
+        "exec_input" => project_named_string_fields(&args, &["execution_id"])?,
         "terminal_input" => project_named_string_fields(&args, &["task_id"])?,
         _ => return None,
     };
@@ -1941,11 +2097,6 @@ fn project_task_execution_binding(
     execution: &crate::DesktopTaskExecutionBinding,
 ) -> Result<DesktopTimelineTaskExecutionBinding, DesktopProtocolEventError> {
     Ok(match execution {
-        crate::DesktopTaskExecutionBinding::Plan { plan_version } => {
-            DesktopTimelineTaskExecutionBinding::Plan {
-                plan_version: *plan_version,
-            }
-        }
         crate::DesktopTaskExecutionBinding::Direct { admission_id } => {
             DesktopTimelineTaskExecutionBinding::Direct {
                 admission_id: bounded_machine_label(admission_id)?,

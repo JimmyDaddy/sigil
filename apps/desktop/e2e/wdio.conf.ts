@@ -71,7 +71,7 @@ enabled = true
 routing_policy = "auto"
 multi_agent_mode = "proactive"
 max_subagents = 4
-max_parallel_read_steps = 2
+max_concurrent_provider_routes = 2
 ` : ""}
 
 [connections.desktop-e2e]

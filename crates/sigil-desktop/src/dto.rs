@@ -19,7 +19,7 @@ pub enum DesktopSupportStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportSummary {
     pub overall_status: DesktopSupportStatus,
     pub ok: usize,
@@ -28,7 +28,7 @@ pub struct DesktopSupportSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportCheck {
     pub status: DesktopSupportStatus,
     pub name: String,
@@ -38,7 +38,7 @@ pub struct DesktopSupportCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportEnvironment {
     pub os: String,
     pub architecture: String,
@@ -46,7 +46,7 @@ pub struct DesktopSupportEnvironment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportPrivacy {
     pub included: Vec<String>,
     pub excluded: Vec<String>,
@@ -79,7 +79,7 @@ pub enum DesktopCutoverBlockerCode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCutoverBlocker {
     pub code: DesktopCutoverBlockerCode,
     #[serde(default)]
@@ -87,7 +87,7 @@ pub struct DesktopCutoverBlocker {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCutoverStatus {
     pub schema_version: u16,
     pub epoch: DesktopCutoverEpoch,
@@ -96,7 +96,7 @@ pub struct DesktopCutoverStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportDoctorReport {
     pub generated_at_unix_ms: u64,
     pub version: String,
@@ -111,7 +111,7 @@ pub struct DesktopSupportDoctorReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSupportBundleExport {
     pub suggested_file_name: String,
     pub generated_at_unix_ms: u64,
@@ -120,7 +120,7 @@ pub struct DesktopSupportBundleExport {
 
 /// Closed receipt returned by the host-private borrowed native-save route.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopBorrowedNativeSaveReceipt {
     pub schema_version: u16,
     pub capsule_id: String,
@@ -138,7 +138,7 @@ pub enum DesktopProviderConfigMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderModelRef {
     pub connection_id: String,
     pub model_id: String,
@@ -164,14 +164,14 @@ pub enum DesktopProviderConnectionReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderConnectionIssue {
     pub code: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderConnectionEntry {
     pub id: String,
     pub label: String,
@@ -190,7 +190,7 @@ pub struct DesktopProviderConnectionEntry {
 
 /// Secret-free provider settings projection owned by native Rust code.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderConnectionInventory {
     pub config_mode: DesktopProviderConfigMode,
     #[serde(default)]
@@ -228,7 +228,7 @@ pub enum DesktopProviderSetupProtocol {
 ///
 /// Deliberately does not implement `Debug`, `Clone`, or `Deserialize`.
 #[derive(Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupCatalogRequest {
     pub template: DesktopProviderSetupTemplate,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,7 +242,7 @@ pub struct DesktopProviderSetupCatalogRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupModel {
     pub model_id: String,
     pub display_name: String,
@@ -254,7 +254,7 @@ pub struct DesktopProviderSetupModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupCatalog {
     pub connection_id: String,
     pub provider_label: String,
@@ -269,7 +269,7 @@ pub struct DesktopProviderSetupCatalog {
 
 /// Secret-free automatic-orchestration summary shown by setup and settings surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopOrchestrationRolloutSummary {
     pub status: String,
     pub routing_policy: String,
@@ -283,7 +283,7 @@ pub struct DesktopOrchestrationRolloutSummary {
 ///
 /// Deliberately does not implement `Debug`, `Clone`, or `Deserialize`.
 #[derive(Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupSaveRequest {
     pub template: DesktopProviderSetupTemplate,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -302,7 +302,7 @@ pub struct DesktopProviderSetupSaveRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderSetupSaveResult {
     pub default_model: DesktopProviderModelRef,
     pub inventory: DesktopProviderConnectionInventory,
@@ -310,7 +310,7 @@ pub struct DesktopProviderSetupSaveResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderDefaultModelSaveRequest {
     pub model_ref: DesktopProviderModelRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,7 +318,7 @@ pub struct DesktopProviderDefaultModelSaveRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopProviderDefaultModelSaveResult {
     pub default_model: DesktopProviderModelRef,
     pub inventory: DesktopProviderConnectionInventory,
@@ -327,7 +327,7 @@ pub struct DesktopProviderDefaultModelSaveResult {
 
 /// Request body for creating one process-local session handle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
+#[serde(default, rename_all = "snake_case")]
 pub struct DesktopSessionCreateRequest {
     /// Optional user-visible label.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,7 +339,7 @@ pub struct DesktopSessionCreateRequest {
 
 /// Request body for reopening one durable catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionOpenRequest {
     /// Relative direct-child reference returned by the catalog.
     pub session_ref: String,
@@ -354,7 +354,7 @@ pub struct DesktopSessionOpenRequest {
 
 /// Exact durable catalog identity and new display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionRenameRequest {
     pub session_ref: String,
     pub session_id: String,
@@ -363,7 +363,7 @@ pub struct DesktopSessionRenameRequest {
 
 /// Exact durable catalog identity selected for confirmed deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionDeleteRequest {
     pub session_ref: String,
     pub session_id: String,
@@ -371,7 +371,7 @@ pub struct DesktopSessionDeleteRequest {
 
 /// Exact unavailable source fingerprint selected for native-shell quarantine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionQuarantineRequest {
     pub session_ref: String,
     pub source_bytes: u64,
@@ -380,7 +380,7 @@ pub struct DesktopSessionQuarantineRequest {
 
 /// Exact unavailable source fingerprint selected for native-shell permanent deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionInvalidSourceDeleteRequest {
     pub session_ref: String,
     pub source_bytes: u64,
@@ -396,7 +396,7 @@ pub enum DesktopSessionCatalogBatchAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchItem {
     pub session_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,14 +408,14 @@ pub struct DesktopSessionCatalogBatchItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchPlanRequest {
     pub action: DesktopSessionCatalogBatchAction,
     pub items: Vec<DesktopSessionCatalogBatchItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchExecuteRequest {
     pub plan_id: String,
     pub action: DesktopSessionCatalogBatchAction,
@@ -430,7 +430,7 @@ pub enum DesktopSessionCatalogBatchPlanStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchPlanItem {
     pub session_ref: String,
     pub status: DesktopSessionCatalogBatchPlanStatus,
@@ -439,7 +439,7 @@ pub struct DesktopSessionCatalogBatchPlanItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchPlan {
     pub plan_id: String,
     pub action: DesktopSessionCatalogBatchAction,
@@ -459,7 +459,7 @@ pub enum DesktopSessionCatalogBatchOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchReceiptItem {
     pub session_ref: String,
     pub outcome: DesktopSessionCatalogBatchOutcome,
@@ -474,7 +474,7 @@ pub struct DesktopSessionCatalogBatchReceiptItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogBatchReceipt {
     pub plan_id: String,
     pub action: DesktopSessionCatalogBatchAction,
@@ -487,7 +487,7 @@ pub struct DesktopSessionCatalogBatchReceipt {
 
 /// Bounded receipt for a committed durable catalog mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionMutationReceipt {
     pub session_ref: String,
     pub session_id: String,
@@ -498,7 +498,7 @@ pub struct DesktopSessionMutationReceipt {
 
 /// Bounded receipt for one unavailable source moved out of the active catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionQuarantineReceipt {
     pub session_ref: String,
     pub operation_id: String,
@@ -509,7 +509,7 @@ pub struct DesktopSessionQuarantineReceipt {
 
 /// Bounded receipt for one unavailable source permanently removed from the active catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionInvalidSourceDeleteReceipt {
     pub session_ref: String,
     pub operation_id: String,
@@ -519,7 +519,7 @@ pub struct DesktopSessionInvalidSourceDeleteReceipt {
 
 /// Process-local session snapshot returned by the authenticated server.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionSnapshot {
     /// Process-local session handle.
     pub id: String,
@@ -551,7 +551,7 @@ pub enum DesktopSessionRouteTransitionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionRouteTransitionView {
     pub kind: DesktopSessionRouteTransitionKind,
     #[serde(default)]
@@ -578,14 +578,14 @@ impl fmt::Debug for DesktopSessionSnapshot {
 
 /// Read-only durable frontier returned by one continuity probe.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopDurableSessionFrontier {
     pub through_stream_sequence: u64,
 }
 
 /// Exact process-local foreground owner and its opaque attach revision.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopForegroundRunOwner {
     pub run_id: String,
     pub owner_revision: String,
@@ -604,7 +604,7 @@ pub enum DesktopContinuityRecoveryAction {
 
 /// Fresh durable-frontier and foreground-owner proof from the authenticated server.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionContinuityView {
     /// Private durable scope used only by the native attachment boundary.
     pub durable_session_scope_id: String,
@@ -632,7 +632,7 @@ impl fmt::Debug for DesktopSessionContinuityView {
 
 /// Response from listing process-local session handles.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionListResponse {
     /// Current handles in deterministic server order.
     pub sessions: Vec<DesktopSessionSnapshot>,
@@ -659,7 +659,7 @@ pub enum DesktopTranscriptAssistantKind {
 
 /// One safe message from a bounded durable transcript page.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionTranscriptMessage {
     pub ordinal: u64,
     pub message_id: String,
@@ -677,7 +677,7 @@ pub struct DesktopSessionTranscriptMessage {
 
 /// One chronological, backwards-pageable durable transcript page.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionTranscriptPage {
     pub session_scope_id: String,
     pub total_messages: u64,
@@ -695,7 +695,7 @@ pub struct DesktopTranscriptQuery {
 
 /// Durable order for one canonical conversation display item.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationDisplayOrder {
     #[serde(deserialize_with = "deserialize_decimal_u64")]
     pub session_stream_sequence: String,
@@ -731,6 +731,7 @@ pub enum DesktopConversationDisplaySource {
 pub enum DesktopConversationDisplayStatus {
     Recorded,
     Requested,
+    Running,
     WaitingForApproval,
     Approved,
     Denied,
@@ -763,7 +764,7 @@ pub enum DesktopConversationDisplayAssistantPhase {
 
 /// User-selected skill bound to one durable prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationDisplaySkillReference {
     pub id: String,
     pub name: String,
@@ -801,7 +802,7 @@ pub enum DesktopConversationDisplayCheckpointConflictReason {
 
 /// Typed, secret-safe content carried by one canonical conversation display item.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum DesktopConversationDisplayContent {
     Message {
         role: DesktopConversationDisplayMessageRole,
@@ -827,6 +828,14 @@ pub enum DesktopConversationDisplayContent {
         tool_name: Option<String>,
         #[serde(default)]
         output: Option<String>,
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        execution_id: Option<String>,
+        #[serde(default)]
+        execution_started_at_ms: Option<u64>,
+        #[serde(default)]
+        execution_updated_at_ms: Option<u64>,
         truncated: bool,
         original_content_bytes: u64,
         #[serde(default)]
@@ -875,7 +884,7 @@ pub enum DesktopConversationDisplayContent {
 
 /// One canonical durable conversation item returned by the workspace server.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationDisplayItem {
     pub schema_version: u16,
     pub display_id: String,
@@ -895,7 +904,7 @@ pub struct DesktopConversationDisplayItem {
 
 /// Latest proven terminal boundary at a canonical page's durable frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationTerminalFrontier {
     pub run_id: String,
     #[serde(deserialize_with = "deserialize_decimal_u64")]
@@ -913,7 +922,7 @@ pub enum DesktopConversationDisplayGapKind {
 
 /// Gap fact retained without exposing journal or filesystem details.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationDisplayGapFact {
     pub kind: DesktopConversationDisplayGapKind,
     #[serde(deserialize_with = "deserialize_decimal_u64")]
@@ -922,7 +931,7 @@ pub struct DesktopConversationDisplayGapFact {
 
 /// Process-local run anchor observed after a durable page was projected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationLiveProvisionalAnchor {
     #[serde(deserialize_with = "deserialize_decimal_u64")]
     pub durable_frontier: String,
@@ -933,7 +942,7 @@ pub struct DesktopConversationLiveProvisionalAnchor {
 
 /// Bounded durable plan-step state used to restore Task controls.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationTaskPlanStep {
     pub step_id: String,
     pub title: String,
@@ -947,7 +956,7 @@ pub struct DesktopConversationTaskPlanStep {
 
 /// Bounded durable integration-lane state without private physical identities.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationTaskLane {
     pub lane_id: String,
     #[serde(default)]
@@ -959,7 +968,7 @@ pub struct DesktopConversationTaskLane {
 
 /// Current durable Task control state at the canonical display frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationTaskControl {
     pub schema_version: u16,
     pub task_id: String,
@@ -985,7 +994,7 @@ pub struct DesktopConversationTaskControl {
 
 /// Opaque-cursor page over canonical durable conversation display items.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationDisplayPage {
     pub schema_version: u16,
     /// Process-local adapter session id; no durable scope is exposed.
@@ -1035,7 +1044,7 @@ pub enum DesktopToolArtifactAvailability {
 
 /// Typed, bounded selector accepted by the display artifact endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopToolArtifactSelector {
     ByteSlice {
         offset: u64,
@@ -1047,10 +1056,17 @@ pub enum DesktopToolArtifactSelector {
     },
     SearchLiteral {
         query: String,
+        #[serde(default)]
         start_offset: u64,
-        max_matches: u16,
+        #[serde(default = "default_tool_artifact_search_matches")]
+        max_matches: u64,
+        #[serde(default)]
         context_lines: u16,
     },
+}
+
+fn default_tool_artifact_search_matches() -> u64 {
+    50
 }
 
 /// Narrow request for one session-scoped artifact page.
@@ -1071,7 +1087,7 @@ pub enum DesktopToolArtifactPageEncoding {
 
 /// One typed, bounded artifact page from the authenticated workspace server.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopToolArtifactPage {
     pub schema_version: u16,
     pub request_scope: String,
@@ -1157,7 +1173,7 @@ pub enum DesktopSessionCatalogSourceDiagnostic {
 
 /// One compact, body-free historical catalog row.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogEntry {
     pub workspace_id: String,
     pub session_ref: String,
@@ -1184,7 +1200,7 @@ pub struct DesktopSessionCatalogEntry {
 
 /// Generation-consistent page of historical catalog rows.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionCatalogPage {
     pub workspace_id: String,
     pub generation: u64,
@@ -1250,7 +1266,7 @@ pub enum DesktopApplicationClientAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationCommandCatalogEntry {
     pub canonical: String,
     pub aliases: Vec<String>,
@@ -1267,7 +1283,7 @@ pub struct DesktopApplicationCommandCatalogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationSkillBinding {
     pub skill_id: String,
     pub skill_sha256: String,
@@ -1275,14 +1291,14 @@ pub struct DesktopApplicationSkillBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationAgentBinding {
     pub profile_id: String,
     pub snapshot_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationSkillCatalogEntry {
     pub id: String,
     pub invocation_token: String,
@@ -1299,7 +1315,7 @@ pub struct DesktopApplicationSkillCatalogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationAgentCatalogEntry {
     pub id: String,
     pub invocation_token: String,
@@ -1319,7 +1335,7 @@ pub struct DesktopApplicationAgentCatalogEntry {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationExtensionCatalog {
     pub commands: Vec<DesktopApplicationCommandCatalogEntry>,
     pub skills: Vec<DesktopApplicationSkillCatalogEntry>,
@@ -1338,7 +1354,7 @@ pub enum DesktopReasoningEffort {
 
 /// Exact reasoning-effort capabilities for one selectable model.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationModelOption {
     pub model_ref: DesktopProviderModelRef,
     pub display_name: String,
@@ -1355,7 +1371,7 @@ pub struct DesktopApplicationModelOption {
 
 /// Typed model, permission-mode, and context usage facts for one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopRunContextView {
     pub model_ref: DesktopProviderModelRef,
     pub provider_name: String,
@@ -1383,7 +1399,7 @@ pub struct DesktopRunContextView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApplicationCacheUsage {
     pub cache_read_tokens: u64,
     pub cache_miss_tokens: u64,
@@ -1421,7 +1437,7 @@ pub enum DesktopSessionRouteRecoveryAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionRouteRecoveryView {
     pub code: DesktopSessionRouteRecoveryCode,
     pub allowed_actions: Vec<DesktopSessionRouteRecoveryAction>,
@@ -1454,7 +1470,7 @@ pub enum DesktopAgentHandoffStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopAgentUsageSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1464,7 +1480,7 @@ pub struct DesktopAgentUsageSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopAgentActivityItem {
     pub thread_id: String,
     #[serde(default)]
@@ -1484,7 +1500,7 @@ pub struct DesktopAgentActivityItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopAgentActivityView {
     pub total_agents: usize,
     pub active_agents: usize,
@@ -1494,7 +1510,7 @@ pub struct DesktopAgentActivityView {
 
 /// Request payload for starting one run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopRunStartRequest {
     pub prompt: String,
     pub permission_mode: DesktopPermissionMode,
@@ -1518,7 +1534,7 @@ pub struct DesktopRunStartRequest {
 
 /// Exact durable Task continuation requested instead of a new conversation turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskContinuationRequest {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1527,7 +1543,7 @@ pub struct DesktopTaskContinuationRequest {
 
 /// Request payload for cooperative cancellation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
+#[serde(default, rename_all = "snake_case")]
 pub struct DesktopRunCancelRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -1535,7 +1551,7 @@ pub struct DesktopRunCancelRequest {
 
 /// Exact generation-bound request for stopping one persistent terminal task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTerminalTaskCancelRequest {
     pub task_id: String,
     pub expected_generation: u64,
@@ -1543,18 +1559,17 @@ pub struct DesktopTerminalTaskCancelRequest {
 
 /// Exact durable Task pause payload constructed by the native client boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskPauseRequest {
     pub request_id: String,
     pub task_id: String,
     pub execution: DesktopTaskExecutionBinding,
 }
 
-/// First-class planned or direct execution authority bound to a Task control action.
+/// First-class direct execution authority bound to a Task control action.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopTaskExecutionBinding {
-    Plan { plan_version: u32 },
     Direct { admission_id: String },
 }
 
@@ -1590,7 +1605,7 @@ pub enum DesktopApprovalLifecycleState {
 
 /// Exact bounded approval identity used to recover renderer state after an event gap.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApprovalLifecycleView {
     pub approval: DesktopPendingApproval,
     pub state: DesktopApprovalLifecycleState,
@@ -1614,7 +1629,7 @@ impl DesktopRunStatus {
 
 /// Current adapter-owned run snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopRunSnapshot {
     pub id: String,
     pub session_id: String,
@@ -1634,7 +1649,7 @@ pub struct DesktopRunSnapshot {
 
 /// Typed bounded terminal owner snapshot returned with a run.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTerminalLifecycleView {
     pub task_id: String,
     #[serde(default)]
@@ -1785,7 +1800,7 @@ pub enum DesktopConversationQueueBlockedReason {
 
 /// One secret-free queue row. Exact prompts and prompt hashes stay behind the server boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationQueueItem {
     pub entry_id: String,
     pub order: u32,
@@ -1805,7 +1820,7 @@ pub struct DesktopConversationQueueItem {
 
 /// Bounded queue projection for one exact desktop session handle.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationQueueView {
     pub schema_version: u16,
     pub session_id: String,
@@ -1832,7 +1847,7 @@ pub enum DesktopConversationQueueCommandActionKind {
 
 /// Exact queue mutation. Prompts are request-only and are never present in a receipt or view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum DesktopConversationQueueCommandAction {
     Enqueue {
         prompt: String,
@@ -1881,7 +1896,7 @@ impl DesktopConversationQueueCommandAction {
 
 /// Queue-specific compare-and-swap payload carried by the generic desktop command envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationQueueCommandRequest {
     pub expected_generation: DesktopConversationQueueGeneration,
     pub action: DesktopConversationQueueCommandAction,
@@ -1889,7 +1904,7 @@ pub struct DesktopConversationQueueCommandRequest {
 
 /// Durable queue mutation receipt with no exact prompt material.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationQueueCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -1922,7 +1937,7 @@ pub enum DesktopCheckpointFileAvailability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointFileView {
     pub path: String,
     pub restore_kind: DesktopCheckpointRestoreKind,
@@ -1930,7 +1945,7 @@ pub struct DesktopCheckpointFileView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointView {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -1943,7 +1958,7 @@ pub struct DesktopCheckpointView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationForkPointView {
     pub source_turn_index: usize,
     pub source_turn_digest: String,
@@ -1952,7 +1967,7 @@ pub struct DesktopConversationForkPointView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationRecoveryView {
     pub checkpoints: Vec<DesktopCheckpointView>,
     pub fork_points: Vec<DesktopConversationForkPointView>,
@@ -1960,7 +1975,7 @@ pub struct DesktopConversationRecoveryView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionEconomics {
     pub before_input_tokens: u64,
     pub target_input_tokens: u64,
@@ -1979,7 +1994,7 @@ pub struct DesktopCompactionEconomics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopCompactionAdmission {
     Prepared {
         standalone_tool_output_shrink_available: bool,
@@ -1997,7 +2012,7 @@ pub enum DesktopCompactionAdmission {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionPolicy {
     pub strategy: String,
     pub phase: String,
@@ -2009,7 +2024,7 @@ pub struct DesktopCompactionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionConstraint {
     pub text: String,
     pub source_event_id: String,
@@ -2017,7 +2032,7 @@ pub struct DesktopCompactionConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionToolArtifact {
     pub source_event_id: String,
     pub content_sha256: String,
@@ -2033,7 +2048,7 @@ pub struct DesktopCompactionToolArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionDetails {
     pub active_objective: String,
     pub objective_source_event_id: String,
@@ -2057,7 +2072,7 @@ pub struct DesktopCompactionDetails {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionReview {
     #[serde(default)]
     pub preview_id: Option<String>,
@@ -2071,7 +2086,7 @@ pub struct DesktopCompactionReview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointRestoreRequest {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -2090,7 +2105,7 @@ pub enum DesktopCheckpointRestoreConflictReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointRestorePreviewFile {
     pub path: String,
     pub restore_kind: DesktopCheckpointRestoreKind,
@@ -2103,7 +2118,7 @@ pub struct DesktopCheckpointRestorePreviewFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointReverseDiff {
     pub path: String,
     pub diff: String,
@@ -2112,7 +2127,7 @@ pub struct DesktopCheckpointReverseDiff {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointRestoreReview {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -2133,7 +2148,7 @@ pub enum DesktopConversationRecoveryCommandActionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DesktopConversationRecoveryCommandAction {
     PrepareCompaction {
         preview_id: String,
@@ -2178,7 +2193,7 @@ impl DesktopConversationRecoveryCommandAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCompactionReceipt {
     pub compaction_id: String,
     pub attempt_id: String,
@@ -2191,14 +2206,14 @@ pub struct DesktopCompactionReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopToolOutputShrinkReceipt {
     pub context_epoch_id: String,
     pub projected_output_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCheckpointRestoreReceipt {
     pub checkpoint_id: String,
     pub batch_id: String,
@@ -2207,7 +2222,7 @@ pub struct DesktopCheckpointRestoreReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationForkReceipt {
     pub session_ref: String,
     pub session_id: String,
@@ -2216,7 +2231,7 @@ pub struct DesktopConversationForkReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopConversationRecoveryCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2240,12 +2255,14 @@ pub struct DesktopConversationRecoveryCommandReceipt {
 
 /// Versioned, idempotent command envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopCommandEnvelope<T> {
     pub protocol_version: u16,
     pub command_id: String,
     pub client_id: String,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_journal: Option<crate::DesktopCommandJournalBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_stream_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2255,7 +2272,7 @@ pub struct DesktopCommandEnvelope<T> {
 
 /// Receipt from starting a run.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopRunStartCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2270,7 +2287,7 @@ pub struct DesktopRunStartCommandReceipt {
 
 /// Receipt from requesting cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopRunCancelCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2285,7 +2302,7 @@ pub struct DesktopRunCancelCommandReceipt {
 
 /// Receipt from pausing one exact durable Task.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskPauseCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2302,7 +2319,7 @@ pub struct DesktopTaskPauseCommandReceipt {
 
 /// Receipt from stopping one exact persistent terminal task.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTerminalTaskCancelCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2336,14 +2353,14 @@ pub enum DesktopSessionGrantUnavailableReasonCode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopSessionGrantUnavailableReason {
     pub code: DesktopSessionGrantUnavailableReasonCode,
 }
 
 /// Guard material attached to a durable approval request event.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPendingApproval {
     pub call_id: String,
     pub tool_name: String,
@@ -2358,7 +2375,7 @@ pub struct DesktopPendingApproval {
 
 /// Bounded, credential-free facts used to rebuild one pending approval from a run snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPendingApprovalDisplay {
     pub event_sequence: u64,
     #[serde(default)]
@@ -2385,7 +2402,7 @@ pub struct DesktopPendingApprovalDisplay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPendingApprovalSubject {
     pub kind: String,
     pub scope: String,
@@ -2414,7 +2431,7 @@ pub enum DesktopApprovalRecordedDecision {
 
 /// Server-owned approval decision record.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApprovalDecisionRecord {
     pub run_id: String,
     pub call_id: String,
@@ -2436,7 +2453,7 @@ pub enum DesktopApprovalRouteState {
 
 /// Exact approval guard echoed back to the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApprovalDecisionRequest {
     pub approval_request_id: String,
     pub tool_call_hash: String,
@@ -2451,7 +2468,7 @@ pub struct DesktopApprovalDecisionRequest {
 
 /// Receipt from resolving a pending approval.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopApprovalCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2471,7 +2488,7 @@ pub struct DesktopApprovalCommandReceipt {
 
 /// Exact stale-safe binding for one recommended task verification check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopVerificationRerunRequest {
     pub request_id: String,
     pub task_id: String,
@@ -2543,7 +2560,7 @@ pub enum DesktopVerificationRecommendationKind {
 
 /// Renderer-safe evidence links for verification inspection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopVerificationEvidence {
     pub check_run_id: Option<String>,
     pub check_spec_id: Option<String>,
@@ -2559,7 +2576,7 @@ pub struct DesktopVerificationEvidence {
 
 /// Shared verification recommendation and evidence view.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopVerificationView {
     pub task_id: String,
     pub step_id: String,
@@ -2575,7 +2592,7 @@ pub struct DesktopVerificationView {
 
 /// Receipt from one envelope-protected verification rerun.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopVerificationRerunCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2588,7 +2605,7 @@ pub struct DesktopVerificationRerunCommandReceipt {
 
 /// Exact stale-safe identity for one current Task integration review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskIntegrationReviewRequest {
     pub request_id: String,
     pub task_id: String,
@@ -2615,7 +2632,7 @@ pub enum DesktopIntegrationLaneCandidateKind {
 
 /// Bounded, private-ref-free provenance for one reviewed integration lane.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskIntegrationLaneView {
     pub lane_id: String,
     pub candidate_kind: DesktopIntegrationLaneCandidateKind,
@@ -2625,7 +2642,7 @@ pub struct DesktopTaskIntegrationLaneView {
 
 /// Exact current Task integration review returned by the local server.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskIntegrationReviewView {
     pub schema_version: u16,
     pub request: DesktopTaskIntegrationReviewRequest,
@@ -2656,7 +2673,7 @@ pub enum DesktopIntegrationPromotionStatus {
 
 /// Terminal, renderer-safe result of accepting one exact Task integration review.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskIntegrationAcceptanceView {
     pub request: DesktopTaskIntegrationReviewRequest,
     pub promotion_status: DesktopIntegrationPromotionStatus,
@@ -2671,7 +2688,7 @@ pub struct DesktopTaskIntegrationAcceptanceView {
 
 /// Receipt from accepting one exact Task integration review.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopTaskIntegrationAcceptanceCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2684,14 +2701,14 @@ pub struct DesktopTaskIntegrationAcceptanceCommandReceipt {
 
 /// Stable server error envelope. The native shell only projects the bounded code to the renderer.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct DesktopErrorResponse {
     pub error: DesktopErrorBody,
 }
 
 /// Stable server error body.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct DesktopErrorBody {
     pub code: String,
     pub message: String,
@@ -2701,7 +2718,7 @@ pub(crate) struct DesktopErrorBody {
 
 /// Typed plan decision request crossing the native trust boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanDecisionRequest {
     pub plan_id: String,
     pub expected_plan_hash: String,
@@ -2723,7 +2740,7 @@ pub enum DesktopPlanDecisionAction {
 
 /// Idempotent receipt for one typed plan decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanDecisionCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2739,12 +2756,9 @@ pub struct DesktopPlanDecisionCommandReceipt {
     /// RFC-0067: adopted candidate hash for receipt idempotency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_hash: Option<String>,
-    /// RFC-0067: durable Task phase right after admission (Preparing/Ready/Blocked/Paused).
+    /// Direct Task phase right after Plan approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_phase: Option<DesktopTaskExecutionPhase>,
-    /// RFC-0067: typed blocker when admission held the Task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_blocker: Option<DesktopTaskBlocker>,
     /// Run identity of the supervised revision plan review started by a `Revise` action, so the
     /// renderer can track the child run's lifecycle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2758,10 +2772,8 @@ pub struct DesktopPlanDecisionCommandReceipt {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopTaskExecutionPhase {
-    Preparing,
     Ready,
     Running,
-    Blocked,
     Paused,
     Completed,
     Failed,
@@ -2769,34 +2781,12 @@ pub enum DesktopTaskExecutionPhase {
     Interrupted,
 }
 
-/// RFC-0067 typed blocker mirrored across the native trust boundary.
-///
-/// Field names follow the durable kernel record; the renderer only displays these facts and
-/// never reconstructs Task state from them.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct DesktopTaskBlocker {
-    pub reason_code: String,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected_step: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected_capability: Option<String>,
-    pub retryable: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_actions: Vec<String>,
-    pub evidence_digest: String,
-    pub created_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_at_ms: Option<u64>,
-}
-
 /// Bounded plan review surface crossing the native trust boundary.
 ///
 /// Draft-specific fields are present only when the latest attempt committed a typed draft; the
 /// status always projects so a durable attempt without a draft stays visible across reloads.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanReview {
     pub plan_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2823,7 +2813,7 @@ pub struct DesktopPlanReview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanReviewCandidate {
     pub content_hash: String,
     pub content: String,
@@ -2831,7 +2821,7 @@ pub struct DesktopPlanReviewCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanRevisionSummary {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2848,7 +2838,6 @@ pub struct DesktopPlanRevisionSummary {
 pub enum DesktopPlanReviewStatus {
     Started,
     WaitingForInput,
-    Finalizing,
     DraftReady,
     CompileFailed,
     CompletedWithoutDraft,
@@ -2866,7 +2855,6 @@ pub enum DesktopPlanRevisionStatus {
     Queued,
     Researching,
     WaitingForInput,
-    Finalizing,
     Failed,
     Cancelled,
     Succeeded,
@@ -2892,7 +2880,7 @@ pub enum DesktopPlanReviewSource {
 
 /// Complete immutable plan detail returned only for one exact plan hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanReviewDetail {
     pub plan_id: String,
     pub plan_hash: String,
@@ -2912,7 +2900,7 @@ pub struct DesktopPlanReviewDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanReviewStepDetail {
     pub step_id: String,
     pub title: String,
@@ -2962,7 +2950,7 @@ pub enum DesktopPlanIsolationMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanSuggestedCheck {
     pub check_spec_id: String,
     pub command: DesktopPlanCheckCommand,
@@ -2972,7 +2960,7 @@ pub struct DesktopPlanSuggestedCheck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanCheckCommand {
     pub command: String,
     #[serde(default)]
@@ -2992,7 +2980,7 @@ pub enum DesktopPlanCheckEffect {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanLineage {
     pub source: DesktopPlanSourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3003,7 +2991,7 @@ pub struct DesktopPlanLineage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanSourceRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
@@ -3020,7 +3008,7 @@ pub struct DesktopPlanSourceRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopPlanSourceTurn {
     pub session_scope_id: String,
     pub message_id: String,
@@ -3028,8 +3016,12 @@ pub struct DesktopPlanSourceTurn {
 }
 
 /// Exact immutable projection of one durable request for user input.
+fn default_user_input_required() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputRequest {
     pub identity: DesktopUserInputIdentity,
     pub request_hash: String,
@@ -3047,7 +3039,7 @@ pub struct DesktopUserInputRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputIdentity {
     pub session_scope_id: String,
     pub root_logical_run_id: String,
@@ -3097,39 +3089,22 @@ pub enum DesktopUserInputAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputQuestion {
     pub id: String,
-    pub header: String,
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default = "default_user_input_required")]
     pub required: bool,
-    pub field: DesktopUserInputField,
+    #[serde(default)]
+    pub options: Vec<DesktopUserInputOption>,
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DesktopUserInputField {
-    Text {
-        multiline: bool,
-        max_chars: u32,
-    },
-    Number,
-    Integer,
-    Boolean,
-    SingleSelect {
-        options: Vec<DesktopUserInputOption>,
-        allow_other: bool,
-    },
-    MultiSelect {
-        options: Vec<DesktopUserInputOption>,
-        max_selected: u32,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputOption {
     pub id: String,
     pub label: String,
@@ -3148,7 +3123,7 @@ pub enum DesktopUserInputStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputAnswerReceipt {
     pub command_id: String,
     pub decision: DesktopUserInputDecisionKind,
@@ -3167,7 +3142,7 @@ pub enum DesktopUserInputDecisionKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DesktopUserInputResolution {
     Consumed,
     Declined,
@@ -3179,19 +3154,10 @@ pub enum DesktopUserInputResolution {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DesktopUserInputAnswerValue {
     Text {
         value: String,
-    },
-    Number {
-        value: String,
-    },
-    Integer {
-        value: i64,
-    },
-    Boolean {
-        value: bool,
     },
     SingleSelect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3201,18 +3167,20 @@ pub enum DesktopUserInputAnswerValue {
     },
     MultiSelect {
         option_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other: Option<String>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputAnswer {
     pub question_id: String,
     pub value: DesktopUserInputAnswerValue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DesktopUserInputDecision {
     Submitted {
         answers: Vec<DesktopUserInputAnswer>,
@@ -3222,7 +3190,7 @@ pub enum DesktopUserInputDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputDecisionRequest {
     pub generation: u32,
     pub expected_request_hash: String,
@@ -3232,7 +3200,7 @@ pub struct DesktopUserInputDecisionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopUserInputDecisionCommandReceipt {
     pub command_id: String,
     pub client_id: String,

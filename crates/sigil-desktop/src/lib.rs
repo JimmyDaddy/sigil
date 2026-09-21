@@ -6,6 +6,7 @@
 //! credential primitives to its renderer.
 
 mod client;
+mod control_log_recovery;
 mod dto;
 mod events;
 mod launcher;
@@ -14,6 +15,13 @@ mod protocol;
 mod secret;
 
 pub use client::{DesktopClientError, DesktopHttpClient, DesktopRunEventStream};
+pub use control_log_recovery::{
+    DesktopCommandJournalBinding, DesktopControlLogRecoveryAction,
+    DesktopControlLogRecoveryAuthorityPreview, DesktopControlLogRecoveryImpact,
+    DesktopControlLogRecoveryOutcome, DesktopControlLogRecoveryPreview,
+    DesktopControlLogRecoveryRequest, DesktopControlLogRecoveryScope,
+    DesktopControlLogUnresolvedCommand,
+};
 pub use dto::{
     DesktopAgentActivityItem, DesktopAgentActivityStatus, DesktopAgentActivityView,
     DesktopAgentHandoffStatus, DesktopAgentUsageSummary, DesktopApplicationAgentBinding,
@@ -96,8 +104,8 @@ pub use dto::{
     DesktopSessionRouteTransitionView, DesktopSessionSnapshot, DesktopSessionTranscriptMessage,
     DesktopSessionTranscriptPage, DesktopSupportBundleExport, DesktopSupportCheck,
     DesktopSupportDoctorReport, DesktopSupportEnvironment, DesktopSupportPrivacy,
-    DesktopSupportStatus, DesktopSupportSummary, DesktopTaskBlocker,
-    DesktopTaskContinuationRequest, DesktopTaskExecutionBinding, DesktopTaskExecutionPhase,
+    DesktopSupportStatus, DesktopSupportSummary, DesktopTaskContinuationRequest,
+    DesktopTaskExecutionBinding, DesktopTaskExecutionPhase,
     DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopTaskIntegrationAcceptanceView,
     DesktopTaskIntegrationLaneView, DesktopTaskIntegrationReviewRequest,
     DesktopTaskIntegrationReviewView, DesktopTaskPauseCommandReceipt, DesktopTaskPauseRequest,
@@ -110,13 +118,13 @@ pub use dto::{
     DesktopTranscriptRole, DesktopUserInputAction, DesktopUserInputAnswer,
     DesktopUserInputAnswerReceipt, DesktopUserInputAnswerValue, DesktopUserInputDecision,
     DesktopUserInputDecisionCommandReceipt, DesktopUserInputDecisionKind,
-    DesktopUserInputDecisionRequest, DesktopUserInputField, DesktopUserInputIdentity,
-    DesktopUserInputOption, DesktopUserInputPurpose, DesktopUserInputQuestion,
-    DesktopUserInputRequest, DesktopUserInputResolution, DesktopUserInputSource,
-    DesktopUserInputStatus, DesktopVerificationAction, DesktopVerificationCheckStatus,
-    DesktopVerificationEvidence, DesktopVerificationRecommendationKind,
-    DesktopVerificationRerunCommandReceipt, DesktopVerificationRerunRequest,
-    DesktopVerificationScope, DesktopVerificationVerdict, DesktopVerificationView,
+    DesktopUserInputDecisionRequest, DesktopUserInputIdentity, DesktopUserInputOption,
+    DesktopUserInputPurpose, DesktopUserInputQuestion, DesktopUserInputRequest,
+    DesktopUserInputResolution, DesktopUserInputSource, DesktopUserInputStatus,
+    DesktopVerificationAction, DesktopVerificationCheckStatus, DesktopVerificationEvidence,
+    DesktopVerificationRecommendationKind, DesktopVerificationRerunCommandReceipt,
+    DesktopVerificationRerunRequest, DesktopVerificationScope, DesktopVerificationVerdict,
+    DesktopVerificationView,
 };
 pub use events::{
     DESKTOP_PROTOCOL_EVENT_SCHEMA_VERSION, DESKTOP_PUBLIC_RUN_EVENT_SCHEMA_VERSION,

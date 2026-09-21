@@ -11,10 +11,10 @@ import {
   presentTaskStatus,
   presentTerminalTask,
   type ProductStatus,
+  type TaskExecutionDisplayPhase,
 } from "./statusPresentation";
 import type {
   RunStatus,
-  TaskExecutionPhase,
   TimelineTerminalTask,
   ToolArtifactAvailability,
 } from "./types";
@@ -34,7 +34,7 @@ const runStatusMappings: ReadonlyArray<readonly [RunStatus, ProductStatus]> = [
   ["interrupted", "interrupted"],
 ];
 
-const taskPhases: readonly TaskExecutionPhase[] = [
+const taskPhases: readonly TaskExecutionDisplayPhase[] = [
   "preparing",
   "ready",
   "running",

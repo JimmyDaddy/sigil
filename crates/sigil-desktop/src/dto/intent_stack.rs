@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 
 /// Stable reference to one immutable Intent definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentVersionRef {
     pub intent_id: String,
     pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentAcceptanceCriterion {
     pub criterion_id: String,
     pub statement: String,
@@ -142,7 +142,7 @@ pub enum DesktopIntentVerificationImpact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DesktopIntentSource {
     UserTurn { source_turn_id: String },
     AcceptedSuggestion { source_turn_id: String },
@@ -150,7 +150,7 @@ pub enum DesktopIntentSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentArtifactSummary {
     pub artifact_id: String,
     pub artifact_kind: DesktopIntentArtifactKind,
@@ -161,7 +161,7 @@ pub struct DesktopIntentArtifactSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentConflict {
     pub code: DesktopIntentOperationErrorCode,
     #[serde(default)]
@@ -172,7 +172,7 @@ pub struct DesktopIntentConflict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntent {
     pub intent_ref: DesktopIntentVersionRef,
     pub title: String,
@@ -194,7 +194,7 @@ pub struct DesktopIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentStack {
     pub schema_version: u16,
     pub stack_id: String,
@@ -207,7 +207,7 @@ pub struct DesktopIntentStack {
 
 /// Bounded availability state returned for loaded sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum DesktopIntentStackState {
     Available {
         schema_version: u16,
@@ -220,13 +220,13 @@ pub enum DesktopIntentStackState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentDropPreviewRequest {
     pub intent_ref: DesktopIntentVersionRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentOperationFileSummary {
     pub normalized_relative_path: String,
     pub action: DesktopIntentOperationFileAction,
@@ -234,14 +234,14 @@ pub struct DesktopIntentOperationFileSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentVerificationImpactSummary {
     pub receipt_id: String,
     pub impact: DesktopIntentVerificationImpact,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentOperationPreview {
     pub schema_version: u16,
     pub operation_id: String,
@@ -262,7 +262,7 @@ pub struct DesktopIntentOperationPreview {
 
 /// Exact renderer-to-host request. It intentionally contains no path or authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentDropRequest {
     pub operation_id: String,
     pub stack_version: u64,
@@ -270,7 +270,7 @@ pub struct DesktopIntentDropRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentOperationExecution {
     pub preview: DesktopIntentOperationPreview,
     pub resolution: DesktopIntentOperationResolution,
@@ -281,7 +281,7 @@ pub struct DesktopIntentOperationExecution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopIntentDropCommandReceipt {
     pub command_id: String,
     pub client_id: String,

@@ -27,6 +27,8 @@ export interface TaskProductProjection {
   planStatus?: string;
   steps: TaskStepProjection[];
   checklist: TaskChecklistItem[];
+  /** A streamed checklist replacement was observed, including an explicit empty list. */
+  hasChecklistUpdate?: boolean;
   activeChildren: number;
   completedChildren: number;
   failedChildren: number;
@@ -87,19 +89,35 @@ export function projectCurrentTask(
     objective: started?.task?.objective,
     phase: phase?.task?.phase,
     status,
-    execution: execution?.task?.execution
-      ?? (plan?.task?.planVersion === undefined
-        ? undefined
-        : { kind: "plan", planVersion: plan.task.planVersion }),
+    execution: execution?.task?.execution,
     planVersion: plan?.task?.planVersion ?? phase?.task?.planVersion,
     planStatus: plan?.status,
     steps,
     checklist: checklist?.task?.checklist ?? [],
+    hasChecklistUpdate: checklist?.task?.checklist !== undefined,
     activeChildren: sumTaskCount(batches, "active"),
     completedChildren: sumTaskCount(batches, "completed"),
     failedChildren: sumTaskCount(batches, "failed"),
     lanes,
     canContinue: !NON_CONTINUABLE_TASK_STATUSES.has(status.toLowerCase()),
+  };
+}
+
+export function mergeTaskProductProjections(
+  durableTask: TaskProductProjection | undefined,
+  eventTask: TaskProductProjection | undefined,
+): TaskProductProjection | undefined {
+  if (eventTask === undefined) return durableTask;
+  if (durableTask === undefined || durableTask.taskId !== eventTask.taskId) return eventTask;
+  return {
+    ...durableTask,
+    ...eventTask,
+    objective: eventTask.objective ?? durableTask.objective,
+    execution: eventTask.execution ?? durableTask.execution,
+    steps: eventTask.steps.length === 0 ? durableTask.steps : eventTask.steps,
+    checklist: eventTask.hasChecklistUpdate || eventTask.checklist.length > 0
+      ? eventTask.checklist
+      : durableTask.checklist,
   };
 }
 

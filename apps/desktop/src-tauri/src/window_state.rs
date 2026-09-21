@@ -13,7 +13,7 @@ const MIN_WINDOW_WIDTH: u32 = 1_100;
 const MIN_WINDOW_HEIGHT: u32 = 720;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct WindowGeometry {
     pub(crate) x: i32,
     pub(crate) y: i32,
@@ -41,7 +41,7 @@ pub(crate) struct InitialWindowGeometry {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct WindowStateFile {
     schema_version: u16,
     geometry: WindowGeometry,

@@ -1,5 +1,5 @@
 import { useLocale } from "./i18n";
-import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail, TaskBlocker } from "./types";
+import type { ConversationPlanReview, PlanDecisionAction, PlanReviewDetail, PlanSuggestedCheckDetail } from "./types";
 import { Button } from "./ui/primitives";
 
 interface PlanCardProps {
@@ -7,8 +7,6 @@ interface PlanCardProps {
   disabled: boolean;
   busy: boolean;
   failure: boolean;
-  /** RFC-0067: durable admission blocker shown instead of the action row. */
-  blocker?: TaskBlocker;
   detail?: PlanReviewDetail;
   detailOpen: boolean;
   detailBusy: boolean;
@@ -23,7 +21,6 @@ export function PlanCard({
   disabled,
   busy,
   failure,
-  blocker,
   detail,
   detailOpen,
   detailBusy,
@@ -128,7 +125,7 @@ export function PlanCard({
               </Button>
             </div>
           )}
-          {blocker !== undefined || review.allowedActions.length === 0 ? null : (
+          {review.allowedActions.length === 0 ? null : (
             <div className="plan-card-actions" aria-label={t("planReviewActions")}>
               {review.allowedActions.map((action) => (
                 <Button
@@ -215,12 +212,6 @@ export function PlanCard({
       {failure ? (
         <div className="plan-card-notice plan-card-notice-error" role="alert">
           {t("planDecisionFailed")}
-        </div>
-      ) : null}
-
-      {blocker !== undefined ? (
-        <div className="plan-card-notice plan-card-notice-error" role="alert">
-          <b>{t("planTaskBlocked")}</b> {blocker.summary}
         </div>
       ) : null}
 

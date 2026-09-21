@@ -55,6 +55,7 @@ struct OwnedRunStream {
 }
 
 struct RunProjection {
+    event_cursor: RunEventCursor,
     events: VecDeque<DesktopTimelineEvent>,
     event_text_bytes: usize,
     pending_approvals: BTreeMap<String, DesktopTimelineEvent>,
@@ -69,6 +70,14 @@ struct RunProjection {
     task_pause_observed: bool,
 }
 
+#[derive(Default)]
+struct ExecutionPreviewBinding {
+    tool_name: String,
+    admitted_sequence: u64,
+    execution_id: Option<String>,
+    revision: u64,
+}
+
 /// The public cursor advances only on durable payloads. Preview slots have independent
 /// revisions and cannot reopen a message replaced by a later committed publication.
 #[derive(Default)]
@@ -79,6 +88,8 @@ struct RunEventCursor {
     attempt: Option<String>,
     latest_live_revision: u64,
     live_revisions: BTreeMap<String, u64>,
+    execution_calls: BTreeMap<String, ExecutionPreviewBinding>,
+    terminal_execution_ids: BTreeMap<String, u64>,
     retired_tool_slots: BTreeSet<String>,
     retired_tool_arguments: BTreeSet<String>,
     text_retired: bool,
@@ -98,15 +109,34 @@ impl RunEventCursor {
             if self.terminal
                 || revision == 0
                 || base > self.durable_sequence
+                || event.replayable
+                || event.replay_id.is_some()
+                || event.sequence != base
+                || event.run_sequence != preview.base_sequence
+            {
+                return false;
+            }
+            if event.kind == DesktopTimelineEventKind::ToolProgress {
+                return self.accept_execution_preview(event, revision);
+            }
+            let Some(attempt) = preview
+                .attempt_id
+                .as_deref()
+                .filter(|id| valid_preview_identity(id))
+            else {
+                return false;
+            };
+            if event.execution_id.is_some()
+                || !valid_preview_identity(&preview.slot_id)
                 || base < self.retired_preview_sequence
             {
                 return false;
             }
-            if self.attempt.as_deref() != Some(&preview.attempt_id) {
+            if self.attempt.as_deref() != Some(attempt) {
                 if revision <= self.latest_live_revision {
                     return false;
                 }
-                self.attempt = Some(preview.attempt_id.clone());
+                self.attempt = Some(attempt.to_owned());
                 self.live_revisions.clear();
                 self.retired_tool_slots.clear();
                 self.retired_tool_arguments.clear();
@@ -149,6 +179,7 @@ impl RunEventCursor {
         if event.sequence <= self.durable_sequence {
             return false;
         }
+        self.retire_terminal_execution(event, true);
         if event.replayable {
             self.durable_sequence = event.sequence;
             if event.kind == DesktopTimelineEventKind::RunStarted {
@@ -166,10 +197,37 @@ impl RunEventCursor {
                 }
             }
             if event.kind == DesktopTimelineEventKind::ToolCompleted
-                && let Some(slot) = &event.item_id
-                && self.retired_tool_arguments.len() < 4
+                && let Some(slot) = event
+                    .item_id
+                    .as_ref()
+                    .filter(|id| valid_preview_identity(id))
             {
-                self.retired_tool_arguments.insert(slot.clone());
+                if self.retired_tool_arguments.len() < 4 {
+                    self.retired_tool_arguments.insert(slot.clone());
+                }
+                if self.execution_calls.len() < MAX_ATTACHMENT_EVENTS
+                    && let Some(tool_name) = event
+                        .tool_name
+                        .as_ref()
+                        .filter(|name| valid_preview_identity(name))
+                {
+                    self.execution_calls.entry(slot.clone()).or_insert_with(|| {
+                        ExecutionPreviewBinding {
+                            tool_name: tool_name.clone(),
+                            admitted_sequence: event.sequence,
+                            ..ExecutionPreviewBinding::default()
+                        }
+                    });
+                }
+            }
+            if event.kind == DesktopTimelineEventKind::ToolResult
+                && let Some(call) = &event.item_id
+            {
+                self.execution_calls.remove(call);
+                if let Some(execution) = &event.execution_id {
+                    self.terminal_execution_ids.remove(execution);
+                }
+                self.prune_terminal_previews();
             }
             if event.kind == DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
                 || (event.kind == DesktopTimelineEventKind::UserInputChanged
@@ -206,10 +264,153 @@ impl RunEventCursor {
             ) {
                 self.terminal = true;
                 self.live_revisions.clear();
+                self.execution_calls.clear();
             }
         }
         true
     }
+
+    fn prune_terminal_previews(&mut self) {
+        self.terminal_execution_ids.retain(|_, sequence| {
+            self.execution_calls.values().any(|binding| {
+                binding.execution_id.is_none() && binding.admitted_sequence <= *sequence
+            })
+        });
+    }
+
+    fn retire_terminal_execution(&mut self, event: &DesktopTimelineEvent, track_unbound: bool) {
+        if let Some(execution) = terminal_execution_id(event) {
+            self.execution_calls
+                .retain(|_, binding| binding.execution_id.as_deref() != Some(execution));
+            self.prune_terminal_previews();
+            if track_unbound
+                && self.execution_calls.values().any(|binding| {
+                    binding.execution_id.is_none() && binding.admitted_sequence <= event.sequence
+                })
+            {
+                if self.terminal_execution_ids.len() == MAX_ATTACHMENT_EVENTS
+                    && !self.terminal_execution_ids.contains_key(execution)
+                {
+                    // Only unresolved admissions older than this overflow lose ephemeral progress;
+                    // later commands remain admissible and durable command cards remain intact.
+                    self.execution_calls.retain(|_, binding| {
+                        binding.execution_id.is_some() || binding.admitted_sequence > event.sequence
+                    });
+                    self.prune_terminal_previews();
+                } else {
+                    self.terminal_execution_ids
+                        .insert(execution.to_owned(), event.sequence);
+                }
+            }
+        }
+    }
+
+    fn accept_execution_preview(&mut self, event: &DesktopTimelineEvent, revision: u64) -> bool {
+        let Some(preview) = &event.live_preview else {
+            return false;
+        };
+        let (Some(execution), Some(call)) =
+            (event.execution_id.as_deref(), event.item_id.as_deref())
+        else {
+            return false;
+        };
+        if self.terminal_execution_ids.contains_key(execution)
+            || preview.attempt_id.is_some()
+            || !valid_preview_identity(execution)
+            || !valid_preview_identity(call)
+            || preview.slot_id != execution
+        {
+            return false;
+        }
+        if self.execution_calls.iter().any(|(other_call, binding)| {
+            other_call != call && binding.execution_id.as_deref() == Some(execution)
+        }) {
+            return false;
+        }
+        let Some(binding) = self.execution_calls.get_mut(call) else {
+            return false;
+        };
+        if event.tool_name.as_deref() != Some(binding.tool_name.as_str())
+            || event.sequence < binding.admitted_sequence
+            || binding.revision >= revision
+            || binding
+                .execution_id
+                .as_deref()
+                .is_some_and(|id| id != execution)
+        {
+            return false;
+        }
+        binding.execution_id = Some(execution.to_owned());
+        binding.revision = revision;
+        true
+    }
+}
+
+fn retain_preview_after_event(old: &DesktopTimelineEvent, event: &DesktopTimelineEvent) -> bool {
+    if old.live_preview.is_none() {
+        return true;
+    }
+    if matches!(
+        event.kind,
+        DesktopTimelineEventKind::RunStarted
+            | DesktopTimelineEventKind::RunFinished
+            | DesktopTimelineEventKind::RunFailed
+            | DesktopTimelineEventKind::RunBlocked
+            | DesktopTimelineEventKind::RunPaused
+            | DesktopTimelineEventKind::RunInterrupted
+            | DesktopTimelineEventKind::RunCancelled
+    ) {
+        return false;
+    }
+    if is_execution_preview(old) {
+        return (event.kind != DesktopTimelineEventKind::ToolResult
+            || old.item_id != event.item_id)
+            && terminal_execution_id(event)
+                .is_none_or(|execution| old.execution_id.as_deref() != Some(execution));
+    }
+    match event.kind {
+        DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded => false,
+        DesktopTimelineEventKind::UserInputChanged
+            if event.status.as_deref() == Some("requested") =>
+        {
+            false
+        }
+        DesktopTimelineEventKind::ToolCompleted | DesktopTimelineEventKind::ToolResult => {
+            old.item_id != event.item_id
+        }
+        DesktopTimelineEventKind::AssistantMessage => {
+            old.kind
+                != if event.assistant_kind.as_deref() == Some("reasoning_trace") {
+                    DesktopTimelineEventKind::ReasoningDelta
+                } else {
+                    DesktopTimelineEventKind::AssistantDelta
+                }
+        }
+        _ => true,
+    }
+}
+
+fn terminal_execution_id(event: &DesktopTimelineEvent) -> Option<&str> {
+    event
+        .terminal_task
+        .as_ref()
+        .filter(|task| {
+            matches!(
+                task.status.as_str(),
+                "exited" | "failed" | "cancelled" | "interrupted"
+            )
+        })
+        .map(|task| task.task_id.as_str())
+}
+
+fn valid_preview_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+}
+
+fn is_execution_preview(event: &DesktopTimelineEvent) -> bool {
+    event.live_preview.is_some()
+        && event.kind == DesktopTimelineEventKind::ToolProgress
+        && event.execution_id.is_some()
 }
 
 struct RunSnapshotReconciliation {
@@ -350,7 +551,6 @@ impl DesktopRunStreamOwner {
             stream.projection.stream_state = DesktopRunStreamState::Connecting;
             stream.projection.stream_message = None;
             let initial_cursor = stream.projection.last_replay_id.clone();
-            let initial_sequence = stream.projection.last_sequence;
             let owner = self.clone();
             stream.task = Some(tauri::async_runtime::spawn(follow_run(
                 owner,
@@ -362,7 +562,6 @@ impl DesktopRunStreamOwner {
                 owner_revision,
                 run,
                 initial_cursor,
-                initial_sequence,
             )));
         }
         stream.projection.snapshot()
@@ -415,6 +614,38 @@ impl DesktopRunStreamOwner {
         }
         if state == DesktopRunStreamState::Terminal {
             stream.projection.run_status = terminal_status(stream.projection.run_status);
+        }
+    }
+
+    /// The cursor lives with the retained projection, so a replacement SSE follower preserves
+    /// completed-call admission and result retirement instead of inventing a provider attempt.
+    async fn record_stream_event(&self, event: DesktopTimelineEvent) -> Option<bool> {
+        let key = stream_key(&event.workspace_id, &event.run_id);
+        let mut streams = self.streams.lock().await;
+        let stream = streams.get_mut(&key)?;
+        if !stream.projection.accept_stream_event(&event) {
+            return None;
+        }
+        stream.projection.push(event);
+        Some(stream.projection.is_settled())
+    }
+
+    async fn reset_event_cursor(&self, workspace_id: &str, run_id: &str) {
+        if let Some(stream) = self
+            .streams
+            .lock()
+            .await
+            .get_mut(&stream_key(workspace_id, run_id))
+        {
+            stream.projection.event_cursor = RunEventCursor::default();
+            stream.projection.last_sequence = 0;
+            stream.projection.last_replay_id = None;
+            stream
+                .projection
+                .events
+                .retain(|event| event.live_preview.is_none());
+            stream.projection.event_text_bytes =
+                stream.projection.events.iter().map(event_text_bytes).sum();
         }
     }
 
@@ -528,8 +759,23 @@ fn settled_terminal_reattach_snapshot(
 }
 
 impl RunProjection {
+    fn accept_stream_event(&mut self, event: &DesktopTimelineEvent) -> bool {
+        if is_execution_preview(event)
+            && event.execution_id.as_ref().is_some_and(|execution| {
+                self.terminal_tasks
+                    .get(execution)
+                    .and_then(terminal_execution_id)
+                    .is_some()
+            })
+        {
+            return false;
+        }
+        self.event_cursor.accept(event)
+    }
+
     fn new(run_status: DesktopRunStatus, has_gap: bool) -> Self {
         Self {
+            event_cursor: RunEventCursor::default(),
             events: VecDeque::new(),
             event_text_bytes: 0,
             pending_approvals: BTreeMap::new(),
@@ -592,6 +838,12 @@ impl RunProjection {
         }
         self.pending_approvals = canonical;
         self.terminal_tasks = canonical_terminal_tasks;
+        for event in self.terminal_tasks.values() {
+            self.event_cursor.retire_terminal_execution(event, false);
+            self.events
+                .retain(|old| retain_preview_after_event(old, event));
+        }
+        self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
         self.last_registry_revision = run.stream_sequence;
         self.run_status = run.status;
         true
@@ -599,60 +851,43 @@ impl RunProjection {
 
     fn push(&mut self, event: DesktopTimelineEvent) {
         if let Some(preview) = &event.live_preview {
+            let execution = is_execution_preview(&event);
             self.events.retain(|old| {
                 old.live_preview.as_ref().is_none_or(|old_preview| {
+                    if is_execution_preview(old) != execution {
+                        return true;
+                    }
+                    if execution {
+                        return old.execution_id != event.execution_id;
+                    }
                     old_preview.attempt_id == preview.attempt_id
                         && old_preview.slot_id != preview.slot_id
                 })
             });
+            // Four execution snapshots and four provider snapshots have separate eviction budgets.
             while self
                 .events
                 .iter()
-                .filter(|event| event.live_preview.is_some())
+                .filter(|old| old.live_preview.is_some() && is_execution_preview(old) == execution)
                 .count()
                 >= 4
             {
-                if let Some(index) = self
-                    .events
-                    .iter()
-                    .position(|event| event.live_preview.is_some())
-                {
+                if let Some(index) = self.events.iter().position(|old| {
+                    old.live_preview.is_some() && is_execution_preview(old) == execution
+                }) {
                     self.events.remove(index);
                 }
             }
-            self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
-        } else if matches!(
-            event.kind,
-            DesktopTimelineEventKind::AssistantMessage
-                | DesktopTimelineEventKind::ProviderTurnPartialOutputDiscarded
-                | DesktopTimelineEventKind::ToolCompleted
-                | DesktopTimelineEventKind::ToolResult
-                | DesktopTimelineEventKind::RunFinished
-                | DesktopTimelineEventKind::RunFailed
-                | DesktopTimelineEventKind::RunBlocked
-                | DesktopTimelineEventKind::RunPaused
-                | DesktopTimelineEventKind::RunInterrupted
-                | DesktopTimelineEventKind::RunCancelled
-                | DesktopTimelineEventKind::RunStarted
-        ) || (event.kind == DesktopTimelineEventKind::UserInputChanged
-            && event.status.as_deref() == Some("requested"))
-        {
-            self.events.retain(|old| {
-                old.live_preview.is_none()
-                    || matches!(
-                        event.kind,
-                        DesktopTimelineEventKind::ToolCompleted
-                            | DesktopTimelineEventKind::ToolResult
-                    ) && old.item_id != event.item_id
-                    || event.kind == DesktopTimelineEventKind::AssistantMessage
-                        && old.kind
-                            != if event.assistant_kind.as_deref() == Some("reasoning_trace") {
-                                DesktopTimelineEventKind::ReasoningDelta
-                            } else {
-                                DesktopTimelineEventKind::AssistantDelta
-                            }
-            });
-            self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
+        } else {
+            self.events
+                .retain(|old| retain_preview_after_event(old, &event));
+        }
+        self.event_text_bytes = self.events.iter().map(event_text_bytes).sum();
+        if event.replayable {
+            self.last_sequence = self.last_sequence.max(event.sequence);
+        }
+        if let Some(replay_id) = event.replay_id.as_ref() {
+            self.last_replay_id = Some(replay_id.clone());
         }
         if self.events.iter().any(|current| {
             event.live_preview.is_none()
@@ -660,12 +895,6 @@ impl RunProjection {
                 && event_identity(current) == event_identity(&event)
         }) {
             return;
-        }
-        if event.replayable {
-            self.last_sequence = self.last_sequence.max(event.sequence);
-        }
-        if let Some(replay_id) = event.replay_id.as_ref() {
-            self.last_replay_id = Some(replay_id.clone());
         }
         match event.kind {
             DesktopTimelineEventKind::TerminalLifecycle => {
@@ -802,13 +1031,8 @@ async fn follow_run(
     owner_revision: String,
     initial_run: DesktopRunSnapshot,
     mut cursor: Option<String>,
-    last_sequence: u64,
 ) {
     let run_id = initial_run.id.clone();
-    let mut event_cursor = RunEventCursor {
-        durable_sequence: last_sequence,
-        ..RunEventCursor::default()
-    };
     publish_status(
         &owner,
         &app,
@@ -922,7 +1146,7 @@ async fn follow_run(
                         }
                     }
                     cursor = None;
-                    event_cursor.durable_sequence = 0;
+                    owner.reset_event_cursor(&workspace_id, &run_id).await;
                     publish_status(
                         &owner,
                         &app,
@@ -949,10 +1173,9 @@ async fn follow_run(
                 Ok(event) => event,
                 Err(_) => break,
             };
-            if !event_cursor.accept(&timeline) {
+            let Some(settled) = owner.record_stream_event(timeline.clone()).await else {
                 continue;
-            }
-            let settled = owner.record_event(timeline.clone()).await;
+            };
             if app.emit(DESKTOP_RUN_EVENT_NAME, timeline).is_err() {
                 return;
             }
@@ -1060,6 +1283,10 @@ async fn terminal_snapshot(
         status: Some(status.to_owned()),
         assistant_kind: None,
         tool_input: None,
+        execution_id: None,
+        execution_started_at_ms: None,
+        execution_updated_at_ms: None,
+        display_call_id: None,
         approval: None,
         approval_request_id: None,
         tool_execution: None,
@@ -1108,6 +1335,10 @@ fn terminal_snapshot_timeline(
         status: Some(task.status.clone()),
         assistant_kind: None,
         tool_input: None,
+        execution_id: Some(task.task_id.clone()),
+        execution_started_at_ms: None,
+        execution_updated_at_ms: Some(task.emitted_at_ms),
+        display_call_id: None,
         approval: None,
         approval_request_id: None,
         tool_execution: None,
@@ -1184,7 +1415,9 @@ fn event_text_bytes(event: &DesktopTimelineEvent) -> usize {
             + approval.preview_summary.as_ref().map_or(0, String::len)
             + approval.preview_body.as_ref().map_or(0, String::len)
     });
-    event.text.as_ref().map_or(0, String::len) + approval_bytes
+    event.text.as_ref().map_or(0, String::len)
+        + event.tool_input.as_ref().map_or(0, String::len)
+        + approval_bytes
 }
 
 fn terminal_status(status: DesktopRunStatus) -> DesktopRunStatus {

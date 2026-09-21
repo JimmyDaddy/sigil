@@ -103,6 +103,17 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
   const appearance = useAppearance();
   const { t } = useLocale();
   const { notify } = useNotifications();
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+    void bridge.subscribeWorkspaceCleanupFailure?.(() => {
+      notify({ tone: "error", message: t("workspaceExitCleanupFailed") });
+    }).then((release) => {
+      if (disposed) release();
+      else unsubscribe = release;
+    }).catch(() => undefined);
+    return () => { disposed = true; unsubscribe?.(); };
+  }, [bridge, notify, t]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspaceSummary[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>();
@@ -1090,7 +1101,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               }}
             />
           ) : desktopView === "support" && activeWorkspace !== undefined ? (
-            <SupportPage bridge={bridge} workspaceId={activeWorkspace.id} onBack={back} />
+            <SupportPage bridge={bridge} workspaceId={activeWorkspace.id} session={selectedSession} onBack={back} />
           ) : desktopView === "library" && activeWorkspace !== undefined ? (
             <ConversationLibrary
               bridge={bridge}
@@ -1160,9 +1171,9 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 </>
               )}
             </div>
-          ) : providerInventoryState === "loading" ? (
+          ) : selectedSession === undefined && providerInventoryState === "loading" ? (
             <LoadingState label={t("loadingProviderConnections")} />
-          ) : providerInventoryState === "error" ? (
+          ) : selectedSession === undefined && providerInventoryState === "error" ? (
             <div className="conversation-empty" role="alert">
               <p className="eyebrow">{activeWorkspace.displayName}</p>
               <h1>{t("providerConnectionsUnavailable")}</h1>
@@ -1175,7 +1186,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                 {t("retry")}
               </Button>
             </div>
-          ) : providerInventory !== undefined
+          ) : selectedSession === undefined && providerInventory !== undefined
             && providerInventory.configMode !== "v2"
             && !providerInventoryIsUsable(providerInventory) ? (
               <div className="conversation-empty" role="alert">
@@ -1190,7 +1201,7 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
                   {t("openSettings")}
                 </Button>
               </div>
-            ) : providerInventory !== undefined
+            ) : selectedSession === undefined && providerInventory !== undefined
             && !providerInventoryIsUsable(providerInventory) ? (
               <ProviderSetup
                 key={activeWorkspace.id}
@@ -1214,6 +1225,17 @@ function DesktopApp({ bridge }: { readonly bridge: DesktopBridge }) {
               </div>
             ) : (
             <div className="conversation-surface" inert={conversationNavigation !== undefined || undefined}>
+              {providerInventoryState === "error" ? (
+                <div role="status" className="conversation-inventory-notice">
+                  <span>{t("providerConnectionsUnavailable")}</span>
+                  <Button type="button" onClick={() => void loadProviderInventory(activeWorkspace.id)}>{t("retry")}</Button>
+                </div>
+              ) : providerInventory !== undefined && !providerInventoryIsUsable(providerInventory) ? (
+                <div role="status" className="conversation-inventory-notice">
+                  <span>{t("providerConnectionsUnavailable")}</span>
+                  <Button type="button" onClick={() => navigate("settings")}>{t("openSettings")}</Button>
+                </div>
+              ) : null}
               <ConversationPanel
                 key={selectedSession.id}
                 bridge={bridge}

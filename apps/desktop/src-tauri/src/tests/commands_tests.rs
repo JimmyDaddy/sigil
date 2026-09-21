@@ -432,8 +432,8 @@ fn conversation_display_projection_preserves_decimal_text_and_drops_private_iden
                 task_id: "task-restart".to_owned(),
                 phase: DesktopPublicTaskPhase::Execution,
                 status: "paused".to_owned(),
-                execution: Some(sigil_desktop::DesktopTaskExecutionBinding::Plan {
-                    plan_version: 2,
+                execution: Some(sigil_desktop::DesktopTaskExecutionBinding::Direct {
+                    admission_id: "admission-restart".to_owned(),
                 }),
                 plan_version: Some(2),
                 plan_status: Some("accepted".to_owned()),
@@ -627,6 +627,47 @@ fn tool_artifact_input_validation_enforces_opaque_ref_and_selector_caps() {
 }
 
 #[test]
+fn tool_artifact_search_ipc_defaults_and_positive_match_counts_validate() {
+    let input: DesktopToolArtifactReadInput = serde_json::from_value(serde_json::json!({
+        "artifactRef": format!("ta1_{}", "a".repeat(32)),
+        "selector": { "kind": "search_literal", "query": "needle" }
+    }))
+    .expect("omitted search coordinates should use defaults");
+    assert_eq!(
+        input.selector,
+        DesktopToolArtifactSelector::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 50,
+            context_lines: 0,
+        }
+    );
+    validate_tool_artifact_read_input(&input).expect("default search should validate");
+    for max_matches in [100, u64::MAX] {
+        let input = DesktopToolArtifactReadInput {
+            artifact_ref: input.artifact_ref.clone(),
+            selector: DesktopToolArtifactSelector::SearchLiteral {
+                query: "needle".to_owned(),
+                start_offset: 0,
+                max_matches,
+                context_lines: 0,
+            },
+        };
+        validate_tool_artifact_read_input(&input).expect("large positive request should validate");
+    }
+    let zero = DesktopToolArtifactReadInput {
+        artifact_ref: input.artifact_ref,
+        selector: DesktopToolArtifactSelector::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 0,
+            context_lines: 0,
+        },
+    };
+    assert!(validate_tool_artifact_read_input(&zero).is_err());
+}
+
+#[test]
 fn tool_artifact_errors_are_specific_and_path_free() {
     let unavailable = project_tool_artifact_client_error(DesktopClientError::Rejected {
         status: 404,
@@ -796,7 +837,35 @@ fn conversation_queue_action_validation_rejects_lossy_or_stale_shapes() {
             "action": { "action": "pause" }
         }),
     );
-    assert!(unknown_field.is_err());
+    assert!(unknown_field.is_ok());
+
+    let unknown_user_input_decision = serde_json::from_value::<
+        crate::ipc::DesktopUserInputDecisionInput,
+    >(serde_json::json!({
+        "sessionId": "session-input",
+        "requestId": "request-input",
+        "generation": 1,
+        "expectedRequestHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": { "kind": "submitted", "answers": [], "future": true }
+    }));
+    assert!(unknown_user_input_decision.is_ok());
+
+    let unknown_user_input_answer = serde_json::from_value::<
+        crate::ipc::DesktopUserInputDecisionInput,
+    >(serde_json::json!({
+        "sessionId": "session-input",
+        "requestId": "request-input",
+        "generation": 1,
+        "expectedRequestHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "decision": {
+            "kind": "submitted",
+            "answers": [{
+                "questionId": "scope",
+                "value": { "kind": "text", "value": "repo", "future": true }
+            }]
+        }
+    }));
+    assert!(unknown_user_input_answer.is_ok());
 }
 
 #[test]
@@ -871,7 +940,7 @@ fn task_continuation_requires_exact_task_and_optional_nonempty_guidance() {
             "permissionMode": "manual",
             "prompt": "must not become a chat turn"
         }));
-    assert!(unknown_field.is_err());
+    assert!(unknown_field.is_ok());
 }
 
 #[test]

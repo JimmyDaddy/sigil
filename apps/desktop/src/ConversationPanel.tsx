@@ -45,7 +45,6 @@ import type {
   PlanReviewDetail,
   ProviderConnectionInventory,
   ProviderTurnRecoveryPhase,
-  TaskBlocker,
   ProviderModelRef,
   ReasoningEffort,
   RunContext,
@@ -89,10 +88,12 @@ import {
   selectProviderTurnRecovery,
   selectTaskEvents,
   selectTerminalTasks,
+  selectSemanticLiveItems,
   semanticLiveItemFromTimelineEvent,
   terminalSignalFromTimelineEvent,
 } from "./features/conversation/liveEventReducer";
 import {
+  mergeTaskProductProjections,
   projectCurrentTask,
   type TaskProductProjection,
 } from "./features/conversation/taskProjection";
@@ -228,7 +229,6 @@ export function ConversationPanel({
   const [planDetailFailure, setPlanDetailFailure] = useState(false);
   const [planDecisionBusy, setPlanDecisionBusy] = useState(false);
   const [planDecisionFailure, setPlanDecisionFailure] = useState(false);
-  const [planDecisionBlocker, setPlanDecisionBlocker] = useState<TaskBlocker | undefined>(undefined);
   useEffect(() => {
     setPlanDecisionFailure(false);
   }, [
@@ -1385,6 +1385,7 @@ export function ConversationPanel({
       selectConversationTimeline(continuityState),
       selectDeltaBuffers(liveEventState),
       t,
+      selectSemanticLiveItems(liveEventState),
     );
     if (pendingPrompt === undefined) return next;
     return [...next, {
@@ -1420,20 +1421,7 @@ export function ConversationPanel({
     [durableTaskControl],
   );
   const taskProjection = useMemo<TaskProductProjection | undefined>(() => {
-    const currentTask = eventTask === undefined
-      ? durableTask
-      : durableTask === undefined || durableTask.taskId !== eventTask.taskId
-        ? eventTask
-        : {
-            ...durableTask,
-            ...eventTask,
-            objective: eventTask.objective ?? durableTask.objective,
-            execution: eventTask.execution ?? durableTask.execution,
-            steps: eventTask.steps.length === 0 ? durableTask.steps : eventTask.steps,
-            checklist: eventTask.checklist.length === 0
-              ? durableTask.checklist
-              : eventTask.checklist,
-          };
+    const currentTask = mergeTaskProductProjections(durableTask, eventTask);
     if (
       taskIntegrationReview === undefined
       || currentTask?.taskId === taskIntegrationReview.request.taskId
@@ -1876,7 +1864,6 @@ export function ConversationPanel({
     ) return;
     setPlanDecisionBusy(true);
     setPlanDecisionFailure(false);
-    setPlanDecisionBlocker(undefined);
     if (action === "revise") {
       // Freeze the old plan immediately. The canonical reload will replace this optimistic
       // no-authority view with awaiting-guidance/running/failed state.
@@ -1905,17 +1892,9 @@ export function ConversationPanel({
         if (summary.taskId === undefined) {
           throw new Error("Run plan decision did not return a task identity.");
         }
-        if (summary.taskBlocker !== undefined) {
-          // RFC-0067: admission already held the Task with a durable typed blocker; do not
-          // start a runner for a blocked Task.
-          setPlanDecisionBlocker(summary.taskBlocker);
-          setPlanDecisionBusy(false);
-          return;
-        }
         // `Run` durably creates the Task; execution is intentionally owned by the existing
         // Task continuation path so it gets the same foreground ownership, event attachment,
         // cancellation, and restart semantics as every other Task run.
-        setPlanDecisionBlocker(undefined);
         // The plan decision is the authoritative terminal transition, but the renderer may still
         // hold the just-finished review run in its local `active` projection. The typed server
         // command owns the real foreground gate, so allow this exact post-decision continuation
@@ -2483,7 +2462,6 @@ export function ConversationPanel({
           disabled={active || submissionBlocked || pendingApproval?.approval !== undefined}
           busy={planDecisionBusy}
           failure={planDecisionFailure}
-          blocker={planDecisionBlocker}
           detail={exactPlanDetail}
           detailOpen={planDetailOpen && exactPlanDetail !== undefined}
           detailBusy={planDetailBusy}
@@ -2757,6 +2735,8 @@ export function ConversationPanel({
                   text: row.text,
                   input: row.input,
                   status: row.status,
+                  executionStartedAtMs: row.executionStartedAtMs,
+                  executionUpdatedAtMs: row.executionUpdatedAtMs,
                   artifactRef: row.artifactRef,
                   artifactAvailability: row.artifactAvailability,
                   artifactHasMore: row.artifactHasMore,
@@ -2768,12 +2748,18 @@ export function ConversationPanel({
                     artifactRef: row.artifactRef!,
                     selector,
                   })}
+                onCancelExecution={row.executionId === undefined ? undefined : (() => {
+                  const execution = terminalTasks.find(({ runId, task }) => runId === row.executionRunId && task.taskId === row.executionId
+                    && (task.status === "starting" || task.status === "running"));
+                  return execution === undefined ? undefined : () => void cancelTerminalTask(execution.runId, execution.task);
+                })()}
+                cancelling={terminalTaskStoppingId === `${row.executionRunId}\u0000${row.executionId}`}
               />
             )
             : <Message key={row.key} displayId={row.key} message={row}
               onOpenExternalUrl={bridge.openExternalUrl} onReadContent={readMessageContent} />)
         ) : null}
-        {terminalTasks.map(({ runId, task }) => (
+        {terminalTasks.filter(({ runId, task }) => !rows.some((row) => row.kind === "tool" && row.executionRunId === runId && row.executionId === task.taskId)).map(({ runId, task }) => (
           <TerminalTaskCard
             key={`${runId}:${task.taskId}`}
             task={task}
@@ -3224,7 +3210,7 @@ function integrationReviewTaskProjection(
     taskId: review.request.taskId,
     phase: "integration",
     status: "awaiting_review",
-    execution: { kind: "plan", planVersion: review.request.planVersion },
+    execution: undefined,
     planVersion: review.request.planVersion,
     steps: [],
     checklist: [],

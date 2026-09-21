@@ -78,6 +78,10 @@ export interface LiveConversationDisplayItem {
   content: LiveConversationDisplayContent;
   /** Bounded live-only preview already projected by the allowlisted event bridge. */
   toolInput?: string;
+  executionId?: string;
+  executionStartedAtMs?: number;
+  executionUpdatedAtMs?: number;
+  toolApprovalRequestId?: string;
 }
 
 export interface ConversationTerminalFrontier {

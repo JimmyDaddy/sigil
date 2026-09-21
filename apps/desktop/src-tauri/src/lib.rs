@@ -38,12 +38,12 @@ use crate::{
         desktop_pause_task, desktop_pick_workspace, desktop_plan_decision, desktop_plan_detail,
         desktop_plan_session_catalog_batch, desktop_prepare_history_query,
         desktop_preview_intent_drop, desktop_provider_connections, desktop_provider_setup_catalog,
-        desktop_quarantine_session, desktop_read_tool_artifact, desktop_rename_session,
-        desktop_rerun_verification, desktop_resolve_approval, desktop_run_context,
-        desktop_save_provider_default_model, desktop_save_provider_setup, desktop_set_appearance,
-        desktop_start_run, desktop_support_doctor, desktop_task_integration_review,
-        desktop_transcript, desktop_user_input_decision, desktop_user_input_request,
-        desktop_verification, resolve_sigil_binary,
+        desktop_quarantine_session, desktop_read_tool_artifact, desktop_recover_control_log,
+        desktop_rename_session, desktop_rerun_verification, desktop_resolve_approval,
+        desktop_run_context, desktop_save_provider_default_model, desktop_save_provider_setup,
+        desktop_set_appearance, desktop_start_run, desktop_support_doctor,
+        desktop_task_integration_review, desktop_transcript, desktop_user_input_decision,
+        desktop_user_input_request, desktop_verification, resolve_sigil_binary,
     },
     state::DesktopAppState,
     update::{
@@ -176,6 +176,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             desktop_bootstrap,
             desktop_open_external_url,
             desktop_support_doctor,
+            desktop_recover_control_log,
             desktop_export_support_bundle,
             desktop_provider_connections,
             desktop_provider_setup_catalog,
@@ -286,7 +287,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tauri::async_runtime::spawn(async move {
                     updater.stop_background();
                     streams.stop_all().await;
-                    manager.close_all().await;
+                    let results = manager.close_all().await;
+                    if results.iter().any(|(_, result)| result.is_err()) {
+                        exit_state.cancel_cleanup();
+                        let _ = handle.emit("sigil-workspace-cleanup-failed", "cleanup_incomplete");
+                        return;
+                    }
                     exit_state.allow_exit();
                     handle.exit(0);
                 });

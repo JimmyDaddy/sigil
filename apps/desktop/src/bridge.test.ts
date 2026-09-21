@@ -7,6 +7,12 @@ import { desktopBridge } from "./bridge";
 
 beforeEach(() => { invoke.mockReset(); });
 
+it("sends command-history recovery only through its narrow native command", async () => {
+  invoke.mockResolvedValue({ Preview: {} });
+  await desktopBridge.recoverControlLog("workspace", "session", "Preview");
+  expect(invoke).toHaveBeenCalledWith("desktop_recover_control_log", { workspaceId: "workspace", sessionId: "session", action: "Preview" });
+});
+
 describe("native history observation cancellation", () => {
   it("does not prepare an already aborted query", async () => {
     const controller = new AbortController();

@@ -91,6 +91,46 @@ export interface SupportSaveSummary {
   fileName?: string;
 }
 
+export interface ControlLogRecoveryAuthorityPreview {
+  request: {
+    logical_journal_id: string;
+    operation_id: string;
+    from_generation: number;
+    successor_generation: number;
+    header_digest: string;
+    owner_context_digest: string;
+  };
+  old_namespace_hash: string;
+  successor_namespace_hash: string;
+  old_byte_length: number;
+  old_content_digest: string;
+  old_file_identity: string | null;
+  preview_digest: string;
+}
+
+export interface ControlLogRecoveryPreview {
+  authority: ControlLogRecoveryAuthorityPreview;
+  impact: {
+    verified_prefix_bytes: number;
+    verified_record_count: number;
+    verified_prefix_digest: string;
+    known_command_count: number;
+    affected_scope_count: number;
+    affected_scopes: { scope_digest: string; session_id: string | null; workspace_id: string | null }[];
+    scopes_truncated: boolean;
+    known_unresolved_count: number;
+    unresolved_commands: { key_digest: string; scope_digest: string; command_id: string; command_kind: string; phase: string }[];
+    commands_truncated: boolean;
+    unparsed_tail_bytes: number;
+    tail_command_count_unknown: boolean;
+  };
+}
+
+export type ControlLogRecoveryAction = "Preview" | { SealAndRotate: { preview: ControlLogRecoveryPreview } };
+export type ControlLogRecoveryOutcome =
+  | { Preview: ControlLogRecoveryPreview }
+  | { Activated: { logical_journal_id: string; command_generation: number } };
+
 export interface RecentWorkspaceSummary {
   id: string;
   displayName: string;
@@ -665,6 +705,7 @@ export type ConversationDisplaySource =
 export type ConversationDisplayStatus =
   | "recorded"
   | "requested"
+  | "running"
   | "waiting_for_approval"
   | "approved"
   | "denied"
@@ -701,6 +742,10 @@ export type ConversationDisplayContent =
       type: "tool";
       callId?: string;
       toolName?: string;
+      input?: string;
+      executionId?: string;
+      executionStartedAtMs?: number;
+      executionUpdatedAtMs?: number;
       output?: string;
       truncated: boolean;
       originalContentBytes: number;
@@ -790,7 +835,6 @@ export interface ConversationDisplayPage {
 export type PlanReviewStatus =
   | "started"
   | "waiting_for_input"
-  | "finalizing"
   | "draft_ready"
   | "compile_failed"
   | "completed_without_draft"
@@ -817,7 +861,6 @@ export type PlanRevisionStatus =
   | "queued"
   | "researching"
   | "waiting_for_input"
-  | "finalizing"
   | "failed"
   | "cancelled"
   | "succeeded";
@@ -857,37 +900,20 @@ export interface PlanDecisionSummary {
   planHash: string;
   action: PlanDecisionAction;
   taskId?: string;
-  /** RFC-0067: durable Task phase right after admission. */
   taskPhase?: TaskExecutionPhase;
-  /** RFC-0067: typed blocker when admission held the Task. */
-  taskBlocker?: TaskBlocker;
   revisionRunId?: string;
   userInputRequest?: UserInputRequest;
   replayed: boolean;
 }
 
 export type TaskExecutionPhase =
-  | "preparing"
   | "ready"
   | "running"
-  | "blocked"
   | "paused"
   | "completed"
   | "failed"
   | "cancelled"
   | "interrupted";
-
-export interface TaskBlocker {
-  reasonCode: string;
-  summary: string;
-  affectedStep?: string;
-  affectedCapability?: string;
-  retryable: boolean;
-  availableActions: string[];
-  evidenceDigest: string;
-  createdAtMs: number;
-  resolvedAtMs?: number;
-}
 
 export type PlanAgentRole = "planner" | "executor" | "subagent_read" | "subagent_write";
 export type PlanStepMode = "read" | "write" | "review" | "verify";
@@ -982,21 +1008,13 @@ export interface UserInputOption {
   description?: string;
 }
 
-export type UserInputField =
-  | { kind: "text"; multiline: boolean; maxChars: number }
-  | { kind: "number" }
-  | { kind: "integer" }
-  | { kind: "boolean" }
-  | { kind: "single_select"; options: UserInputOption[]; allowOther: boolean }
-  | { kind: "multi_select"; options: UserInputOption[]; maxSelected: number };
-
 export interface UserInputQuestion {
   id: string;
-  header: string;
   question: string;
   description?: string;
   required: boolean;
-  field: UserInputField;
+  options: UserInputOption[];
+  multiple: boolean;
 }
 
 export interface UserInputRequest {
@@ -1040,11 +1058,8 @@ export interface UserInputRequest {
 
 export type UserInputAnswerValue =
   | { kind: "text"; value: string }
-  | { kind: "number"; value: string }
-  | { kind: "integer"; value: number }
-  | { kind: "boolean"; value: boolean }
   | { kind: "single_select"; optionId?: string; other?: string }
-  | { kind: "multi_select"; optionIds: string[] };
+  | { kind: "multi_select"; optionIds: string[]; other?: string };
 
 export interface UserInputAnswer {
   questionId: string;
@@ -1859,12 +1874,10 @@ export type TimelineTaskPhase =
   | "planning"
   | "execution"
   | "integration"
-  | "synthesis"
   | "terminal";
 
 export type TaskExecutionBinding =
-  | { kind: "plan"; planVersion: number }
-  | { kind: "direct"; admissionId: string };
+  { kind: "direct"; admissionId: string };
 
 export interface TaskChecklistItem {
   itemId: string;
@@ -1954,7 +1967,7 @@ export interface TimelineEvent {
   replayId?: string;
   provisionalId?: string;
   livePreview?: {
-    attemptId: string;
+    attemptId?: string;
     slotId: string;
     revision: string;
     baseSequence: string;
@@ -1967,6 +1980,10 @@ export interface TimelineEvent {
   status?: string;
   assistantKind?: "tool_preamble" | "progress" | "reasoning_trace" | "final_answer";
   toolInput?: string;
+  executionId?: string;
+  executionStartedAtMs?: number;
+  executionUpdatedAtMs?: number;
+  displayCallId?: string;
   approval?: TimelineApproval;
   approvalRequestId?: string;
   toolExecution?: TimelineToolExecution;

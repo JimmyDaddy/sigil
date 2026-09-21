@@ -1,12 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    future::Future,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::{
+    sync::{Notify, oneshot},
+    task::JoinHandle,
+};
+use uuid::Uuid;
 
 use crate::{
     DesktopClientError, DesktopHttpClient, DesktopLaunchError, DesktopLaunchRequest,
@@ -52,7 +58,7 @@ pub enum DesktopConnectionState {
 
 /// Renderer-safe workspace summary with no local path, token, address, or process handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct DesktopWorkspaceSummary {
     pub id: String,
     pub display_name: String,
@@ -69,16 +75,22 @@ struct ManagedWorkspace {
 }
 
 /// Owns at most one authenticated `sigil serve` process per canonical workspace.
+#[derive(Clone)]
 pub struct DesktopWorkspaceManager {
     launcher: DesktopLauncher,
     state: Arc<Mutex<DesktopWorkspaceManagerState>>,
+    changed: Arc<Notify>,
+    close_all_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct DesktopWorkspaceManagerState {
     workspaces: BTreeMap<String, ManagedWorkspace>,
     opening_roots: BTreeSet<PathBuf>,
-    opening_workspace_ids: BTreeSet<String>,
+    opening_workspace_ids: BTreeMap<String, PathBuf>,
     closing: bool,
+    operations: BTreeMap<Uuid, JoinHandle<()>>,
+    close_all_task: Option<JoinHandle<()>>,
+    retained_cleanup: Vec<(String, ManagedWorkspace)>,
 }
 
 struct DesktopWorkspaceOpenTicket {
@@ -97,9 +109,14 @@ impl DesktopWorkspaceManager {
             state: Arc::new(Mutex::new(DesktopWorkspaceManagerState {
                 workspaces: BTreeMap::new(),
                 opening_roots: BTreeSet::new(),
-                opening_workspace_ids: BTreeSet::new(),
+                opening_workspace_ids: BTreeMap::new(),
                 closing: false,
+                operations: BTreeMap::new(),
+                close_all_task: None,
+                retained_cleanup: Vec::new(),
             })),
+            changed: Arc::new(Notify::new()),
+            close_all_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -112,7 +129,7 @@ impl DesktopWorkspaceManager {
         let canonical_root = tokio::fs::canonicalize(&request.launch.workspace_root)
             .await
             .map_err(|_| DesktopWorkspaceManagerError::InvalidWorkspace)?;
-        let ticket = {
+        let completion = {
             let mut state = self.lock_state();
             if state.closing || state.opening_roots.contains(&canonical_root) {
                 return Err(DesktopWorkspaceManagerError::WorkspaceOperationInProgress);
@@ -122,7 +139,7 @@ impl DesktopWorkspaceManager {
                 .iter()
                 .find(|(_, workspace)| workspace.canonical_root == canonical_root)
                 .map(|(id, _)| id.clone());
-            if let Some(id) = existing_id {
+            let ticket = if let Some(id) = existing_id {
                 let workspace = state
                     .workspaces
                     .get_mut(&id)
@@ -136,7 +153,9 @@ impl DesktopWorkspaceManager {
                     .workspaces
                     .remove(&id)
                     .expect("workspace id was checked immediately before removal");
-                state.opening_workspace_ids.insert(id.clone());
+                state
+                    .opening_workspace_ids
+                    .insert(id.clone(), canonical_root.clone());
                 DesktopWorkspaceOpenTicket {
                     canonical_root,
                     display_name: request.display_name,
@@ -151,9 +170,15 @@ impl DesktopWorkspaceManager {
                     launch: request.launch,
                     existing: None,
                 }
-            }
+            };
+            let manager = self.clone();
+            self.spawn_operation(&mut state, async move {
+                manager.execute_open_ticket(ticket).await
+            })
         };
-        self.execute_open_ticket(ticket).await
+        completion
+            .await
+            .map_err(|_| DesktopWorkspaceManagerError::WorkspaceUnavailable)?
     }
 
     /// Returns current secret-free summaries after polling native child status.
@@ -175,7 +200,7 @@ impl DesktopWorkspaceManager {
         workspace_id: &str,
     ) -> Result<DesktopHttpClient, DesktopWorkspaceManagerError> {
         let mut state = self.lock_state();
-        let opening = state.opening_workspace_ids.contains(workspace_id);
+        let opening = state.opening_workspace_ids.contains_key(workspace_id);
         let workspace = state.workspaces.get_mut(workspace_id).ok_or(if opening {
             DesktopWorkspaceManagerError::WorkspaceUnavailable
         } else {
@@ -195,9 +220,9 @@ impl DesktopWorkspaceManager {
         &self,
         workspace_id: &str,
     ) -> Result<DesktopWorkspaceSummary, DesktopWorkspaceManagerError> {
-        let ticket = {
+        let completion = {
             let mut state = self.lock_state();
-            if state.closing || state.opening_workspace_ids.contains(workspace_id) {
+            if state.closing || state.opening_workspace_ids.contains_key(workspace_id) {
                 return Err(DesktopWorkspaceManagerError::WorkspaceOperationInProgress);
             }
             let workspace = state
@@ -205,61 +230,162 @@ impl DesktopWorkspaceManager {
                 .remove(workspace_id)
                 .ok_or(DesktopWorkspaceManagerError::UnknownWorkspace)?;
             state.opening_roots.insert(workspace.canonical_root.clone());
-            state.opening_workspace_ids.insert(workspace_id.to_owned());
-            DesktopWorkspaceOpenTicket {
+            state
+                .opening_workspace_ids
+                .insert(workspace_id.to_owned(), workspace.canonical_root.clone());
+            let ticket = DesktopWorkspaceOpenTicket {
                 canonical_root: workspace.canonical_root.clone(),
                 display_name: workspace.display_name.clone(),
                 launch: workspace.launch.clone(),
                 existing: Some((workspace_id.to_owned(), workspace)),
-            }
+            };
+            let manager = self.clone();
+            self.spawn_operation(&mut state, async move {
+                manager.execute_open_ticket(ticket).await
+            })
         };
-        self.execute_open_ticket(ticket).await
+        completion
+            .await
+            .map_err(|_| DesktopWorkspaceManagerError::WorkspaceUnavailable)?
     }
 
-    /// Gracefully closes and removes one workspace-owned process.
+    /// Gracefully closes one workspace. Its root remains reserved until cleanup finishes,
+    /// even when the caller drops the returned future.
     pub async fn close(
         &self,
         workspace_id: &str,
     ) -> Result<DesktopShutdownReport, DesktopWorkspaceManagerError> {
-        let mut workspace = {
+        let completion = {
             let mut state = self.lock_state();
-            if state.opening_workspace_ids.contains(workspace_id) {
+            let retained = state
+                .retained_cleanup
+                .iter()
+                .position(|(id, _)| id == workspace_id);
+            if state.closing
+                || (state.opening_workspace_ids.contains_key(workspace_id) && retained.is_none())
+            {
                 return Err(DesktopWorkspaceManagerError::WorkspaceOperationInProgress);
             }
-            state
-                .workspaces
-                .remove(workspace_id)
-                .ok_or(DesktopWorkspaceManagerError::UnknownWorkspace)?
-        };
-        match workspace.process.shutdown_in_place().await {
-            Ok(report) => Ok(report),
-            Err(error) => {
-                self.lock_state()
+            let workspace = if let Some(index) = retained {
+                state.retained_cleanup.remove(index).1
+            } else {
+                state
                     .workspaces
-                    .insert(workspace_id.to_owned(), workspace);
-                Err(error.into())
-            }
-        }
+                    .remove(workspace_id)
+                    .ok_or(DesktopWorkspaceManagerError::UnknownWorkspace)?
+            };
+            state.opening_roots.insert(workspace.canonical_root.clone());
+            state
+                .opening_workspace_ids
+                .insert(workspace_id.to_owned(), workspace.canonical_root.clone());
+            let manager = self.clone();
+            let workspace_id = workspace_id.to_owned();
+            self.spawn_operation(&mut state, async move {
+                manager
+                    .close_workspace(workspace_id, workspace)
+                    .await
+                    .map_err(Into::into)
+            })
+        };
+        completion
+            .await
+            .map_err(|_| DesktopWorkspaceManagerError::WorkspaceUnavailable)?
     }
 
-    /// Closes every process without admitting new work between shutdowns.
+    /// Closes admission, drains all admitted lifecycle operations, then closes every process.
+    /// Caller cancellation does not cancel this manager-owned cleanup. Concurrent callers wait
+    /// for the preceding drain before starting another one.
     pub async fn close_all(
         &self,
     ) -> Vec<(String, Result<DesktopShutdownReport, DesktopShutdownError>)> {
-        let workspaces = {
+        let gate = self.close_all_gate.clone().lock_owned().await;
+        let (sender, receiver) = oneshot::channel();
+        {
             let mut state = self.lock_state();
-            if state.closing {
-                return Vec::new();
-            }
             state.closing = true;
-            std::mem::take(&mut state.workspaces)
-        };
-        let mut results = Vec::with_capacity(workspaces.len());
-        for (id, workspace) in workspaces {
-            results.push((id, workspace.process.shutdown().await));
+            let manager = self.clone();
+            state.close_all_task = Some(tokio::spawn(async move {
+                let _gate = gate;
+                manager.wait_for_operations().await;
+                let workspaces = {
+                    let mut state = manager.lock_state();
+                    let mut workspaces = std::mem::take(&mut state.workspaces)
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    workspaces.append(&mut state.retained_cleanup);
+                    workspaces
+                };
+                let mut results = Vec::with_capacity(workspaces.len());
+                for (id, workspace) in workspaces {
+                    let result = manager.close_workspace(id.clone(), workspace).await;
+                    results.push((id, result));
+                }
+                {
+                    let mut state = manager.lock_state();
+                    state.closing = false;
+                    state.close_all_task.take();
+                }
+                manager.changed.notify_waiters();
+                let _ = sender.send(results);
+            }));
         }
-        self.lock_state().closing = false;
-        results
+        receiver
+            .await
+            .unwrap_or_else(|_| vec![(String::new(), Err(DesktopShutdownError::WaitFailed))])
+    }
+
+    async fn close_workspace(
+        &self,
+        id: String,
+        mut workspace: ManagedWorkspace,
+    ) -> Result<DesktopShutdownReport, DesktopShutdownError> {
+        let result = workspace.process.shutdown_in_place().await;
+        let mut state = self.lock_state();
+        if result.is_err() {
+            // A failed wait is not proof of exit; keep both the handle and root reservation.
+            state.opening_roots.insert(workspace.canonical_root.clone());
+            state
+                .opening_workspace_ids
+                .entry(id.clone())
+                .or_insert_with(|| workspace.canonical_root.clone());
+            state.retained_cleanup.push((id, workspace));
+        } else {
+            state.opening_roots.remove(&workspace.canonical_root);
+            if state.opening_workspace_ids.get(&id) == Some(&workspace.canonical_root) {
+                state.opening_workspace_ids.remove(&id);
+            }
+        }
+        result
+    }
+
+    fn spawn_operation<T: Send + 'static>(
+        &self,
+        state: &mut DesktopWorkspaceManagerState,
+        operation: impl Future<Output = T> + Send + 'static,
+    ) -> oneshot::Receiver<T> {
+        let id = Uuid::new_v4();
+        let manager = self.clone();
+        let (sender, receiver) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let result = operation.await;
+            manager.lock_state().operations.remove(&id);
+            manager.changed.notify_waiters();
+            let _ = sender.send(result);
+        });
+        state.operations.insert(id, handle);
+        receiver
+    }
+
+    async fn wait_for_operations(&self) {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock_state().operations.is_empty() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn lock_state(&self) -> MutexGuard<'_, DesktopWorkspaceManagerState> {
@@ -279,6 +405,14 @@ impl DesktopWorkspaceManager {
             self.restore_open_ticket(ticket);
             return Err(error.into());
         }
+        if let Some((_, workspace)) = ticket.existing.as_mut() {
+            workspace.state = DesktopConnectionState::Exited;
+        }
+        let closing = self.lock_state().closing;
+        if closing {
+            self.restore_open_ticket(ticket);
+            return Err(DesktopWorkspaceManagerError::WorkspaceOperationInProgress);
+        }
         let launch = ticket.launch.clone();
         let process = match self.launcher.launch(launch).await {
             Ok(process) => process,
@@ -288,41 +422,50 @@ impl DesktopWorkspaceManager {
             }
         };
         let id = process.server_info().workspace_id.clone();
-        let identity_collision = {
-            let state = self.lock_state();
-            state.workspaces.contains_key(&id)
-                || ticket
-                    .existing
-                    .as_ref()
-                    .is_some_and(|(existing_id, _)| existing_id != &id)
-        };
-        if identity_collision {
-            let _ = process.shutdown().await;
-            self.restore_open_ticket(ticket);
-            return Err(DesktopWorkspaceManagerError::IdentityCollision);
-        }
-        let closing = self.lock_state().closing;
-        if closing {
-            let _ = process.shutdown().await;
-            self.discard_open_ticket(&ticket);
-            return Err(DesktopWorkspaceManagerError::WorkspaceOperationInProgress);
-        }
         let workspace = ManagedWorkspace {
             canonical_root: ticket.canonical_root.clone(),
             display_name: ticket.display_name.clone(),
-            launch: ticket.launch,
+            launch: ticket.launch.clone(),
             state: DesktopConnectionState::Ready,
             process,
         };
         let response = summary(&id, &workspace);
-        {
+        let rejected = {
             let mut state = self.lock_state();
-            state.workspaces.insert(id.clone(), workspace);
-            state.opening_roots.remove(&ticket.canonical_root);
-            state.opening_workspace_ids.remove(&id);
-            if let Some((existing_id, _)) = ticket.existing {
-                state.opening_workspace_ids.remove(&existing_id);
+            let collision = state.workspaces.contains_key(&id)
+                || state
+                    .opening_workspace_ids
+                    .get(&id)
+                    .is_some_and(|root| root != &ticket.canonical_root)
+                || ticket
+                    .existing
+                    .as_ref()
+                    .is_some_and(|(existing_id, _)| existing_id != &id);
+            if collision || state.closing {
+                Some((
+                    workspace,
+                    if collision {
+                        DesktopWorkspaceManagerError::IdentityCollision
+                    } else {
+                        DesktopWorkspaceManagerError::WorkspaceOperationInProgress
+                    },
+                ))
+            } else {
+                state.workspaces.insert(id.clone(), workspace);
+                state.opening_roots.remove(&ticket.canonical_root);
+                state.opening_workspace_ids.remove(&id);
+                if let Some((existing_id, _)) = ticket.existing.as_ref() {
+                    state.opening_workspace_ids.remove(existing_id);
+                }
+                None
             }
+        };
+        if let Some((workspace, error)) = rejected {
+            let result = self.close_workspace(id, workspace).await;
+            if result.is_ok() {
+                self.discard_open_ticket(&ticket);
+            }
+            return Err(result.err().map_or(error, Into::into));
         }
         Ok(response)
     }

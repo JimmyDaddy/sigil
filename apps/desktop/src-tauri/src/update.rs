@@ -655,7 +655,7 @@ enum UpdateCheckOrigin {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct DesktopUpdateLastCheck {
     checked_at_unix_seconds: u64,
 }

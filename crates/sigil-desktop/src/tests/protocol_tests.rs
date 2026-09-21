@@ -64,7 +64,7 @@ fn server_info_requires_exact_loopback_desktop_contract() {
 }
 
 #[test]
-fn exact_server_info_rejects_unknown_fields() {
+fn server_info_ignores_unknown_fields() {
     let result = serde_json::from_value::<DesktopServerInfo>(serde_json::json!({
         "schema_version": 14,
         "protocol_version": 2,
@@ -99,7 +99,14 @@ fn exact_server_info_rejects_unknown_fields() {
         "unexpected": "drift"
     }));
 
-    assert!(result.is_err());
+    let parsed = result.expect("unknown fields are ignored");
+    assert!(
+        !serde_json::to_value(parsed)
+            .expect("normalized server info")
+            .as_object()
+            .expect("server info object")
+            .contains_key("unexpected")
+    );
 }
 
 #[test]

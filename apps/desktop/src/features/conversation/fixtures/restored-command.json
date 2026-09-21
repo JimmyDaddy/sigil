@@ -1,0 +1,8 @@
+{
+  "input": "printf ready\nsleep 60",
+  "executionId": "execution-restored",
+  "executionStartedAtMs": 1000,
+  "executionUpdatedAtMs": 2000,
+  "status": "running",
+  "output": ""
+}

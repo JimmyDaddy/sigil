@@ -20,6 +20,11 @@ export type ProductStatus =
   | "interrupted"
   | "completed";
 
+export type TaskExecutionDisplayPhase =
+  | TaskExecutionPhase
+  | "preparing"
+  | "blocked";
+
 export type ProductStatusAction =
   | "wait"
   | "stop"
@@ -375,7 +380,7 @@ export function isTaskRunningStatus(status: string): boolean {
 }
 
 function presentTaskExecutionPhase(
-  phase: TaskExecutionPhase,
+  phase: TaskExecutionDisplayPhase,
   t: Translate,
 ): ProductStatusPresentation {
   switch (phase) {

@@ -52,7 +52,7 @@ const DESKTOP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION: u16 = 1;
 const DESKTOP_TOOL_ARTIFACT_MAX_PAGE_BYTES: u32 = 16 * 1024;
 const DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE: u64 = 16 * 1024 * 1024;
 const DESKTOP_TOOL_ARTIFACT_MAX_LINES: u32 = 200;
-const DESKTOP_TOOL_ARTIFACT_MAX_MATCHES: u16 = 20;
+const DESKTOP_TOOL_ARTIFACT_MAX_MATCHES: u16 = 16_384;
 const DESKTOP_TOOL_ARTIFACT_MAX_CONTEXT_LINES: u16 = 3;
 const DESKTOP_TOOL_ARTIFACT_MAX_QUERY_BYTES: usize = 512;
 // A 16 KiB UTF-8 page can expand sixfold when JSON escapes control bytes. The transport cap
@@ -101,7 +101,7 @@ struct DesktopBorrowedConfigurationRequest<T> {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct DesktopBorrowedConfigurationReceipt {
     schema_version: u16,
     capsule_id: String,
@@ -115,7 +115,7 @@ struct DesktopBorrowedConfigurationReceipt {
 }
 
 #[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct DesktopBorrowedConfigurationResponse<T> {
     result: T,
     receipt: DesktopBorrowedConfigurationReceipt,
@@ -130,6 +130,9 @@ pub struct DesktopHttpClient {
     address: SocketAddr,
     bearer: Arc<DesktopBearerToken>,
     client_id: Arc<str>,
+    command_journals: Arc<
+        std::sync::Mutex<std::collections::BTreeMap<String, crate::DesktopCommandJournalBinding>>,
+    >,
 }
 
 impl DesktopHttpClient {
@@ -143,6 +146,7 @@ impl DesktopHttpClient {
             address,
             bearer,
             client_id: Arc::from(format!("sigil-desktop-{}", Uuid::new_v4())),
+            command_journals: Arc::default(),
         }
     }
 
@@ -156,6 +160,47 @@ impl DesktopHttpClient {
     pub async fn support_doctor(&self) -> Result<DesktopSupportDoctorReport, DesktopClientError> {
         self.get_json(self.route(["support", "doctor"])?, StatusCode::OK)
             .await
+    }
+
+    /// Previews or confirms one exact server-owned command-log recovery, without command admission.
+    pub async fn recover_control_log(
+        &self,
+        session_id: &str,
+        action: &crate::DesktopControlLogRecoveryAction,
+    ) -> Result<crate::DesktopControlLogRecoveryOutcome, DesktopClientError> {
+        if let crate::DesktopControlLogRecoveryAction::SealAndRotate { preview } = action {
+            preview.validate()?;
+        }
+        let result: crate::DesktopControlLogRecoveryOutcome = self
+            .send_json(
+                self.client
+                    .post(self.route([
+                        "sessions",
+                        session_id,
+                        "application",
+                        "control-log",
+                        "recovery",
+                    ])?)
+                    .header("x-sigil-application-client-id", self.client_id.as_ref())
+                    .json(action),
+                StatusCode::OK,
+            )
+            .await?;
+        result.validate()?;
+        if let crate::DesktopControlLogRecoveryAction::SealAndRotate { preview } = action {
+            if !matches!(&result, crate::DesktopControlLogRecoveryOutcome::Activated(binding)
+                if binding.logical_journal_id == preview.request.logical_journal_id
+                    && binding.command_generation == preview.request.successor_generation)
+            {
+                return Err(DesktopClientError::InvalidResponse);
+            }
+        } else if !matches!(result, crate::DesktopControlLogRecoveryOutcome::Preview(_)) {
+            return Err(DesktopClientError::InvalidResponse);
+        }
+        if let crate::DesktopControlLogRecoveryOutcome::Activated(binding) = &result {
+            self.remember_command_journal(session_id, binding.clone())?;
+        }
+        Ok(result)
     }
 
     /// Builds a bounded private support bundle for the native save boundary.
@@ -594,7 +639,7 @@ impl DesktopHttpClient {
             } => Some((foreground_run_id.clone(), foreground_owner_revision.clone())),
             _ => None,
         };
-        let command = self.command(session_id, None, payload);
+        let command = self.command(session_id, None, payload).await?;
         let expected_command_id = command.command_id.clone();
         let expected_client_id = command.client_id.clone();
         let receipt: DesktopConversationQueueCommandReceipt = self
@@ -702,7 +747,7 @@ impl DesktopHttpClient {
         validate_stream_identity(session_id)?;
         validate_conversation_recovery_action(&action)?;
         let expected_action = action.kind();
-        let command = self.command(session_id, None, action);
+        let command = self.command(session_id, None, action).await?;
         let expected_command_id = command.command_id.clone();
         let expected_client_id = command.client_id.clone();
         let receipt: DesktopConversationRecoveryCommandReceipt = self
@@ -729,7 +774,7 @@ impl DesktopHttpClient {
         session_id: &str,
         payload: DesktopRunStartRequest,
     ) -> Result<DesktopRunStartCommandReceipt, DesktopClientError> {
-        let command = self.command(session_id, None, payload);
+        let command = self.command(session_id, None, payload).await?;
         self.post_json(
             self.route(["sessions", session_id, "runs"])?,
             &command,
@@ -807,7 +852,7 @@ impl DesktopHttpClient {
         expected_stream_sequence: u64,
         payload: DesktopRunCancelRequest,
     ) -> Result<DesktopRunCancelCommandReceipt, DesktopClientError> {
-        let command = self.command(session_id, Some(expected_stream_sequence), payload);
+        let command = self.safety_command(session_id, Some(expected_stream_sequence), payload);
         self.post_json(
             self.route(["runs", run_id, "cancel"])?,
             &command,
@@ -830,7 +875,7 @@ impl DesktopHttpClient {
         if expected_generation == 0 {
             return Err(DesktopClientError::InvalidRoute);
         }
-        let command = self.command(
+        let command = self.safety_command(
             session_id,
             None,
             DesktopTerminalTaskCancelRequest {
@@ -883,7 +928,7 @@ impl DesktopHttpClient {
             return Err(DesktopClientError::InvalidRoute);
         }
         let payload = desktop_task_pause_request(task_id, execution.clone());
-        let command = self.command(session_id, Some(expected_stream_sequence), payload);
+        let command = self.safety_command(session_id, Some(expected_stream_sequence), payload);
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
         let receipt: DesktopTaskPauseCommandReceipt = self
@@ -940,16 +985,18 @@ impl DesktopHttpClient {
         {
             return Err(DesktopClientError::InvalidRoute);
         }
-        let command = self.command(
-            session_id,
-            None,
-            crate::DesktopPlanDecisionRequest {
-                plan_id: plan_id.to_owned(),
-                expected_plan_hash: expected_plan_hash.to_owned(),
-                action,
-                expected_candidate_hash: expected_candidate_hash.map(str::to_owned),
-            },
-        );
+        let command = self
+            .command(
+                session_id,
+                None,
+                crate::DesktopPlanDecisionRequest {
+                    plan_id: plan_id.to_owned(),
+                    expected_plan_hash: expected_plan_hash.to_owned(),
+                    action,
+                    expected_candidate_hash: expected_candidate_hash.map(str::to_owned),
+                },
+            )
+            .await?;
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
         let route = self.route(["sessions", session_id, "plan-decision"])?;
@@ -1070,16 +1117,18 @@ impl DesktopHttpClient {
         if generation == 0 || expected_request_hash.is_empty() {
             return Err(DesktopClientError::InvalidRoute);
         }
-        let command = self.command(
-            session_id,
-            None,
-            crate::DesktopUserInputDecisionRequest {
-                generation,
-                expected_request_hash: expected_request_hash.to_owned(),
-                decision,
-                permission_mode,
-            },
-        );
+        let command = self
+            .command(
+                session_id,
+                None,
+                crate::DesktopUserInputDecisionRequest {
+                    generation,
+                    expected_request_hash: expected_request_hash.to_owned(),
+                    decision,
+                    permission_mode,
+                },
+            )
+            .await?;
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
         let route = self.route(["sessions", session_id, "user-input", request_id, "decision"])?;
@@ -1117,7 +1166,9 @@ impl DesktopHttpClient {
         expected_stream_sequence: u64,
         payload: DesktopApprovalDecisionRequest,
     ) -> Result<DesktopApprovalCommandReceipt, DesktopClientError> {
-        let command = self.command(session_id, Some(expected_stream_sequence), payload);
+        let command = self
+            .command(session_id, Some(expected_stream_sequence), payload)
+            .await?;
         let command_id = command.command_id.clone();
         let client_id = command.client_id.clone();
         let approval_request_id = command.payload.approval_request_id.clone();
@@ -1210,7 +1261,7 @@ impl DesktopHttpClient {
     ) -> Result<DesktopIntentDropCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_intent_drop_request(&payload)?;
-        let command = self.command(session_id, None, payload.clone());
+        let command = self.command(session_id, None, payload.clone()).await?;
         let expected_command_id = command.command_id.clone();
         let expected_client_id = command.client_id.clone();
         let receipt: DesktopIntentDropCommandReceipt = self
@@ -1283,7 +1334,7 @@ impl DesktopHttpClient {
     ) -> Result<DesktopTaskIntegrationAcceptanceCommandReceipt, DesktopClientError> {
         validate_stream_identity(session_id)?;
         validate_task_integration_review_request(&payload)?;
-        let command = self.command(session_id, None, payload.clone());
+        let command = self.command(session_id, None, payload.clone()).await?;
         let expected_command_id = command.command_id.clone();
         let expected_client_id = command.client_id.clone();
         let receipt: DesktopTaskIntegrationAcceptanceCommandReceipt = self
@@ -1311,7 +1362,7 @@ impl DesktopHttpClient {
         session_id: &str,
         payload: DesktopVerificationRerunRequest,
     ) -> Result<DesktopVerificationRerunCommandReceipt, DesktopClientError> {
-        let command = self.command(session_id, None, payload);
+        let command = self.command(session_id, None, payload).await?;
         self.post_json(
             self.route(["sessions", session_id, "verification", "rerun"])?,
             &command,
@@ -1320,17 +1371,72 @@ impl DesktopHttpClient {
         .await
     }
 
-    fn command<T>(
+    async fn command<T>(
         &self,
         session_id: &str,
         expected_stream_sequence: Option<u64>,
         payload: T,
+    ) -> Result<DesktopCommandEnvelope<T>, DesktopClientError> {
+        validate_stream_identity(session_id)?;
+        let binding: crate::DesktopCommandJournalBinding = self
+            .send_json(
+                self.client
+                    .get(self.route([
+                        "sessions",
+                        session_id,
+                        "application",
+                        "command-journal-binding",
+                    ])?)
+                    .header("x-sigil-application-client-id", self.client_id.as_ref()),
+                StatusCode::OK,
+            )
+            .await?;
+        binding.validate()?;
+        self.remember_command_journal(session_id, binding.clone())?;
+        Ok(self.command_in_journal(session_id, expected_stream_sequence, payload, Some(binding)))
+    }
+
+    fn remember_command_journal(
+        &self,
+        session_id: &str,
+        binding: crate::DesktopCommandJournalBinding,
+    ) -> Result<(), DesktopClientError> {
+        self.command_journals
+            .lock()
+            .map_err(|_| DesktopClientError::RequestFailed)?
+            .insert(session_id.to_owned(), binding);
+        Ok(())
+    }
+
+    fn safety_command<T>(
+        &self,
+        session_id: &str,
+        expected_stream_sequence: Option<u64>,
+        payload: T,
+    ) -> DesktopCommandEnvelope<T> {
+        // No observation round-trip may delay an exact-owner safety stop. A missing or stale
+        // binding can only select the server's restricted stop lane, never a new forward effect.
+        let binding = self
+            .command_journals
+            .lock()
+            .ok()
+            .and_then(|bindings| bindings.get(session_id).cloned());
+        self.command_in_journal(session_id, expected_stream_sequence, payload, binding)
+    }
+
+    fn command_in_journal<T>(
+        &self,
+        session_id: &str,
+        expected_stream_sequence: Option<u64>,
+        payload: T,
+        command_journal: Option<crate::DesktopCommandJournalBinding>,
     ) -> DesktopCommandEnvelope<T> {
         DesktopCommandEnvelope {
             protocol_version: DESKTOP_HTTP_PROTOCOL_VERSION,
             command_id: format!("desktop-command-{}", Uuid::new_v4()),
             client_id: self.client_id.to_string(),
             session_id: session_id.to_owned(),
+            command_journal,
             expected_stream_sequence,
             correlation_id: None,
             payload,
@@ -2182,8 +2288,6 @@ fn validate_user_input_request(
         if question.id.trim().is_empty()
             || question.id.len() > 48
             || !question_ids.insert(question.id.as_str())
-            || question.header.trim().is_empty()
-            || question.header.chars().count() > 32
             || question.question.trim().is_empty()
             || question.question.chars().count() > 512
             || question
@@ -2193,42 +2297,27 @@ fn validate_user_input_request(
         {
             return Err(DesktopClientError::InvalidResponse);
         }
-        match &question.field {
-            crate::DesktopUserInputField::Text { max_chars, .. } => {
-                if *max_chars == 0 || *max_chars > 4096 {
-                    return Err(DesktopClientError::InvalidResponse);
-                }
+        if !question.options.is_empty() {
+            if question.options.len() < 2 || question.options.len() > 12 {
+                return Err(DesktopClientError::InvalidResponse);
             }
-            crate::DesktopUserInputField::SingleSelect { options, .. }
-            | crate::DesktopUserInputField::MultiSelect { options, .. } => {
-                if options.len() < 2 || options.len() > 12 {
-                    return Err(DesktopClientError::InvalidResponse);
-                }
-                let mut option_ids = BTreeSet::new();
-                for option in options {
-                    if option.id.trim().is_empty()
-                        || option.id.len() > 48
-                        || !option_ids.insert(option.id.as_str())
-                        || option.label.trim().is_empty()
-                        || option.label.chars().count() > 80
-                        || option
-                            .description
-                            .as_deref()
-                            .is_some_and(|value| value.chars().count() > 240)
-                    {
-                        return Err(DesktopClientError::InvalidResponse);
-                    }
-                }
-                if let crate::DesktopUserInputField::MultiSelect { max_selected, .. } =
-                    &question.field
-                    && (*max_selected == 0 || *max_selected as usize > options.len())
+            let mut option_ids = BTreeSet::new();
+            for option in &question.options {
+                if option.id.trim().is_empty()
+                    || option.id.len() > 48
+                    || !option_ids.insert(option.id.as_str())
+                    || option.label.trim().is_empty()
+                    || option.label.chars().count() > 80
+                    || option
+                        .description
+                        .as_deref()
+                        .is_some_and(|value| value.chars().count() > 240)
                 {
                     return Err(DesktopClientError::InvalidResponse);
                 }
             }
-            crate::DesktopUserInputField::Number
-            | crate::DesktopUserInputField::Integer
-            | crate::DesktopUserInputField::Boolean => {}
+        } else if question.multiple {
+            return Err(DesktopClientError::InvalidResponse);
         }
     }
     let actions_are_unique = request
@@ -2309,7 +2398,7 @@ fn validate_tool_artifact_page(
         || match &page.selector {
             DesktopToolArtifactSelector::ByteSlice { limit, .. } => page.returned_bytes > *limit,
             DesktopToolArtifactSelector::SearchLiteral { max_matches, .. } => {
-                page.match_count > *max_matches
+                u64::from(page.match_count) > *max_matches
             }
             DesktopToolArtifactSelector::LinePage { .. } => false,
         }
@@ -2366,7 +2455,7 @@ fn valid_tool_artifact_selector(selector: &DesktopToolArtifactSelector) -> bool 
             !query.is_empty()
                 && query.len() <= DESKTOP_TOOL_ARTIFACT_MAX_QUERY_BYTES
                 && *start_offset <= DESKTOP_TOOL_ARTIFACT_MAX_COORDINATE
-                && (1..=DESKTOP_TOOL_ARTIFACT_MAX_MATCHES).contains(max_matches)
+                && *max_matches > 0
                 && *context_lines <= DESKTOP_TOOL_ARTIFACT_MAX_CONTEXT_LINES
         }
     }
@@ -2603,7 +2692,6 @@ fn desktop_task_pause_request(
 
 fn desktop_task_execution_binding_is_valid(execution: &crate::DesktopTaskExecutionBinding) -> bool {
     match execution {
-        crate::DesktopTaskExecutionBinding::Plan { plan_version } => *plan_version > 0,
         crate::DesktopTaskExecutionBinding::Direct { admission_id } => {
             !admission_id.is_empty()
                 && admission_id.len() <= 256
@@ -2787,3 +2875,7 @@ pub enum DesktopClientError {
 #[cfg(test)]
 #[path = "tests/client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/control_log_recovery_tests.rs"]
+mod control_log_recovery_tests;

@@ -1204,6 +1204,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{session_id}/application/command-journal-binding": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Obtain the command journal binding for a new intent
+         * @description Freeze this binding when creating the command envelope. Retries retain the original envelope. Missing bindings denote legacy generation zero.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header: {
+                    "x-sigil-application-client-id": components["parameters"]["ApplicationClientId"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Current host-issued accepting domain */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["CommandJournalBinding"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{session_id}/application/commands": {
         parameters: {
             query?: never;
@@ -1247,6 +1294,57 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                503: components["responses"]["Unavailable"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sessions/{session_id}/application/control-log/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview or resume recovery of a damaged command journal
+         * @description Authenticated restricted recovery, independent of ordinary command admission and projection refresh. SealAndRotate must echo the exact physical preview. Old history is retained, and only a durable Activated successor accepts new commands.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header: {
+                    "x-sigil-application-client-id": components["parameters"]["ApplicationClientId"];
+                };
+                path: {
+                    session_id: components["parameters"]["SessionId"];
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ControlLogRecoveryAction"];
+                };
+            };
+            responses: {
+                /** @description Exact preview or durable activation */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ControlLogRecoveryOutcome"];
+                    };
+                };
+                400: components["responses"]["BadRequest"];
+                401: components["responses"]["Unauthorized"];
+                404: components["responses"]["NotFound"];
                 503: components["responses"]["Unavailable"];
             };
         };
@@ -2602,11 +2700,30 @@ export interface components {
             unavailable_reason?: string | null;
         };
         /** @description Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome. */
-        ApplicationCommandReceipt: Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never> | Record<string, never>;
+        ApplicationCommandReceipt: {
+            Settled: Record<string, never>;
+        } | {
+            Replayed: Record<string, never>;
+        } | {
+            Rejected: Record<string, never>;
+        } | {
+            PayloadConflict: Record<string, never>;
+        } | {
+            InFlight: Record<string, never>;
+        } | {
+            Uncertain: Record<string, never>;
+        } | {
+            ReplayedUncertain: Record<string, never>;
+        } | {
+            ConfirmedNoEffect: Record<string, never>;
+        } | {
+            SafetyStopRequestedButUnrecorded: Record<string, never>;
+        };
         ApplicationCommandRequest: {
             /** @description Versioned grouped application command. The server validates its schema and host binding. */
             command: Record<string, never>;
             command_id: string;
+            command_journal?: components["schemas"]["CommandJournalBinding"] | null;
         };
         ApplicationExtensionCatalog: {
             agents: components["schemas"]["ApplicationAgentCatalogEntry"][];
@@ -2746,6 +2863,8 @@ export interface components {
             reason: string | null;
             /** @constant */
             type: "approval_resolved";
+        } & {
+            [key: string]: unknown;
         };
         /** @enum {string} */
         ApprovalRouteState: "decision_accepted" | "delivery_uncertain" | "terminal";
@@ -2815,12 +2934,18 @@ export interface components {
         CommandEnvelopeBase: {
             client_id: string;
             command_id: string;
+            command_journal?: components["schemas"]["CommandJournalBinding"] | null;
             correlation_id?: string | null;
             /** Format: uint64 */
             expected_stream_sequence?: number | null;
             /** @constant */
             protocol_version: 2;
             session_id: string;
+        };
+        CommandJournalBinding: {
+            /** Format: uint64 */
+            command_generation: number;
+            logical_journal_id: string;
         };
         CompactionAdmissionNoHistory: {
             /** Format: uint64 */
@@ -2971,6 +3096,75 @@ export interface components {
             type: "control";
         } & {
             [key: string]: unknown;
+        };
+        ControlLogRecoveryAction: "Preview" | {
+            SealAndRotate: {
+                preview: components["schemas"]["ControlLogRecoveryPreview"];
+            };
+        };
+        ControlLogRecoveryAuthorityPreview: {
+            /** Format: uint64 */
+            old_byte_length: number;
+            old_content_digest: string;
+            old_file_identity: string | null;
+            old_namespace_hash: string;
+            preview_digest: string;
+            request: {
+                /** Format: uint64 */
+                from_generation: number;
+                header_digest: string;
+                logical_journal_id: string;
+                operation_id: string;
+                owner_context_digest: string;
+                /** Format: uint64 */
+                successor_generation: number;
+            };
+            successor_namespace_hash: string;
+        };
+        ControlLogRecoveryImpact: {
+            /** Format: uint64 */
+            affected_scope_count: number;
+            affected_scopes: components["schemas"]["ControlLogRecoveryScope"][];
+            commands_truncated: boolean;
+            /** Format: uint64 */
+            known_command_count: number;
+            /** Format: uint64 */
+            known_unresolved_count: number;
+            scopes_truncated: boolean;
+            tail_command_count_unknown: boolean;
+            /** Format: uint64 */
+            unparsed_tail_bytes: number;
+            unresolved_commands: components["schemas"]["ControlLogUnresolvedCommand"][];
+            /** Format: uint64 */
+            verified_prefix_bytes: number;
+            verified_prefix_digest: string;
+            /** Format: uint64 */
+            verified_record_count: number;
+        };
+        ControlLogRecoveryOutcome: {
+            Preview: components["schemas"]["ControlLogRecoveryPreview"];
+        } | {
+            Activated: {
+                command_generation: number;
+                logical_journal_id: string;
+            };
+        };
+        ControlLogRecoveryPreview: {
+            authority: components["schemas"]["ControlLogRecoveryAuthorityPreview"];
+            impact: components["schemas"]["ControlLogRecoveryImpact"];
+        };
+        ControlLogRecoveryScope: {
+            scope_digest: string;
+            session_id: string | null;
+            workspace_id: string | null;
+        };
+        ControlLogUnresolvedCommand: {
+            command_id: string;
+            command_kind: string;
+            key_digest: string;
+            /** @enum {string} */
+            phase: "Reserved" | "DispatchStarted" | "EffectStarted" | "DomainCommitted" | "Settled" | "Uncertain" | "ConfirmedNoEffect";
+            scope_digest: string;
         };
         ConversationDisplayContent: {
             /** @enum {string|null} */
@@ -3276,6 +3470,8 @@ export interface components {
             status: string;
             /** @constant */
             type: "conversation_route_changed";
+        } & {
+            [key: string]: unknown;
         };
         /** @description Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority. */
         ConversationTaskControl: {
@@ -3374,6 +3570,8 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "integration_lane_changed";
+        } & {
+            [key: string]: unknown;
         };
         /** @enum {string} */
         IntegrationPromotionStatus: "prepared" | "promoted" | "conflict" | "stale" | "failed" | "cancelled";
@@ -3588,6 +3786,8 @@ export interface components {
             message: string;
             /** @constant */
             type: "notice";
+        } & {
+            [key: string]: unknown;
         };
         PendingApproval: {
             approval_request_id: string;
@@ -3646,7 +3846,6 @@ export interface components {
             replayed: boolean;
             revision_run_id?: string | null;
             session_id: string;
-            task_blocker?: components["schemas"]["TaskBlocker"] | null;
             task_id?: string | null;
             task_phase?: components["schemas"]["TaskExecutionPhase"] | null;
             task_title?: string | null;
@@ -3682,7 +3881,7 @@ export interface components {
                 attempt_ordinal?: number | null;
                 request_id: string;
                 /** @enum {string} */
-                status: "awaiting_guidance" | "queued" | "researching" | "waiting_for_input" | "finalizing" | "failed" | "cancelled" | "succeeded";
+                status: "awaiting_guidance" | "queued" | "researching" | "waiting_for_input" | "failed" | "cancelled" | "succeeded";
                 terminal_reason?: string | null;
             } | null;
             risk?: string | null;
@@ -3690,7 +3889,7 @@ export interface components {
             source: "explicit_plan_command" | "automatic_conversation_route";
             stale: boolean;
             /** @enum {string} */
-            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "compile_failed" | "completed_without_draft" | "blocked" | "paused" | "failed" | "interrupted" | "cancelled";
+            status: "started" | "waiting_for_input" | "draft_ready" | "compile_failed" | "completed_without_draft" | "blocked" | "paused" | "failed" | "interrupted" | "cancelled";
             step_count?: number | null;
             suggested_check_count?: number | null;
             summary?: string | null;
@@ -3701,9 +3900,11 @@ export interface components {
             plan_id: string;
             plan_review_id: string;
             /** @enum {string} */
-            status: "started" | "waiting_for_input" | "finalizing" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
+            status: "started" | "waiting_for_input" | "draft_ready" | "completed_without_draft" | "failed" | "interrupted" | "cancelled";
             /** @constant */
             type: "plan_review_changed";
+        } & {
+            [key: string]: unknown;
         };
         PlanReviewDetail: {
             legacy_markdown?: string | null;
@@ -3888,7 +4089,7 @@ export interface components {
             text: string;
         };
         /** @enum {string} */
-        PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "synthesis" | "terminal";
+        PublicTaskPhase: "routing" | "planning" | "execution" | "integration" | "terminal";
         PublicTaskPlanStep: {
             depends_on: string[];
             isolation: string;
@@ -3938,6 +4139,8 @@ export interface components {
             text: string;
             /** @constant */
             type: "reasoning_delta";
+        } & {
+            [key: string]: unknown;
         };
         /** @enum {string} */
         ReasoningEffort: "low" | "medium" | "high" | "max";
@@ -3949,11 +4152,15 @@ export interface components {
             retryable: boolean;
             /** @constant */
             type: "route_recovery_required";
+        } & {
+            [key: string]: unknown;
         };
         RouteTransitionEvent: {
             transition: components["schemas"]["PublicSessionRouteTransitionView"];
             /** @constant */
             type: "route_transition";
+        } & {
+            [key: string]: unknown;
         };
         RunAdmissionErrorResponse: {
             error: {
@@ -3970,11 +4177,15 @@ export interface components {
             request_id: string;
             /** @constant */
             type: "run_awaiting_user_input";
+        } & {
+            [key: string]: unknown;
         };
         RunBlockedEvent: {
             reason: string;
             /** @constant */
             type: "run_blocked";
+        } & {
+            [key: string]: unknown;
         };
         RunCancelCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["RunCancelRequest"];
@@ -3995,6 +4206,8 @@ export interface components {
         RunCancelledEvent: {
             /** @constant */
             type: "run_cancelled";
+        } & {
+            [key: string]: unknown;
         };
         RunContextView: {
             available_permission_modes: components["schemas"]["PermissionMode"][];
@@ -4023,21 +4236,29 @@ export interface components {
             error: string;
             /** @constant */
             type: "run_failed";
+        } & {
+            [key: string]: unknown;
         };
         RunFinishedEvent: {
             final_text: string;
             /** @constant */
             type: "run_finished";
+        } & {
+            [key: string]: unknown;
         };
         RunInterruptedEvent: {
             reason: string;
             /** @constant */
             type: "run_interrupted";
+        } & {
+            [key: string]: unknown;
         };
         RunPausedEvent: {
             reason: string;
             /** @constant */
             type: "run_paused";
+        } & {
+            [key: string]: unknown;
         };
         RunSnapshot: {
             id: string;
@@ -4081,6 +4302,8 @@ export interface components {
             prompt: string;
             /** @constant */
             type: "run_started";
+        } & {
+            [key: string]: unknown;
         };
         /** @enum {string} */
         RunStatus: "starting" | "running" | "waiting_for_approval" | "cancel_requested" | "pause_requested" | "execution_uncertain" | "finished" | "failed" | "cancelled" | "paused" | "blocked" | "interrupted";
@@ -4400,24 +4623,9 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_batch_changed";
+        } & {
+            [key: string]: unknown;
         };
-        TaskBlocker: {
-            affected_capability?: components["schemas"]["TaskCapability"] | null;
-            affected_step?: components["schemas"]["TaskStepId"] | null;
-            available_actions?: components["schemas"]["TaskBlockerAction"][];
-            /** Format: uint64 */
-            created_at_ms: number;
-            evidence_digest: string;
-            reason_code: components["schemas"]["TaskBlockerReasonCode"];
-            /** Format: uint64 */
-            resolved_at_ms?: number | null;
-            retryable: boolean;
-            summary: string;
-        };
-        /** @enum {string} */
-        TaskBlockerAction: "retry_admission" | "replan" | "cancel" | "rebind_route" | "grant_permission" | "resume";
-        /** @enum {string} */
-        TaskBlockerReasonCode: "workspace_changed" | "workspace_snapshot_unavailable" | "missing_required_capability" | "provider_unavailable" | "credential_unavailable" | "permission_required" | "workspace_trust_required" | "external_writer_active" | "isolation_unavailable" | "disk_space_exhausted" | "artifact_storage_unavailable" | "session_storage_degraded" | "verification_runner_unavailable" | "route_rebind_required" | "contract_recompile_required";
         /** @enum {string} */
         TaskCapability: "workspace_read" | "workspace_write" | "vcs_read" | "process_execute" | "network_read" | "artifact_read" | "verification_run";
         TaskChecklistUpdatedEvent: {
@@ -4427,6 +4635,8 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_checklist_updated";
+        } & {
+            [key: string]: unknown;
         };
         TaskContinuationRequest: {
             guidance?: string | null;
@@ -4437,19 +4647,16 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_execution_admitted";
+        } & {
+            [key: string]: unknown;
         };
         TaskExecutionBinding: {
-            /** @constant */
-            kind: "plan";
-            /** Format: uint32 */
-            plan_version: number;
-        } | {
             admission_id: string;
             /** @constant */
             kind: "direct";
         };
         /** @enum {string} */
-        TaskExecutionPhase: "preparing" | "ready" | "running" | "blocked" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
+        TaskExecutionPhase: "ready" | "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
         TaskIntegrationAcceptanceCommand: components["schemas"]["CommandEnvelopeBase"] & {
             payload: components["schemas"]["TaskIntegrationReviewRequest"];
         };
@@ -4526,6 +4733,8 @@ export interface components {
             task_id: string | null;
             /** @constant */
             type: "task_phase_changed";
+        } & {
+            [key: string]: unknown;
         };
         TaskPlanUpdatedEvent: {
             /** Format: uint32 */
@@ -4535,6 +4744,8 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_plan_updated";
+        } & {
+            [key: string]: unknown;
         };
         TaskRoutingChangedEvent: {
             handoff_id: string;
@@ -4542,18 +4753,24 @@ export interface components {
             task_id: string | null;
             /** @constant */
             type: "task_routing_changed";
+        } & {
+            [key: string]: unknown;
         };
         TaskRunFinishedEvent: {
             status: string;
             task_id: string;
             /** @constant */
             type: "task_run_finished";
+        } & {
+            [key: string]: unknown;
         };
         TaskRunStartedEvent: {
             objective: string;
             task_id: string;
             /** @constant */
             type: "task_run_started";
+        } & {
+            [key: string]: unknown;
         };
         TaskStepChangedEvent: {
             attempt_id: string | null;
@@ -4564,6 +4781,8 @@ export interface components {
             task_id: string;
             /** @constant */
             type: "task_step_changed";
+        } & {
+            [key: string]: unknown;
         };
         TaskStepId: string;
         TerminalLifecycle: {
@@ -4581,6 +4800,8 @@ export interface components {
             event: components["schemas"]["TerminalLifecycle"];
             /** @constant */
             type: "terminal_lifecycle";
+        } & {
+            [key: string]: unknown;
         };
         /** @enum {string} */
         TerminalReadinessKind: "none" | "output_contains" | "output_regex";
@@ -4652,6 +4873,8 @@ export interface components {
             text: string;
             /** @constant */
             type: "text_delta";
+        } & {
+            [key: string]: unknown;
         };
         ToolArtifactPage: {
             artifact_ref: string;
@@ -4691,14 +4914,23 @@ export interface components {
             /** Format: uint64 */
             start_line: number;
         } | {
-            /** Format: uint16 */
+            /**
+             * Format: uint16
+             * @default 0
+             */
             context_lines: number;
             /** @constant */
             kind: "search_literal";
-            /** Format: uint16 */
+            /**
+             * Format: uint64
+             * @default 50
+             */
             max_matches: number;
             query: string;
-            /** Format: uint64 */
+            /**
+             * Format: uint64
+             * @default 0
+             */
             start_offset: number;
         };
         ToolCallArgsDeltaEvent: {
@@ -4706,6 +4938,8 @@ export interface components {
             id: string;
             /** @constant */
             type: "tool_call_args_delta";
+        } & {
+            [key: string]: unknown;
         };
         ToolCallCompletedEvent: {
             call: components["schemas"]["PublicToolCall"];
@@ -4760,19 +4994,6 @@ export interface components {
             value: string;
         } | {
             /** @constant */
-            kind: "number";
-            value: string;
-        } | {
-            /** @constant */
-            kind: "integer";
-            /** Format: int64 */
-            value: number;
-        } | {
-            /** @constant */
-            kind: "boolean";
-            value: boolean;
-        } | {
-            /** @constant */
             kind: "single_select";
             option_id?: string | null;
             other?: string | null;
@@ -4780,6 +5001,7 @@ export interface components {
             /** @constant */
             kind: "multi_select";
             option_ids: string[];
+            other?: string | null;
         };
         UserInputChangedEvent: {
             /** Format: uint32 */
@@ -4791,6 +5013,8 @@ export interface components {
             status: "requested" | "decision_accepted" | "continuation_claimed" | "continuation_started" | "resolved";
             /** @constant */
             type: "user_input_changed";
+        } & {
+            [key: string]: unknown;
         };
         UserInputDecision: {
             answers: {
@@ -4831,33 +5055,6 @@ export interface components {
             generation: number;
             permission_mode?: components["schemas"]["PermissionMode"] | null;
         };
-        UserInputField: {
-            /** @constant */
-            kind: "text";
-            /** Format: uint32 */
-            max_chars: number;
-            multiline: boolean;
-        } | {
-            /** @constant */
-            kind: "number";
-        } | {
-            /** @constant */
-            kind: "integer";
-        } | {
-            /** @constant */
-            kind: "boolean";
-        } | {
-            allow_other: boolean;
-            /** @constant */
-            kind: "single_select";
-            options: components["schemas"]["UserInputOption"][];
-        } | {
-            /** @constant */
-            kind: "multi_select";
-            /** Format: uint32 */
-            max_selected: number;
-            options: components["schemas"]["UserInputOption"][];
-        };
         UserInputIdentity: {
             /** Format: uint32 */
             generation: number;
@@ -4874,11 +5071,11 @@ export interface components {
         };
         UserInputQuestion: {
             description?: string | null;
-            field: components["schemas"]["UserInputField"];
-            header: string;
             id: string;
+            multiple?: boolean;
+            options?: components["schemas"]["UserInputOption"][];
             question: string;
-            required: boolean;
+            required?: boolean;
         };
         UserInputRequest: {
             allowed_actions: ("submit" | "decline" | "cancel_run")[];

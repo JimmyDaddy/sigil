@@ -15,7 +15,7 @@ pub enum DesktopServerAuthentication {
 
 /// Frozen coarse capabilities required by the first desktop shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopServerCapabilities {
     /// Historical workspace sessions can be listed.
     pub session_catalog: bool,
@@ -89,7 +89,7 @@ impl DesktopServerCapabilities {
 
 /// Secret-free metadata accepted from both startup stdout and `/server-info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DesktopServerInfo {
     /// Version of this metadata object.
     pub schema_version: u16,

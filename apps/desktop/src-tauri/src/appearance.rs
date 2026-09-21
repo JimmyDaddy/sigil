@@ -95,7 +95,7 @@ pub(crate) struct AppearanceSnapshot {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AppearanceFile {
     schema_version: u16,
     theme_preference: ThemePreference,

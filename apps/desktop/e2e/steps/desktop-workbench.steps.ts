@@ -1988,15 +1988,12 @@ Then("Desktop completes one durable Task from the approved plan", async () => {
   const evidence = await fetch(`${fixtureBaseUrl}/__evidence`).then(async (response) => {
     assert.equal(response.ok, true, "desktop E2E provider evidence is unavailable");
     return await response.json() as {
-      maxConcurrentReads: number;
       requestCounts: Record<string, number>;
     };
   });
-  assert.equal(evidence.maxConcurrentReads, 0, "approved-plan direct execution unexpectedly spawned read Agents");
   assert.equal(evidence.requestCounts.plan_review_request, 1);
-  assert.equal(evidence.requestCounts.plan_draft, 1);
+  assert.equal(evidence.requestCounts.plan_review_result, 1);
   assert.equal(evidence.requestCounts.approved_plan_direct_execution, 1);
-  assert.equal(evidence.requestCounts.auto_synthesis ?? 0, 0);
 });
 
 When("an unsupported conversation source is stored in the workspace", () => {
@@ -2347,7 +2344,6 @@ function requestedIdentity(control: Record<string, unknown>): DurableUserInputId
 }
 
 async function providerEvidence(): Promise<{
-  maxConcurrentReads: number;
   requestCounts: Record<string, number>;
 }> {
   const fixtureBaseUrl = process.env.SIGIL_DESKTOP_E2E_PROVIDER_BASE_URL;
@@ -2355,7 +2351,6 @@ async function providerEvidence(): Promise<{
   const response = await fetch(`${fixtureBaseUrl}/__evidence`);
   assert.equal(response.ok, true, "desktop E2E provider evidence is unavailable");
   return await response.json() as {
-    maxConcurrentReads: number;
     requestCounts: Record<string, number>;
   };
 }

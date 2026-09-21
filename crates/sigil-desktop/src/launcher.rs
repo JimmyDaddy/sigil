@@ -389,6 +389,7 @@ impl DesktopLauncher {
             server_info,
             address,
             shutdown_timeout: self.shutdown_timeout,
+            shutdown_report: None,
             stdout_task: Some(stdout_task),
             stderr_task: Some(stderr_task),
         })
@@ -433,6 +434,7 @@ pub struct DesktopServerProcess {
     server_info: DesktopServerInfo,
     address: SocketAddr,
     shutdown_timeout: Duration,
+    shutdown_report: Option<DesktopShutdownReport>,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
 }
@@ -479,6 +481,9 @@ impl DesktopServerProcess {
     pub(crate) async fn shutdown_in_place(
         &mut self,
     ) -> Result<DesktopShutdownReport, DesktopShutdownError> {
+        if let Some(report) = self.shutdown_report {
+            return Ok(report);
+        }
         self.owner_stdin.take();
         if self.shutdown_timeout.is_zero() {
             return self.shutdown_after_deadline().await;
@@ -495,10 +500,10 @@ impl DesktopServerProcess {
             Ok(Ok(status)) => {
                 self.child.take();
                 self.finish_pipe_tasks().await;
-                Ok(DesktopShutdownReport::from_status(
-                    DesktopShutdownKind::Graceful,
-                    status,
-                ))
+                let report =
+                    DesktopShutdownReport::from_status(DesktopShutdownKind::Graceful, status);
+                self.shutdown_report = Some(report);
+                Ok(report)
             }
             Ok(Err(_)) => Err(DesktopShutdownError::WaitFailed),
             Err(_) => self.shutdown_after_deadline().await,
@@ -527,7 +532,9 @@ impl DesktopServerProcess {
         };
         self.child.take();
         self.finish_pipe_tasks().await;
-        Ok(DesktopShutdownReport::from_status(kind, status))
+        let report = DesktopShutdownReport::from_status(kind, status);
+        self.shutdown_report = Some(report);
+        Ok(report)
     }
 
     async fn finish_pipe_tasks(&mut self) {

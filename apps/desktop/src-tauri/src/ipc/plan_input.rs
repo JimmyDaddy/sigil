@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopPlanDetailInput {
     pub(crate) session_id: String,
     pub(crate) plan_id: String,
@@ -234,7 +234,7 @@ fn plan_effect_label(value: sigil_desktop::DesktopPlanCheckEffect) -> &'static s
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopUserInputReadInput {
     pub(crate) session_id: String,
     pub(crate) request_id: String,
@@ -243,7 +243,7 @@ pub(crate) struct DesktopUserInputReadInput {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopUserInputDecisionInput {
     pub(crate) session_id: String,
     pub(crate) request_id: String,
@@ -264,7 +264,7 @@ pub(crate) enum DesktopUserInputDecisionInputKind {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopUserInputAnswerInput {
     pub(crate) question_id: String,
     pub(crate) value: DesktopUserInputAnswerValueInput,
@@ -280,21 +280,13 @@ pub(crate) enum DesktopUserInputAnswerValueInput {
     Text {
         value: String,
     },
-    Number {
-        value: String,
-    },
-    Integer {
-        value: i64,
-    },
-    Boolean {
-        value: bool,
-    },
     SingleSelect {
         option_id: Option<String>,
         other: Option<String>,
     },
     MultiSelect {
         option_ids: Vec<String>,
+        other: Option<String>,
     },
 }
 
@@ -318,20 +310,11 @@ impl From<DesktopUserInputAnswerInput> for sigil_desktop::DesktopUserInputAnswer
                 DesktopUserInputAnswerValueInput::Text { value } => {
                     sigil_desktop::DesktopUserInputAnswerValue::Text { value }
                 }
-                DesktopUserInputAnswerValueInput::Number { value } => {
-                    sigil_desktop::DesktopUserInputAnswerValue::Number { value }
-                }
-                DesktopUserInputAnswerValueInput::Integer { value } => {
-                    sigil_desktop::DesktopUserInputAnswerValue::Integer { value }
-                }
-                DesktopUserInputAnswerValueInput::Boolean { value } => {
-                    sigil_desktop::DesktopUserInputAnswerValue::Boolean { value }
-                }
                 DesktopUserInputAnswerValueInput::SingleSelect { option_id, other } => {
                     sigil_desktop::DesktopUserInputAnswerValue::SingleSelect { option_id, other }
                 }
-                DesktopUserInputAnswerValueInput::MultiSelect { option_ids } => {
-                    sigil_desktop::DesktopUserInputAnswerValue::MultiSelect { option_ids }
+                DesktopUserInputAnswerValueInput::MultiSelect { option_ids, other } => {
+                    sigil_desktop::DesktopUserInputAnswerValue::MultiSelect { option_ids, other }
                 }
             },
         }
@@ -391,36 +374,12 @@ pub(crate) struct DesktopUserInputSourceSummary {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopUserInputQuestionSummary {
     pub(crate) id: String,
-    pub(crate) header: String,
     pub(crate) question: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
     pub(crate) required: bool,
-    pub(crate) field: DesktopUserInputFieldSummary,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub(crate) enum DesktopUserInputFieldSummary {
-    Text {
-        multiline: bool,
-        max_chars: u32,
-    },
-    Number,
-    Integer,
-    Boolean,
-    SingleSelect {
-        options: Vec<DesktopUserInputOptionSummary>,
-        allow_other: bool,
-    },
-    MultiSelect {
-        options: Vec<DesktopUserInputOptionSummary>,
-        max_selected: u32,
-    },
+    pub(crate) options: Vec<DesktopUserInputOptionSummary>,
+    pub(crate) multiple: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -504,42 +463,11 @@ impl From<sigil_desktop::DesktopUserInputQuestion> for DesktopUserInputQuestionS
     fn from(value: sigil_desktop::DesktopUserInputQuestion) -> Self {
         Self {
             id: value.id,
-            header: value.header,
             question: value.question,
             description: value.description,
             required: value.required,
-            field: match value.field {
-                sigil_desktop::DesktopUserInputField::Text {
-                    multiline,
-                    max_chars,
-                } => DesktopUserInputFieldSummary::Text {
-                    multiline,
-                    max_chars,
-                },
-                sigil_desktop::DesktopUserInputField::Number => {
-                    DesktopUserInputFieldSummary::Number
-                }
-                sigil_desktop::DesktopUserInputField::Integer => {
-                    DesktopUserInputFieldSummary::Integer
-                }
-                sigil_desktop::DesktopUserInputField::Boolean => {
-                    DesktopUserInputFieldSummary::Boolean
-                }
-                sigil_desktop::DesktopUserInputField::SingleSelect {
-                    options,
-                    allow_other,
-                } => DesktopUserInputFieldSummary::SingleSelect {
-                    options: options.into_iter().map(Into::into).collect(),
-                    allow_other,
-                },
-                sigil_desktop::DesktopUserInputField::MultiSelect {
-                    options,
-                    max_selected,
-                } => DesktopUserInputFieldSummary::MultiSelect {
-                    options: options.into_iter().map(Into::into).collect(),
-                    max_selected,
-                },
-            },
+            options: value.options.into_iter().map(Into::into).collect(),
+            multiple: value.multiple,
         }
     }
 }

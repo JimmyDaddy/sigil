@@ -12,8 +12,8 @@ import { Button, Checkbox, Select, TextArea, TextField } from "./ui/primitives";
 type SingleSelectDraft =
   | { kind: "option"; optionId: string }
   | { kind: "other"; value: string };
-
-type DraftValue = string | string[] | SingleSelectDraft;
+type MultiSelectDraft = { optionIds: string[]; other: string };
+type DraftValue = string | SingleSelectDraft | MultiSelectDraft;
 
 interface UserInputCardProps {
   request: UserInputRequest;
@@ -45,11 +45,11 @@ export function UserInputCard({
   useEffect(() => {
     setDrafts(Object.fromEntries(request.questions.map((question) => [
       question.id,
-      question.field.kind === "multi_select"
-        ? []
-        : question.field.kind === "single_select"
-          ? { kind: "option", optionId: "" }
-          : "",
+      question.options.length === 0
+        ? ""
+        : question.multiple
+          ? { optionIds: [], other: "" }
+          : { kind: "option", optionId: "" },
     ])));
     setValidation(undefined);
   }, [request.identity.requestId, request.identity.generation, request.requestHash]);
@@ -109,10 +109,9 @@ export function UserInputCard({
       ) : <div className="user-input-fields">
         {request.questions.map((question) => (
           <fieldset key={question.id} disabled={busy}>
-            <legend>{question.header}{question.required ? " *" : ""}</legend>
-            <p>{question.question}</p>
+            <legend>{question.question}</legend>
             {question.description === undefined ? null : <small>{question.description}</small>}
-            <UserInputField
+            <UserInputQuestionField
               question={question}
               value={drafts[question.id]}
               onChange={(value) => update(question.id, value)}
@@ -151,7 +150,7 @@ export function UserInputCard({
   );
 }
 
-function UserInputField({
+function UserInputQuestionField({
   question,
   value,
   onChange,
@@ -160,134 +159,119 @@ function UserInputField({
   value: DraftValue | undefined;
   onChange: (value: DraftValue) => void;
 }) {
-  const field = question.field;
-  switch (field.kind) {
-    case "text":
-      return field.multiline ? (
-        <TextArea label={question.header} labelHidden value={typeof value === "string" ? value : ""} maxLength={field.maxChars} onChange={(event) => onChange(event.target.value)} />
-      ) : (
-        <TextField label={question.header} labelHidden type="text" value={typeof value === "string" ? value : ""} maxLength={field.maxChars} onChange={(event) => onChange(event.target.value)} />
-      );
-    case "number":
-      return <TextField label={question.header} labelHidden type="number" step="any" value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)} />;
-    case "integer":
-      return <TextField label={question.header} labelHidden type="number" step="1" value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value)} />;
-    case "boolean":
-      return (
+  if (question.options.length === 0) {
+    return (
+      <TextArea
+        label={question.question}
+        labelHidden
+        value={typeof value === "string" ? value : ""}
+        maxLength={4096}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    );
+  }
+
+  if (!question.multiple) {
+    const selected = isSingleSelectDraft(value) ? value : { kind: "option" as const, optionId: "" };
+    return (
+      <div className="user-input-select">
         <Select
-          label={question.header}
+          label={question.question}
           labelHidden
-          value={typeof value === "string" ? value : ""}
-          onChange={(event) => onChange(event.target.value)}
+          value={selected.kind === "other" ? "other" : selected.optionId}
+          onChange={(event) => {
+            if (event.target.value === "other") {
+              onChange({ kind: "other", value: "" });
+            } else {
+              onChange({ kind: "option", optionId: event.target.value });
+            }
+          }}
         >
           <option value="">Select…</option>
-          <option value="true">Yes</option>
-          <option value="false">No</option>
+          {question.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+          <option value="other">Other…</option>
         </Select>
-      );
-    case "single_select": {
-      const selected = isSingleSelectDraft(value)
-        ? value
-        : { kind: "option" as const, optionId: "" };
-      const selectedIndex = selected.kind === "option"
-        ? field.options.findIndex((option) => option.id === selected.optionId)
-        : -1;
-      return (
-        <div className="user-input-select">
-          <Select
-            label={question.header}
+        {selected.kind === "other" ? (
+          <TextField
+            label={`${question.question} Other`}
             labelHidden
-            value={selected.kind === "other" ? "other" : selectedIndex < 0 ? "" : `option:${selectedIndex}`}
-            onChange={(event) => {
-              if (event.target.value === "other") {
-                onChange({ kind: "other", value: "" });
-                return;
-              }
-              const optionIndex = Number(event.target.value.slice("option:".length));
-              const option = field.options[optionIndex];
-              onChange({ kind: "option", optionId: option?.id ?? "" });
-            }}
-          >
-            <option value="">Select…</option>
-            {field.options.map((option, index) => <option key={option.id} value={`option:${index}`}>{option.label}</option>)}
-            {field.allowOther ? <option value="other">Other…</option> : null}
-          </Select>
-          {selected.kind === "other" ? (
-            <TextField
-              label={`${question.header} Other`}
-              labelHidden
-              type="text"
-              value={selected.value}
-              onChange={(event) => onChange({ kind: "other", value: event.target.value })}
-            />
-          ) : null}
-        </div>
-      );
-    }
-    case "multi_select": {
-      const selected = Array.isArray(value) ? value : [];
-      return <div className="user-input-options">{field.options.map((option) => (
-        <Checkbox
-            key={option.id}
-            label={option.label}
-            checked={selected.includes(option.id)}
-            disabled={!selected.includes(option.id) && selected.length >= field.maxSelected}
-            onChange={(event) => onChange(event.target.checked
-              ? [...selected, option.id]
-              : selected.filter((id) => id !== option.id))}
+            type="text"
+            value={selected.value}
+            onChange={(event) => onChange({ kind: "other", value: event.target.value })}
           />
-      ))}</div>;
-    }
+        ) : null}
+      </div>
+    );
   }
+
+  const selected = isMultiSelectDraft(value) ? value : { optionIds: [], other: "" };
+  return (
+    <div className="user-input-options">
+      {question.options.map((option) => (
+        <Checkbox
+          key={option.id}
+          label={option.label}
+          checked={selected.optionIds.includes(option.id)}
+          onChange={(event) => onChange({
+            optionIds: event.target.checked
+              ? [...selected.optionIds, option.id]
+              : selected.optionIds.filter((id) => id !== option.id),
+            other: selected.other,
+          })}
+        />
+      ))}
+      <TextField
+        label={`${question.question} Other`}
+        labelHidden
+        type="text"
+        value={selected.other}
+        onChange={(event) => onChange({ optionIds: selected.optionIds, other: event.target.value })}
+      />
+    </div>
+  );
 }
 
-function answerForQuestion(question: UserInputQuestion, draft: DraftValue | undefined): UserInputAnswer | string | undefined {
-  const missing = `${question.header} requires an answer.`;
-  switch (question.field.kind) {
-    case "text": {
-      const value = typeof draft === "string" ? draft : "";
-      if (value.length === 0) return question.required ? missing : undefined;
-      return { questionId: question.id, value: { kind: "text", value } };
-    }
-    case "number": {
-      const value = typeof draft === "string" ? draft : "";
-      if (value.length === 0) return question.required ? missing : undefined;
-      if (!Number.isFinite(Number(value))) return `${question.header} must be a finite number.`;
-      return { questionId: question.id, value: { kind: "number", value } };
-    }
-    case "integer": {
-      const value = typeof draft === "string" ? draft : "";
-      if (value.length === 0) return question.required ? missing : undefined;
-      const parsed = Number(value);
-      if (!Number.isSafeInteger(parsed)) return `${question.header} must be an integer.`;
-      return { questionId: question.id, value: { kind: "integer", value: parsed } };
-    }
-    case "boolean": {
-      const value = typeof draft === "string" ? draft : "";
-      if (value.length === 0) return question.required ? missing : undefined;
-      return { questionId: question.id, value: { kind: "boolean", value: value === "true" } };
-    }
-    case "single_select": {
-      const selected = isSingleSelectDraft(draft)
-        ? draft
-        : { kind: "option" as const, optionId: "" };
-      if (selected.kind === "other") {
-        const other = selected.value;
-        if (other.length === 0) return `${question.header} requires an Other value.`;
-        return { questionId: question.id, value: { kind: "single_select", other } };
-      }
-      if (selected.optionId.length === 0) return question.required ? missing : undefined;
-      return { questionId: question.id, value: { kind: "single_select", optionId: selected.optionId } };
-    }
-    case "multi_select": {
-      const optionIds = Array.isArray(draft) ? draft : [];
-      if (optionIds.length === 0) return question.required ? missing : undefined;
-      return { questionId: question.id, value: { kind: "multi_select", optionIds } };
-    }
+function answerForQuestion(
+  question: UserInputQuestion,
+  draft: DraftValue | undefined,
+): UserInputAnswer | string | undefined {
+  const missing = `${question.question} requires an answer.`;
+  if (question.options.length === 0) {
+    const value = typeof draft === "string" ? draft : "";
+    return value.length === 0
+      ? question.required ? missing : undefined
+      : { questionId: question.id, value: { kind: "text", value } };
   }
+  if (!question.multiple) {
+    const selected = isSingleSelectDraft(draft) ? draft : { kind: "option" as const, optionId: "" };
+    if (selected.kind === "other") {
+      return selected.value.length === 0
+        ? question.required ? `${question.question} requires an Other value.` : undefined
+        : { questionId: question.id, value: { kind: "single_select", other: selected.value } };
+    }
+    return selected.optionId.length === 0
+      ? question.required ? missing : undefined
+      : { questionId: question.id, value: { kind: "single_select", optionId: selected.optionId } };
+  }
+  const selected = isMultiSelectDraft(draft) ? draft : { optionIds: [], other: "" };
+  if (selected.optionIds.length === 0 && selected.other.length === 0) {
+    return question.required ? missing : undefined;
+  }
+  return {
+    questionId: question.id,
+    value: {
+      kind: "multi_select",
+      optionIds: selected.optionIds,
+      ...(selected.other.length === 0 ? {} : { other: selected.other }),
+    },
+  };
 }
 
 function isSingleSelectDraft(value: DraftValue | undefined): value is SingleSelectDraft {
-  return typeof value === "object" && !Array.isArray(value) && value !== null
+  return typeof value === "object" && value !== null && "kind" in value
     && (value.kind === "option" || value.kind === "other");
+}
+
+function isMultiSelectDraft(value: DraftValue | undefined): value is MultiSelectDraft {
+  return typeof value === "object" && value !== null && "optionIds" in value;
 }

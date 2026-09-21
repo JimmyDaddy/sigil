@@ -122,7 +122,6 @@
     },
     "schemas": {
       "AgentActivityItem": {
-        "additionalProperties": false,
         "properties": {
           "display_name": {
             "maxLength": 32768,
@@ -202,7 +201,6 @@
         "type": "string"
       },
       "AgentActivityView": {
-        "additionalProperties": false,
         "properties": {
           "active_agents": {
             "format": "uint64",
@@ -243,7 +241,6 @@
         "type": "string"
       },
       "AgentUsageSummary": {
-        "additionalProperties": false,
         "properties": {
           "cached_tokens": {
             "format": "uint64",
@@ -273,7 +270,6 @@
         "type": "object"
       },
       "ApplicationAgentBinding": {
-        "additionalProperties": false,
         "properties": {
           "profile_id": {
             "type": "string"
@@ -289,7 +285,6 @@
         "type": "object"
       },
       "ApplicationAgentCatalogEntry": {
-        "additionalProperties": false,
         "properties": {
           "available": {
             "type": "boolean"
@@ -355,7 +350,6 @@
         "type": "object"
       },
       "ApplicationCacheUsage": {
-        "additionalProperties": false,
         "properties": {
           "cache_miss_tokens": {
             "format": "uint64",
@@ -415,7 +409,6 @@
         "type": "string"
       },
       "ApplicationCommandCatalogEntry": {
-        "additionalProperties": false,
         "properties": {
           "aliases": {
             "items": {
@@ -475,45 +468,107 @@
         "description": "Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome.",
         "oneOf": [
           {
+            "properties": {
+              "Settled": {
+                "type": "object"
+              }
+            },
             "required": [
-              "settled"
+              "Settled"
             ],
             "type": "object"
           },
           {
+            "properties": {
+              "Replayed": {
+                "type": "object"
+              }
+            },
             "required": [
-              "replayed"
+              "Replayed"
             ],
             "type": "object"
           },
           {
+            "properties": {
+              "Rejected": {
+                "type": "object"
+              }
+            },
             "required": [
-              "rejected"
+              "Rejected"
             ],
             "type": "object"
           },
           {
+            "properties": {
+              "PayloadConflict": {
+                "type": "object"
+              }
+            },
             "required": [
-              "payload_conflict"
+              "PayloadConflict"
             ],
             "type": "object"
           },
           {
+            "properties": {
+              "InFlight": {
+                "type": "object"
+              }
+            },
             "required": [
-              "in_flight"
+              "InFlight"
             ],
             "type": "object"
           },
           {
+            "properties": {
+              "Uncertain": {
+                "type": "object"
+              }
+            },
             "required": [
-              "uncertain"
+              "Uncertain"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "ReplayedUncertain": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "ReplayedUncertain"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "ConfirmedNoEffect": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "ConfirmedNoEffect"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "SafetyStopRequestedButUnrecorded": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "SafetyStopRequestedButUnrecorded"
             ],
             "type": "object"
           }
         ]
       },
       "ApplicationCommandRequest": {
-        "additionalProperties": false,
         "properties": {
           "command": {
             "description": "Versioned grouped application command. The server validates its schema and host binding.",
@@ -523,6 +578,16 @@
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
+          },
+          "command_journal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandJournalBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -532,7 +597,6 @@
         "type": "object"
       },
       "ApplicationExtensionCatalog": {
-        "additionalProperties": false,
         "properties": {
           "agents": {
             "items": {
@@ -561,7 +625,6 @@
         "type": "object"
       },
       "ApplicationModelOption": {
-        "additionalProperties": false,
         "properties": {
           "availability": {
             "enum": [
@@ -633,7 +696,6 @@
         "type": "object"
       },
       "ApplicationProjection": {
-        "additionalProperties": false,
         "properties": {
           "agents": {
             "type": "object"
@@ -715,7 +777,6 @@
         "type": "object"
       },
       "ApplicationProjectionPage": {
-        "additionalProperties": false,
         "properties": {
           "after": {
             "type": [
@@ -771,7 +832,6 @@
         "type": "object"
       },
       "ApplicationSkillBinding": {
-        "additionalProperties": false,
         "properties": {
           "index_fingerprint": {
             "type": "string"
@@ -791,7 +851,6 @@
         "type": "object"
       },
       "ApplicationSkillCatalogEntry": {
-        "additionalProperties": false,
         "properties": {
           "available": {
             "type": "boolean"
@@ -1094,7 +1153,7 @@
         "type": "object"
       },
       "ApprovalResolvedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "approved": {
             "type": "boolean"
@@ -1156,7 +1215,6 @@
         "type": "string"
       },
       "CheckpointFileView": {
-        "additionalProperties": false,
         "properties": {
           "availability": {
             "$ref": "#/components/schemas/CheckpointFileAvailability"
@@ -1196,7 +1254,6 @@
         "type": "string"
       },
       "CheckpointRestorePreviewFile": {
-        "additionalProperties": false,
         "properties": {
           "actual_current_hash": {
             "maxLength": 512,
@@ -1237,7 +1294,6 @@
         "type": "object"
       },
       "CheckpointRestoreReceipt": {
-        "additionalProperties": false,
         "properties": {
           "batch_id": {
             "type": "string"
@@ -1263,7 +1319,6 @@
         "type": "object"
       },
       "CheckpointRestoreRequest": {
-        "additionalProperties": false,
         "properties": {
           "checkpoint_digest": {
             "maxLength": 512,
@@ -1283,7 +1338,6 @@
         "type": "object"
       },
       "CheckpointRestoreReview": {
-        "additionalProperties": false,
         "properties": {
           "checkpoint_digest": {
             "maxLength": 512,
@@ -1329,7 +1383,6 @@
         "type": "object"
       },
       "CheckpointReverseDiff": {
-        "additionalProperties": false,
         "properties": {
           "diff": {
             "maxLength": 65536,
@@ -1357,7 +1410,6 @@
         "type": "object"
       },
       "CheckpointView": {
-        "additionalProperties": false,
         "properties": {
           "checkpoint_digest": {
             "maxLength": 512,
@@ -1415,6 +1467,16 @@
           "command_id": {
             "type": "string"
           },
+          "command_journal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandJournalBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "correlation_id": {
             "type": [
               "string",
@@ -1445,8 +1507,25 @@
         ],
         "type": "object"
       },
+      "CommandJournalBinding": {
+        "properties": {
+          "command_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "logical_journal_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "logical_journal_id",
+          "command_generation"
+        ],
+        "type": "object"
+      },
       "CompactionAdmissionNoHistory": {
-        "additionalProperties": false,
         "properties": {
           "durable_message_count": {
             "format": "uint64",
@@ -1471,7 +1550,6 @@
         "type": "object"
       },
       "CompactionAdmissionPrepared": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "prepared",
@@ -1488,7 +1566,6 @@
         "type": "object"
       },
       "CompactionAdmissionReady": {
-        "additionalProperties": false,
         "properties": {
           "economics": {
             "$ref": "#/components/schemas/CompactionEconomics"
@@ -1505,7 +1582,6 @@
         "type": "object"
       },
       "CompactionAdmissionUnavailable": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "unavailable",
@@ -1523,7 +1599,6 @@
         "type": "object"
       },
       "CompactionConstraint": {
-        "additionalProperties": false,
         "properties": {
           "source_event_id": {
             "maxLength": 512,
@@ -1549,7 +1624,6 @@
         "type": "object"
       },
       "CompactionDetails": {
-        "additionalProperties": false,
         "properties": {
           "active_constraints": {
             "items": {
@@ -1661,7 +1735,6 @@
         "type": "object"
       },
       "CompactionEconomics": {
-        "additionalProperties": false,
         "properties": {
           "before_input_tokens": {
             "format": "uint64",
@@ -1746,7 +1819,6 @@
         "type": "object"
       },
       "CompactionPolicy": {
-        "additionalProperties": false,
         "properties": {
           "admission_reason": {
             "oneOf": [
@@ -1808,7 +1880,6 @@
         "type": "object"
       },
       "CompactionReceipt": {
-        "additionalProperties": false,
         "properties": {
           "attempt_id": {
             "maxLength": 512,
@@ -1848,7 +1919,6 @@
         "type": "object"
       },
       "CompactionReview": {
-        "additionalProperties": false,
         "properties": {
           "admission": {
             "oneOf": [
@@ -1906,7 +1976,6 @@
         "type": "object"
       },
       "CompactionToolArtifact": {
-        "additionalProperties": false,
         "properties": {
           "content_sha256": {
             "pattern": "^sha256:[0-9a-f]{64}$",
@@ -2028,10 +2097,314 @@
         ],
         "type": "object"
       },
+      "ControlLogRecoveryAction": {
+        "oneOf": [
+          {
+            "enum": [
+              "Preview"
+            ],
+            "type": "string"
+          },
+          {
+            "properties": {
+              "SealAndRotate": {
+                "properties": {
+                  "preview": {
+                    "$ref": "#/components/schemas/ControlLogRecoveryPreview"
+                  }
+                },
+                "required": [
+                  "preview"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "SealAndRotate"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ControlLogRecoveryAuthorityPreview": {
+        "properties": {
+          "old_byte_length": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "old_content_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "old_file_identity": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "old_namespace_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "preview_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "request": {
+            "properties": {
+              "from_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "header_digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "logical_journal_id": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "operation_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "owner_context_digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "successor_generation": {
+                "format": "uint64",
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "logical_journal_id",
+              "operation_id",
+              "from_generation",
+              "successor_generation",
+              "header_digest",
+              "owner_context_digest"
+            ],
+            "type": "object"
+          },
+          "successor_namespace_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request",
+          "old_namespace_hash",
+          "successor_namespace_hash",
+          "old_byte_length",
+          "old_content_digest",
+          "old_file_identity",
+          "preview_digest"
+        ],
+        "type": "object"
+      },
+      "ControlLogRecoveryImpact": {
+        "properties": {
+          "affected_scope_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "affected_scopes": {
+            "items": {
+              "$ref": "#/components/schemas/ControlLogRecoveryScope"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "commands_truncated": {
+            "type": "boolean"
+          },
+          "known_command_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "known_unresolved_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scopes_truncated": {
+            "type": "boolean"
+          },
+          "tail_command_count_unknown": {
+            "type": "boolean"
+          },
+          "unparsed_tail_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unresolved_commands": {
+            "items": {
+              "$ref": "#/components/schemas/ControlLogUnresolvedCommand"
+            },
+            "maxItems": 32,
+            "type": "array"
+          },
+          "verified_prefix_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verified_prefix_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "verified_record_count": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "verified_prefix_bytes",
+          "verified_record_count",
+          "verified_prefix_digest",
+          "known_command_count",
+          "affected_scope_count",
+          "affected_scopes",
+          "scopes_truncated",
+          "known_unresolved_count",
+          "unresolved_commands",
+          "commands_truncated",
+          "unparsed_tail_bytes",
+          "tail_command_count_unknown"
+        ],
+        "type": "object"
+      },
+      "ControlLogRecoveryOutcome": {
+        "oneOf": [
+          {
+            "properties": {
+              "Preview": {
+                "$ref": "#/components/schemas/ControlLogRecoveryPreview"
+              }
+            },
+            "required": [
+              "Preview"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "Activated": {
+                "properties": {
+                  "command_generation": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "logical_journal_id": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "logical_journal_id",
+                  "command_generation"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "Activated"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ControlLogRecoveryPreview": {
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/ControlLogRecoveryAuthorityPreview"
+          },
+          "impact": {
+            "$ref": "#/components/schemas/ControlLogRecoveryImpact"
+          }
+        },
+        "required": [
+          "authority",
+          "impact"
+        ],
+        "type": "object"
+      },
+      "ControlLogRecoveryScope": {
+        "properties": {
+          "scope_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "scope_digest",
+          "session_id",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
+      "ControlLogUnresolvedCommand": {
+        "properties": {
+          "command_id": {
+            "type": "string"
+          },
+          "command_kind": {
+            "type": "string"
+          },
+          "key_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "Reserved",
+              "DispatchStarted",
+              "EffectStarted",
+              "DomainCommitted",
+              "Settled",
+              "Uncertain",
+              "ConfirmedNoEffect"
+            ],
+            "type": "string"
+          },
+          "scope_digest": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_digest",
+          "scope_digest",
+          "command_id",
+          "command_kind",
+          "phase"
+        ],
+        "type": "object"
+      },
       "ConversationDisplayContent": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "assistant_phase": {
                 "enum": [
@@ -2094,7 +2467,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "original_content_bytes": {
                 "format": "uint64",
@@ -2120,7 +2492,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "artifact_availability": {
                 "enum": [
@@ -2227,7 +2598,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "call_id": {
                 "maxLength": 512,
@@ -2261,7 +2631,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "checkpoint_id": {
                 "maxLength": 512,
@@ -2304,7 +2673,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "original_content_bytes": {
                 "format": "uint64",
@@ -2330,7 +2698,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "final_message_id": {
                 "maxLength": 512,
@@ -2362,7 +2729,6 @@
         ]
       },
       "ConversationDisplayGapFact": {
-        "additionalProperties": false,
         "properties": {
           "after_session_stream_sequence": {
             "$ref": "#/components/schemas/DecimalSequence"
@@ -2385,7 +2751,6 @@
         "type": "string"
       },
       "ConversationDisplayItem": {
-        "additionalProperties": false,
         "properties": {
           "content": {
             "$ref": "#/components/schemas/ConversationDisplayContent"
@@ -2469,7 +2834,6 @@
         "type": "string"
       },
       "ConversationDisplayOrder": {
-        "additionalProperties": false,
         "properties": {
           "session_stream_sequence": {
             "$ref": "#/components/schemas/DecimalSequence"
@@ -2487,7 +2851,6 @@
         "type": "object"
       },
       "ConversationDisplayPage": {
-        "additionalProperties": false,
         "properties": {
           "gap_facts": {
             "items": {
@@ -2598,7 +2961,6 @@
         "type": "object"
       },
       "ConversationDisplaySkillReference": {
-        "additionalProperties": false,
         "properties": {
           "id": {
             "maxLength": 512,
@@ -2644,7 +3006,6 @@
         "type": "string"
       },
       "ConversationForkPointView": {
-        "additionalProperties": false,
         "properties": {
           "source_boundary_stream_sequence": {
             "format": "uint64",
@@ -2676,7 +3037,6 @@
         "type": "object"
       },
       "ConversationForkReceipt": {
-        "additionalProperties": false,
         "properties": {
           "copied_external_provenance_count": {
             "format": "uint64",
@@ -2706,7 +3066,6 @@
         "type": "object"
       },
       "ConversationLiveProvisionalAnchor": {
-        "additionalProperties": false,
         "description": "Process-local observation only; never a durable display order.",
         "properties": {
           "durable_frontier": {
@@ -2799,7 +3158,6 @@
         "type": "string"
       },
       "ConversationQueueCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/ConversationQueueCommandActionKind"
@@ -2855,7 +3213,6 @@
         "type": "object"
       },
       "ConversationQueueCommandRequest": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/ConversationQueueCommandAction"
@@ -2871,7 +3228,6 @@
         "type": "object"
       },
       "ConversationQueueEditAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "edit",
@@ -2906,7 +3262,6 @@
         "type": "object"
       },
       "ConversationQueueEnqueueAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "enqueue",
@@ -2946,7 +3301,6 @@
         "type": "string"
       },
       "ConversationQueueInterruptAndRunNextAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "interrupt_and_run_next",
@@ -2972,7 +3326,6 @@
         "type": "object"
       },
       "ConversationQueueItem": {
-        "additionalProperties": false,
         "properties": {
           "blocked_reason": {
             "oneOf": [
@@ -3064,7 +3417,6 @@
         "type": "string"
       },
       "ConversationQueuePauseAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "pause",
@@ -3085,7 +3437,6 @@
         "type": "string"
       },
       "ConversationQueueRemoveAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "remove",
@@ -3104,7 +3455,6 @@
         "type": "object"
       },
       "ConversationQueueReorderAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "reorder",
@@ -3131,7 +3481,6 @@
         "type": "object"
       },
       "ConversationQueueResumeAction": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "const": "resume",
@@ -3144,7 +3493,6 @@
         "type": "object"
       },
       "ConversationQueueView": {
-        "additionalProperties": false,
         "properties": {
           "generation": {
             "$ref": "#/components/schemas/ConversationQueueGeneration"
@@ -3234,7 +3582,6 @@
         ]
       },
       "ConversationRecoveryCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "enum": [
@@ -3329,7 +3676,6 @@
         "type": "object"
       },
       "ConversationRecoveryCompactionAction": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "apply_compaction",
@@ -3348,7 +3694,6 @@
         "type": "object"
       },
       "ConversationRecoveryForkAction": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "fork_conversation",
@@ -3371,7 +3716,6 @@
         "type": "object"
       },
       "ConversationRecoveryPrepareCompactionAction": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "prepare_compaction",
@@ -3390,7 +3734,6 @@
         "type": "object"
       },
       "ConversationRecoveryRestoreAction": {
-        "additionalProperties": false,
         "properties": {
           "checkpoint_digest": {
             "maxLength": 512,
@@ -3415,7 +3758,6 @@
         "type": "object"
       },
       "ConversationRecoveryToolOutputShrinkAction": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "apply_standalone_tool_output_shrink",
@@ -3434,7 +3776,6 @@
         "type": "object"
       },
       "ConversationRecoveryView": {
-        "additionalProperties": false,
         "properties": {
           "checkpoints": {
             "items": {
@@ -3464,7 +3805,7 @@
         "type": "object"
       },
       "ConversationRouteChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "decision_id": {
             "maxLength": 512,
@@ -3496,7 +3837,6 @@
         "type": "object"
       },
       "ConversationTaskControl": {
-        "additionalProperties": false,
         "description": "Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority.",
         "properties": {
           "active_children": {
@@ -3586,7 +3926,6 @@
         "type": "object"
       },
       "ConversationTaskLane": {
-        "additionalProperties": false,
         "properties": {
           "conflicts": {
             "items": {
@@ -3617,7 +3956,6 @@
         "type": "object"
       },
       "ConversationTaskPlanStep": {
-        "additionalProperties": false,
         "properties": {
           "depends_on": {
             "items": {
@@ -3663,7 +4001,6 @@
         "type": "object"
       },
       "ConversationTerminalFrontier": {
-        "additionalProperties": false,
         "properties": {
           "run_id": {
             "maxLength": 512,
@@ -3684,7 +4021,6 @@
         "type": "object"
       },
       "CutoverBlocker": {
-        "additionalProperties": false,
         "properties": {
           "adapter": {
             "type": [
@@ -3707,7 +4043,6 @@
         "type": "object"
       },
       "CutoverSurfaceStatus": {
-        "additionalProperties": false,
         "properties": {
           "authority": {
             "enum": [
@@ -3765,7 +4100,6 @@
         "type": "object"
       },
       "DurableSessionFrontier": {
-        "additionalProperties": false,
         "properties": {
           "through_stream_sequence": {
             "format": "uint64",
@@ -3824,7 +4158,6 @@
         "type": "object"
       },
       "ForegroundRunOwner": {
-        "additionalProperties": false,
         "properties": {
           "owner_revision": {
             "pattern": "^sha256:[0-9a-f]{64}$",
@@ -3860,7 +4193,7 @@
         "type": "string"
       },
       "IntegrationLaneChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "conflicts": {
             "items": {
@@ -3923,7 +4256,6 @@
         "type": "string"
       },
       "Intent": {
-        "additionalProperties": false,
         "properties": {
           "acceptance_criteria": {
             "items": {
@@ -4031,7 +4363,6 @@
         "type": "object"
       },
       "IntentAcceptanceCriterion": {
-        "additionalProperties": false,
         "properties": {
           "criterion_id": {
             "maxLength": 128,
@@ -4095,7 +4426,6 @@
         "type": "string"
       },
       "IntentArtifactSummary": {
-        "additionalProperties": false,
         "properties": {
           "artifact_id": {
             "maxLength": 128,
@@ -4136,7 +4466,6 @@
         "type": "string"
       },
       "IntentConflict": {
-        "additionalProperties": false,
         "properties": {
           "artifact_id": {
             "maxLength": 128,
@@ -4197,7 +4526,6 @@
         ]
       },
       "IntentDropCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "client_id": {
             "type": "string"
@@ -4231,7 +4559,6 @@
         "type": "object"
       },
       "IntentDropPreviewRequest": {
-        "additionalProperties": false,
         "properties": {
           "intent_ref": {
             "$ref": "#/components/schemas/IntentVersionRef"
@@ -4243,7 +4570,6 @@
         "type": "object"
       },
       "IntentDropRequest": {
-        "additionalProperties": false,
         "properties": {
           "operation_id": {
             "maxLength": 128,
@@ -4300,7 +4626,6 @@
         "type": "string"
       },
       "IntentOperationExecution": {
-        "additionalProperties": false,
         "properties": {
           "committed_operation_ids": {
             "items": {
@@ -4359,7 +4684,6 @@
         "type": "string"
       },
       "IntentOperationFileSummary": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/IntentOperationFileAction"
@@ -4394,7 +4718,6 @@
         "type": "string"
       },
       "IntentOperationPreview": {
-        "additionalProperties": false,
         "properties": {
           "conflicts": {
             "items": {
@@ -4501,7 +4824,6 @@
       "IntentSource": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "user_turn",
@@ -4519,7 +4841,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "accepted_suggestion",
@@ -4537,7 +4858,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "trusted_spec",
@@ -4557,7 +4877,6 @@
         ]
       },
       "IntentStack": {
-        "additionalProperties": false,
         "properties": {
           "authority_state": {
             "$ref": "#/components/schemas/IntentAuthorityState"
@@ -4608,7 +4927,6 @@
       "IntentStackState": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "schema_version": {
                 "const": 1,
@@ -4630,7 +4948,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "safe_message": {
                 "maxLength": 2048,
@@ -4662,7 +4979,6 @@
         "type": "string"
       },
       "IntentVerificationImpactSummary": {
-        "additionalProperties": false,
         "properties": {
           "impact": {
             "$ref": "#/components/schemas/IntentVerificationImpact"
@@ -4679,7 +4995,6 @@
         "type": "object"
       },
       "IntentVersionRef": {
-        "additionalProperties": false,
         "properties": {
           "intent_id": {
             "maxLength": 128,
@@ -4699,7 +5014,6 @@
         "type": "object"
       },
       "LiveRunUpdate": {
-        "additionalProperties": false,
         "properties": {
           "attempt_id": {
             "maxLength": 256,
@@ -4751,7 +5065,6 @@
             "type": "string"
           },
           "tool_progress": {
-            "additionalProperties": false,
             "properties": {
               "call_id": {
                 "maxLength": 256,
@@ -4816,7 +5129,6 @@
         "type": "object"
       },
       "MessageContentPage": {
-        "additionalProperties": false,
         "properties": {
           "content_version": {
             "pattern": "^[0-9a-f]{64}$",
@@ -4864,7 +5176,7 @@
         "type": "object"
       },
       "NoticeEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "message": {
             "type": "string"
@@ -4881,7 +5193,6 @@
         "type": "object"
       },
       "PendingApproval": {
-        "additionalProperties": false,
         "properties": {
           "approval_request_id": {
             "type": "string"
@@ -4933,7 +5244,6 @@
         "type": "object"
       },
       "PendingApprovalDisplay": {
-        "additionalProperties": false,
         "properties": {
           "analysis_reason_codes": {
             "items": {
@@ -5049,7 +5359,6 @@
         "type": "object"
       },
       "PendingApprovalSubject": {
-        "additionalProperties": false,
         "properties": {
           "kind": {
             "maxLength": 2048,
@@ -5083,7 +5392,6 @@
         "type": "string"
       },
       "PlanDecisionCommand": {
-        "additionalProperties": false,
         "properties": {
           "client_id": {
             "maxLength": 128,
@@ -5131,7 +5439,6 @@
         "type": "object"
       },
       "PlanDecisionCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "enum": [
@@ -5173,16 +5480,6 @@
           },
           "session_id": {
             "type": "string"
-          },
-          "task_blocker": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/TaskBlocker"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "task_id": {
             "type": [
@@ -5229,7 +5526,6 @@
         "type": "object"
       },
       "PlanDecisionRequest": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "enum": [
@@ -5280,7 +5576,6 @@
         "type": "object"
       },
       "PlanLineage": {
-        "additionalProperties": false,
         "properties": {
           "attempt_id": {
             "maxLength": 128,
@@ -5311,7 +5606,6 @@
         "type": "object"
       },
       "PlanReview": {
-        "additionalProperties": false,
         "properties": {
           "allowed_actions": {
             "items": {
@@ -5330,7 +5624,6 @@
           "candidate": {
             "oneOf": [
               {
-                "additionalProperties": false,
                 "properties": {
                   "completeness": {
                     "enum": [
@@ -5375,7 +5668,6 @@
           "revision": {
             "oneOf": [
               {
-                "additionalProperties": false,
                 "properties": {
                   "attempt_id": {
                     "type": [
@@ -5399,7 +5691,6 @@
                       "queued",
                       "researching",
                       "waiting_for_input",
-                      "finalizing",
                       "failed",
                       "cancelled",
                       "succeeded"
@@ -5445,7 +5736,6 @@
             "enum": [
               "started",
               "waiting_for_input",
-              "finalizing",
               "draft_ready",
               "compile_failed",
               "completed_without_draft",
@@ -5500,7 +5790,7 @@
         "type": "object"
       },
       "PlanReviewChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "plan_id": {
             "maxLength": 512,
@@ -5514,7 +5804,6 @@
             "enum": [
               "started",
               "waiting_for_input",
-              "finalizing",
               "draft_ready",
               "completed_without_draft",
               "failed",
@@ -5537,7 +5826,6 @@
         "type": "object"
       },
       "PlanReviewDetail": {
-        "additionalProperties": false,
         "properties": {
           "legacy_markdown": {
             "maxLength": 65536,
@@ -5629,7 +5917,6 @@
         "type": "object"
       },
       "PlanReviewStepDetail": {
-        "additionalProperties": false,
         "properties": {
           "depends_on": {
             "items": {
@@ -5753,7 +6040,6 @@
         "type": "object"
       },
       "PlanSuggestedCheck": {
-        "additionalProperties": false,
         "properties": {
           "check_spec_id": {
             "maxLength": 512,
@@ -5761,7 +6047,6 @@
             "type": "string"
           },
           "command": {
-            "additionalProperties": false,
             "properties": {
               "args": {
                 "items": {
@@ -5816,7 +6101,6 @@
         "type": "object"
       },
       "ProtocolEvent": {
-        "additionalProperties": false,
         "oneOf": [
           {
             "not": {
@@ -5906,7 +6190,6 @@
         "type": "string"
       },
       "ProviderConnectionEntry": {
-        "additionalProperties": false,
         "properties": {
           "credential_source": {
             "$ref": "#/components/schemas/ProviderCredentialSource"
@@ -5971,7 +6254,6 @@
         "type": "object"
       },
       "ProviderConnectionInventory": {
-        "additionalProperties": false,
         "properties": {
           "config_mode": {
             "$ref": "#/components/schemas/ProviderConfigMode"
@@ -6007,7 +6289,6 @@
         "type": "object"
       },
       "ProviderConnectionIssue": {
-        "additionalProperties": false,
         "properties": {
           "code": {
             "type": "string"
@@ -6042,7 +6323,6 @@
         "type": "string"
       },
       "ProviderDefaultModelSaveRequest": {
-        "additionalProperties": false,
         "properties": {
           "context_window_tokens": {
             "format": "uint32",
@@ -6062,7 +6342,6 @@
         "type": "object"
       },
       "ProviderDefaultModelSaveResult": {
-        "additionalProperties": false,
         "properties": {
           "default_model": {
             "$ref": "#/components/schemas/ProviderModelRef"
@@ -6082,7 +6361,6 @@
         "type": "object"
       },
       "ProviderModelRef": {
-        "additionalProperties": false,
         "properties": {
           "connection_id": {
             "type": "string"
@@ -6098,7 +6376,6 @@
         "type": "object"
       },
       "ProviderSetupCatalog": {
-        "additionalProperties": false,
         "properties": {
           "connection_id": {
             "type": "string"
@@ -6135,7 +6412,6 @@
         "type": "object"
       },
       "ProviderSetupCatalogRequest": {
-        "additionalProperties": false,
         "properties": {
           "api_key": {
             "format": "password",
@@ -6189,7 +6465,6 @@
         "type": "string"
       },
       "ProviderSetupModel": {
-        "additionalProperties": false,
         "properties": {
           "availability": {
             "enum": [
@@ -6244,7 +6519,6 @@
         "type": "string"
       },
       "ProviderSetupSaveRequest": {
-        "additionalProperties": false,
         "properties": {
           "api_key": {
             "format": "password",
@@ -6309,7 +6583,6 @@
         "type": "object"
       },
       "ProviderSetupSaveResult": {
-        "additionalProperties": false,
         "properties": {
           "default_model": {
             "$ref": "#/components/schemas/ProviderModelRef"
@@ -6373,7 +6646,6 @@
         "type": "object"
       },
       "PublicRunEvent": {
-        "additionalProperties": false,
         "properties": {
           "event": {
             "$ref": "#/components/schemas/PublicRunEventPayload"
@@ -6524,7 +6796,6 @@
         ]
       },
       "PublicSessionRouteTransitionView": {
-        "additionalProperties": false,
         "properties": {
           "connection_id": {
             "type": [
@@ -6559,7 +6830,6 @@
         "type": "object"
       },
       "PublicTaskChecklistItem": {
-        "additionalProperties": false,
         "properties": {
           "item_id": {
             "maxLength": 256,
@@ -6591,13 +6861,11 @@
           "planning",
           "execution",
           "integration",
-          "synthesis",
           "terminal"
         ],
         "type": "string"
       },
       "PublicTaskPlanStep": {
-        "additionalProperties": false,
         "properties": {
           "depends_on": {
             "items": {
@@ -6780,7 +7048,7 @@
         "type": "object"
       },
       "ReasoningDeltaEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "text": {
             "type": "string"
@@ -6806,7 +7074,7 @@
         "type": "string"
       },
       "RouteRecoveryRequiredEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "actions": {
             "items": {
@@ -6859,7 +7127,7 @@
         "type": "object"
       },
       "RouteTransitionEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "transition": {
             "$ref": "#/components/schemas/PublicSessionRouteTransitionView"
@@ -6876,10 +7144,8 @@
         "type": "object"
       },
       "RunAdmissionErrorResponse": {
-        "additionalProperties": false,
         "properties": {
           "error": {
-            "additionalProperties": false,
             "properties": {
               "code": {
                 "enum": [
@@ -6915,7 +7181,7 @@
         "type": "object"
       },
       "RunAwaitingUserInputEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "generation": {
             "format": "uint32",
@@ -6943,7 +7209,7 @@
         "type": "object"
       },
       "RunBlockedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "reason": {
             "type": "string"
@@ -7029,7 +7295,7 @@
         "type": "object"
       },
       "RunCancelledEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "type": {
             "const": "run_cancelled",
@@ -7042,7 +7308,6 @@
         "type": "object"
       },
       "RunContextView": {
-        "additionalProperties": false,
         "properties": {
           "available_permission_modes": {
             "items": {
@@ -7166,7 +7431,7 @@
         "type": "object"
       },
       "RunFailedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "error": {
             "type": "string"
@@ -7183,7 +7448,7 @@
         "type": "object"
       },
       "RunFinishedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "final_text": {
             "type": "string"
@@ -7200,7 +7465,7 @@
         "type": "object"
       },
       "RunInterruptedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "reason": {
             "type": "string"
@@ -7217,7 +7482,7 @@
         "type": "object"
       },
       "RunPausedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "reason": {
             "type": "string"
@@ -7442,7 +7707,7 @@
         "type": "object"
       },
       "RunStartedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "prompt": {
             "type": "string"
@@ -7476,7 +7741,6 @@
         "type": "string"
       },
       "ServerCapabilities": {
-        "additionalProperties": false,
         "properties": {
           "agent_activity": {
             "type": "boolean"
@@ -7568,7 +7832,6 @@
         "type": "object"
       },
       "ServerInfo": {
-        "additionalProperties": false,
         "properties": {
           "authentication": {
             "enum": [
@@ -7621,7 +7884,6 @@
         "type": "string"
       },
       "SessionCatalogBatchExecuteRequest": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/SessionCatalogBatchAction"
@@ -7647,7 +7909,6 @@
         "type": "object"
       },
       "SessionCatalogBatchItem": {
-        "additionalProperties": false,
         "properties": {
           "session_id": {
             "maxLength": 512,
@@ -7681,7 +7942,6 @@
         "type": "object"
       },
       "SessionCatalogBatchPlan": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/SessionCatalogBatchAction"
@@ -7724,7 +7984,6 @@
         "type": "object"
       },
       "SessionCatalogBatchPlanItem": {
-        "additionalProperties": false,
         "properties": {
           "reason": {
             "type": [
@@ -7750,7 +8009,6 @@
         "type": "object"
       },
       "SessionCatalogBatchPlanRequest": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/SessionCatalogBatchAction"
@@ -7771,7 +8029,6 @@
         "type": "object"
       },
       "SessionCatalogBatchReceipt": {
-        "additionalProperties": false,
         "properties": {
           "action": {
             "$ref": "#/components/schemas/SessionCatalogBatchAction"
@@ -7814,7 +8071,6 @@
         "type": "object"
       },
       "SessionCatalogBatchReceiptItem": {
-        "additionalProperties": false,
         "properties": {
           "operation_id": {
             "type": [
@@ -7860,7 +8116,6 @@
         "type": "object"
       },
       "SessionCatalogEntry": {
-        "additionalProperties": false,
         "description": "Compact historical metadata only; message and tool bodies are absent.",
         "properties": {
           "assistant_message_count": {
@@ -7963,7 +8218,6 @@
         "type": "object"
       },
       "SessionCatalogPage": {
-        "additionalProperties": false,
         "properties": {
           "degraded_source_count": {
             "format": "uint64",
@@ -8013,7 +8267,6 @@
         "type": "object"
       },
       "SessionContinuityView": {
-        "additionalProperties": false,
         "properties": {
           "durable_frontier": {
             "$ref": "#/components/schemas/DurableSessionFrontier"
@@ -8067,7 +8320,6 @@
         "type": "object"
       },
       "SessionDeleteRequest": {
-        "additionalProperties": false,
         "properties": {
           "session_id": {
             "maxLength": 512,
@@ -8086,7 +8338,6 @@
         "type": "object"
       },
       "SessionGrantUnavailableReason": {
-        "additionalProperties": false,
         "properties": {
           "code": {
             "$ref": "#/components/schemas/SessionGrantUnavailableReasonCode"
@@ -8116,7 +8367,6 @@
         "type": "string"
       },
       "SessionInvalidSourceDeleteReceipt": {
-        "additionalProperties": false,
         "properties": {
           "operation_id": {
             "type": "string"
@@ -8139,7 +8389,6 @@
         "type": "object"
       },
       "SessionInvalidSourceDeleteRequest": {
-        "additionalProperties": false,
         "properties": {
           "session_ref": {
             "maxLength": 128,
@@ -8177,7 +8426,6 @@
         "type": "object"
       },
       "SessionMutationReceipt": {
-        "additionalProperties": false,
         "properties": {
           "operation_id": {
             "type": "string"
@@ -8204,7 +8452,6 @@
         "type": "object"
       },
       "SessionOpenRequest": {
-        "additionalProperties": false,
         "properties": {
           "label": {
             "maxLength": 160,
@@ -8238,7 +8485,6 @@
         "type": "object"
       },
       "SessionQuarantineReceipt": {
-        "additionalProperties": false,
         "properties": {
           "operation_id": {
             "type": "string"
@@ -8265,7 +8511,6 @@
         "type": "object"
       },
       "SessionQuarantineRequest": {
-        "additionalProperties": false,
         "properties": {
           "session_ref": {
             "maxLength": 128,
@@ -8289,7 +8534,6 @@
         "type": "object"
       },
       "SessionRenameRequest": {
-        "additionalProperties": false,
         "properties": {
           "display_name": {
             "maxLength": 160,
@@ -8314,7 +8558,6 @@
         "type": "object"
       },
       "SessionRouteRecoveryView": {
-        "additionalProperties": false,
         "properties": {
           "allowed_actions": {
             "items": {
@@ -8363,7 +8606,6 @@
         "type": "object"
       },
       "SessionRouteTransitionView": {
-        "additionalProperties": false,
         "properties": {
           "connection_id": {
             "type": [
@@ -8450,7 +8692,6 @@
         "type": "object"
       },
       "SessionTranscriptMessage": {
-        "additionalProperties": false,
         "properties": {
           "assistant_kind": {
             "enum": [
@@ -8518,7 +8759,6 @@
         "type": "object"
       },
       "SessionTranscriptPage": {
-        "additionalProperties": false,
         "properties": {
           "messages": {
             "items": {
@@ -8557,7 +8797,6 @@
         "type": "string"
       },
       "SupportBundleExport": {
-        "additionalProperties": false,
         "properties": {
           "content": {
             "maxLength": 262144,
@@ -8579,7 +8818,6 @@
         "type": "object"
       },
       "SupportCheck": {
-        "additionalProperties": false,
         "properties": {
           "name": {
             "type": "string"
@@ -8605,7 +8843,6 @@
         "type": "object"
       },
       "SupportDoctorReport": {
-        "additionalProperties": false,
         "properties": {
           "checks": {
             "items": {
@@ -8657,7 +8894,6 @@
         "type": "object"
       },
       "SupportEnvironment": {
-        "additionalProperties": false,
         "properties": {
           "architecture": {
             "type": "string"
@@ -8685,7 +8921,6 @@
         "type": "object"
       },
       "SupportPrivacy": {
-        "additionalProperties": false,
         "properties": {
           "excluded": {
             "items": {
@@ -8719,7 +8954,6 @@
         "type": "string"
       },
       "SupportSummary": {
-        "additionalProperties": false,
         "properties": {
           "error": {
             "format": "uint64",
@@ -8746,7 +8980,7 @@
         "type": "object"
       },
       "TaskBatchChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "active": {
             "format": "uint32",
@@ -8788,99 +9022,6 @@
         ],
         "type": "object"
       },
-      "TaskBlocker": {
-        "additionalProperties": false,
-        "properties": {
-          "affected_capability": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/TaskCapability"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "affected_step": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/TaskStepId"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "available_actions": {
-            "items": {
-              "$ref": "#/components/schemas/TaskBlockerAction"
-            },
-            "type": "array"
-          },
-          "created_at_ms": {
-            "format": "uint64",
-            "type": "integer"
-          },
-          "evidence_digest": {
-            "type": "string"
-          },
-          "reason_code": {
-            "$ref": "#/components/schemas/TaskBlockerReasonCode"
-          },
-          "resolved_at_ms": {
-            "format": "uint64",
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "retryable": {
-            "type": "boolean"
-          },
-          "summary": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "reason_code",
-          "summary",
-          "retryable",
-          "evidence_digest",
-          "created_at_ms"
-        ],
-        "type": "object"
-      },
-      "TaskBlockerAction": {
-        "enum": [
-          "retry_admission",
-          "replan",
-          "cancel",
-          "rebind_route",
-          "grant_permission",
-          "resume"
-        ],
-        "type": "string"
-      },
-      "TaskBlockerReasonCode": {
-        "enum": [
-          "workspace_changed",
-          "workspace_snapshot_unavailable",
-          "missing_required_capability",
-          "provider_unavailable",
-          "credential_unavailable",
-          "permission_required",
-          "workspace_trust_required",
-          "external_writer_active",
-          "isolation_unavailable",
-          "disk_space_exhausted",
-          "artifact_storage_unavailable",
-          "session_storage_degraded",
-          "verification_runner_unavailable",
-          "route_rebind_required",
-          "contract_recompile_required"
-        ],
-        "type": "string"
-      },
       "TaskCapability": {
         "enum": [
           "workspace_read",
@@ -8894,7 +9035,7 @@
         "type": "string"
       },
       "TaskChecklistUpdatedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "items": {
             "items": {
@@ -8926,7 +9067,6 @@
         "type": "object"
       },
       "TaskContinuationRequest": {
-        "additionalProperties": false,
         "properties": {
           "guidance": {
             "minLength": 1,
@@ -8946,7 +9086,7 @@
         "type": "object"
       },
       "TaskExecutionAdmittedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "execution": {
             "$ref": "#/components/schemas/TaskExecutionBinding"
@@ -8968,53 +9108,27 @@
         "type": "object"
       },
       "TaskExecutionBinding": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "plan",
-                "type": "string"
-              },
-              "plan_version": {
-                "format": "uint32",
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "kind",
-              "plan_version"
-            ],
-            "type": "object"
+        "properties": {
+          "admission_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
           },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "admission_id": {
-                "maxLength": 256,
-                "minLength": 1,
-                "type": "string"
-              },
-              "kind": {
-                "const": "direct",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "admission_id"
-            ],
-            "type": "object"
+          "kind": {
+            "const": "direct",
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "kind",
+          "admission_id"
+        ],
+        "type": "object"
       },
       "TaskExecutionPhase": {
         "enum": [
-          "preparing",
           "ready",
           "running",
-          "blocked",
           "paused",
           "completed",
           "failed",
@@ -9042,7 +9156,6 @@
         ]
       },
       "TaskIntegrationAcceptanceCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "acceptance": {
             "$ref": "#/components/schemas/TaskIntegrationAcceptanceView"
@@ -9076,7 +9189,6 @@
         "type": "object"
       },
       "TaskIntegrationAcceptanceView": {
-        "additionalProperties": false,
         "properties": {
           "can_continue": {
             "type": "boolean"
@@ -9118,7 +9230,6 @@
         "type": "object"
       },
       "TaskIntegrationLaneView": {
-        "additionalProperties": false,
         "properties": {
           "candidate_kind": {
             "$ref": "#/components/schemas/IntegrationLaneCandidateKind"
@@ -9144,7 +9255,6 @@
         "type": "object"
       },
       "TaskIntegrationReviewRequest": {
-        "additionalProperties": false,
         "properties": {
           "plan_id": {
             "maxLength": 512,
@@ -9182,7 +9292,6 @@
         "type": "object"
       },
       "TaskIntegrationReviewView": {
-        "additionalProperties": false,
         "properties": {
           "aggregate_diff": {
             "maxLength": 4194304,
@@ -9320,7 +9429,6 @@
         "type": "object"
       },
       "TaskPauseRequest": {
-        "additionalProperties": false,
         "properties": {
           "execution": {
             "$ref": "#/components/schemas/TaskExecutionBinding"
@@ -9340,7 +9448,7 @@
         "type": "object"
       },
       "TaskPhaseChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "phase": {
             "$ref": "#/components/schemas/PublicTaskPhase"
@@ -9370,7 +9478,7 @@
         "type": "object"
       },
       "TaskPlanUpdatedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "plan_version": {
             "format": "uint32",
@@ -9405,7 +9513,7 @@
         "type": "object"
       },
       "TaskRoutingChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "handoff_id": {
             "maxLength": 512,
@@ -9436,7 +9544,7 @@
         "type": "object"
       },
       "TaskRunFinishedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "status": {
             "maxLength": 512,
@@ -9459,7 +9567,7 @@
         "type": "object"
       },
       "TaskRunStartedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "objective": {
             "maxLength": 131072,
@@ -9482,7 +9590,7 @@
         "type": "object"
       },
       "TaskStepChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "attempt_id": {
             "maxLength": 512,
@@ -9526,7 +9634,6 @@
         "type": "string"
       },
       "TerminalLifecycle": {
-        "additionalProperties": false,
         "properties": {
           "emitted_at_ms": {
             "format": "uint64",
@@ -9561,7 +9668,7 @@
         "type": "object"
       },
       "TerminalLifecycleEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "event": {
             "$ref": "#/components/schemas/TerminalLifecycle"
@@ -9588,7 +9695,6 @@
       "TerminalReadinessStatus": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "state": {
                 "const": "none"
@@ -9600,7 +9706,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "$ref": "#/components/schemas/TerminalReadinessKind"
@@ -9616,7 +9721,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "$ref": "#/components/schemas/TerminalReadinessKind"
@@ -9637,7 +9741,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "$ref": "#/components/schemas/TerminalReadinessKind"
@@ -9657,7 +9760,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "$ref": "#/components/schemas/TerminalReadinessKind"
@@ -9693,7 +9795,6 @@
         ]
       },
       "TerminalTaskCancelCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "client_id": {
             "type": "string"
@@ -9738,7 +9839,6 @@
         "type": "object"
       },
       "TerminalTaskCancelRequest": {
-        "additionalProperties": false,
         "properties": {
           "expected_generation": {
             "format": "uint64",
@@ -9757,7 +9857,6 @@
       "TerminalTaskStatus": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "state": {
                 "const": "starting"
@@ -9769,7 +9868,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "state": {
                 "const": "running"
@@ -9781,7 +9879,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "exit_code": {
                 "format": "int32",
@@ -9800,7 +9897,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "reason": {
                 "type": "string"
@@ -9816,7 +9912,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "state": {
                 "const": "cancelled"
@@ -9828,7 +9923,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "state": {
                 "const": "interrupted"
@@ -9842,7 +9936,7 @@
         ]
       },
       "TextDeltaEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "text": {
             "type": "string"
@@ -9859,7 +9953,6 @@
         "type": "object"
       },
       "ToolArtifactPage": {
-        "additionalProperties": false,
         "properties": {
           "artifact_ref": {
             "pattern": "^ta1_[0-9a-fA-F]{32}$",
@@ -9881,7 +9974,7 @@
           },
           "match_count": {
             "format": "uint16",
-            "maximum": 20,
+            "maximum": 16384,
             "minimum": 0,
             "type": "integer"
           },
@@ -9941,7 +10034,6 @@
         "type": "string"
       },
       "ToolArtifactReadRequest": {
-        "additionalProperties": false,
         "properties": {
           "artifact_ref": {
             "pattern": "^ta1_[0-9a-fA-F]{32}$",
@@ -9960,7 +10052,6 @@
       "ToolArtifactSelector": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "byte_slice",
@@ -9987,7 +10078,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "line_page",
@@ -10014,9 +10104,9 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "context_lines": {
+                "default": 0,
                 "format": "uint16",
                 "maximum": 3,
                 "minimum": 0,
@@ -10027,8 +10117,8 @@
                 "type": "string"
               },
               "max_matches": {
-                "format": "uint16",
-                "maximum": 20,
+                "default": 50,
+                "format": "uint64",
                 "minimum": 1,
                 "type": "integer"
               },
@@ -10038,6 +10128,7 @@
                 "type": "string"
               },
               "start_offset": {
+                "default": 0,
                 "format": "uint64",
                 "maximum": 16777216,
                 "minimum": 0,
@@ -10046,17 +10137,14 @@
             },
             "required": [
               "kind",
-              "query",
-              "start_offset",
-              "max_matches",
-              "context_lines"
+              "query"
             ],
             "type": "object"
           }
         ]
       },
       "ToolCallArgsDeltaEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "delta": {
             "type": "string"
@@ -10111,7 +10199,6 @@
         "type": "object"
       },
       "ToolOutputShrinkReceipt": {
-        "additionalProperties": false,
         "properties": {
           "context_epoch_id": {
             "maxLength": 512,
@@ -10181,7 +10268,6 @@
         "type": "object"
       },
       "UserInputAnswerReceipt": {
-        "additionalProperties": false,
         "properties": {
           "answer_hash": {
             "oneOf": [
@@ -10223,7 +10309,6 @@
       "UserInputAnswerValue": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "text"
@@ -10240,57 +10325,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "number"
-              },
-              "value": {
-                "maxLength": 64,
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "value"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "integer"
-              },
-              "value": {
-                "format": "int64",
-                "type": "integer"
-              }
-            },
-            "required": [
-              "kind",
-              "value"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "boolean"
-              },
-              "value": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "kind",
-              "value"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "single_select"
@@ -10316,7 +10350,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "multi_select"
@@ -10328,6 +10361,13 @@
                 },
                 "maxItems": 12,
                 "type": "array"
+              },
+              "other": {
+                "maxLength": 4096,
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -10339,7 +10379,7 @@
         ]
       },
       "UserInputChangedEvent": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
           "generation": {
             "format": "uint32",
@@ -10384,11 +10424,9 @@
       "UserInputDecision": {
         "oneOf": [
           {
-            "additionalProperties": false,
             "properties": {
               "answers": {
                 "items": {
-                  "additionalProperties": false,
                   "properties": {
                     "question_id": {
                       "type": "string"
@@ -10417,7 +10455,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "declined"
@@ -10429,7 +10466,6 @@
             "type": "object"
           },
           {
-            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "run_cancelled"
@@ -10443,7 +10479,6 @@
         ]
       },
       "UserInputDecisionCommand": {
-        "additionalProperties": false,
         "properties": {
           "client_id": {
             "maxLength": 128,
@@ -10491,7 +10526,6 @@
         "type": "object"
       },
       "UserInputDecisionCommandReceipt": {
-        "additionalProperties": false,
         "properties": {
           "client_id": {
             "type": "string"
@@ -10525,7 +10559,6 @@
         "type": "object"
       },
       "UserInputDecisionRequest": {
-        "additionalProperties": false,
         "properties": {
           "decision": {
             "$ref": "#/components/schemas/UserInputDecision"
@@ -10556,124 +10589,7 @@
         ],
         "type": "object"
       },
-      "UserInputField": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "text"
-              },
-              "max_chars": {
-                "format": "uint32",
-                "maximum": 4096,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "multiline": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "kind",
-              "multiline",
-              "max_chars"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "number"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "integer"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "boolean"
-              }
-            },
-            "required": [
-              "kind"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "allow_other": {
-                "type": "boolean"
-              },
-              "kind": {
-                "const": "single_select"
-              },
-              "options": {
-                "items": {
-                  "$ref": "#/components/schemas/UserInputOption"
-                },
-                "maxItems": 12,
-                "minItems": 2,
-                "type": "array"
-              }
-            },
-            "required": [
-              "kind",
-              "options",
-              "allow_other"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "multi_select"
-              },
-              "max_selected": {
-                "format": "uint32",
-                "maximum": 12,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "options": {
-                "items": {
-                  "$ref": "#/components/schemas/UserInputOption"
-                },
-                "maxItems": 12,
-                "minItems": 2,
-                "type": "array"
-              }
-            },
-            "required": [
-              "kind",
-              "options",
-              "max_selected"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "UserInputIdentity": {
-        "additionalProperties": false,
         "properties": {
           "generation": {
             "format": "uint32",
@@ -10715,7 +10631,6 @@
         "type": "object"
       },
       "UserInputOption": {
-        "additionalProperties": false,
         "properties": {
           "description": {
             "maxLength": 240,
@@ -10742,7 +10657,6 @@
         "type": "object"
       },
       "UserInputQuestion": {
-        "additionalProperties": false,
         "properties": {
           "description": {
             "maxLength": 512,
@@ -10751,18 +10665,20 @@
               "null"
             ]
           },
-          "field": {
-            "$ref": "#/components/schemas/UserInputField"
-          },
-          "header": {
-            "maxLength": 32,
-            "minLength": 1,
-            "type": "string"
-          },
           "id": {
             "maxLength": 48,
             "minLength": 1,
             "type": "string"
+          },
+          "multiple": {
+            "type": "boolean"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/UserInputOption"
+            },
+            "maxItems": 12,
+            "type": "array"
           },
           "question": {
             "maxLength": 512,
@@ -10775,15 +10691,11 @@
         },
         "required": [
           "id",
-          "header",
-          "question",
-          "required",
-          "field"
+          "question"
         ],
         "type": "object"
       },
       "UserInputRequest": {
-        "additionalProperties": false,
         "properties": {
           "allowed_actions": {
             "items": {
@@ -10851,10 +10763,8 @@
                 "type": "string"
               },
               {
-                "additionalProperties": false,
                 "properties": {
                   "failed": {
-                    "additionalProperties": false,
                     "properties": {
                       "failure_class": {
                         "maxLength": 128,
@@ -10890,10 +10800,8 @@
                 "type": "string"
               },
               {
-                "additionalProperties": false,
                 "properties": {
                   "plan_review_research": {
-                    "additionalProperties": false,
                     "properties": {
                       "attempt_id": {
                         "type": "string"
@@ -10915,10 +10823,8 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
                 "properties": {
                   "plan_revision": {
-                    "additionalProperties": false,
                     "properties": {
                       "base_plan_hash": {
                         "$ref": "#/components/schemas/Sha256"
@@ -10940,10 +10846,8 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
                 "properties": {
                   "planner": {
-                    "additionalProperties": false,
                     "properties": {
                       "task_id": {
                         "type": "string"
@@ -10961,10 +10865,8 @@
                 "type": "object"
               },
               {
-                "additionalProperties": false,
                 "properties": {
                   "mcp": {
-                    "additionalProperties": false,
                     "properties": {
                       "call_id": {
                         "type": "string"
@@ -11175,7 +11077,6 @@
         "type": "object"
       },
       "VerificationRerunRequest": {
-        "additionalProperties": false,
         "properties": {
           "check_spec_hash": {
             "type": "string"
@@ -12505,6 +12406,44 @@
         "summary": "Read the transport-neutral application projection"
       }
     },
+    "/sessions/{session_id}/application/command-journal-binding": {
+      "get": {
+        "description": "Freeze this binding when creating the command envelope. Retries retain the original envelope. Missing bindings denote legacy generation zero.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/ApplicationClientId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandJournalBinding"
+                }
+              }
+            },
+            "description": "Current host-issued accepting domain"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Obtain the command journal binding for a new intent"
+      }
+    },
     "/sessions/{session_id}/application/commands": {
       "post": {
         "description": "Reserves and dispatches a typed application command using the durable client identity supplied by the x-sigil-application-client-id header. Commands without a lossless HTTP host mapping are rejected explicitly during migration.",
@@ -12554,6 +12493,54 @@
           }
         },
         "summary": "Execute one transport-neutral application command"
+      }
+    },
+    "/sessions/{session_id}/application/control-log/recovery": {
+      "post": {
+        "description": "Authenticated restricted recovery, independent of ordinary command admission and projection refresh. SealAndRotate must echo the exact physical preview. Old history is retained, and only a durable Activated successor accepts new commands.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SessionId"
+          },
+          {
+            "$ref": "#/components/parameters/ApplicationClientId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlLogRecoveryAction"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlLogRecoveryOutcome"
+                }
+              }
+            },
+            "description": "Exact preview or durable activation"
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "summary": "Preview or resume recovery of a damaged command journal"
       }
     },
     "/sessions/{session_id}/application/page": {

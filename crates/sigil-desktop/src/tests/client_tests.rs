@@ -70,7 +70,8 @@ fn intent_stack_projection_accepts_only_bounded_private_free_contract() {
         "safe_message": "No Intent Stack has been created.",
         "session_path": "/private/session.jsonl"
     });
-    assert!(serde_json::from_value::<DesktopIntentStackState>(with_private_field).is_err());
+    let _: DesktopIntentStackState =
+        serde_json::from_value(with_private_field).expect("unknown fields are ignored");
 }
 
 #[test]
@@ -508,6 +509,10 @@ fn conversation_display_decodes_exact_decimal_text_and_opaque_cursor() {
     typed_tool_page.items[0].content = crate::DesktopConversationDisplayContent::Tool {
         call_id: Some("call-1".to_owned()),
         tool_name: Some("shell".to_owned()),
+        input: None,
+        execution_id: None,
+        execution_started_at_ms: None,
+        execution_updated_at_ms: None,
         output: Some("bounded preview".to_owned()),
         truncated: true,
         original_content_bytes: 8_363,
@@ -892,7 +897,8 @@ fn tool_artifact_page_decodes_only_bounded_path_free_contract() {
         "match_count": 0,
         "artifact_path": "/private/session/artifacts/blob"
     });
-    assert!(serde_json::from_value::<crate::DesktopToolArtifactPage>(with_path).is_err());
+    let _: crate::DesktopToolArtifactPage =
+        serde_json::from_value(with_path).expect("unknown fields are ignored");
 
     let mut wrong_scope = page.clone();
     wrong_scope.request_scope = "other-session".to_owned();
@@ -1279,19 +1285,21 @@ fn run_start_serializes_an_exact_same_session_model_route() {
 fn task_pause_request_identity_matches_the_shared_content_binding() {
     let request = desktop_task_pause_request(
         "task_1",
-        crate::DesktopTaskExecutionBinding::Plan { plan_version: 3 },
+        crate::DesktopTaskExecutionBinding::Direct {
+            admission_id: "admission_3".to_owned(),
+        },
     );
 
     assert_eq!(
         request.request_id,
-        "task-pause-8255cff6d4b82d53e2f95ed642e5cac61db6837bb1428027a4e1fb48f854ce0b"
+        "task-pause-05538f40b3b5c77b42326f2f5a5611b284e3e7a83867a70322e122c2774c6ed9",
     );
     assert_eq!(
         serde_json::to_value(request).expect("Task pause should encode"),
         serde_json::json!({
-            "request_id": "task-pause-8255cff6d4b82d53e2f95ed642e5cac61db6837bb1428027a4e1fb48f854ce0b",
+            "request_id": "task-pause-05538f40b3b5c77b42326f2f5a5611b284e3e7a83867a70322e122c2774c6ed9",
             "task_id": "task_1",
-            "execution": { "kind": "plan", "plan_version": 3 }
+            "execution": { "kind": "direct", "admission_id": "admission_3" }
         })
     );
 }
@@ -1393,7 +1401,7 @@ fn task_integration_acceptance_command_preserves_exact_request_identity() {
         preview_digest: format!("sha256:{}", "b".repeat(64)),
     };
 
-    let command = client.command("http-session-1", None, request.clone());
+    let command = client.command_in_journal("http-session-1", None, request.clone(), None);
     assert_eq!(command.session_id, "http-session-1");
     assert_eq!(command.expected_stream_sequence, None);
     assert_eq!(command.payload, request);
@@ -1492,6 +1500,7 @@ async fn plan_decision_revise_accepts_the_supervised_revision_run_identity() {
     let plan_hash = format!("sha256:{}", "d".repeat(64));
     let server_plan_hash = plan_hash.clone();
     let server = tokio::spawn(async move {
+        serve_command_journal_binding(&listener, "desktop-session-1", 7).await;
         let (mut stream, _) = listener.accept().await.expect("request should connect");
         let mut buffer = vec![0_u8; 8_192];
         let read = stream.read(&mut buffer).await.expect("request should read");
@@ -1594,6 +1603,7 @@ async fn plan_decision_retries_only_typed_admission_busy_with_one_exact_envelope
             .expect("listener");
         let address = listener.local_addr().expect("address");
         let server = tokio::spawn(async move {
+            serve_command_journal_binding(&listener, "plan-session", 7).await;
             let mut original = None;
             for index in 0..refusals + usize::from(succeeds) {
                 let (mut stream, _) = listener.accept().await.expect("request connection");
@@ -1812,11 +1822,18 @@ async fn approval_retry_reuses_the_exact_command_envelope_after_a_lost_response(
         .local_addr()
         .expect("loopback listener should expose its address");
     let server = tokio::spawn(async move {
+        serve_command_journal_binding(&listener, "session-1", 7).await;
         let (mut first, _) = listener
             .accept()
             .await
             .expect("first request should connect");
         let first_body = read_request(&mut first).await;
+        assert_eq!(
+            first_body["command_journal"],
+            serde_json::json!({
+                "logical_journal_id": "a".repeat(64), "command_generation": 7,
+            })
+        );
         drop(first);
 
         let (mut second, _) = listener.accept().await.expect("retry should connect");
@@ -1937,10 +1954,9 @@ async fn user_input_detail_requires_the_exact_request_hash_etag() {
             "prompt": "Which workspace should I inspect?",
             "questions": [{
                 "id": "workspace",
-                "header": "Workspace",
                 "question": "Which workspace should I inspect?",
-                "required": true,
-                "field": {"kind": "text", "multiline": false, "max_chars": 512}
+                "options": [],
+                "multiple": false
             }],
             "allowed_actions": ["submit", "decline", "cancel_run"],
             "requested_at_unix_ms": 100,
@@ -2019,11 +2035,18 @@ async fn user_input_retry_reuses_the_exact_command_envelope_after_a_lost_respons
     let expected_request_hash = format!("sha256:{}", "b".repeat(64));
     let response_request_hash = expected_request_hash.clone();
     let server = tokio::spawn(async move {
+        serve_command_journal_binding(&listener, "session-1", 7).await;
         let (mut first, _) = listener
             .accept()
             .await
             .expect("first request should connect");
         let first_body = read_request(&mut first).await;
+        assert_eq!(
+            first_body["command_journal"],
+            serde_json::json!({
+                "logical_journal_id": "a".repeat(64), "command_generation": 7,
+            })
+        );
         drop(first);
 
         let (mut second, _) = listener.accept().await.expect("retry should connect");
@@ -2058,10 +2081,9 @@ async fn user_input_retry_reuses_the_exact_command_envelope_after_a_lost_respons
                 "prompt": "Which workspace should I inspect?",
                 "questions": [{
                     "id": "workspace",
-                    "header": "Workspace",
                     "question": "Which workspace should I inspect?",
-                    "required": true,
-                    "field": {"kind": "text", "multiline": false, "max_chars": 512}
+                    "options": [],
+                    "multiple": false
                 }],
                 "allowed_actions": ["submit", "decline", "cancel_run"],
                 "requested_at_unix_ms": 100,
@@ -2340,6 +2362,61 @@ async fn tool_artifact_request_rejects_unbounded_values_before_transport() {
 }
 
 #[test]
+fn tool_artifact_search_defaults_and_large_match_requests_validate() {
+    let selector: DesktopToolArtifactSelector = serde_json::from_value(serde_json::json!({
+        "kind": "search_literal", "query": "needle"
+    }))
+    .expect("search defaults should deserialize");
+    assert_eq!(
+        selector,
+        DesktopToolArtifactSelector::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 50,
+            context_lines: 0,
+        }
+    );
+    for max_matches in [50, 100, u64::MAX] {
+        let request = DesktopToolArtifactReadRequest {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: DesktopToolArtifactSelector::SearchLiteral {
+                query: "needle".to_owned(),
+                start_offset: 0,
+                max_matches,
+                context_lines: 0,
+            },
+        };
+        validate_tool_artifact_request(&request).expect("positive match request should validate");
+        let mut page = DesktopToolArtifactPage {
+            schema_version: DESKTOP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION,
+            request_scope: "session-search".to_owned(),
+            artifact_ref: request.artifact_ref.clone(),
+            selector: request.selector.clone(),
+            body: "needle\n".repeat(50),
+            body_encoding: DesktopToolArtifactPageEncoding::Utf8,
+            returned_bytes: 350,
+            page_sha256: sha256_prefixed("needle\n".repeat(50).as_bytes()),
+            artifact_sha256: sha256_prefixed("needle\n".repeat(50).as_bytes()),
+            eof: true,
+            match_count: 50,
+            next_selector: None,
+        };
+        validate_tool_artifact_page(&page, "session-search", &request)
+            .expect("more than twenty returned matches should validate");
+        page.match_count = DESKTOP_TOOL_ARTIFACT_MAX_MATCHES + 1;
+        assert!(validate_tool_artifact_page(&page, "session-search", &request).is_err());
+    }
+    assert!(!valid_tool_artifact_selector(
+        &DesktopToolArtifactSelector::SearchLiteral {
+            query: "needle".to_owned(),
+            start_offset: 0,
+            max_matches: 0,
+            context_lines: 0,
+        }
+    ));
+}
+
+#[test]
 fn sse_decoder_accepts_durable_and_transient_frames_and_rejects_gaps() {
     let durable = br#"id: sigil-http-run-v1:session-1:run-1:1
 event: run_event
@@ -2491,4 +2568,88 @@ data: {"schema_version":3,"event_class":"transient","live_update":{"schema_versi
             DesktopProtocolEventError::WrongStream
         ))
     ));
+}
+
+async fn serve_command_journal_binding(
+    listener: &tokio::net::TcpListener,
+    session_id: &str,
+    generation: u64,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (mut stream, _) = listener.accept().await.expect("binding connection");
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await.expect("binding request");
+        assert!(read > 0);
+        request.extend_from_slice(&chunk[..read]);
+    }
+    let headers = String::from_utf8(request)
+        .expect("headers")
+        .to_ascii_lowercase();
+    assert!(headers.starts_with(&format!(
+        "get /sessions/{session_id}/application/command-journal-binding "
+    )));
+    assert!(headers.contains("\r\nauthorization: bearer "));
+    assert!(headers.contains("\r\nx-sigil-application-client-id: sigil-desktop-"));
+    let body =
+        serde_json::json!({"logical_journal_id":"a".repeat(64),"command_generation":generation})
+            .to_string();
+    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("binding response");
+}
+
+#[tokio::test]
+async fn new_intents_fetch_current_binding_without_rebinding_an_existing_envelope() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        serve_command_journal_binding(&listener, "session-1", 0).await;
+        serve_command_journal_binding(&listener, "session-1", 2).await;
+    });
+    let client = DesktopHttpClient::new(
+        Client::new(),
+        address,
+        Arc::new(DesktopBearerToken::generate().expect("bearer")),
+    );
+    let old = client
+        .command("session-1", None, serde_json::json!({"intent": "one"}))
+        .await
+        .expect("original binding");
+    let retained = serde_json::to_value(&old).expect("frozen request");
+    // Another confirmed recovery may update native stop context while a response-lost command
+    // still owns its original envelope. The next new intent queries the host again.
+    client
+        .remember_command_journal(
+            "session-1",
+            crate::DesktopCommandJournalBinding {
+                logical_journal_id: "a".repeat(64),
+                command_generation: 1,
+            },
+        )
+        .expect("recovery binding");
+    let new = client
+        .command("session-1", None, serde_json::json!({"intent": "two"}))
+        .await
+        .expect("new binding");
+    assert_eq!(serde_json::to_value(old).expect("retry"), retained);
+    assert_eq!(retained["command_journal"]["command_generation"], 0);
+    assert_eq!(
+        new.command_journal
+            .as_ref()
+            .expect("binding")
+            .command_generation,
+        2
+    );
+    assert_ne!(new.command_id, retained["command_id"]);
+    let stop = client.safety_command("session-1", None, ());
+    assert_eq!(stop.command_journal, new.command_journal);
+    assert!(
+        client
+            .safety_command("unobserved-session", None, ())
+            .command_journal
+            .is_none()
+    );
+    server.await.expect("server");
 }

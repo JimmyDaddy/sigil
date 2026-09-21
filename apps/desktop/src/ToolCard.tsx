@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 
 import { DiffViewer, isUnifiedDiff } from "./DiffViewer";
 import { HighlightedCode } from "./SafeMarkdown";
@@ -25,10 +25,29 @@ export interface ToolView {
   status?: string;
   risk?: string;
   duration?: string;
+  executionStartedAtMs?: number;
+  executionUpdatedAtMs?: number;
   artifactRef?: string;
   artifactAvailability?: ToolArtifactAvailability;
   artifactHasMore?: boolean;
   artifactPersistedBytes?: number;
+}
+
+
+function useCommandDuration(tool: ToolView): string | undefined {
+  const [now, setNow] = useState(Date.now);
+  const running = tool.status === "running" || tool.status === "starting";
+  const started = tool.executionStartedAtMs;
+  useEffect(() => {
+    if (!running || started === undefined) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [running, started]);
+  if (started === undefined) return tool.duration;
+  if (["pending", "requested", "approval", "awaiting_approval", "waiting_for_approval", "denied"].includes(tool.status ?? "")) return undefined;
+  const until = running ? now : tool.executionUpdatedAtMs;
+  return until === undefined ? tool.duration : `${(Math.max(0, until - started) / 1_000).toFixed(1)} s`;
 }
 
 type ToolTone = "neutral" | "info" | "success" | "warning" | "danger";
@@ -70,13 +89,18 @@ export function ToolCard({
   tool,
   displayId,
   onReadArtifact,
+  onCancelExecution,
+  cancelling = false,
 }: {
   readonly tool: ToolView;
   readonly displayId?: string;
   readonly onReadArtifact?: (selector: ToolArtifactSelector) => Promise<ToolArtifactPage>;
+  readonly onCancelExecution?: () => void;
+  readonly cancelling?: boolean;
 }) {
   const { t } = useLocale();
   const presentation = presentTool(tool);
+  const duration = useCommandDuration(tool);
   const boundedDetail = boundedOutput(presentation.detailText ?? "");
   const inputLanguage = toolInputLanguage(tool.toolName);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
@@ -121,16 +145,17 @@ export function ToolCard({
           {presentation.tone === "success" ? null : <small>{presentation.status}</small>}
         </span>
         <span className="tool-card-meta">
-          {tool.duration === undefined ? null : <small>{tool.duration}</small>}
+          {duration === undefined ? null : <small aria-label="Execution elapsed">{duration}</small>}
           {tool.risk === undefined ? null : <small className="tool-risk">{tool.risk} risk</small>}
         </span>
       </header>
+      {onCancelExecution === undefined ? null : (
+        <Button type="button" variant="quiet" busy={cancelling} onClick={onCancelExecution}>Stop command</Button>
+      )}
       {presentation.input === undefined && presentation.summary === undefined ? null : (
         <div className="tool-card-main">
           {presentation.input === undefined ? null : (
-            <div className={`tool-input${inputLanguage === undefined ? " is-parameters" : " is-command"}`}>
-              <HighlightedCode text={presentation.input} language={inputLanguage} ariaLabel={`${tool.toolName} input`} />
-            </div>
+            <ToolInput key={tool.key} toolName={tool.toolName} input={presentation.input} language={inputLanguage} />
           )}
           {presentation.summary === undefined ? null : (
             <div className="tool-result">
@@ -268,6 +293,25 @@ export function ToolCard({
   );
 }
 
+function ToolInput({ toolName, input, language }: {
+  readonly toolName: string;
+  readonly input: string;
+  readonly language?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = language === undefined ? { text: input, truncated: false } : outputPreview(input);
+  return (
+    <div className={`tool-input${language === undefined ? " is-parameters" : " is-command"}`}>
+      <HighlightedCode text={expanded ? input : preview.text} language={language} ariaLabel={`${toolName} input`} />
+      {preview.truncated ? (
+        <Button type="button" variant="quiet" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+          {expanded ? "Collapse command" : "Show full command"}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function ToolOutputPanel({
   toolName,
   text,
@@ -333,7 +377,7 @@ function ToolOutputPanel({
 
 export function presentTool(tool: ToolView): ToolPresentation {
   const structured = parseStructuredOutput(tool.text);
-  const status = structured?.status ?? tool.status ?? "recorded";
+  const status = tool.status ?? structured?.status ?? "recorded";
   const tone = statusTone(status);
   const diff = isUnifiedDiff(tool.text);
   const outputPresentation = diff
@@ -514,20 +558,17 @@ function boundedOutput(text: string): { readonly text: string; readonly omittedL
 function outputPreview(text: string): OutputPreview {
   const lines = text.split("\n");
   const linePreview = lines.slice(0, OUTPUT_PREVIEW_LINES).join("\n");
-  if (lines.length > OUTPUT_PREVIEW_LINES) {
-    return { text: linePreview, truncated: true };
-  }
   if (linePreview.length > OUTPUT_PREVIEW_CHARACTERS) {
     return {
       text: `${linePreview.slice(0, OUTPUT_PREVIEW_CHARACTERS - 1).trimEnd()}…`,
       truncated: true,
     };
   }
-  return { text: linePreview, truncated: false };
+  return { text: linePreview, truncated: lines.length > OUTPUT_PREVIEW_LINES };
 }
 
 function toolInputLanguage(toolName: string): string | undefined {
-  return /bash|shell|terminal/i.test(toolName) ? "bash" : undefined;
+  return toolName === "exec_command" || /bash|shell|terminal/i.test(toolName) ? "bash" : undefined;
 }
 
 function inferOutputLanguage(
@@ -639,6 +680,7 @@ function boundedSummary(value: string): string {
 }
 
 function humanizeToolName(value: string): string {
+  if (value === "exec_command") return "Command";
   const words = value.replace(/[_-]+/g, " ").trim();
   if (words === "") return "Tool";
   return `${words.charAt(0).toLocaleUpperCase()}${words.slice(1)}`;

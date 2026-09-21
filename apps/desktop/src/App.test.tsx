@@ -168,6 +168,7 @@ function bridgeWith(overrides: BridgeOverrides = {}): DesktopBridge {
       privacy: { included: ["build metadata"], excluded: ["credentials"], reviewBeforeSharing: true },
     }),
     exportSupportBundle: async () => ({ cancelled: false, fileName: "sigil-support-test.json" }),
+    recoverControlLog: async () => { throw new Error("recovery fixture not configured"); },
     providerConnections: async () => ({
       configMode: "v2",
       defaultModel: { connectionId: "deepseek-default", modelId: "deepseek-v4-flash" },
@@ -1846,6 +1847,58 @@ describe("desktop workspace and history shell", () => {
       sessionId: "durable-last-session",
       label: "Last selected conversation",
     });
+  });
+
+  it.each(["loading", "failed", "unconfigured"] as const)(
+    "keeps an existing live session visible and stoppable when provider inventory is %s",
+    async (inventoryState) => {
+      const user = userEvent.setup();
+      writeLastSession(workspace.id, {
+        sessionRef: "live-session.jsonl",
+        sessionId: "durable-live-session",
+        label: "Healthy existing session",
+      });
+      const cancelRun = vi.fn(async (_workspaceId: string, sessionId: string, runId: string) => ({
+        id: runId, sessionId, status: "cancel_requested" as const, permissionMode: "manual" as const, streamSequence: 1,
+      }));
+      render(<App bridge={bridgeWith({
+        bootstrap: async () => ({ protocolVersion: 2, workspaces: [workspace], recentWorkspaces: [] }),
+        openSession: async () => ({ id: "http-live-session", label: "Healthy existing session", runCount: 1 }),
+        providerConnections: async () => {
+          if (inventoryState === "loading") return new Promise(() => undefined);
+          if (inventoryState === "failed") throw new Error("inventory unavailable");
+          return { configMode: "v2", connections: [], issues: [] };
+        },
+        continuity: async () => ({
+          durableFrontier: { throughStreamSequence: 1 },
+          foregroundOwner: { runId: "live-run", ownerRevision: `sha256:${"a".repeat(64)}` },
+          retainedTerminalRuns: [], recoveryActions: [],
+        }),
+        attachRun: async () => ({
+          run: { id: "live-run", sessionId: "http-live-session", status: "running", permissionMode: "manual", streamSequence: 1 },
+          events: [], streamState: "live", hasGap: false,
+        }),
+        cancelRun,
+      })} />);
+      expect(await screen.findByRole("heading", { name: "Healthy existing session" })).toBeTruthy();
+      await user.click(await screen.findByRole("button", { name: "Stop run" }));
+      await waitFor(() => expect(cancelRun).toHaveBeenCalledWith(workspace.id, "http-live-session", "live-run"));
+      expect(screen.getByRole("heading", { name: "Healthy existing session" })).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Connect a model provider" })).toBeNull();
+    },
+  );
+
+  it("reports incomplete native cleanup without treating it as a completed exit", async () => {
+    let cleanupFailed: (() => void) | undefined;
+    const unsubscribe = vi.fn();
+    const view = render(<App bridge={bridgeWith({
+      subscribeWorkspaceCleanupFailure: async (listener) => { cleanupFailed = listener; return unsubscribe; },
+    })} />);
+    await waitFor(() => expect(cleanupFailed).toBeDefined());
+    act(() => cleanupFailed?.());
+    expect(await screen.findByText("A workspace is still closing. Sigil has stayed open; retry Quit to finish cleanup.")).toBeTruthy();
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalled();
   });
 
   it("falls back to the conversation list when the remembered session is stale", async () => {
@@ -6140,7 +6193,7 @@ describe("desktop workspace and history shell", () => {
           taskId: "task-restart-control",
           phase: "execution",
           status: "paused",
-          execution: { kind: "plan", planVersion: 3 },
+          execution: { kind: "direct", admissionId: "admission-restart" },
           planVersion: 3,
           planStatus: "accepted",
           steps: [{
@@ -6181,7 +6234,7 @@ describe("desktop workspace and history shell", () => {
     ));
   });
 
-  it("pauses the exact active Task plan without using ordinary run cancellation", async () => {
+  it("pauses the exact active Task without using ordinary run cancellation", async () => {
     const user = userEvent.setup();
     let eventListener: ((event: TimelineEvent) => void) | undefined;
     const pauseTask = vi.fn(async (
@@ -6235,12 +6288,11 @@ describe("desktop workspace and history shell", () => {
         sequence: 2,
         runSequence: "2",
         replayable: true,
-        kind: "task_plan_updated",
-        status: "approved",
+        kind: "task_execution_admitted",
+        status: "admitted",
         task: {
           taskId: "task-pause-1",
-          planVersion: 7,
-          steps: [],
+          execution: { kind: "direct", admissionId: "admission-task-pause" },
         },
       });
       eventListener?.({
@@ -6274,7 +6326,7 @@ describe("desktop workspace and history shell", () => {
       "run-1",
       {
         taskId: "task-pause-1",
-        execution: { kind: "plan", planVersion: 7 },
+        execution: { kind: "direct", admissionId: "admission-task-pause" },
       },
     ));
     expect(cancelRun).not.toHaveBeenCalled();
@@ -6644,17 +6696,13 @@ describe("desktop workspace and history shell", () => {
           prompt: "Choose the execution mode",
           questions: [{
             id: "mode",
-            header: "Mode",
             question: "Which mode should Sigil use?",
             required: true,
-            field: {
-              kind: "single_select" as const,
-              options: [
-                { id: "__other__", label: "Literal sentinel" },
-                { id: "safe", label: "Safe" },
-              ],
-              allowOther: true,
-            },
+            options: [
+              { id: "__other__", label: "Literal sentinel" },
+              { id: "safe", label: "Safe" },
+            ],
+            multiple: false,
           }],
           allowedActions: ["submit" as const],
           requestedAtUnixMs: 1,
@@ -6667,8 +6715,8 @@ describe("desktop workspace and history shell", () => {
 
     await screen.findByText("No matching conversation.");
     await user.click(screen.getByRole("button", { name: "New conversation" }));
-    const select = await screen.findByRole("combobox", { name: "Mode" });
-    await user.selectOptions(select, "option:0");
+    const select = await screen.findByRole("combobox", { name: "Which mode should Sigil use?" });
+    await user.selectOptions(select, "__other__");
     await user.click(screen.getByRole("button", { name: "Submit and continue" }));
 
     await waitFor(() => expect(userInputDecision).toHaveBeenCalledWith(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TimelineEvent } from "../../types";
-import { projectCurrentTask } from "./taskProjection";
+import { mergeTaskProductProjections, projectCurrentTask } from "./taskProjection";
 
 describe("Task product projection", () => {
   it("combines the typed plan, step, batch, and integration lane slots", () => {
@@ -111,6 +111,7 @@ describe("Task product projection", () => {
           checklist: [
             { itemId: "inspect", text: "Inspect", status: "completed" },
             { itemId: "implement", text: "Implement", status: "in_progress" },
+            { itemId: "verify", text: "Verify independently", status: "in_progress" },
           ],
         },
       }),
@@ -123,9 +124,69 @@ describe("Task product projection", () => {
       checklist: [
         { text: "Inspect", status: "completed" },
         { text: "Implement", status: "in_progress" },
+        { text: "Verify independently", status: "in_progress" },
       ],
     });
     expect(task?.planVersion).toBeUndefined();
+  });
+});
+
+describe("Task projection merge", () => {
+  const savedItems = [{ itemId: "inspect", text: "Inspect", status: "completed" as const }];
+  const durableTask = projectCurrentTask([
+    event("task_checklist_updated", {
+      task: { taskId: "task-1", checklistRevision: 1, checklist: savedItems },
+    }),
+    event("task_run_started", {
+      task: { taskId: "task-1", objective: "Implement the change" },
+    }),
+  ]);
+
+  it("keeps an explicit streamed clear instead of restoring the saved checklist", () => {
+    const streamedTask = projectCurrentTask([
+      event("task_checklist_updated", {
+        task: { taskId: "task-1", checklistRevision: 2, checklist: [] },
+      }),
+    ]);
+    expect(mergeTaskProductProjections(durableTask, streamedTask)).toMatchObject({
+      taskId: "task-1",
+      objective: "Implement the change",
+      checklist: [],
+    });
+  });
+
+  it("keeps the saved checklist when streamed task events contain no checklist update", () => {
+    const streamedTask = projectCurrentTask([
+      event("task_phase_changed", {
+        status: "running",
+        task: { taskId: "task-1", phase: "execution" },
+      }),
+    ]);
+    expect(mergeTaskProductProjections(durableTask, streamedTask)).toMatchObject({
+      taskId: "task-1",
+      checklist: savedItems,
+    });
+    expect(mergeTaskProductProjections(durableTask, undefined)).toBe(durableTask);
+  });
+
+  it("replaces saved items with a streamed nonempty update", () => {
+    const items = [{ itemId: "verify", text: "Verify", status: "in_progress" as const }];
+    const streamedTask = projectCurrentTask([
+      event("task_checklist_updated", {
+        task: { taskId: "task-1", checklistRevision: 2, checklist: items },
+      }),
+    ]);
+    expect(mergeTaskProductProjections(durableTask, streamedTask)?.checklist).toEqual(items);
+  });
+
+  it("does not carry the saved checklist into a different task", () => {
+    const streamedTask = projectCurrentTask([
+      event("task_run_started", {
+        task: { taskId: "task-2", objective: "A different objective" },
+      }),
+    ]);
+    expect(mergeTaskProductProjections(durableTask, streamedTask)).toBe(streamedTask);
+    expect(mergeTaskProductProjections(undefined, streamedTask)).toBe(streamedTask);
   });
 });
 

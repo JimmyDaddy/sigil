@@ -619,6 +619,57 @@ describe("live event reducer", () => {
     expect(selectProviderTurnRecovery(state)).toBeUndefined();
   });
 
+  it("maps child approval display identities to one command without changing the authority guard", () => {
+    const approval = exactApproval();
+    let state = createLiveEventState(SESSION_ID);
+    for (const [index, callId] of ["child-a-call", "child-b-call"].entries()) {
+      state = reduceLiveTimelineEvent(state, event({ kind: "tool_completed", runSequence: String(index + 1),
+        provisionalId: callId, itemId: callId, toolName: "exec_command", toolInput: "cargo check" }));
+    }
+    state = reduceLiveTimelineEvent(state, event({ kind: "approval_requested", runSequence: "10",
+      provisionalId: "approval-1", itemId: approval.callId, displayCallId: "child-b-call", toolName: "exec_command", approval }));
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(approval);
+    const command = (id: string) => selectSemanticLiveItems(state).find((item) => item.provisionalId === id);
+    expect(command("child-a-call")?.status).toBe("requested");
+    expect(command("child-b-call")?.status).toBe("waiting_for_approval");
+    state = reduceLiveTimelineEvent(state, event({ kind: "approval_resolved", runSequence: "11",
+      provisionalId: "approval-1", itemId: approval.callId, displayCallId: "child-b-call", toolName: "exec_command",
+      approvalRequestId: approval.approvalRequestId, status: "denied" }));
+    expect(command("child-b-call")?.status).toBe("denied");
+    expect(command("child-a-call")?.status).toBe("requested");
+    expect(selectLatestPendingApproval(state)).toBeUndefined();
+  });
+
+  it("keeps parallel command approval display independent of reused provider call IDs", () => {
+    const first = exactApproval();
+    const second = { ...first, approvalRequestId: "approval-2" };
+    let state = createLiveEventState(SESSION_ID);
+    for (const [index, callId] of ["child-a-call", "child-b-call"].entries()) {
+      state = reduceLiveTimelineEvent(state, event({ kind: "tool_completed", runSequence: String(index + 1),
+        provisionalId: callId, itemId: callId, toolName: "exec_command", toolInput: "cargo check" }));
+    }
+    for (const [index, approval] of [first, second].entries()) {
+      state = reduceLiveTimelineEvent(state, event({ kind: "approval_requested", runSequence: String(index + 10),
+        provisionalId: approval.approvalRequestId, itemId: approval.callId,
+        displayCallId: index === 0 ? "child-a-call" : "child-b-call", toolName: "exec_command", approval }));
+    }
+    const command = (id: string) => selectSemanticLiveItems(state).find((item) => item.provisionalId === id);
+    expect(command("child-a-call")?.status).toBe("waiting_for_approval");
+    expect(command("child-b-call")?.status).toBe("waiting_for_approval");
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(second);
+    state = reduceLiveTimelineEvent(state, event({ kind: "approval_resolved", runSequence: "12",
+      provisionalId: first.approvalRequestId, itemId: first.callId, displayCallId: "child-a-call",
+      approvalRequestId: first.approvalRequestId, status: "approved" }));
+    expect(command("child-a-call")?.status).toBe("requested");
+    expect(command("child-b-call")?.status).toBe("waiting_for_approval");
+    expect(selectLatestPendingApproval(state)?.approval).toEqual(second);
+    state = reduceLiveTimelineEvent(state, event({ kind: "approval_resolved", runSequence: "13",
+      provisionalId: second.approvalRequestId, itemId: second.callId, displayCallId: "child-b-call",
+      approvalRequestId: second.approvalRequestId, status: "denied" }));
+    expect(command("child-b-call")?.status).toBe("denied");
+    expect(selectLatestPendingApproval(state)).toBeUndefined();
+  });
+
   it("keeps the exact pending approval guard and removes it on resolution", () => {
     const approval = exactApproval();
     let state = createLiveEventState(SESSION_ID);

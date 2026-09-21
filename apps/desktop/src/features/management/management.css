@@ -392,6 +392,11 @@
 .support-section-heading h2 { margin: 0; font-size: 17px; }
 .support-section-heading p { margin: 5px 0 0; color: var(--sg-sys-color-on-surface-variant); font-size: 13px; }
 .support-section-heading > span { color: var(--sg-sys-color-on-surface-subtle); font-size: 12px; }
+.control-log-recovery-facts { display: grid; gap: var(--sg-sys-space-3); }
+.control-log-recovery-facts div { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr); gap: var(--sg-sys-space-3); }
+.control-log-recovery-facts dt { color: var(--sg-sys-color-on-surface-variant); }
+.control-log-recovery-facts dd { margin: 0; overflow-wrap: anywhere; }
+.control-log-recovery-commands { overflow-wrap: anywhere; }
 .support-checks > ul { display: grid; gap: 1px; margin: 0; padding: 0; overflow: hidden; border: 1px solid var(--sg-sys-color-outline-variant); border-radius: var(--sg-sys-radius-md); list-style: none; }
 .support-check { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: var(--sg-sys-space-3); padding: var(--sg-sys-space-3); background: var(--sg-sys-color-surface-container); }
 .support-check + .support-check { border-top: 1px solid var(--sg-sys-color-outline-variant); }

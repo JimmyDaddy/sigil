@@ -159,7 +159,7 @@ fn user_input_select_answers_decode_renderer_camel_case_fields() {
     .expect("multi-select answer should decode from the renderer contract");
     assert!(matches!(
         multiple.value,
-        DesktopUserInputAnswerValueInput::MultiSelect { ref option_ids }
+        DesktopUserInputAnswerValueInput::MultiSelect { ref option_ids, .. }
             if option_ids == &["fmt".to_owned(), "test".to_owned()]
     ));
 }

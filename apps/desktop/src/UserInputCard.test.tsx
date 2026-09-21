@@ -22,10 +22,10 @@ function acceptedRequest(): UserInputRequest {
     prompt: "Which workspace should Sigil inspect?",
     questions: [{
       id: "workspace",
-      header: "Workspace",
       question: "Which workspace should Sigil inspect?",
       required: true,
-      field: { kind: "text", multiline: false, maxChars: 512 },
+      options: [],
+      multiple: false,
     }],
     allowedActions: ["submit", "decline", "cancel_run"],
     requestedAtUnixMs: 1,

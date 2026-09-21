@@ -1,7 +1,7 @@
 import type { Translate } from "../../i18n";
 import type { MessageView } from "../../Message";
 import type { ToolArtifactAvailability } from "../../types";
-import type { ConversationTimelineItem } from "./continuityReducer";
+import type { ConversationTimelineItem, LiveConversationDisplayItem } from "./continuityReducer";
 import {
   compareRunSequence,
   selectDeltaText,
@@ -22,6 +22,10 @@ export type ConversationTimelineRow =
   | (TimelineRowBase & {
       kind: "tool";
       input?: string;
+      executionId?: string;
+      executionRunId?: string;
+      executionStartedAtMs?: number;
+      executionUpdatedAtMs?: number;
       artifactRef?: string;
       artifactAvailability?: ToolArtifactAvailability;
       artifactHasMore?: boolean;
@@ -32,17 +36,47 @@ export function projectConversationRows(
   items: readonly ConversationTimelineItem[],
   deltaBuffers: readonly LiveDeltaBuffer[],
   t: Translate,
+  toolSnapshots: readonly LiveConversationDisplayItem[] = [],
 ): ConversationTimelineRow[] {
+  const projectEntry = (entry: ConversationTimelineItem): ConversationTimelineRow[] => {
+    const rows = projectDisplayItem(entry.identity, entry.item, t);
+    const identities = entry.source === "durable" ? entry.item.reconciles ?? [] : [entry.identity];
+    const snapshot = toolSnapshots.find((candidate) => candidate.runId === entry.item.runId
+      && candidate.content.type === "tool" && identities.includes(candidate.provisionalId));
+    if (snapshot?.content.type !== "tool") return rows;
+    const output = snapshot.content.output;
+    return rows.map((row) => {
+      if (row.kind !== "tool") return row;
+      const sequenceIsCurrent = entry.item.runSequence === undefined
+        || compareRunSequence(snapshot.runSequence, entry.item.runSequence) >= 0;
+      // Canonical terminal rows already incorporate durable owner generations. A retained live
+      // snapshot without a newer owner generation cannot refine their final state or output.
+      const keepsTerminalState = !isTerminalCommandStatus(row.status)
+        || (entry.source !== "durable" && isTerminalCommandStatus(snapshot.status));
+      if (!sequenceIsCurrent || !keepsTerminalState) return { ...row, input: row.input ?? snapshot.toolInput };
+      return { ...row, input: snapshot.toolInput ?? row.input, status: snapshot.status,
+        ...(snapshot.executionId === undefined ? {} : {
+          executionId: snapshot.executionId, executionRunId: snapshot.runId,
+          executionStartedAtMs: snapshot.executionStartedAtMs ?? row.executionStartedAtMs,
+          executionUpdatedAtMs: snapshot.executionUpdatedAtMs ?? row.executionUpdatedAtMs,
+          text: output ?? row.text,
+        }),
+      };
+    });
+  };
+  const durableTerminals = new Set(items.flatMap((entry) => entry.source === "durable"
+    && entry.item.content.type === "tool" && entry.item.content.executionId !== undefined
+    && isTerminalCommandStatus(entry.item.status) ? [entry.item.content.executionId] : []));
   const durableRows = items
     .filter((entry) => entry.source === "durable")
-    .flatMap(({ identity, item }) => projectDisplayItem(identity, item, t));
+    .flatMap(projectEntry);
   const liveEntries: LiveRowEntry[] = items
     .filter((entry) => entry.source === "live")
-    .map(({ identity, item }) => ({
-      runId: item.runId,
-      runSequence: item.runSequence,
-      identity,
-      rows: projectDisplayItem(identity, item, t),
+    .map((entry) => ({
+      runId: entry.item.runId,
+      runSequence: entry.item.runSequence,
+      identity: entry.identity,
+      rows: projectEntry(entry),
     }));
   const deltaEntries: LiveRowEntry[] = deltaBuffers.map((buffer) => ({
     runId: buffer.runId,
@@ -56,12 +90,40 @@ export function projectConversationRows(
       status: "streaming",
     }],
   }));
-  return [
+  return coalesceExecutionRows([
     ...durableRows,
     ...[...liveEntries, ...deltaEntries]
       .sort(compareLiveRowEntries)
       .flatMap((entry) => entry.rows),
-  ];
+  ], durableRows.length, durableTerminals);
+}
+
+function isTerminalCommandStatus(status: string | undefined): boolean {
+  return ["completed", "succeeded", "success", "failed", "error", "cancelled", "interrupted", "timed_out", "cleanup_incomplete"].includes(status ?? "");
+}
+
+function coalesceExecutionRows(rows: ConversationTimelineRow[], durableRowCount: number, durableTerminals: ReadonlySet<string>): ConversationTimelineRow[] {
+  const result: ConversationTimelineRow[] = [];
+  const executions = new Map<string, number>();
+  for (const [rowIndex, row] of rows.entries()) {
+    if (row.kind !== "tool" || row.executionId === undefined) { result.push(row); continue; }
+    // Rows belong to one session; the authority-issued execution ID spans follow-up runs.
+    const key = row.executionId;
+    const previousIndex = executions.get(key);
+    const previous = previousIndex === undefined ? undefined : result[previousIndex];
+    if (rowIndex >= durableRowCount && durableTerminals.has(key)) continue;
+    if (previousIndex !== undefined && previous?.kind === "tool") {
+      const previousTerminal = isTerminalCommandStatus(previous.status);
+      if (previousTerminal && ["requested", "pending", "running", "streaming"].includes(row.status ?? "")) continue;
+      result[previousIndex] = { ...row, text: row.text || previous.text,
+        artifactRef: row.artifactRef ?? previous.artifactRef,
+        artifactAvailability: row.artifactAvailability ?? previous.artifactAvailability,
+        artifactHasMore: row.artifactRef === undefined ? previous.artifactHasMore : row.artifactHasMore,
+        artifactPersistedBytes: row.artifactPersistedBytes ?? previous.artifactPersistedBytes, key: previous.key, label: previous.label, input: previous.input ?? row.input,
+        executionStartedAtMs: previous.executionStartedAtMs ?? row.executionStartedAtMs };
+    } else { executions.set(key, result.length); result.push(row); }
+  }
+  return result;
 }
 
 interface LiveRowEntry {
@@ -140,7 +202,11 @@ function projectDisplayItem(
         kind: "tool",
         label: content.toolName ?? t("toolResult"),
         text: content.output ?? "",
-        input: "toolInput" in item ? item.toolInput : undefined,
+        input: content.input ?? ("toolInput" in item ? item.toolInput : undefined),
+        executionId: content.executionId,
+        executionRunId: item.runId,
+        executionStartedAtMs: content.executionStartedAtMs,
+        executionUpdatedAtMs: content.executionUpdatedAtMs,
         status: item.status,
         artifactRef: content.artifactRef,
         artifactAvailability: content.artifactAvailability,

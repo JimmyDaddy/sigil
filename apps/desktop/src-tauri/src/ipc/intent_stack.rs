@@ -10,21 +10,21 @@ use sigil_desktop::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopIntentVersionBinding {
     pub(crate) intent_id: String,
     pub(crate) version: u64,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopIntentDropPreviewInput {
     pub(crate) session_id: String,
     pub(crate) intent_ref: DesktopIntentVersionBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopIntentDropBinding {
     pub(crate) operation_id: String,
     pub(crate) stack_version: u64,
@@ -32,7 +32,7 @@ pub(crate) struct DesktopIntentDropBinding {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopIntentDropInput {
     pub(crate) session_id: String,
     pub(crate) request: DesktopIntentDropBinding,

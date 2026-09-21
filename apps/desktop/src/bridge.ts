@@ -81,6 +81,8 @@ import type {
   ToolArtifactReadInput,
   SupportDoctorReport,
   SupportSaveSummary,
+  ControlLogRecoveryAction,
+  ControlLogRecoveryOutcome,
   UserInputDecision,
   UserInputDecisionSummary,
   UserInputRequest,
@@ -95,6 +97,7 @@ export interface DesktopBridge {
   setAppearance(preference: ThemePreference): Promise<AppearanceSnapshot>;
   openExternalUrl(url: string): Promise<void>;
   supportDoctor(workspaceId: string): Promise<SupportDoctorReport>;
+  recoverControlLog(workspaceId: string, sessionId: string, action: ControlLogRecoveryAction): Promise<ControlLogRecoveryOutcome>;
   exportSupportBundle(workspaceId: string): Promise<SupportSaveSummary>;
   providerConnections(workspaceId: string): Promise<ProviderConnectionInventory>;
   providerSetupCatalog(
@@ -296,6 +299,7 @@ export interface DesktopBridge {
     listener: (snapshot: RunApprovalSnapshot) => void,
   ): Promise<() => void>;
   subscribeRunStreamStatus(listener: (status: RunStreamStatus) => void): Promise<() => void>;
+  subscribeWorkspaceCleanupFailure?(listener: () => void): Promise<() => void>;
   subscribeAppearance(listener: (snapshot: AppearanceSnapshot) => void): Promise<() => void>;
   subscribeUpdate(listener: (snapshot: DesktopUpdateSnapshot) => void): Promise<() => void>;
 }
@@ -340,6 +344,8 @@ export const desktopBridge: DesktopBridge = {
     invoke<void>("desktop_open_external_url", { input: { url } }),
   supportDoctor: (workspaceId) =>
     invoke<SupportDoctorReport>("desktop_support_doctor", { workspaceId }),
+  recoverControlLog: (workspaceId, sessionId, action) =>
+    invoke<ControlLogRecoveryOutcome>("desktop_recover_control_log", { workspaceId, sessionId, action }),
   exportSupportBundle: (workspaceId) =>
     invoke<SupportSaveSummary>("desktop_export_support_bundle", { workspaceId }),
   providerConnections: (workspaceId) =>
@@ -605,6 +611,10 @@ export const desktopBridge: DesktopBridge = {
     listen<RunApprovalSnapshot>("sigil-run-approval-snapshot", (event) => listener(event.payload)),
   subscribeRunStreamStatus: async (listener) =>
     listen<RunStreamStatus>("sigil-run-stream-status", (event) => listener(event.payload)),
+  subscribeWorkspaceCleanupFailure: async (listener) =>
+    listen<string>("sigil-workspace-cleanup-failed", (event) => {
+      if (event.payload === "cleanup_incomplete") listener();
+    }),
   subscribeAppearance: async (listener) =>
     listen<AppearanceSnapshot>("sigil-appearance-changed", (event) => listener(event.payload)),
   subscribeUpdate: async (listener) =>

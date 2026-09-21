@@ -73,6 +73,25 @@ const DESKTOP_PROTOCOL_VERSION: u16 = 1;
 const MAX_EXTERNAL_URL_BYTES: usize = 2_048;
 const MAX_SUPPORT_BUNDLE_BYTES: usize = 256 * 1024;
 
+#[tauri::command]
+pub(crate) async fn desktop_recover_control_log(
+    workspace_id: String,
+    session_id: String,
+    action: sigil_desktop::DesktopControlLogRecoveryAction,
+    state: State<'_, DesktopAppState>,
+) -> Result<sigil_desktop::DesktopControlLogRecoveryOutcome, DesktopCommandError> {
+    validate_workspace_id(&workspace_id)?;
+    validate_session_id(&session_id)?;
+    let client = state
+        .manager
+        .client(&workspace_id)
+        .map_err(project_manager_error)?;
+    client
+        .recover_control_log(&session_id, &action)
+        .await
+        .map_err(project_client_error)
+}
+
 #[derive(Debug, Error, Serialize)]
 #[error("{message}")]
 #[serde(rename_all = "camelCase")]
@@ -1197,9 +1216,6 @@ pub(crate) async fn desktop_pause_task(
         validate_session_id(value)?;
     }
     let execution = match input.execution {
-        DesktopTaskExecutionBindingInput::Plan { plan_version } if plan_version > 0 => {
-            DesktopTaskExecutionBinding::Plan { plan_version }
-        }
         DesktopTaskExecutionBindingInput::Direct { admission_id }
             if !admission_id.is_empty()
                 && admission_id.len() <= 256
@@ -1303,7 +1319,6 @@ pub(crate) async fn desktop_plan_decision(
         },
         task_id: receipt.task_id,
         task_phase: receipt.task_phase,
-        task_blocker: receipt.task_blocker,
         revision_run_id: receipt.revision_run_id,
         user_input_request: receipt.user_input_request.map(Into::into),
         replayed: receipt.replayed,
@@ -2149,7 +2164,7 @@ fn validate_tool_artifact_read_input(
             !query.is_empty()
                 && query.len() <= 512
                 && *start_offset <= 16_777_216
-                && (1..=20).contains(max_matches)
+                && *max_matches > 0
                 && *context_lines <= 3
         }
     };

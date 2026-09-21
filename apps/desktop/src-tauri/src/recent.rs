@@ -20,7 +20,7 @@ pub(crate) struct RecentWorkspaceSummary {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RecentWorkspaceRecord {
     id: String,
     display_name: String,
@@ -28,7 +28,7 @@ struct RecentWorkspaceRecord {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RecentWorkspaceFile {
     schema_version: u16,
     entries: Vec<RecentWorkspaceRecord>,
