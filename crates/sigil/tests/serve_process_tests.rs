@@ -4,6 +4,10 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Output, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -60,6 +64,17 @@ credential = {{ source = "none" }}
         workspace.join("cache").display()
     );
     fs::write(path, config).expect("test config should write");
+}
+
+fn write_auto_task_config(path: &Path, base_url: &str) {
+    write_config(path, base_url);
+    let config = fs::read_to_string(path).expect("base config should read");
+    let config = config.replace(
+        "[task]\nrouting_policy = \"manual\"",
+        "[task]\nrouting_policy = \"auto\"\nmulti_agent_mode = \"proactive\"",
+    );
+    let config = config.replace("request_timeout_secs = 5", "request_timeout_secs = 60");
+    fs::write(path, config).expect("auto Task config should write");
 }
 
 fn spawn_provider_fixture(answer: &'static str) -> (String, thread::JoinHandle<()>) {
@@ -164,10 +179,11 @@ fn spawn_provider_fixture_with_listener(
     })
 }
 
-fn read_http_message(stream: &mut TcpStream) {
+fn read_http_message(stream: &mut TcpStream) -> String {
     const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
     let mut request = Vec::new();
     let mut buffer = [0_u8; 16 * 1024];
+    let mut sent_continue = false;
     loop {
         let read = stream.read(&mut buffer).expect("HTTP request should read");
         assert!(read > 0, "HTTP request ended before its body arrived");
@@ -191,9 +207,265 @@ fn read_http_message(stream: &mut TcpStream) {
             })
             .unwrap_or(0);
         if request.len() >= header_end.saturating_add(content_length) {
-            return;
+            return String::from_utf8_lossy(&request).into_owned();
+        }
+        if !sent_continue
+            && headers
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("expect: 100-continue"))
+        {
+            stream
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .expect("provider fixture should accept an Expect request body");
+            stream
+                .flush()
+                .expect("provider fixture should flush 100 Continue");
+            sent_continue = true;
         }
     }
+}
+
+struct DirectTaskProviderFixture {
+    base_url: String,
+    requests: std::sync::mpsc::Receiver<(String, serde_json::Value)>,
+    stop: std::sync::mpsc::Sender<()>,
+    release_background_child: std::sync::mpsc::Sender<()>,
+    recovery_mode: Arc<AtomicBool>,
+    worker: thread::JoinHandle<()>,
+}
+
+fn spawn_direct_task_provider_fixture() -> DirectTaskProviderFixture {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("provider fixture should bind");
+    let address = listener.local_addr().expect("provider fixture address");
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let (child_release_tx, child_release_rx) = std::sync::mpsc::channel();
+    let child_release_rx = Arc::new(Mutex::new(child_release_rx));
+    let recovery_mode = Arc::new(AtomicBool::new(false));
+    let fixture_recovery_mode = Arc::clone(&recovery_mode);
+    let task_turns = Arc::new(AtomicUsize::new(0));
+    let provider = thread::spawn(move || {
+        listener
+            .set_nonblocking(true)
+            .expect("fixture listener should be nonblocking");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut responders = Vec::new();
+        while Instant::now() < deadline && stop_rx.try_recv().is_err() {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let request_tx = request_tx.clone();
+                    let task_turns = Arc::clone(&task_turns);
+                    let child_release_rx = Arc::clone(&child_release_rx);
+                    let recovery_mode = Arc::clone(&fixture_recovery_mode);
+                    responders.push(thread::spawn(move || {
+                        respond_to_direct_task_provider_request(
+                            stream,
+                            request_tx,
+                            task_turns,
+                            child_release_rx,
+                            recovery_mode,
+                        );
+                    }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("provider fixture accept failed: {error}"),
+            }
+        }
+        for responder in responders {
+            responder
+                .join()
+                .expect("provider request responder should not panic");
+        }
+    });
+    DirectTaskProviderFixture {
+        base_url: format!("http://{address}"),
+        requests: request_rx,
+        stop: stop_tx,
+        release_background_child: child_release_tx,
+        recovery_mode,
+        worker: provider,
+    }
+}
+
+fn respond_to_direct_task_provider_request(
+    mut stream: TcpStream,
+    request_tx: std::sync::mpsc::Sender<(String, serde_json::Value)>,
+    task_turns: Arc<AtomicUsize>,
+    child_release_rx: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
+    recovery_mode: Arc<AtomicBool>,
+) {
+    stream
+        .set_nonblocking(false)
+        .expect("accepted provider socket should be blocking");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .expect("provider read timeout should configure");
+    let request_text = read_http_message(&mut stream);
+    let request: serde_json::Value = serde_json::from_str(
+        request_text
+            .split_once("\r\n\r\n")
+            .expect("provider request should contain headers")
+            .1,
+    )
+    .expect("provider request body should be JSON");
+    let tools = request["tools"].as_array().cloned().unwrap_or_default();
+    let tool_names = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect::<Vec<_>>();
+    let messages = request["messages"].as_array().cloned().unwrap_or_default();
+    let message_text = messages
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let category = if message_text
+        .contains("Generate a concise semantic title for a coding-agent conversation.")
+    {
+        "session_title"
+    } else if message_text.contains("Inspect the repository with read-only tools")
+        && recovery_mode.load(Ordering::SeqCst)
+    {
+        "replayed_background_child"
+    } else if message_text.contains("Inspect the repository with read-only tools") {
+        "background_child"
+    } else if recovery_mode.load(Ordering::SeqCst) {
+        "recovery_turn"
+    } else if tool_names.contains(&"start_task") {
+        "routing"
+    } else if tool_names.contains(&"spawn_agent") {
+        match task_turns.fetch_add(1, Ordering::SeqCst) {
+            0 => "task_spawn",
+            1 => "task_after_spawn",
+            2 => "task_continuation_read_result",
+            _ => "task_continuation_final",
+        }
+    } else if tool_names.contains(&"read_agent_result") {
+        "task_continuation_read_result"
+    } else {
+        "unexpected"
+    };
+    let recorded_category = if category == "unexpected" {
+        format!(
+            "unexpected tools={tool_names:?}; prompt={}",
+            message_text.chars().take(500).collect::<String>()
+        )
+    } else {
+        category.to_owned()
+    };
+    request_tx
+        .send((recorded_category, request))
+        .expect("test should still collect provider requests");
+
+    let (status, response_data) = match category {
+        "session_title" => (
+            "stop",
+            serde_json::json!({"content": "Direct Task background E2E"}),
+        ),
+        "recovery_turn" => (
+            "stop",
+            serde_json::json!({"content": "The new session turn completed after restart."}),
+        ),
+        "replayed_background_child" => (
+            "stop",
+            serde_json::json!({"content": "A replayed child request must fail the test."}),
+        ),
+        "routing" => (
+            "tool_calls",
+            serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-direct-task-handoff",
+                    "type": "function",
+                    "function": {"name": "start_task", "arguments": "{}"}
+                }]
+            }),
+        ),
+        "task_spawn" => (
+            "tool_calls",
+            serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-background-child",
+                    "type": "function",
+                    "function": {
+                        "name": "spawn_agent",
+                        "arguments": serde_json::json!({
+                            "profile_id": "explore",
+                            "objective": "Inspect the fixture workspace",
+                            "prompt": "Inspect the repository read-only and return the words child research result.",
+                            "mode": "background",
+                            "isolation": "shared_read_only"
+                        }).to_string()
+                    }
+                }]
+            }),
+        ),
+        "task_continuation_read_result" => (
+            "tool_calls",
+            serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-read-child-result",
+                    "type": "function",
+                    "function": {
+                        "name": "read_agent_result",
+                        "arguments": serde_json::json!({
+                            "thread_id": sigil_runtime::chat_agent_thread_id_for_call(
+                                "call-background-child",
+                                &sigil_kernel::AgentProfileId::new("explore")
+                                    .expect("explore profile id should be valid")
+                            )
+                            .expect("child thread id should be deterministic")
+                            .as_str()
+                        }).to_string()
+                    }
+                }]
+            }),
+        ),
+        "background_child" => {
+            child_release_rx
+                .lock()
+                .expect("child response gate should not be poisoned")
+                .recv_timeout(Duration::from_secs(60))
+                .expect("test should release the background child response");
+            (
+                "stop",
+                serde_json::json!({"content": "child research result: fixture inspection completed"}),
+            )
+        }
+        "task_after_spawn" => (
+            "stop",
+            serde_json::json!({"content": "The background child is still working; I will resume this Task when its result is ready."}),
+        ),
+        "task_continuation_final" => (
+            "stop",
+            serde_json::json!({"content": "Completed after reviewing the child research result."}),
+        ),
+        _ => (
+            "stop",
+            serde_json::json!({"content": "unexpected scripted provider request"}),
+        ),
+    };
+    let delta = if status == "tool_calls" {
+        response_data
+    } else {
+        serde_json::json!({"content": response_data["content"]})
+    };
+    let event = serde_json::json!({
+        "choices": [{"delta": delta, "finish_reason": status}]
+    });
+    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    // A process-restart test intentionally kills the serve process while this
+    // response is gated, so a closed client connection is an expected fixture
+    // outcome after the test releases the child response.
+    let _ = stream.write_all(response.as_bytes());
 }
 
 struct ServeProcess {
@@ -1424,6 +1696,69 @@ fn stop_serve(mut process: ServeProcess) -> Output {
     }
 }
 
+fn approve_direct_task_background_child(
+    server: &ServeProcess,
+    token: &str,
+    run_id: &str,
+    session_id: &str,
+) {
+    let approval_deadline = Instant::now() + Duration::from_secs(10);
+    let (pending, stream_sequence) = loop {
+        let (status, body) = http_request(
+            server.address,
+            "GET",
+            &format!("/runs/{run_id}"),
+            Some(token),
+            None,
+        );
+        assert_eq!(status, 200, "run snapshot should be readable: {body}");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&body).expect("run snapshot should be JSON");
+        if let Some(pending) = snapshot["pending_approvals"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["call_id"].as_str() == Some("call-background-child"))
+        }) {
+            let stream_sequence = snapshot["stream_sequence"]
+                .as_u64()
+                .expect("approval snapshot should carry the current stream sequence");
+            break (pending.clone(), stream_sequence);
+        }
+        assert!(
+            Instant::now() < approval_deadline,
+            "background child approval did not become visible: {snapshot}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let approval_body = serde_json::json!({
+        "protocol_version": 2,
+        "command_id": "approve-direct-task-background-child",
+        "client_id": "direct-task-background-e2e",
+        "session_id": session_id,
+        "expected_stream_sequence": stream_sequence,
+        "correlation_id": "direct-task-background-approval",
+        "payload": {
+            "approval_request_id": pending["approval_request_id"],
+            "tool_call_hash": pending["tool_call_hash"],
+            "policy_version": pending["policy_version"],
+            "expires_at_ms": pending["expires_at_ms"],
+            "decision": "approve"
+        }
+    })
+    .to_string();
+    let (status, receipt) = http_request(
+        server.address,
+        "POST",
+        &format!("/runs/{run_id}/approvals/call-background-child"),
+        Some(token),
+        Some(&approval_body),
+    );
+    assert_eq!(status, 200, "background child approval failed: {receipt}");
+    let approval: serde_json::Value =
+        serde_json::from_str(&receipt).expect("approval receipt should be JSON");
+    assert_eq!(approval["decision"]["decision"], "approved");
+}
+
 #[cfg(unix)]
 #[test]
 fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_epoch() {
@@ -1666,6 +2001,569 @@ fn serve_process_runs_authenticated_session_to_terminal_and_restarts_with_new_ep
         .expect("restart provider fixture should join");
     assert_eq!(stop_serve(restarted).status.code(), Some(0));
 
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_process_auto_continues_direct_task_after_background_child_result() {
+    let workspace = test_workspace("direct-task-background");
+    let config_path = workspace.join("sigil.toml");
+    let token = "direct-task-background-token";
+    let DirectTaskProviderFixture {
+        base_url,
+        requests: provider_requests,
+        stop: stop_provider,
+        release_background_child,
+        recovery_mode: _,
+        worker: provider,
+    } = spawn_direct_task_provider_fixture();
+    write_auto_task_config(&config_path, &base_url);
+
+    let mut server = spawn_serve(&workspace, &config_path, token);
+    let (session_status, session_body) = http_request(
+        server.address,
+        "POST",
+        "/sessions",
+        Some(token),
+        Some(r#"{"label":"Direct Task background E2E"}"#),
+    );
+    assert_eq!(session_status, 201, "session response: {session_body}");
+    let session: serde_json::Value =
+        serde_json::from_str(&session_body).expect("session response should be JSON");
+    let session_id = session["id"]
+        .as_str()
+        .expect("session id should exist")
+        .to_owned();
+
+    let run_command = serde_json::json!({
+        "protocol_version": 2,
+        "command_id": "start-direct-task-background-e2e",
+            "client_id": "direct-task-background-e2e",
+            "session_id": session_id.clone(),
+        "payload": {
+            "prompt": "Use a delegated read-only child agent to inspect this workspace, then incorporate its result and report completion.",
+            "permission_mode": "read-only"
+        }
+    })
+    .to_string();
+    let (run_status, run_body) = http_request(
+        server.address,
+        "POST",
+        &format!("/sessions/{session_id}/runs"),
+        Some(token),
+        Some(&run_command),
+    );
+    assert_eq!(run_status, 201, "run response: {run_body}");
+    let initial_run: serde_json::Value =
+        serde_json::from_str(&run_body).expect("run receipt should be JSON");
+    let initial_run_id = initial_run["run"]["id"]
+        .as_str()
+        .expect("initial run id should exist")
+        .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut provider_turns = Vec::new();
+    let mut approved_background_spawn = false;
+    while provider_turns.len() < 6 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (category, request) = match provider_requests.recv_timeout(remaining) {
+            Ok(turn) => turn,
+            Err(error) => {
+                let server_exit = server.child.try_wait().ok().flatten();
+                let session_logs = walkdir::WalkDir::new(&workspace)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry.file_type().is_file()
+                            && entry.file_name().to_str() == Some("records.jsonl")
+                    })
+                    .filter_map(|entry| {
+                        let path = entry.path().to_path_buf();
+                        let contents = fs::read_to_string(&path).ok()?;
+                        let start = contents
+                            .char_indices()
+                            .map(|(index, _)| index)
+                            .find(|index| contents.len().saturating_sub(*index) <= 12_000)
+                            .unwrap_or(0);
+                        Some(format!("{}\n{}", path.display(), &contents[start..]))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n--- log ---\n");
+                panic!(
+                    "serve did not run all Task and continuation turns: {error}; workspace: {}; observed categories: {:?}; server exit: {server_exit:?}; stdout: {}; stderr: {}; recent durable logs: {session_logs}",
+                    workspace.display(),
+                    provider_turns
+                        .iter()
+                        .map(|(category, _)| category)
+                        .collect::<Vec<_>>(),
+                    fs::read_to_string(&server.stdout_path).unwrap_or_default(),
+                    fs::read_to_string(&server.stderr_path).unwrap_or_default()
+                );
+            }
+        };
+        if category == "session_title" {
+            continue;
+        }
+        if category == "background_child" {
+            release_background_child
+                .send(())
+                .expect("scripted provider should release the completed E2E child");
+        }
+        let should_approve_background_spawn = category == "task_spawn";
+        provider_turns.push((category, request));
+        if should_approve_background_spawn && !approved_background_spawn {
+            approve_direct_task_background_child(&server, token, &initial_run_id, &session_id);
+            approved_background_spawn = true;
+        }
+    }
+    assert_eq!(provider_turns.len(), 6);
+    stop_provider
+        .send(())
+        .expect("scripted provider should accept its stop signal");
+    provider
+        .join()
+        .expect("scripted provider should serve all Direct Task requests");
+
+    let categories = provider_turns
+        .iter()
+        .map(|(category, _)| category.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "routing",
+        "task_spawn",
+        "task_after_spawn",
+        "background_child",
+        "task_continuation_read_result",
+        "task_continuation_final",
+    ] {
+        assert!(
+            categories.contains(&expected),
+            "serve skipped {expected}; observed provider turns: {categories:?}"
+        );
+    }
+    let result_read_turn = provider_turns
+        .iter()
+        .find(|(category, _)| category == "task_continuation_final")
+        .expect("Task should make a provider turn after reading the child result");
+    assert!(
+        result_read_turn
+            .1
+            .to_string()
+            .contains("child research result"),
+        "continuation should receive the result read from the background child: {}",
+        result_read_turn.1
+    );
+
+    let session_log_root = workspace.join("state/managed/session-log");
+    let session_path = walkdir::WalkDir::new(&session_log_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file() && entry.file_name().to_str() == Some("records.jsonl")
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .find(|path| {
+            sigil_kernel::JsonlSessionStore::read_entries(path)
+                .ok()
+                .is_some_and(|entries| {
+                    sigil_kernel::Session::from_entries("openai_compat", "gpt-4.1", entries)
+                        .task_state_projection()
+                        .latest_task()
+                        .is_some()
+                })
+        })
+        .expect("parent session JSONL should exist");
+    let task_deadline = Instant::now() + Duration::from_secs(15);
+    let completed = loop {
+        if let Ok(entries) = sigil_kernel::JsonlSessionStore::read_entries(&session_path) {
+            let session = sigil_kernel::Session::from_entries("openai_compat", "gpt-4.1", entries);
+            let tasks = session.task_state_projection();
+            if let Some(task) = tasks.latest_task()
+                && task.status == sigil_kernel::TaskRunStatus::Completed
+            {
+                let children = tasks.direct_task_background_agents(&task.task_id);
+                let agent_threads = session.agent_thread_state_projection();
+                let child_results_complete = !children.is_empty()
+                    && children.iter().all(|thread_id| {
+                        agent_threads.threads.get(thread_id).is_some_and(|thread| {
+                            thread.status == sigil_kernel::AgentThreadStatus::Completed
+                                && thread.result.is_some()
+                        })
+                    });
+                if child_results_complete && task.direct_execution_attempts.len() >= 2 {
+                    break true;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < task_deadline,
+            "Task did not reach a completed state after the serve continuation"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(completed);
+
+    assert_eq!(stop_serve(server).status.code(), Some(0));
+    fs::remove_dir_all(workspace).expect("test workspace should remove");
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_process_restart_interrupts_ownerless_direct_task_background_child() {
+    let workspace = test_workspace("direct-task-background-restart");
+    let config_path = workspace.join("sigil.toml");
+    let token = "direct-task-background-restart-token";
+    let DirectTaskProviderFixture {
+        base_url,
+        requests: provider_requests,
+        stop: stop_provider,
+        release_background_child,
+        recovery_mode,
+        worker: provider,
+    } = spawn_direct_task_provider_fixture();
+    write_auto_task_config(&config_path, &base_url);
+
+    let mut server = spawn_serve(&workspace, &config_path, token);
+    let (session_status, session_body) = http_request(
+        server.address,
+        "POST",
+        "/sessions",
+        Some(token),
+        Some(r#"{"label":"Direct Task background restart"}"#),
+    );
+    assert_eq!(session_status, 201, "session response: {session_body}");
+    let session: serde_json::Value =
+        serde_json::from_str(&session_body).expect("session response should be JSON");
+    let session_id = session["id"]
+        .as_str()
+        .expect("session id should exist")
+        .to_owned();
+    let durable_session_id = session["durable_session_scope_id"]
+        .as_str()
+        .expect("durable session id should exist")
+        .to_owned();
+    let run_command = serde_json::json!({
+        "protocol_version": 2,
+        "command_id": "start-direct-task-background-restart",
+        "client_id": "direct-task-background-restart",
+        "session_id": session_id,
+        "payload": {
+            "prompt": "Delegate a read-only child agent and use its result before completing.",
+            "permission_mode": "read-only"
+        }
+    })
+    .to_string();
+    let (run_status, run_body) = http_request(
+        server.address,
+        "POST",
+        &format!("/sessions/{session_id}/runs"),
+        Some(token),
+        Some(&run_command),
+    );
+    assert_eq!(run_status, 201, "run response: {run_body}");
+    let run: serde_json::Value = serde_json::from_str(&run_body).expect("run receipt JSON");
+    let run_id = run["run"]["id"]
+        .as_str()
+        .expect("run id should exist")
+        .to_owned();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut saw_child_request = false;
+    let mut saw_parent_wait = false;
+    let mut approved_child = false;
+    while !saw_child_request || !saw_parent_wait {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (category, _) = provider_requests
+            .recv_timeout(remaining)
+            .expect("serve should start a child and let the Direct Task yield");
+        if category == "session_title" {
+            continue;
+        }
+        if category == "task_spawn" && !approved_child {
+            approve_direct_task_background_child(&server, token, &run_id, &session_id);
+            approved_child = true;
+        }
+        saw_child_request |= category == "background_child";
+        saw_parent_wait |= category == "task_after_spawn";
+        assert!(
+            [
+                "routing",
+                "task_spawn",
+                "task_after_spawn",
+                "background_child",
+            ]
+            .contains(&category.as_str()),
+            "unexpected provider turn before process restart: {category}"
+        );
+    }
+    assert!(
+        approved_child,
+        "background child must be explicitly approved"
+    );
+
+    let blocked_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = http_request(
+            server.address,
+            "GET",
+            &format!("/runs/{run_id}"),
+            Some(token),
+            None,
+        );
+        assert_eq!(status, 200, "run snapshot response: {body}");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&body).expect("run snapshot should be JSON");
+        if snapshot["status"] == "blocked" {
+            break;
+        }
+        assert!(
+            Instant::now() < blocked_deadline,
+            "parent run did not yield while the child response was held: {snapshot}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let session_log_root = workspace.join("state/managed/session-log");
+    let session_path = walkdir::WalkDir::new(&session_log_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file() && entry.file_name().to_str() == Some("records.jsonl")
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .find(|path| {
+            sigil_kernel::JsonlSessionStore::read_entries(path)
+                .ok()
+                .is_some_and(|entries| {
+                    sigil_kernel::Session::from_entries("openai_compat", "gpt-4.1", entries)
+                        .task_state_projection()
+                        .latest_task()
+                        .is_some()
+                })
+        })
+        .expect("parent session log should exist before process crash");
+    let initial_entries = sigil_kernel::JsonlSessionStore::read_entries(&session_path)
+        .expect("parent session should remain readable before process crash");
+    let initial_session =
+        sigil_kernel::Session::from_entries("openai_compat", "gpt-4.1", initial_entries);
+    let interrupted_task_id = initial_session
+        .task_state_projection()
+        .latest_task()
+        .expect("parent Direct Task should be durable before process crash")
+        .task_id
+        .clone();
+
+    // The provider has received the child model request but cannot complete it
+    // until the test opens the gate. Kill serve in this exact ownerless window.
+    server
+        .child
+        .kill()
+        .expect("serve process should accept crash simulation");
+    let crash_status = server
+        .child
+        .wait()
+        .expect("crashed serve process should be reaped");
+    assert!(!crash_status.success(), "crash simulation must be abnormal");
+    drop(server);
+    release_background_child
+        .send(())
+        .expect("scripted provider should release the abandoned child request");
+
+    recovery_mode.store(true, Ordering::SeqCst);
+    let restarted = spawn_serve(&workspace, &config_path, token);
+    let (catalog_status, catalog_body) = http_request(
+        restarted.address,
+        "GET",
+        "/session-catalog",
+        Some(token),
+        None,
+    );
+    assert_eq!(catalog_status, 200, "session catalog: {catalog_body}");
+    let catalog: serde_json::Value =
+        serde_json::from_str(&catalog_body).expect("session catalog should be JSON");
+    let historical = catalog["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["session_id"].as_str() == Some(&durable_session_id))
+        })
+        .expect("interrupted durable session should be discoverable after restart");
+    let open_body = serde_json::json!({
+        "session_ref": historical["session_ref"],
+        "session_id": durable_session_id,
+        "label": "Recovered Direct Task"
+    })
+    .to_string();
+    let (open_status, open_response) = http_request(
+        restarted.address,
+        "POST",
+        "/sessions/open",
+        Some(token),
+        Some(&open_body),
+    );
+    assert_eq!(open_status, 200, "session reopen response: {open_response}");
+    let reopened: serde_json::Value =
+        serde_json::from_str(&open_response).expect("reopened session should be JSON");
+    let reopened_session_id = reopened["id"]
+        .as_str()
+        .expect("reopened adapter session id should exist");
+    let recovery_command = serde_json::json!({
+        "protocol_version": 2,
+        "command_id": "start-after-direct-task-background-restart",
+        "client_id": "direct-task-background-restart",
+        "session_id": reopened_session_id,
+        "payload": {
+            "prompt": "Finish this new session turn after recovering prior work.",
+            "permission_mode": "read-only"
+        }
+    })
+    .to_string();
+    let (recovery_start_status, recovery_start_body) = http_request(
+        restarted.address,
+        "POST",
+        &format!("/sessions/{reopened_session_id}/runs"),
+        Some(token),
+        Some(&recovery_command),
+    );
+    assert_eq!(
+        recovery_start_status, 201,
+        "post-restart run should trigger owner rescan: {recovery_start_body}"
+    );
+    let recovery_run: serde_json::Value =
+        serde_json::from_str(&recovery_start_body).expect("recovery run receipt should be JSON");
+    let recovery_run_id = recovery_run["run"]["id"]
+        .as_str()
+        .expect("post-restart run id should exist");
+    let recovery_turn_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = recovery_turn_deadline.saturating_duration_since(Instant::now());
+        let (category, _) = provider_requests
+            .recv_timeout(remaining)
+            .expect("post-restart session run should reach its scripted provider turn");
+        if category == "session_title" {
+            continue;
+        }
+        assert_eq!(
+            category, "recovery_turn",
+            "reopening may start the explicit new turn, but must not replay the old child"
+        );
+        break;
+    }
+    let recovery_run_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = http_request(
+            restarted.address,
+            "GET",
+            &format!("/runs/{recovery_run_id}"),
+            Some(token),
+            None,
+        );
+        assert_eq!(status, 200, "post-restart run snapshot: {body}");
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&body).expect("post-restart run snapshot should be JSON");
+        if snapshot["status"] == "finished" {
+            break;
+        }
+        assert!(
+            Instant::now() < recovery_run_deadline,
+            "explicit post-restart run did not finish: {snapshot}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let child_id = sigil_runtime::chat_agent_thread_id_for_call(
+        "call-background-child",
+        &sigil_kernel::AgentProfileId::new("explore").expect("explore profile id"),
+    )
+    .expect("child thread id should be deterministic");
+    let recovery_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_path)
+            .expect("parent session should remain readable after restart");
+        let recovered = sigil_kernel::Session::from_entries("openai_compat", "gpt-4.1", entries);
+        let tasks = recovered.task_state_projection();
+        let agents = recovered.agent_thread_state_projection();
+        let child = agents.threads.get(&child_id);
+        let task_state = tasks.tasks.get(&interrupted_task_id).map(|task| {
+            (
+                task.task_id.clone(),
+                task.status,
+                task.direct_execution_admission.is_some(),
+                task.latest_plan_version,
+            )
+        });
+        let direct_children = tasks.direct_task_background_agents(&interrupted_task_id);
+        let direct_child_statuses = direct_children
+            .iter()
+            .map(|thread_id| (thread_id.clone(), tasks.agent_thread_status(thread_id)))
+            .collect::<Vec<_>>();
+        let all_task_states = tasks
+            .tasks
+            .values()
+            .map(|task| (task.task_id.clone(), task.status))
+            .collect::<Vec<_>>();
+        let thread_states = agents
+            .threads
+            .iter()
+            .map(|(thread_id, thread)| (thread_id.clone(), thread.status, thread.result.is_some()))
+            .collect::<Vec<_>>();
+        let child_status_history = recovered
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| match entry {
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::AgentThreadStarted(entry),
+                ) if entry.thread_id == child_id => Some((index, "started".to_owned())),
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::AgentThreadStatusChanged(entry),
+                ) if entry.thread_id == child_id => {
+                    Some((index, format!("status:{:?}", entry.status)))
+                }
+                sigil_kernel::SessionLogEntry::Control(
+                    sigil_kernel::ControlEntry::AgentThreadResultRecorded(entry),
+                ) if entry.result.thread_id == child_id => {
+                    Some((index, format!("result:{:?}", entry.result.status)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if task_state
+            .as_ref()
+            .is_some_and(|(_, status, _, _)| *status == sigil_kernel::TaskRunStatus::Interrupted)
+            && child.is_some_and(|thread| {
+                thread.status == sigil_kernel::AgentThreadStatus::Interrupted
+                    && thread.result.is_none()
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < recovery_deadline,
+            "restart must durably interrupt the ownerless Task and child; target_task={task_state:?}, direct_children={direct_children:?}, child_task_statuses={direct_child_statuses:?}, all_tasks={all_task_states:?}, threads={thread_states:?}, child_history={child_status_history:?}, session_log={}",
+            session_path.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let no_replay_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < no_replay_deadline {
+        if let Ok((category, _)) = provider_requests.recv_timeout(Duration::from_millis(25)) {
+            assert_eq!(
+                category, "session_title",
+                "restart must not rerun an ownerless Direct Task or child"
+            );
+        }
+    }
+    stop_provider
+        .send(())
+        .expect("scripted provider should stop after recovery verification");
+    provider
+        .join()
+        .expect("scripted provider fixture should finish");
+    assert_eq!(stop_serve(restarted).status.code(), Some(0));
     fs::remove_dir_all(workspace).expect("test workspace should remove");
 }
 

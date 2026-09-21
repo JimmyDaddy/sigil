@@ -353,6 +353,7 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         preview: ToolPreviewCapability::Required,
     };
     let approval = render_run_event(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity(&call.id),
         effects: std::collections::BTreeSet::from([sigil_kernel::ToolPermissionEffect::FileWrite]),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -515,6 +516,7 @@ async fn drain_provider_stream_and_stdout_event_handler_accept_supported_events(
         args_json: "{}".to_owned(),
     }))?;
     handler.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: false,
@@ -1431,6 +1433,7 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
     })?;
     handler.handle(sigil_kernel::RunEvent::ToolCallCompleted(call.clone()))?;
     handler.handle(sigil_kernel::RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity(&call.id),
         effects: std::collections::BTreeSet::from([sigil_kernel::ToolPermissionEffect::FileRead]),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -1465,6 +1468,7 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
         }),
     })?;
     handler.handle(sigil_kernel::RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: call.id.clone(),
         approval_request_id: format!("approval-{}", call.id),
         approved: false,
@@ -1946,7 +1950,7 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
     let (_, fallback_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(&root_config)?;
     let store = sigil_kernel::JsonlSessionStore::new(session_path)?;
-    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+    let mut session = sigil_runtime::provider_connections::load_session_for_route(
         &root_config,
         &fallback_route,
         store,
@@ -1982,7 +1986,6 @@ fn session_with_pending_plan_draft(session_path: &std::path::Path) -> Result<Pen
         explicit_objective: None,
         route_decision_id: Some(decision_id.clone()),
         child_session_ref: SessionRef::new_relative("child.jsonl")?,
-        finalizer_session_ref: None,
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,

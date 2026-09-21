@@ -294,7 +294,11 @@ enum UpdateCommand {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(&cli);
+    // The Direct Task -> background child serve path overflows Tokio's default
+    // worker stack while polling the nested agent run; the 4 MiB setting is
+    // covered by the real serve-process continuation and restart tests.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(4 * 1024 * 1024)
         .enable_all()
         .build()
     {
@@ -1219,27 +1223,9 @@ async fn plan_decision_command(
         },
         task_id: receipt.task_id,
         task_phase: receipt.task_phase.map(|phase| phase.as_str().to_owned()),
-        task_blocker: receipt.task_blocker.map(|blocker| CliTaskBlocker {
-            reason_code: blocker.reason_code.as_str().to_owned(),
-            summary: blocker.summary,
-            retryable: blocker.retryable,
-            available_actions: blocker
-                .available_actions
-                .iter()
-                .map(|action| action.as_str().to_owned())
-                .collect(),
-        }),
     })
     .context("failed to serialize plan decision receipt")?;
     Ok(rendered)
-}
-
-#[derive(serde::Serialize)]
-struct CliTaskBlocker {
-    reason_code: String,
-    summary: String,
-    retryable: bool,
-    available_actions: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1252,8 +1238,6 @@ struct CliPlanDecisionReceipt {
     task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     task_phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_blocker: Option<CliTaskBlocker>,
 }
 
 fn cli_application_run_request(
@@ -1980,6 +1964,7 @@ fn render_public_run_event(event: PublicRunEventKind) -> RenderedOutput {
             approved,
             reason,
             approval_request_id: _,
+            display_call_id: _,
         } => RenderedOutput {
             stderr: format!(
                 "[tool:approval:{call_id}] {}{}\n",

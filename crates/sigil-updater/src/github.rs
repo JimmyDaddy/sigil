@@ -26,7 +26,6 @@ const MAX_ETAG_BYTES: usize = 256;
 
 /// Integrity and immutability evidence for one exact release asset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReleaseSecurity {
     pub immutable: bool,
     pub sha256: Option<String>,
@@ -36,7 +35,6 @@ pub struct ReleaseSecurity {
 
 /// A strictly newer release selected for the requested channel and target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UpdateCandidate {
     pub version: String,
     pub tag_name: String,
@@ -47,7 +45,6 @@ pub struct UpdateCandidate {
 
 /// Result returned to CLI, TUI, and other product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UpdateCheckOutcome {
     pub current_version: String,
     pub target: String,

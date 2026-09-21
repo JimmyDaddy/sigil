@@ -406,46 +406,29 @@ fn spawn_openai_compatible_without_catalog_fixture() -> Result<NoCatalogProvider
                 request.starts_with("POST /v1/chat/completions"),
                 "unexpected provider request: {request}"
             );
-            // Respect the actual request contract: first-run composition can enter ordinary
-            // execution directly, whereas a routing microturn advertises only routing tools.
+            // Respect the actual request contract: the model receives ordinary tools and can
+            // choose an optional handoff in the same conversation loop.
             let (_, request_body) = request
                 .split_once("\r\n\r\n")
                 .context("chat completion request body is missing")?;
             let payload: serde_json::Value = serde_json::from_str(request_body)?;
-            let routing_only = payload["tools"].as_array().is_some_and(|tools| {
-                tools
-                    .iter()
-                    .any(|tool| tool["function"]["name"] == "continue_without_task_planning")
-                    && tools.iter().all(|tool| {
-                        matches!(
-                            tool["function"]["name"].as_str(),
-                            Some(
-                                "continue_without_task_planning"
-                                    | "request_task_planning"
-                                    | "request_plan_review"
-                                    | "continue_existing_task"
-                            )
-                        )
-                    })
-            });
-            let body = if routing_only {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"routing-1\",\"type\":\"function\",\"function\":{\"name\":\"continue_without_task_planning\",\"arguments\":\"{\\\"reason\\\":\\\"does_not_meet_task_planning_criteria\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            } else {
-                concat!(
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"FIRST-RUN-CANARY\"},\"finish_reason\":\"stop\"}]}\n\n",
-                    "data: [DONE]\n\n"
-                )
-            };
+            assert!(
+                payload
+                    .get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| !tools.is_empty())
+            );
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"FIRST-RUN-CANARY\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             )?;
             stream.flush()?;
-            if !routing_only && request.contains("reply with the first-run canary") {
+            if request.contains("reply with the first-run canary") {
                 server_generated.store(true, Ordering::Release);
                 return Ok(());
             }

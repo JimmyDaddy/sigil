@@ -70,7 +70,6 @@ impl ProductUpdaterReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct UpdateCacheEntry {
     pub(crate) schema_version: u16,
     pub(crate) cache_key: String,

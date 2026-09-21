@@ -31,7 +31,6 @@ pub const UPDATE_CACHE_RELATIVE_PATH: &str = "updates/v1/check.json";
 
 /// Build facts supplied by the final binary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BuildMetadata {
     pub version: String,
     pub target: String,

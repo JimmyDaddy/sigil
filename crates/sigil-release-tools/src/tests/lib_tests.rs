@@ -70,7 +70,7 @@ fn orchestration_eval_manifest(
                 canonical_model_version: "v1".to_owned(),
                 route_fingerprint: "route".to_owned(),
                 routing_prompt_digest: "routing".to_owned(),
-                planner_prompt_digest: "planner".to_owned(),
+                direct_task_prompt_digest: "planner".to_owned(),
                 system_prompt_digest: "system".to_owned(),
                 tool_profile_contract_digest: "tools".to_owned(),
                 task_config_digest: "task-config".to_owned(),
