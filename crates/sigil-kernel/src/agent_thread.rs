@@ -19,6 +19,9 @@ use crate::{
     tool::ToolRegistryScope,
 };
 
+mod result_delivery;
+pub use result_delivery::AgentResultDeliveryCoverage;
+
 const AGENT_INVOCATION_GRANT_SCOPE_HASH: &str = "agent_invocation_grant_v1";
 
 /// Stable identifier for an agent profile.
@@ -660,9 +663,8 @@ pub enum DelegationAuthority {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
-    TaskOrchestrator {
+    DirectTask {
         task_id: crate::TaskId,
-        phase: TaskOrchestratorPhase,
     },
     ModelProactive,
     SystemRecovery,
@@ -683,20 +685,9 @@ pub enum AgentInvocationGrantSource {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
-    TaskOrchestrator {
+    DirectTask {
         task_id: crate::TaskId,
-        phase: TaskOrchestratorPhase,
     },
-}
-
-/// Host-owned internal task phase that may start a bounded child before or after executable
-/// step admission. This is separate from accepted-plan authority and cannot be model-authored.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskOrchestratorPhase {
-    Planner,
-    PlannerDiscovery,
-    Synthesis,
 }
 
 /// Root-run facts from which the host may mint a concrete child invocation grant.
@@ -1107,12 +1098,11 @@ fn validate_invocation_grant_binding(
             && plan_version == authority_plan_version
             && step_id == authority_step_id => {}
         (
-            AgentInvocationGrantSource::TaskOrchestrator { task_id, phase },
-            DelegationAuthority::TaskOrchestrator {
+            AgentInvocationGrantSource::DirectTask { task_id },
+            DelegationAuthority::DirectTask {
                 task_id: authority_task_id,
-                phase: authority_phase,
             },
-        ) if task_id == authority_task_id && phase == authority_phase => {}
+        ) if task_id == authority_task_id => {}
         _ => bail!("agent invocation grant source and authority do not match"),
     }
     Ok(())
@@ -1168,9 +1158,8 @@ pub enum DelegationAuthorityRecord {
         plan_version: u32,
         step_id: crate::TaskStepId,
     },
-    TaskOrchestrator {
+    DirectTask {
         task_id: crate::TaskId,
-        phase: TaskOrchestratorPhase,
     },
     ModelProactive,
     SystemRecovery,
@@ -1189,9 +1178,8 @@ impl From<&DelegationAuthority> for DelegationAuthorityRecord {
                 plan_version: *plan_version,
                 step_id: step_id.clone(),
             },
-            DelegationAuthority::TaskOrchestrator { task_id, phase } => Self::TaskOrchestrator {
+            DelegationAuthority::DirectTask { task_id } => Self::DirectTask {
                 task_id: task_id.clone(),
-                phase: *phase,
             },
             DelegationAuthority::ModelProactive => Self::ModelProactive,
             DelegationAuthority::SystemRecovery => Self::SystemRecovery,
@@ -1256,6 +1244,7 @@ impl AgentThreadStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AgentThreadTerminalStatus {
     Completed,
+    Blocked,
     Failed,
     Cancelled,
     Interrupted,
@@ -1933,6 +1922,7 @@ impl AgentThreadStateProjection {
         thread.result_delivered = false;
         thread.result_fully_delivered = false;
         thread.result_delivered_chars = 0;
+        thread.result_delivery_coverage = AgentResultDeliveryCoverage::default();
         thread.result_delivery_call_ids.clear();
         if thread.unresolved {
             thread.reason = Some("agent thread start entry missing".to_owned());
@@ -1940,6 +1930,7 @@ impl AgentThreadStateProjection {
         }
         thread.status = match result.status {
             AgentThreadTerminalStatus::Completed => AgentThreadStatus::Completed,
+            AgentThreadTerminalStatus::Blocked => AgentThreadStatus::Blocked,
             AgentThreadTerminalStatus::Failed => AgentThreadStatus::Failed,
             AgentThreadTerminalStatus::Cancelled => AgentThreadStatus::Cancelled,
             AgentThreadTerminalStatus::Interrupted => AgentThreadStatus::Interrupted,
@@ -1959,16 +1950,12 @@ impl AgentThreadStateProjection {
         if !result_matches {
             return;
         }
-        let page_end = entry.offset_chars.saturating_add(entry.returned_chars);
-        if entry.offset_chars <= thread.result_delivered_chars {
-            thread.result_delivered_chars = thread.result_delivered_chars.max(page_end);
-        }
-        if !entry.truncated
-            && entry.total_chars > 0
-            && thread.result_delivered_chars >= entry.total_chars
-        {
-            thread.result_fully_delivered = true;
-        }
+        thread.result_delivery_coverage.record(entry);
+        thread.result_delivered_chars = thread.result_delivery_coverage.contiguous_chars();
+        thread.result_fully_delivered = thread
+            .result_delivery_coverage
+            .fully_delivered_receipt()
+            .is_some();
     }
 
     fn apply_display_name(&mut self, entry: &AgentThreadDisplayNameEntry) {
@@ -2112,6 +2099,8 @@ pub struct AgentThreadProjection {
     pub result_delivered: bool,
     pub result_fully_delivered: bool,
     pub result_delivered_chars: usize,
+    /// Replayable page coverage, including pages beyond a still-unread gap.
+    pub result_delivery_coverage: AgentResultDeliveryCoverage,
     pub result_delivery_call_ids: Vec<String>,
     pub attempts: BTreeMap<AgentRunAttemptId, AgentRunAttemptProjection>,
     pub merge_safe_points: Vec<AgentMergeSafePointEntry>,
@@ -2146,6 +2135,7 @@ impl AgentThreadProjection {
             result_delivered: false,
             result_fully_delivered: false,
             result_delivered_chars: 0,
+            result_delivery_coverage: AgentResultDeliveryCoverage::default(),
             result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
@@ -2180,6 +2170,7 @@ impl AgentThreadProjection {
             result_delivered: false,
             result_fully_delivered: false,
             result_delivered_chars: 0,
+            result_delivery_coverage: AgentResultDeliveryCoverage::default(),
             result_delivery_call_ids: Vec::new(),
             attempts: BTreeMap::new(),
             merge_safe_points: Vec::new(),
@@ -2297,6 +2288,14 @@ pub struct AgentGraphSummary {
 /// Returns recovery entries for agent attempts that were started but never reached a terminal
 /// attempt/thread state.
 pub fn interrupted_agent_attempts(entries: &[SessionLogEntry]) -> Vec<AgentRunInterruptedEntry> {
+    interrupted_agent_attempts_excluding_live_owner(entries, &BTreeSet::new())
+}
+
+/// Returns recovery entries for attempts whose thread no longer has a live process-local owner.
+pub fn interrupted_agent_attempts_excluding_live_owner(
+    entries: &[SessionLogEntry],
+    live_owner_thread_ids: &BTreeSet<AgentThreadId>,
+) -> Vec<AgentRunInterruptedEntry> {
     let mut started =
         BTreeMap::<(AgentThreadId, AgentRunAttemptId), AgentRunAttemptStartedEntry>::new();
     let mut terminal = BTreeSet::<(AgentThreadId, AgentRunAttemptId)>::new();
@@ -2333,7 +2332,8 @@ pub fn interrupted_agent_attempts(entries: &[SessionLogEntry]) -> Vec<AgentRunIn
         .into_iter()
         .filter_map(|((thread_id, attempt_id), _)| {
             (!terminal.contains(&(thread_id.clone(), attempt_id.clone()))
-                && !terminal_threads.contains(&thread_id))
+                && !terminal_threads.contains(&thread_id)
+                && !live_owner_thread_ids.contains(&thread_id))
             .then_some(AgentRunInterruptedEntry {
                 thread_id,
                 attempt_id,
@@ -2353,12 +2353,22 @@ pub fn interrupted_agent_attempts(entries: &[SessionLogEntry]) -> Vec<AgentRunIn
 pub fn interrupted_agent_threads(
     entries: &[SessionLogEntry],
 ) -> Vec<AgentThreadStatusChangedEntry> {
+    interrupted_agent_threads_excluding_live_owner(entries, &BTreeSet::new())
+}
+
+/// Returns recovery entries for non-terminal agent threads that do not have a live process-local
+/// owner retained by the exact session attachment.
+pub fn interrupted_agent_threads_excluding_live_owner(
+    entries: &[SessionLogEntry],
+    live_owner_thread_ids: &BTreeSet<AgentThreadId>,
+) -> Vec<AgentThreadStatusChangedEntry> {
     let projection = AgentThreadStateProjection::from_entries(entries);
     projection
         .threads
         .values()
         .filter(|thread| {
             !thread.status.is_terminal()
+                && !live_owner_thread_ids.contains(&thread.thread_id)
                 && !thread
                     .attempts
                     .values()
@@ -2384,12 +2394,23 @@ pub fn interrupted_agent_threads(
 pub fn interrupted_agent_result_continuations(
     entries: &[SessionLogEntry],
 ) -> Vec<AgentResultContinuationEntry> {
+    interrupted_agent_result_continuations_excluding_live_owner(entries, &BTreeSet::new())
+}
+
+/// Returns only continuations that cannot be safely resumed and have no live child owner.
+pub fn interrupted_agent_result_continuations_excluding_live_owner(
+    entries: &[SessionLogEntry],
+    live_owner_thread_ids: &BTreeSet<AgentThreadId>,
+) -> Vec<AgentResultContinuationEntry> {
     let continuations = AgentResultContinuationProjection::from_entries(entries);
     let threads = AgentThreadStateProjection::from_entries(entries);
     continuations
         .statuses
         .into_iter()
         .filter_map(|(thread_id, status)| {
+            if live_owner_thread_ids.contains(&thread_id) {
+                return None;
+            }
             let reason = match status {
                 AgentResultContinuationStatus::Started => {
                     "parent continuation delivery became uncertain during session restore"
@@ -2416,8 +2437,18 @@ pub fn interrupted_agent_result_continuations(
 
 /// Returns recovery entries for routes that were left non-terminal across process restart.
 pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedEntry> {
+    closed_agent_routes_excluding_live_owner(entries, &BTreeSet::new())
+}
+
+/// Returns recovery closures only for routes whose source and target have no live attachment
+/// owner. Routes belonging to active background children remain actionable by that owner.
+pub fn closed_agent_routes_excluding_live_owner(
+    entries: &[SessionLogEntry],
+    live_owner_thread_ids: &BTreeSet<AgentThreadId>,
+) -> Vec<AgentRouteClosedEntry> {
     let mut statuses = BTreeMap::<AgentRouteId, AgentRouteStatus>::new();
     let mut already_closed = BTreeSet::<AgentRouteId>::new();
+    let mut live_owned_routes = BTreeSet::<AgentRouteId>::new();
     for entry in entries {
         let SessionLogEntry::Control(control) = entry else {
             continue;
@@ -2425,12 +2456,33 @@ pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedE
         match control {
             ControlEntry::AgentApprovalRoute(entry) => {
                 statuses.insert(entry.route_id.clone(), entry.status);
+                if live_owner_thread_ids.contains(&entry.source_thread_id)
+                    || entry
+                        .target_thread_id
+                        .as_ref()
+                        .is_some_and(|thread_id| live_owner_thread_ids.contains(thread_id))
+                {
+                    live_owned_routes.insert(entry.route_id.clone());
+                }
             }
             ControlEntry::AgentElicitationRoute(entry) => {
                 statuses.insert(entry.route_id.clone(), entry.status);
+                if live_owner_thread_ids.contains(&entry.source_thread_id)
+                    || entry
+                        .target_thread_id
+                        .as_ref()
+                        .is_some_and(|thread_id| live_owner_thread_ids.contains(thread_id))
+                {
+                    live_owned_routes.insert(entry.route_id.clone());
+                }
             }
             ControlEntry::AgentThreadMessageRouted(entry) => {
                 statuses.insert(entry.route_id.clone(), entry.status);
+                if live_owner_thread_ids.contains(&entry.source_thread_id)
+                    || live_owner_thread_ids.contains(&entry.target_thread_id)
+                {
+                    live_owned_routes.insert(entry.route_id.clone());
+                }
             }
             ControlEntry::AgentRouteClosed(entry) => {
                 already_closed.insert(entry.route_id.clone());
@@ -2441,12 +2493,13 @@ pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedE
     statuses
         .into_iter()
         .filter_map(|(route_id, status)| {
-            (!status.is_terminal() && !already_closed.contains(&route_id)).then_some(
-                AgentRouteClosedEntry {
-                    route_id,
-                    reason: "agent route closed during session restore".to_owned(),
-                },
-            )
+            (!status.is_terminal()
+                && !already_closed.contains(&route_id)
+                && !live_owned_routes.contains(&route_id))
+            .then_some(AgentRouteClosedEntry {
+                route_id,
+                reason: "agent route closed during session restore".to_owned(),
+            })
         })
         .collect()
 }
@@ -2482,6 +2535,15 @@ pub fn stale_expired_agent_approval_routes(
 pub fn interrupted_agent_mailbox_messages(
     entries: &[SessionLogEntry],
 ) -> Vec<AgentMailboxMessageEntry> {
+    interrupted_agent_mailbox_messages_excluding_live_owner(entries, &BTreeSet::new())
+}
+
+/// Returns recovery entries only for mailbox messages whose source and target are not held by a
+/// live background owner.
+pub fn interrupted_agent_mailbox_messages_excluding_live_owner(
+    entries: &[SessionLogEntry],
+    live_owner_thread_ids: &BTreeSet<AgentThreadId>,
+) -> Vec<AgentMailboxMessageEntry> {
     let mut messages = BTreeMap::<AgentRouteId, AgentMailboxMessageEntry>::new();
     for entry in entries {
         let SessionLogEntry::Control(control) = entry else {
@@ -2494,7 +2556,10 @@ pub fn interrupted_agent_mailbox_messages(
     messages
         .into_values()
         .filter_map(|message| {
-            (!message.status.is_terminal()).then_some(AgentMailboxMessageEntry {
+            (!message.status.is_terminal()
+                && !live_owner_thread_ids.contains(&message.source_thread_id)
+                && !live_owner_thread_ids.contains(&message.target_thread_id))
+            .then_some(AgentMailboxMessageEntry {
                 route_id: message.route_id,
                 source_thread_id: message.source_thread_id,
                 target_thread_id: message.target_thread_id,

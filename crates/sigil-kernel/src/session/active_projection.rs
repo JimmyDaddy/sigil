@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::writer::SharedSessionCoordinator;
 use super::*;
+use crate::terminal_task::terminal_task_generation_is_newer;
 use crate::{
     AgentThreadId, ConversationQueueDurableProjection, EventId, ReadinessEvaluatedEntry,
     SessionStats, TaskGuidancePromotedEntry, TaskId, TaskPlanStatus, TaskRunStatus, TerminalTaskId,
@@ -61,12 +62,13 @@ impl ActiveProjectionFrontier {
     }
 }
 
-/// A small task state sufficient to admit task-guidance work.
+/// A small task state sufficient to admit direct Task guidance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveTaskGuidanceState {
     status: TaskRunStatus,
+    objective: String,
     latest_plan_version: Option<u32>,
-    accepted_plan_version: Option<u32>,
+    direct_execution_admitted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,10 +388,10 @@ impl ActiveTaskGuidanceState {
         self.latest_plan_version
     }
 
-    /// Returns the currently accepted plan version, when one remains accepted.
+    /// Returns whether direct Task execution authority has been admitted.
     #[must_use]
-    pub fn accepted_plan_version(&self) -> Option<u32> {
-        self.accepted_plan_version
+    pub fn direct_execution_admitted(&self) -> bool {
+        self.direct_execution_admitted
     }
 }
 
@@ -408,6 +410,7 @@ pub struct ActiveSessionProjection {
     pending_agent_continuations: BTreeSet<AgentThreadId>,
     pending_agent_continuations_overflowed: bool,
     active_terminal_tasks: BTreeSet<TerminalTaskId>,
+    terminal_task_generations: BTreeMap<TerminalTaskId, u64>,
     active_terminal_tasks_overflowed: bool,
     usage: SessionStats,
     latest_readiness: Option<ReadinessEvaluatedEntry>,
@@ -444,6 +447,7 @@ impl ActiveSessionProjection {
             pending_agent_continuations: BTreeSet::new(),
             pending_agent_continuations_overflowed: false,
             active_terminal_tasks: BTreeSet::new(),
+            terminal_task_generations: BTreeMap::new(),
             active_terminal_tasks_overflowed: false,
             usage: SessionStats::default(),
             latest_readiness: None,
@@ -581,8 +585,9 @@ impl ActiveSessionProjection {
                 let current = self.task_guidance.entry(entry.task_id.clone()).or_insert(
                     ActiveTaskGuidanceState {
                         status: entry.status,
+                        objective: entry.objective.clone(),
                         latest_plan_version: None,
-                        accepted_plan_version: None,
+                        direct_execution_admitted: false,
                     },
                 );
                 if !matches!(
@@ -607,20 +612,12 @@ impl ActiveSessionProjection {
                 if entry.status != TaskPlanStatus::Superseded {
                     current.latest_plan_version = Some(entry.plan_version);
                 }
-                match entry.status {
-                    TaskPlanStatus::Accepted => {
-                        current.accepted_plan_version = Some(entry.plan_version);
-                    }
-                    TaskPlanStatus::Proposed
-                    | TaskPlanStatus::Rejected
-                    | TaskPlanStatus::Superseded
-                        if current.accepted_plan_version == Some(entry.plan_version) =>
-                    {
-                        current.accepted_plan_version = None;
-                    }
-                    TaskPlanStatus::Proposed
-                    | TaskPlanStatus::Rejected
-                    | TaskPlanStatus::Superseded => {}
+            }
+            ControlEntry::TaskDirectExecutionAdmittedV1(entry) => {
+                if let Some(current) = self.task_guidance.get_mut(&entry.task_id) {
+                    current.direct_execution_admitted = entry.validate().is_ok()
+                        && entry.matches_objective(&current.objective)
+                        && current.latest_plan_version.is_none();
                 }
             }
             ControlEntry::AgentResultContinuation(entry) => {
@@ -640,18 +637,24 @@ impl ActiveSessionProjection {
                 }
             }
             ControlEntry::TerminalTask(entry) => {
+                let task_id = entry.handle.task_id.clone();
+                let current_generation = self.terminal_task_generations.get(&task_id).copied();
+                if !terminal_task_generation_is_newer(current_generation, entry.generation) {
+                    return Ok(());
+                }
+                self.terminal_task_generations
+                    .insert(task_id.clone(), entry.generation);
                 if entry.status.is_active() {
-                    if !self.active_terminal_tasks.contains(&entry.handle.task_id)
+                    if !self.active_terminal_tasks.contains(&task_id)
                         && (self.active_terminal_tasks_overflowed
                             || self.active_terminal_tasks.len() >= MAX_ACTIVE_TERMINAL_TASKS)
                     {
                         self.active_terminal_tasks_overflowed = true;
                         return Ok(());
                     }
-                    self.active_terminal_tasks
-                        .insert(entry.handle.task_id.clone());
+                    self.active_terminal_tasks.insert(task_id);
                 } else {
-                    self.active_terminal_tasks.remove(&entry.handle.task_id);
+                    self.active_terminal_tasks.remove(&task_id);
                 }
             }
             ControlEntry::UsageSnapshot(usage) => self.usage.apply_usage(usage),
@@ -689,10 +692,8 @@ impl ActiveSessionProjection {
         ) {
             bail!("task guidance promotion cannot target a completed or cancelled task");
         }
-        if task.latest_plan_version != Some(entry.plan_version)
-            || task.accepted_plan_version != Some(entry.plan_version)
-        {
-            bail!("task guidance promotion plan version is not the accepted task plan");
+        if task.latest_plan_version.is_some() || !task.direct_execution_admitted {
+            bail!("task guidance promotion requires a current direct Task without a TaskPlan");
         }
         Ok(())
     }

@@ -80,11 +80,6 @@ fn invalid_unselected_module_payloads_roundtrip_and_fail_only_when_selected() {
             "[memory]\nwritable = ['invalid']",
         ),
         (
-            OptionalCapability::Skills,
-            "skills",
-            "[skills]\nunknown = 4",
-        ),
-        (
             OptionalCapability::Compaction,
             "compaction",
             "[compaction]\nstrategy = 'invalid'",
@@ -105,6 +100,16 @@ fn invalid_unselected_module_payloads_roundtrip_and_fail_only_when_selected() {
             "[[mcp_servers]]\nname = 'broken'\ntransport = 42",
         ),
     ];
+    let unknown = config_with_module("[skills]\nunknown = 4");
+    let mut unknown_config =
+        RootConfig::parse_persisted(&unknown).expect("unknown module fields should be ignored");
+    unknown_config
+        .composition
+        .enhancements
+        .insert(OptionalCapability::Skills);
+    unknown_config
+        .with_effective_composition()
+        .expect("retired module fields should not block selection");
     for (capability, key, module) in cases {
         let raw = config_with_module(module);
         let mut config = RootConfig::parse_persisted(&raw).expect("unselected payload is deferred");
@@ -191,15 +196,22 @@ fn composition_does_not_enable_a_module_disabled_by_its_own_configuration() {
 }
 
 #[test]
-fn core_keeps_syntax_root_schema_and_permission_validation_strict() {
-    for raw in [
-        format!("{CORE_CONFIG}\n[task"),
-        CORE_CONFIG.replace("config_version = 2", "config_version = 2\nunknown = true"),
-        config_with_module("[permission]\nmode = 'invalid-mode'"),
-        config_with_module("[composition.unknown]\nenabled = true"),
-    ] {
-        assert!(RootConfig::parse_persisted(&raw).is_err(), "{raw}");
-    }
+fn core_keeps_syntax_and_known_value_validation_while_ignoring_unknown_fields() {
+    assert!(RootConfig::parse_persisted(&format!("{CORE_CONFIG}\n[task")).is_err());
+    assert!(
+        RootConfig::parse_persisted(&config_with_module("[permission]\nmode = 'invalid-mode'"))
+            .is_err()
+    );
+    assert!(
+        RootConfig::parse_persisted(
+            &CORE_CONFIG.replace("config_version = 2", "config_version = 2\nunknown = true")
+        )
+        .is_ok()
+    );
+    assert!(
+        RootConfig::parse_persisted(&config_with_module("[composition.unknown]\nenabled = true"))
+            .is_ok()
+    );
 }
 
 #[test]

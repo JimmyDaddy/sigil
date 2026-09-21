@@ -484,6 +484,12 @@ pub trait ManagedProcessOutputStreamV1: Send {
 /// Async trait for persistent process handles (non-clone, non-serialize).
 #[async_trait::async_trait]
 pub trait ManagedProcessHandleV1: Send {
+    /// Attaches process-local timing observation only. It cannot change process control,
+    /// resource authority or the cleanup receipt. Adapters with owned cleanup override this.
+    fn observe_cleanup(&mut self, observer: crate::RunCancellationHandle) {
+        let _ = observer;
+    }
+
     fn process_ref(&self) -> ReflectiveOpaqueProcessRef;
     fn physical_attempt_id(&self) -> PhysicalAttemptId;
     fn take_output_stream(

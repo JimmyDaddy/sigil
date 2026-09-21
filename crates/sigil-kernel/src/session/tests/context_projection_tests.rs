@@ -207,7 +207,7 @@ fn v2_context_projection_preserves_raw_messages_until_applied_then_uses_v2_bound
 fn promoted_user_is_live_immediately_but_durable_context_waits_for_delivery() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session-promoted.jsonl"))?;
-    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
     let queue_id = ConversationInputQueueId::new("context-promoted")?;
     let prompt = project_conversation_prompt_for_persistence("promoted context request");
     session.append_control(ControlEntry::ConversationInputQueued(
@@ -255,6 +255,38 @@ fn promoted_user_is_live_immediately_but_durable_context_waits_for_delivery() ->
             .count(),
         1
     );
+
+    let progress =
+        ModelMessage::assistant(Some("investigated before handoff".to_owned()), Vec::new());
+    session.append_assistant_message(progress.clone())?;
+    let handoff = ControlEntry::Note {
+        kind: "dispatching-handoff".to_owned(),
+        data: serde_json::json!(1),
+    };
+    session.append_control(handoff.clone())?;
+    let frozen = session
+        .context_projection_before_control_including_source(&handoff, &durable_user_message.id)?
+        .model_messages();
+    assert_eq!(
+        frozen
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![durable_user_message.id.as_str(), progress.id.as_str()]
+    );
+    let persisted = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+    assert_eq!(
+        serde_json::to_value(&frozen)?,
+        serde_json::to_value(
+            persisted
+                .context_projection_before_control_including_source(
+                    &handoff,
+                    &durable_user_message.id
+                )?
+                .model_messages()
+        )?
+    );
+    drop(persisted);
 
     store.append(&SessionLogEntry::Control(
         ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
@@ -564,6 +596,13 @@ fn context_prefix_rejects_missing_source_conflicting_source_and_missing_boundary
         Some(&SessionContextPrefixError::MissingBoundary)
     );
     session.append_control(boundary.clone())?;
+    let including_progress = session
+        .context_projection_before_control_including_source(&boundary, &source.id)
+        .expect_err("progress projection must still validate the exact source");
+    assert_eq!(
+        including_progress.downcast_ref::<SessionContextPrefixError>(),
+        Some(&SessionContextPrefixError::ConflictingSource)
+    );
     let conflict = session
         .context_projection_before_control(&boundary, Some(&source.id))
         .expect_err("source conflict");
@@ -616,5 +655,64 @@ fn context_prefix_rejects_missing_source_conflicting_source_and_missing_boundary
         error.downcast_ref::<SessionContextPrefixError>(),
         Some(&SessionContextPrefixError::ConflictingSource)
     );
+    Ok(())
+}
+
+#[test]
+fn handoff_context_preserves_completed_tools_at_exact_boundary_across_reload() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("handoff.jsonl"))?;
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
+    let source = ModelMessage::user("inspect, then plan the remaining change");
+    session.append_user_message(source.clone())?;
+    let call = ToolCall {
+        id: "completed-write".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: serde_json::json!({"path":"src/a.rs"}).to_string(),
+    };
+    session.append_assistant_message(ModelMessage::assistant(None, vec![call]))?;
+    session.append_test_tool_result(crate::ToolResult::ok(
+        "completed-write",
+        "write_file",
+        "already updated src/a.rs",
+        crate::ToolResultMeta::default(),
+    ))?;
+    let boundary = ControlEntry::Note {
+        kind: "handoff".to_owned(),
+        data: serde_json::json!(1),
+    };
+    session.append_control(boundary.clone())?;
+    session.append_user_message(ModelMessage::user("later unrelated parent request"))?;
+    let expected = session
+        .context_projection_before_control_including_source(&boundary, &source.id)?
+        .model_messages();
+    assert!(expected.iter().any(|message| {
+        message
+            .content
+            .as_deref()
+            .is_some_and(|text| text.contains("already updated src/a.rs"))
+    }));
+    assert!(
+        !expected
+            .iter()
+            .any(|message| message.content.as_deref() == Some("later unrelated parent request"))
+    );
+    let before = std::fs::read(store.path())?;
+    drop(session);
+    let reloaded = Session::load_from_store("test", "model", store.clone())?;
+    assert_eq!(
+        serde_json::to_value(&expected)?,
+        serde_json::to_value(
+            reloaded
+                .context_projection_before_control_including_source(&boundary, &source.id)?
+                .model_messages()
+        )?
+    );
+    assert!(
+        reloaded
+            .context_projection_before_control_including_source(&boundary, "absent")
+            .is_err()
+    );
+    assert_eq!(before, std::fs::read(store.path())?);
     Ok(())
 }

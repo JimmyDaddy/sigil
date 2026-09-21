@@ -10,7 +10,7 @@ pub const APPROVAL_REQUEST_NO_EXPIRY_MS: u64 = 9_007_199_254_740_991;
 
 /// Exact V2 identity shared by kernel, route adapters, durable audit and clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ApprovalRequestIdentityV2 {
     pub session_id: String,
     pub run_id: String,
@@ -27,7 +27,7 @@ pub struct ApprovalRequestIdentityV2 {
 /// The signature binds the raw tool-call digest, policy snapshot, subjects, risk and preview
 /// identity without exposing any of those potentially sensitive values to routing adapters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolApprovalContext {
     pub identity: ApprovalRequestIdentityV2,
     pub permission_signature: String,

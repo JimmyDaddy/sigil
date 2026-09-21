@@ -187,7 +187,7 @@ pub enum RuntimeContextSnapshotStateV2 {
 /// The full message is safe persistence material. Exact transient overlays and secret carriers
 /// are never allowed in this record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RuntimeContextSnapshotV2 {
     pub schema_version: u16,
     pub state: RuntimeContextSnapshotStateV2,
@@ -201,7 +201,9 @@ pub struct RuntimeContextSnapshotV2 {
 #[allow(clippy::large_enum_variant)] // Boxing variants would churn append-only control projection matches.
 #[serde(rename_all = "snake_case")]
 pub enum ControlEntry {
+    ProviderDiagnostic(crate::ProviderDiagnosticV1),
     SessionCompositionBound(crate::SessionCompositionSnapshotV1),
+    SessionRuntimeTransitionV1(crate::SessionRuntimeTransitionV1),
     SessionIdentity {
         provider_name: String,
         model_name: String,
@@ -273,33 +275,18 @@ pub enum ControlEntry {
     PlanReviewResolutionRecordedV1(crate::PlanReviewResolutionRecordedV1),
     PlanDraftCreated(PlanDraftCreatedEntry),
     PlanDecisionRecorded(PlanDecisionRecordedEntry),
+    ApplicationOperationPreparedV1(crate::ApplicationOperationBindingV1),
+    ApplicationOperationCommittedV1(crate::ApplicationOperationCommittedV1),
     PlanPermissionGranted(PlanPermissionGrantedEntry),
     TaskCreatedFromPlan(TaskCreatedFromPlanEntry),
     /// First-class authority for executing a complete Task objective without a TaskPlan.
     TaskDirectExecutionAdmittedV1(crate::TaskDirectExecutionAdmittedV1),
     /// Durable lifecycle of one direct execution attempt.
     TaskDirectExecutionAttemptV1(crate::TaskDirectExecutionAttemptV1),
+    /// Once-only source interpretation admitted before Direct execution.
+    TaskDirectRequirementsBoundV1(crate::TaskDirectRequirementsBoundV1),
     /// Display-only progress checklist; never execution or completion authority.
     TaskChecklistUpdatedV1(crate::TaskChecklistUpdatedV1),
-    /// RFC-0067: durable executable plan candidate prepared before DraftReady.
-    ExecutablePlanCandidatePreparedV1(Box<crate::ExecutablePlanCandidateV1>),
-    /// RFC-0067: final marker proving a candidate is adoptable; the only DraftReady authority.
-    PlanReadyCommittedV1(crate::PlanReadyCommittedV1Entry),
-    /// RFC-0067: typed compile failure; the plan review never becomes DraftReady.
-    PlanCompileFailedV1(crate::PlanCompileFailureV1),
-    /// RFC-0067: the single atomic authority of one Run command.
-    PlanExecutionAdoptedV1(Box<crate::PlanExecutionAdoptedV1Entry>),
-    /// RFC-0069: post-approval materialization of the stable Task shell. The payload retains the
-    /// V1 candidate shape so old sessions can replay while new writers never use adoption as
-    /// their authority.
-    TaskMaterializationPreparedV1(Box<crate::PlanExecutionAdoptedV1Entry>),
-    /// RFC-0069: durable start of one idempotent post-approval materialization generation.
-    TaskMaterializationAttemptStartedV1(crate::TaskMaterializationAttemptStartedV1),
-    /// RFC-0069: materialization is blocked locally while the approved Plan and Task shell stay
-    /// durable and retryable.
-    TaskMaterializationBlockedV1(crate::TaskMaterializationBlockedV1),
-    /// RFC-0067: one monotonic admission attempt with its typed outcome.
-    TaskAdmissionAttemptedV1(crate::TaskAdmissionAttemptV1),
     TaskHandoffRequested(TaskHandoffRequestedEntry),
     TaskHandoffResolved(TaskHandoffResolvedEntry),
     TaskContinuationSelected(crate::TaskContinuationSelectedEntry),
@@ -311,15 +298,9 @@ pub enum ControlEntry {
     TaskStepContractBoundV2(crate::TaskStepContractBoundEntryV2),
     /// Terminal marker for an atomically committed, complete V2 plan contract set.
     TaskPlanContractSetCommittedV2(crate::TaskPlanContractSetCommittedV2),
-    TaskGuidanceApplied(crate::TaskGuidanceAppliedEntry),
-    TaskGuidanceMaterialized(crate::TaskGuidanceMaterializedEntry),
     TaskStep(TaskStepEntry),
     TaskParticipantAttempt(TaskParticipantAttemptEntry),
-    TaskParticipantRetryScheduled(TaskParticipantRetryScheduledEntry),
     TaskParticipantResult(TaskParticipantResultEntry),
-    /// Hash-only participant frontier used for recovery and no-progress detection.
-    TaskStepCheckpointV2(crate::TaskStepCheckpointV2),
-    TaskFinalAnswerCommitted(TaskFinalAnswerCommittedEntry),
     OrchestrationRouteDisabled(crate::OrchestrationRouteDisabledEntry),
     TaskChildSession(TaskChildSessionEntry),
     TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry),
@@ -385,7 +366,7 @@ pub enum ControlEntry {
     /// bound here for replay, but does not become provider-visible until the pre-turn sender
     /// consumes the promotion contract.
     ConversationInputPromoted(crate::ConversationInputPromotedEntry),
-    /// Scheduler-owned binding of queued task guidance to one accepted task plan version.
+    /// Durable binding of queued guidance to one admitted direct Task.
     TaskGuidancePromoted(crate::TaskGuidancePromotedEntry),
     Note {
         kind: String,
@@ -401,6 +382,8 @@ impl ControlEntry {
     pub(crate) fn validate_durable_contract(&self) -> anyhow::Result<()> {
         match self {
             Self::SessionCompositionBound(entry) => entry.validate(),
+            Self::SessionRuntimeTransitionV1(entry) => entry.validate(),
+            Self::VerificationPolicyChanged(entry) => entry.validate(),
             Self::ToolPermissionPlannedV2(entry) => entry.validate(),
             Self::ToolPermissionDecisionV2(entry) => entry.validate(),
             Self::ToolApproval(entry) => entry.validate(),
@@ -413,13 +396,14 @@ impl ControlEntry {
             Self::TaskRunTargetSelected(entry) => entry.validate_shape(),
             Self::TaskDirectExecutionAdmittedV1(entry) => entry.validate(),
             Self::TaskDirectExecutionAttemptV1(entry) => entry.validate(),
+            Self::TaskDirectRequirementsBoundV1(entry) => entry.validate(),
             Self::TaskChecklistUpdatedV1(entry) => entry.validate(),
             Self::TaskStepContractBoundV2(entry) => entry.validate(),
             Self::TaskPlanContractSetCommittedV2(entry) => entry.validate(),
-            Self::TaskStepCheckpointV2(entry) => entry.validate(),
-            Self::TaskGuidanceMaterialized(entry) => entry.validate_shape(),
             Self::UserInputRequested(entry) => entry.validate(),
             Self::UserInputDecisionAccepted(entry) => entry.validate_shape(),
+            Self::ApplicationOperationPreparedV1(entry) => entry.validate(),
+            Self::ApplicationOperationCommittedV1(entry) => entry.validate(),
             Self::UserInputContinuationClaimed(entry) => entry.validate(),
             Self::UserInputContinuationStarted(entry) => entry.validate(),
             Self::UserInputContinuationReleased(entry) => entry.validate(),
@@ -429,14 +413,6 @@ impl ControlEntry {
             }
             Self::PlanReviewResolutionRecordedV1(entry) => entry.validate(),
             Self::AgentUserInputRoute(entry) => entry.validate(),
-            Self::ExecutablePlanCandidatePreparedV1(candidate) => candidate.validate(),
-            Self::PlanReadyCommittedV1(marker) => marker.validate(),
-            Self::PlanCompileFailedV1(failure) => failure.validate(),
-            Self::PlanExecutionAdoptedV1(adoption) => adoption.validate(),
-            Self::TaskMaterializationPreparedV1(materialization) => materialization.validate(),
-            Self::TaskMaterializationAttemptStartedV1(attempt) => attempt.validate(),
-            Self::TaskMaterializationBlockedV1(blocked) => blocked.validate(),
-            Self::TaskAdmissionAttemptedV1(attempt) => attempt.validate(),
             _ => Ok(()),
         }
     }
@@ -444,7 +420,7 @@ impl ControlEntry {
 
 /// Recovery-safe, secret-free permission plan recorded before policy evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolPermissionPlannedV2Entry {
     pub schema_version: u32,
     pub call_id: String,
@@ -572,7 +548,7 @@ impl ToolPermissionPlannedV2Entry {
 
 /// Recovery-safe result of evaluating one immutable permission plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolPermissionDecisionV2Entry {
     pub schema_version: u32,
     pub call_id: String,
@@ -645,7 +621,7 @@ pub const TOOL_PERMISSION_DECISION_SCHEMA_VERSION: u32 = 2;
 
 /// Append-only audit entry for permission policy evaluation and interactive approval decisions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolApprovalEntry {
     pub schema_version: u32,
     pub identity: ApprovalRequestIdentityV2,
@@ -893,7 +869,7 @@ pub enum ToolApprovalUserDecision {
 
 /// Kernel acknowledgement that the exact approval route returned a bound decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolApprovalDecisionReceiptV2 {
     pub approval_request_id: String,
     pub decision: ToolApprovalUserDecision,
@@ -914,7 +890,7 @@ pub enum ToolApprovalTerminalStatusV2 {
 
 /// Append-only session-local approval grant created from an interactive tool approval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolApprovalSessionGrantEntry {
     pub schema_version: u32,
     pub grant_id: String,
@@ -927,7 +903,10 @@ pub struct ToolApprovalSessionGrantEntry {
     pub subjects: Vec<ToolSubjectAudit>,
     pub facets: Vec<ToolApprovalSessionGrantFacet>,
     pub scope: ToolApprovalSessionGrantScope,
-    pub containment_binding: ExecutionContainmentBindingV2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub containment_binding: Option<ExecutionContainmentBindingV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_binding: Option<crate::NetworkSessionGrantBindingV1>,
     pub policy_version: String,
     pub expires: ToolApprovalSessionGrantExpiry,
     pub granted_at_ms: u64,
@@ -967,18 +946,38 @@ impl ToolApprovalSessionGrantEntry {
             &self.policy_version,
             MAX_DURABLE_PERMISSION_TEXT_BYTES,
         )?;
-        validate_sha256(
-            "session grant backend identity hash",
-            &self.containment_binding.backend_identity_hash,
-        )?;
-        validate_sha256(
-            "session grant backend profile hash",
-            &self.containment_binding.backend_profile_hash,
-        )?;
-        validate_sha256(
-            "session grant environment binding hash",
-            &self.containment_binding.environment_binding_hash,
-        )?;
+        match (&self.containment_binding, &self.network_binding) {
+            (Some(binding), None) => {
+                validate_sha256(
+                    "session grant backend identity hash",
+                    &binding.backend_identity_hash,
+                )?;
+                validate_sha256(
+                    "session grant backend profile hash",
+                    &binding.backend_profile_hash,
+                )?;
+                validate_sha256(
+                    "session grant environment binding hash",
+                    &binding.environment_binding_hash,
+                )?;
+            }
+            (None, Some(binding)) => {
+                if self.effect_ceiling
+                    != std::collections::BTreeSet::from([ToolPermissionEffect::NetworkRead])
+                {
+                    anyhow::bail!("network session grant must contain only network-read effects");
+                }
+                for hash in [
+                    &binding.endpoint_hash,
+                    &binding.transport_hash,
+                    &binding.route_hash,
+                    &binding.policy_hash,
+                ] {
+                    validate_sha256("session grant network binding hash", hash)?;
+                }
+            }
+            _ => anyhow::bail!("session grant requires exactly one execution binding"),
+        }
         if let ToolApprovalSessionGrantScope::CommandFamily { prefix } = &self.scope
             && (prefix.trim().is_empty() || prefix.contains('\n') || prefix.contains('\r'))
         {
@@ -1008,6 +1007,7 @@ pub struct ToolExecutionEntry {
     pub subjects: Vec<ToolSubjectAudit>,
     pub changed_files: Vec<String>,
     pub metadata: ToolResultMeta,
+    #[serde(deserialize_with = "deserialize_durable_tool_error")]
     pub error: Option<ToolError>,
     pub model_content_hash: Option<String>,
 }
@@ -1065,6 +1065,24 @@ impl ToolExecutionEntry {
     }
 }
 
+fn deserialize_durable_tool_error<'de, D>(deserializer: D) -> Result<Option<ToolError>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut error = Option::<ToolError>::deserialize(deserializer)?;
+    if let Some(error) = error.as_mut()
+        && let Some(details) = error.details.as_object()
+    {
+        let recognized = details
+            .iter()
+            .filter(|(key, _)| matches!(key.as_str(), "redacted" | "sha256"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        error.details = serde_json::Value::Object(recognized);
+    }
+    Ok(error)
+}
+
 fn validate_durable_execution_paths(paths: &[String]) -> anyhow::Result<()> {
     if paths.len() > MAX_DURABLE_TOOL_EXECUTION_PATHS {
         anyhow::bail!("tool execution path labels exceed maximum count");
@@ -1081,11 +1099,12 @@ fn validate_durable_execution_details(details: &serde_json::Value) -> anyhow::Re
         }
         anyhow::bail!("durable tool execution details must be an object or null");
     };
-    for key in object.keys() {
-        if !DURABLE_TOOL_EXECUTION_DETAIL_KEYS.contains(&key.as_str()) {
-            anyhow::bail!("durable tool execution details contain unsupported key {key}");
-        }
-    }
+    let known_details = object
+        .iter()
+        .filter(|(key, _)| DURABLE_TOOL_EXECUTION_DETAIL_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let known_details = serde_json::Value::Object(known_details);
     for key in [
         "command_sha256",
         "details_sha256",
@@ -1093,14 +1112,14 @@ fn validate_durable_execution_details(details: &serde_json::Value) -> anyhow::Re
         "permission_plan_hash",
         "shell_sha256",
     ] {
-        if let Some(value) = object.get(key) {
+        if let Some(value) = known_details.get(key) {
             let hash = value
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("durable tool execution {key} must be a digest"))?;
             validate_sha256("durable tool execution detail hash", hash)?;
         }
     }
-    if let Some(value) = object.get("cwd_label") {
+    if let Some(value) = known_details.get("cwd_label") {
         validate_relative_label(
             value
                 .as_str()
@@ -1108,7 +1127,7 @@ fn validate_durable_execution_details(details: &serde_json::Value) -> anyhow::Re
         )?;
     }
     for key in ["approval_request_id", "log_ref", "shell_label", "task_id"] {
-        if let Some(value) = object.get(key) {
+        if let Some(value) = known_details.get(key) {
             validate_durable_identity(
                 "durable tool execution detail identity",
                 value
@@ -1117,17 +1136,17 @@ fn validate_durable_execution_details(details: &serde_json::Value) -> anyhow::Re
             )?;
         }
     }
-    if let Some(call) = object.get("call") {
+    if let Some(call) = known_details.get("call") {
         validate_durable_tool_call_context(call)?;
     }
-    if crate::safe_persistence_json_value(details.clone()) != *details {
+    if crate::safe_persistence_json_value(known_details.clone()) != known_details {
         anyhow::bail!("durable tool execution details contain unsafe text");
     }
-    if json_value_contains_absolute_path(details) {
+    if json_value_contains_absolute_path(&known_details) {
         anyhow::bail!("durable tool execution details contain an absolute path");
     }
-    let bytes =
-        serde_json::to_vec(details).context("failed to size durable tool execution details")?;
+    let bytes = serde_json::to_vec(&known_details)
+        .context("failed to size durable tool execution details")?;
     if bytes.len() > MAX_DURABLE_TOOL_EXECUTION_DETAILS_BYTES {
         anyhow::bail!("durable tool execution details exceed maximum byte size");
     }
@@ -1138,21 +1157,23 @@ fn validate_durable_tool_call_context(context: &serde_json::Value) -> anyhow::Re
     let object = context
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("durable tool call context must be an object"))?;
-    for key in object.keys() {
-        if ![
-            "command_sha256",
-            "path_sha256",
-            "pattern_sha256",
-            "subjects",
-            "summary",
-        ]
-        .contains(&key.as_str())
-        {
-            anyhow::bail!("durable tool call context contains unsupported key {key}");
-        }
-    }
+    let known_context = object
+        .iter()
+        .filter(|(key, _)| {
+            [
+                "command_sha256",
+                "path_sha256",
+                "pattern_sha256",
+                "subjects",
+                "summary",
+            ]
+            .contains(&key.as_str())
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let known_context = serde_json::Value::Object(known_context);
     for key in ["command_sha256", "path_sha256", "pattern_sha256"] {
-        if let Some(value) = object.get(key) {
+        if let Some(value) = known_context.get(key) {
             validate_sha256(
                 "durable tool call context hash",
                 value
@@ -1161,7 +1182,7 @@ fn validate_durable_tool_call_context(context: &serde_json::Value) -> anyhow::Re
             )?;
         }
     }
-    if let Some(subjects) = object.get("subjects") {
+    if let Some(subjects) = known_context.get("subjects") {
         let subjects = subjects
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("tool call context subjects must be an array"))?;
@@ -1178,7 +1199,7 @@ fn validate_durable_tool_call_context(context: &serde_json::Value) -> anyhow::Re
             )?;
         }
     }
-    if let Some(summary) = object.get("summary") {
+    if let Some(summary) = known_context.get("summary") {
         validate_bounded_safe_text(
             "tool call context summary",
             summary
@@ -1222,8 +1243,7 @@ fn validate_durable_execution_error_details(details: &serde_json::Value) -> anyh
     let Some(object) = details.as_object() else {
         anyhow::bail!("durable tool execution error details must be null or a digest object");
     };
-    if object.len() != 2
-        || object.get("redacted") != Some(&serde_json::Value::Bool(true))
+    if object.get("redacted") != Some(&serde_json::Value::Bool(true))
         || object
             .get("sha256")
             .and_then(serde_json::Value::as_str)
@@ -1232,6 +1252,44 @@ fn validate_durable_execution_error_details(details: &serde_json::Value) -> anyh
         anyhow::bail!("durable tool execution error details are invalid");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tool_execution_error_details_tests {
+    use super::*;
+
+    #[test]
+    fn durable_tool_execution_errors_ignore_unknown_detail_fields() -> anyhow::Result<()> {
+        let mut entry = ToolExecutionEntry {
+            call_id: "call-details".to_owned(),
+            tool_name: "read_file".to_owned(),
+            status: ToolExecutionStatus::Failed,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: Some(crate::ToolError {
+                kind: crate::ToolErrorKind::Internal,
+                message: "redacted".to_owned(),
+                retryable: false,
+                details: serde_json::json!({
+                    "redacted": true,
+                    "sha256": format!("sha256:{}", "a".repeat(64)),
+                }),
+            }),
+            model_content_hash: None,
+        };
+        entry.error.as_mut().expect("error present").details["future_detail"] =
+            serde_json::json!("private marker");
+
+        let value = serde_json::to_value(entry)?;
+        let parsed: ToolExecutionEntry = serde_json::from_value(value)?;
+        parsed.validate()?;
+        let details = &parsed.error.as_ref().expect("error present").details;
+        assert_eq!(details.as_object().expect("digest object").len(), 2);
+        assert!(details.get("future_detail").is_none());
+        Ok(())
+    }
 }
 
 pub(crate) const DURABLE_TOOL_EXECUTION_DETAIL_KEYS: &[&str] = &[

@@ -41,7 +41,7 @@ pub enum ConversationRunTerminalStatusV1 {
 
 /// Recovery-critical start boundary for one adapter-owned foreground conversation run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationRunStartedEntryV1 {
     schema_version: u16,
     run_id: String,
@@ -101,7 +101,7 @@ impl ConversationRunStartedEntryV1 {
 
 /// Recovery-critical terminal boundary for one adapter-owned foreground conversation run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationRunFinalizedEntryV1 {
     schema_version: u16,
     run_id: String,
@@ -664,7 +664,6 @@ fn active_conversation_run(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CurrentKernelRunLifecyclePayload {
     run_status: String,
     terminal_reason: String,

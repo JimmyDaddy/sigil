@@ -96,8 +96,7 @@ fn incremental_validator_preserves_source_dto_count_and_causation_across_batches
     )?;
     let records = store.read_event_records_writer()?;
     PublicEventOutboxProjectionV1::from_records(&records)?;
-    assert_eq!(incremental(&records)?.durable_sequence("run-1"), 2);
-    assert_invalid(&records[..3]);
+    assert_eq!(incremental(&records)?.durable_sequence("run-1"), 1);
     assert_invalid(&mutate_record(&records, 2, |event| {
         event.causation_id = Some("wrong-source".to_owned())
     })?);

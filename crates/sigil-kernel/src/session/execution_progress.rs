@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Result, bail};
 
 use super::ControlEntry;
-use crate::{TaskId, TaskParticipantPurpose};
+use crate::TaskId;
 
 const MAX_RUN_BINDINGS: usize = super::TOOL_OUTPUT_PRESSURE_HARD_MAX_RESULTS;
 
@@ -13,17 +13,12 @@ enum ExecutionScope {
         task_id: TaskId,
         admission_id: String,
     },
-    Step {
-        task_id: TaskId,
-        plan_version: u32,
-        step_id: crate::TaskStepId,
-    },
 }
 
 impl ExecutionScope {
     fn task_id(&self) -> &TaskId {
         match self {
-            Self::Direct { task_id, .. } | Self::Step { task_id, .. } => task_id,
+            Self::Direct { task_id, .. } => task_id,
         }
     }
 }
@@ -59,30 +54,6 @@ impl ExecutionProgress {
                     ExecutionScope::Direct {
                         task_id: attempt.task_id.clone(),
                         admission_id: attempt.admission_id.clone(),
-                    },
-                )?;
-            }
-            ControlEntry::TaskParticipantAttempt(attempt)
-                if attempt.purpose == TaskParticipantPurpose::Step =>
-            {
-                attempt.validate_shape()?;
-                self.bind(
-                    crate::task_participant_logical_run_id(&attempt.attempt_id),
-                    ExecutionScope::Step {
-                        task_id: attempt.task_id.clone(),
-                        plan_version: attempt.plan_version.expect("validated step plan version"),
-                        step_id: attempt.step_id.clone().expect("validated step identity"),
-                    },
-                )?;
-            }
-            ControlEntry::TaskStepCheckpointV2(checkpoint) => {
-                checkpoint.validate()?;
-                self.bind(
-                    crate::task_participant_logical_run_id(&checkpoint.attempt_id),
-                    ExecutionScope::Step {
-                        task_id: checkpoint.task_id.clone(),
-                        plan_version: checkpoint.plan_version,
-                        step_id: checkpoint.step_id.clone(),
                     },
                 )?;
             }

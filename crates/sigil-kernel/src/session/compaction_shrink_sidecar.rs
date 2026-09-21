@@ -27,7 +27,7 @@ pub enum ToolOutputContextEpochTransitionReasonV1 {
 
 /// Explicit proof that shrink activation rotates, rather than invisibly mutates, a cache epoch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputContextEpochTransitionV1 {
     pub schema_version: u16,
     pub source_epoch_id: String,
@@ -85,7 +85,7 @@ impl ToolOutputContextEpochTransitionV1 {
 /// The sidecar stores no source output text. Each descriptor proves its source event and the
 /// deterministic head/tail projection is rebuilt from the immutable raw transcript on load.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputProjectionShrinkRecorded {
     pub schema_version: u16,
     pub compaction_id: CompactionId,

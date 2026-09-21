@@ -1,162 +1,19 @@
 use super::*;
 
-/// Runtime-neutral contract for launching task child sessions.
+/// Runtime-neutral seam for the one model-owned Task root loop.
 ///
-/// The kernel owns task control-plane semantics, but runtime implementations own concrete child
-/// session creation, profile snapshots, provider/tool assembly, and route-aware child lifecycle.
+/// The kernel owns admission, durable attempt state, and terminal authority. The runtime only
+/// materializes the provider/tool session that executes the already-admitted direct objective.
 #[async_trait]
 pub trait TaskChildSessionRunner: Send + Sync {
-    /// Reports whether the production runner can materialize private integration lanes.
-    #[must_use]
-    fn supports_integration_lanes(&self) -> bool {
-        false
-    }
-
-    /// Returns host-proven worktree planning capability for this exact run surface and workspace.
-    async fn planner_worktree_availability(
-        &self,
-        options: &AgentRunOptions,
-    ) -> TaskPlannerWorktreeAvailability {
-        if options.interaction_mode == crate::InteractionMode::Headless {
-            TaskPlannerWorktreeAvailability::UnavailableHeadless
-        } else {
-            TaskPlannerWorktreeAvailability::UnavailableRunner
-        }
-    }
-
-    /// Runs the complete durable Task objective without manufacturing a TaskPlan or TaskStep.
     async fn run_direct_execution_session<H, A>(
         &self,
-        _parent_session: &mut Session,
-        _request: TaskDirectExecutionSessionRunRequest,
-        _handler: &mut H,
-        _approval_handler: &mut A,
+        parent_session: &mut Session,
+        request: TaskDirectExecutionSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
     ) -> Result<TaskDirectExecutionSessionRunOutput>
     where
         H: EventHandler + Send,
-        A: ApprovalHandler + Send,
-    {
-        bail!("task child session runner does not support direct Task execution")
-    }
-
-    /// Runs the task planner in an isolated transcript and returns its accepted plan artifact.
-    async fn run_planner_session<H, A>(
-        &self,
-        _parent_session: &mut Session,
-        _request: TaskPlannerSessionRunRequest,
-        _handler: &mut H,
-        _approval_handler: &mut A,
-    ) -> Result<TaskPlannerSessionRunOutcome>
-    where
-        H: EventHandler + Send,
-        A: ApprovalHandler + Send,
-    {
-        bail!("task child session runner does not support isolated planner sessions")
-    }
-
-    /// Resumes an exact suspended planner transcript after its durable user answer was accepted.
-    async fn resume_planner_session<H, A>(
-        &self,
-        _parent_session: &mut Session,
-        _request: TaskPlannerSessionResumeRequest,
-        _handler: &mut H,
-        _approval_handler: &mut A,
-    ) -> Result<TaskPlannerSessionRunOutcome>
-    where
-        H: EventHandler + Send,
-        A: ApprovalHandler + Send,
-    {
-        bail!("task child session runner does not support planner input continuation")
-    }
-
-    /// Runs one task child session and returns its bounded terminal output.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when child session creation, control-log append, approval routing, or the
-    /// child agent run fails before a terminal result can be recorded.
-    async fn run_child_session<H, A>(
-        &self,
-        parent_session: &mut Session,
-        request: TaskChildSessionRunRequest,
-        handler: &mut H,
-        approval_handler: &mut A,
-    ) -> Result<TaskChildSessionRunOutput>
-    where
-        H: EventHandler + Send,
         A: ApprovalHandler + Send;
-
-    /// Synchronously prepares a parallel task batch and optionally returns parent-free work.
-    ///
-    /// The default keeps the exact requests for the compatibility path below. A detached
-    /// implementation may mutate the parent only during this call, then return a future whose
-    /// lifetime is tied to the runner and live handlers but not to `parent_session`.
-    fn prepare_child_session_batch<'a, H, A>(
-        &'a self,
-        _parent_session: &mut Session,
-        requests: Vec<TaskChildSessionRunRequest>,
-        _handler: &'a mut H,
-        _approval_handler: &'a mut A,
-    ) -> Result<TaskChildSessionBatchPreparation<'a>>
-    where
-        H: EventHandler + Send + 'a,
-        A: ApprovalHandler + Send + 'a,
-    {
-        Ok(TaskChildSessionBatchPreparation::Fallback(requests))
-    }
-
-    /// Runs one ready parallel task batch and returns member outcomes in request order.
-    ///
-    /// The default preserves compatibility by executing members sequentially. Runtime
-    /// implementations that can detach child execution from the parent session should override
-    /// this method and keep parent-session mutation in prepare/commit phases around the concurrent
-    /// child futures.
-    async fn run_child_session_batch<H, A>(
-        &self,
-        parent_session: &mut Session,
-        requests: Vec<TaskChildSessionRunRequest>,
-        handler: &mut H,
-        approval_handler: &mut A,
-    ) -> Result<Vec<Result<TaskChildSessionRunOutput>>>
-    where
-        H: EventHandler + Send,
-        A: ApprovalHandler + Send,
-    {
-        let mut outputs = Vec::with_capacity(requests.len());
-        for request in requests {
-            outputs.push(
-                self.run_child_session(parent_session, request, handler, approval_handler)
-                    .await,
-            );
-        }
-        Ok(outputs)
-    }
-
-    /// Runs one already-recorded private integration plan.
-    async fn run_integration_lanes<H>(
-        &self,
-        _parent_session: &mut Session,
-        _request: TaskIntegrationRunRequest,
-        _handler: &mut H,
-    ) -> Result<TaskIntegrationRunOutput>
-    where
-        H: EventHandler + Send,
-    {
-        bail!("task child session runner does not support integration lanes")
-    }
-
-    /// Runs final synthesis in an isolated read-only transcript.
-    async fn run_synthesis_session<H, A>(
-        &self,
-        _parent_session: &mut Session,
-        _request: TaskSynthesisSessionRunRequest,
-        _handler: &mut H,
-        _approval_handler: &mut A,
-    ) -> Result<TaskSynthesisSessionRunOutput>
-    where
-        H: EventHandler + Send,
-        A: ApprovalHandler + Send,
-    {
-        bail!("task child session runner does not support isolated synthesis sessions")
-    }
 }

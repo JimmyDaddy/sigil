@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{
         Arc, Mutex,
@@ -9,6 +9,9 @@ use std::{
 };
 
 use tokio::sync::Notify;
+
+mod cleanup_progress;
+pub use cleanup_progress::{RunCleanupStage, RunCleanupStageGuard, RunCleanupStageSnapshot};
 
 const RUN_PHASE_OPEN: u8 = 0;
 const RUN_PHASE_CANCEL_RESERVED: u8 = 1;
@@ -246,6 +249,7 @@ struct RunCancellationState {
     active_effects: AtomicUsize,
     active_tasks: AtomicUsize,
     cleanup_incomplete: AtomicBool,
+    cleanup_progress: cleanup_progress::CleanupProgress,
     changed: Notify,
 }
 
@@ -270,6 +274,16 @@ impl fmt::Debug for RunCancellationHandle {
 }
 
 impl RunCancellationHandle {
+    /// Observes a real cleanup operation without changing cancellation or completion authority.
+    pub fn begin_cleanup_stage(&self, stage: RunCleanupStage) -> RunCleanupStageGuard {
+        self.state.cleanup_progress.begin(stage)
+    }
+
+    /// Fixed-size, non-sensitive timing snapshot for the original run's cleanup owners.
+    pub fn cleanup_progress(&self) -> Vec<RunCleanupStageSnapshot> {
+        self.state.cleanup_progress.snapshot()
+    }
+
     fn reserve_cancel(&self) -> bool {
         self.state
             .phase
@@ -458,6 +472,11 @@ pub struct RunStopCapability {
 }
 
 impl RunStopCapability {
+    /// Observes the same run owners without granting any additional stop authority.
+    pub fn cleanup_progress(&self) -> Vec<RunCleanupStageSnapshot> {
+        self.handle.cleanup_progress()
+    }
+
     /// Closes admission before the UI waits for the owner's durable cancellation work.
     pub fn reserve(&self) -> bool {
         self.handle.reserve_cancel()
@@ -619,6 +638,18 @@ pub fn reconcile_unfinished_run_cancellations(
     session: &mut Session,
     finalized_at_ms: u64,
 ) -> Result<Vec<RunCancellationFinalizedEntry>> {
+    reconcile_unfinished_run_cancellations_excluding_live_scopes(
+        session,
+        finalized_at_ms,
+        &BTreeSet::new(),
+    )
+}
+
+pub(crate) fn reconcile_unfinished_run_cancellations_excluding_live_scopes(
+    session: &mut Session,
+    finalized_at_ms: u64,
+    live_scope_ids: &BTreeSet<String>,
+) -> Result<Vec<RunCancellationFinalizedEntry>> {
     let records = cancellation_records(session)?;
     let finalized = records
         .iter()
@@ -632,6 +663,7 @@ pub fn reconcile_unfinished_run_cancellations(
         .filter_map(|record| match record {
             DurableRunCancellationRecord::Requested(entry)
                 if !finalized.contains(entry.request_id.as_str())
+                    && !live_scope_ids.contains(&entry.run_scope_id)
                     && finalized_at_ms >= entry.quiescence_deadline_ms =>
             {
                 Some(entry.clone())

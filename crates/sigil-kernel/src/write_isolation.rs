@@ -229,6 +229,10 @@ pub struct IsolatedWorkspaceCreated {
     /// Snapshot of the child workspace after the immutable overlay was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized_snapshot_id: Option<WorkspaceSnapshotId>,
+    /// Exact immutable Git tree used as the changeset baseline. Required for automatic reattachment
+    /// of a completion-repair worktree; old records without this proof remain retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_tree: Option<String>,
 }
 
 /// Durable intent recorded before physical isolated-workspace materialization begins.
@@ -874,14 +878,14 @@ impl WriteIsolationProjection {
             .push(WriteIsolationRecordRef::IsolatedWorkspace {
                 workspace_id: entry.isolated_workspace_id.clone(),
             });
-        self.isolated_workspaces
+        let previous_created = self
+            .isolated_workspaces
             .insert(entry.isolated_workspace_id.clone(), entry.clone());
         let state = self
             .isolated_workspace_states
             .entry(entry.isolated_workspace_id.clone())
             .or_insert_with(|| IsolatedWorkspaceState::new(entry.isolated_workspace_id.clone()));
-        if state
-            .created
+        if previous_created
             .as_ref()
             .is_some_and(|created| created != entry)
             || state
@@ -891,6 +895,18 @@ impl WriteIsolationProjection {
         {
             state.binding_conflict = true;
         }
+        // A new owner-authored Created receipt reactivates this exact binding after the prior
+        // physical worktree was removed. Historical cleanup remains in the append-only log;
+        // it cannot describe this newly materialized workspace. Conflicting receipts never
+        // clear either the conflict or its prior cleanup state.
+        if !state.binding_conflict
+            && state
+                .cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.status.is_terminal())
+        {
+            state.cleanup = None;
+        }
         state.created = Some(entry.clone());
     }
 
@@ -899,6 +915,7 @@ impl WriteIsolationProjection {
             .push(WriteIsolationRecordRef::IsolatedWorkspace {
                 workspace_id: entry.isolated_workspace_id.clone(),
             });
+        let previous_created = self.isolated_workspaces.get(&entry.isolated_workspace_id);
         let state = self
             .isolated_workspace_states
             .entry(entry.isolated_workspace_id.clone())
@@ -907,12 +924,21 @@ impl WriteIsolationProjection {
             .prepared
             .as_ref()
             .is_some_and(|prepared| prepared != entry)
-            || state
-                .created
-                .as_ref()
-                .is_some_and(|created| !prepared_matches_created(entry, created))
+            || previous_created.is_some_and(|created| !prepared_matches_created(entry, created))
         {
             state.binding_conflict = true;
+        }
+        if !state.binding_conflict
+            && state
+                .cleanup
+                .as_ref()
+                .is_some_and(|cleanup| cleanup.status.is_terminal())
+        {
+            // A new physical cycle has intent but no materialization proof yet. Keeping the
+            // prior Created here would let a crash prefix masquerade as an active workspace.
+            // The historical binding stays in isolated_workspaces for the next Created check.
+            state.created = None;
+            state.cleanup = None;
         }
         state.prepared = Some(entry.clone());
     }

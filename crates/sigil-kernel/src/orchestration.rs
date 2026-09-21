@@ -15,7 +15,6 @@ pub enum OrchestrationHardInvariant {
     DuplicateMerge,
     PermissionMonotonicityViolation,
     UnknownEffectReplay,
-    ParentChildDuplicateFinal,
     ModelPollingTurn,
 }
 
@@ -24,10 +23,7 @@ impl OrchestrationHardInvariant {
     /// Polling overhead and repeated presentation remain diagnostics.
     #[must_use]
     pub fn blocks_execution(self) -> bool {
-        !matches!(
-            self,
-            Self::ParentChildDuplicateFinal | Self::ModelPollingTurn
-        )
+        !matches!(self, Self::ModelPollingTurn)
     }
 }
 

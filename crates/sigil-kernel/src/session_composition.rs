@@ -13,7 +13,6 @@ pub const CORE_RUN_CONTRACT_VERSION: u16 = 1;
 
 /// Immutable contracts selected before this session's first effectful run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionCompositionSnapshotV1 {
     pub schema_version: u16,
     pub core_contract_version: u16,

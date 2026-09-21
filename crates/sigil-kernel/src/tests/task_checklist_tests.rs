@@ -58,14 +58,15 @@ fn multiple_plan_steps_seed_display_only_checklist() -> Result<()> {
 }
 
 #[test]
-fn model_update_is_bounded_and_has_one_in_progress_item() -> Result<()> {
+fn model_update_allows_multiple_concurrent_items() -> Result<()> {
     let call = ToolCall {
         id: "call-1".to_owned(),
         name: crate::UPDATE_TASK_CHECKLIST_TOOL_NAME.to_owned(),
         args_json: serde_json::json!({
             "items": [
                 {"text": "Inspect", "status": "completed"},
-                {"text": "Implement", "status": "in_progress"}
+                {"text": "Implement", "status": "in_progress"},
+                {"text": "Verify another branch", "status": "in_progress"}
             ]
         })
         .to_string(),
@@ -79,5 +80,32 @@ fn model_update_is_bounded_and_has_one_in_progress_item() -> Result<()> {
     )?;
     assert_eq!(entry.revision, 2);
     assert_eq!(entry.items[1].status, TaskChecklistItemStatusV1::InProgress);
+    assert_eq!(entry.items[2].status, TaskChecklistItemStatusV1::InProgress);
+    Ok(())
+}
+
+#[test]
+fn model_can_track_one_item_and_clear_the_list() -> Result<()> {
+    for items in [
+        serde_json::json!([{"text":"Inspect the parser", "status":"in_progress", "retired_id":"old-item", "future_metadata":{"source":"model"}}]),
+        serde_json::json!([]),
+    ] {
+        let entry = task_checklist_update_entry(
+            &TaskChecklistUpdateContextV1 {
+                task_id: TaskId::new("task-progress")?,
+                current_revision: 2,
+            },
+            &ToolCall {
+                id: "progress".to_owned(),
+                name: crate::UPDATE_TASK_CHECKLIST_TOOL_NAME.to_owned(),
+                args_json: serde_json::json!({"items":items,"retired_list_field":true}).to_string(),
+            },
+        )?;
+        assert_eq!(entry.revision, 3);
+        assert_eq!(
+            entry.items.len(),
+            items.as_array().expect("items array").len()
+        );
+    }
     Ok(())
 }

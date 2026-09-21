@@ -5,32 +5,21 @@ use sha2::{Digest, Sha256};
 
 use crate::task::{TaskRootCompletionBlockerV1, TaskRootTerminalCandidateV1};
 use crate::{
-    AgentFinalAnswerRef, AgentRole, AgentThreadId, ControlEntry, ConversationInputQueueId,
-    ConversationTurnRef, ModelMessage, Session, SessionLogEntry, SessionRef,
-    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-    TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS,
-    TASK_PLAN_UPDATE_TOOL_NAME, TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskApprovalRouteBinding,
-    TaskCapabilityV2, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskCompletionClaimStatusV1, TaskCompletionClaimSubjectV1,
-    TaskCompletionClaimV1, TaskCompletionRequirementClaimV1, TaskCompletionRequirementFieldV1,
-    TaskCompletionRequirementOutcomeV1, TaskCompletionRequirementSourceV1,
+    AgentRole, AgentThreadId, ControlEntry, ConversationTurnRef, ModelMessage, Session,
+    SessionLogEntry, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+    TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS, TaskApprovalRouteBinding,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
     TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
-    TaskFinalAnswerCommittedEntry, TaskGraphProjection, TaskGuidanceApplyReason,
-    TaskGuidanceAssessmentContext, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
+    TaskExecutionAttemptStatus, TaskId, TaskIsolationMode, TaskParticipantAttemptEntry,
     TaskParticipantAttemptId, TaskParticipantAttemptStatus, TaskParticipantPurpose,
-    TaskParticipantResultEntry, TaskParticipantRetryProof, TaskParticipantRetryScheduledEntry,
-    TaskPauseRequest, TaskPlanContractSetCommittedV2, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskReadyDeferredReason,
-    TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, TaskStateProjection,
-    TaskStepCheckpointV2, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection,
+    TaskParticipantResultEntry, TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRouteId,
+    TaskRouteStatus, TaskRunCancellationScopeBoundEntry, TaskRunEntry, TaskRunStatus,
+    TaskRunTargetSelectedEntry, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode,
     TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref, derive_task_execution_segments,
+    TaskSubagentElicitationRouteEntry, child_session_ref, derive_task_execution_segments,
     normalize_task_agent_display_name, project_conversation_prompt_for_persistence,
-    stale_task_approval_routes_for_restore, task_final_message_id, task_guidance_applied_entry,
-    task_guidance_apply_tool_spec, task_participant_attempt_id, task_participant_session_ref,
-    task_plan_update_commit_v2, task_plan_update_entry, task_plan_update_result_content,
-    task_plan_update_tool_spec, task_semantic_title, validate_task_plan_graph_steps,
+    stale_task_approval_routes_for_restore, task_participant_attempt_id,
+    task_participant_session_ref, task_semantic_title, validate_task_plan_graph_steps,
 };
 
 #[test]
@@ -73,138 +62,6 @@ fn execution_segments_only_join_exact_linear_execution_contracts() -> Result<()>
         segments[0].step_ids,
         vec![TaskStepId::new("one")?, TaskStepId::new("two")?]
     );
-    Ok(())
-}
-
-#[test]
-fn task_plan_v2_commit_replays_complete_execution_contract() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_contract_v2")?,
-        max_plan_steps: 8,
-        max_plan_versions: 3,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call_contract_v2".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: serde_json::json!({
-            "plan_version": 1,
-            "status": "accepted",
-            "steps": [{
-                "step_id": "inspect_vcs",
-                "title": "Inspect exact repository state",
-                "role": "executor",
-                "mode": "write",
-                "target_paths": ["crates/sigil-kernel"],
-                "required_capabilities": ["vcs_read"],
-                "deliverables": ["bounded patch"],
-                "acceptance_criteria": ["targeted tests pass"],
-                "check_spec_refs": ["check:kernel"],
-                "risk": "medium"
-            }]
-        })
-        .to_string(),
-    };
-    let commit = task_plan_update_commit_v2(&context, &call)?;
-    assert_eq!(commit.step_contracts.len(), 1);
-    assert_eq!(
-        commit.step_contracts[0].contract.required_capabilities,
-        vec![
-            TaskCapabilityV2::WorkspaceRead,
-            TaskCapabilityV2::WorkspaceWrite,
-            TaskCapabilityV2::VcsRead,
-        ]
-    );
-    let missing =
-        crate::validate_task_step_capability_admission(&commit.step_contracts[0].contract, &[])
-            .expect_err(
-                "a participant without the exact capabilities must fail before provider dispatch",
-            );
-    assert!(missing.to_string().contains("workspace_read"));
-    assert!(missing.to_string().contains("workspace_write"));
-    assert!(missing.to_string().contains("vcs_read"));
-    crate::validate_task_step_capability_admission(
-        &commit.step_contracts[0].contract,
-        &[crate::ToolRuntimeContract {
-            spec: task_plan_update_tool_spec(),
-            mutation_tracking: crate::ToolMutationTracking::None,
-            concurrency_class: crate::ToolConcurrencyClass::Exclusive,
-            capabilities: BTreeSet::from([
-                crate::ToolCapability::WorkspaceRead,
-                crate::ToolCapability::WorkspaceWrite,
-                crate::ToolCapability::VcsRead,
-            ]),
-            replay_contract: crate::ToolReplayContractV1::non_replayable(),
-        }],
-    )?;
-    let marker = TaskPlanContractSetCommittedV2::new(&commit.plan, &commit.step_contracts)?;
-    let mut session = Session::new("test", "model");
-    let mut controls = vec![ControlEntry::TaskPlan(commit.plan.clone())];
-    controls.extend(
-        commit
-            .step_contracts
-            .iter()
-            .cloned()
-            .map(ControlEntry::TaskStepContractBoundV2),
-    );
-    controls.push(ControlEntry::TaskPlanContractSetCommittedV2(marker));
-    session.append_controls(controls)?;
-
-    let projection = session.task_state_projection();
-    let plan = projection
-        .tasks
-        .get(&context.task_id)
-        .and_then(|task| task.plans.get(&1))
-        .expect("V2 plan should replay");
-    assert!(plan.contract_set_committed_v2);
-    assert_eq!(plan.step_contracts.len(), 1);
-    assert_eq!(
-        plan.step_contracts[&step_id("inspect_vcs")?].deliverables,
-        vec!["bounded patch"]
-    );
-    Ok(())
-}
-
-#[test]
-fn legacy_task_plan_replays_without_fabricating_v2_contract() -> Result<()> {
-    let plan = TaskPlanEntry {
-        task_id: task_id("legacy_task")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![read_step("inspect", Vec::new())?],
-        reason: None,
-    };
-    let projection = TaskStateProjection::from_entries(&[SessionLogEntry::Control(
-        ControlEntry::TaskPlan(plan),
-    )]);
-    let plan = &projection.tasks[&task_id("legacy_task")?].plans[&1];
-    assert!(plan.step_contracts.is_empty());
-    assert!(!plan.contract_set_committed_v2);
-    Ok(())
-}
-
-#[test]
-fn task_step_checkpoint_detects_only_the_same_semantic_frontier() -> Result<()> {
-    let base = TaskStepCheckpointV2 {
-        schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
-        task_id: task_id("checkpoint_task")?,
-        plan_version: 1,
-        step_id: step_id("inspect")?,
-        attempt_id: TaskParticipantAttemptId::new("attempt-checkpoint")?,
-        model_turn: 1,
-        semantic_call_hash: format!("sha256:{}", "a".repeat(64)),
-        result_frontier_hash: format!("sha256:{}", "b".repeat(64)),
-        no_progress_count: 0,
-    };
-    base.validate()?;
-    let mut repeated = base.clone();
-    repeated.model_turn = 2;
-    repeated.no_progress_count = 1;
-    assert!(repeated.repeated_frontier(Some(&base)));
-    let mut progressed = repeated.clone();
-    progressed.result_frontier_hash = format!("sha256:{}", "c".repeat(64));
-    progressed.no_progress_count = 0;
-    assert!(!progressed.repeated_frontier(Some(&repeated)));
     Ok(())
 }
 
@@ -268,66 +125,6 @@ fn read_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
         intent_refs: Vec::new(),
         mode: Some(TaskStepMode::Read),
         isolation: Some(TaskIsolationMode::SharedReadOnly),
-    })
-}
-
-fn write_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
-    Ok(TaskStepSpec {
-        step_id: step_id(id)?,
-        title: format!("Write {id}"),
-        display_name: None,
-        detail: None,
-        role: AgentRole::Executor,
-        depends_on,
-        intent_refs: Vec::new(),
-        mode: Some(TaskStepMode::Write),
-        isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
-    })
-}
-
-fn changeset_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
-    Ok(TaskStepSpec {
-        step_id: step_id(id)?,
-        title: format!("Propose {id}"),
-        display_name: None,
-        detail: None,
-        role: AgentRole::SubagentWrite,
-        depends_on,
-        intent_refs: Vec::new(),
-        mode: Some(TaskStepMode::Write),
-        isolation: Some(TaskIsolationMode::ChangesetOnly),
-    })
-}
-
-fn worktree_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
-    Ok(TaskStepSpec {
-        step_id: step_id(id)?,
-        title: format!("Edit {id} in worktree"),
-        display_name: None,
-        detail: None,
-        role: AgentRole::SubagentWrite,
-        depends_on,
-        intent_refs: Vec::new(),
-        mode: Some(TaskStepMode::Write),
-        isolation: Some(TaskIsolationMode::Worktree),
-    })
-}
-
-fn step_projection(
-    task_id: TaskId,
-    plan_version: u32,
-    step_id: &str,
-    status: TaskStepStatus,
-) -> Result<TaskStepProjection> {
-    Ok(TaskStepProjection {
-        task_id,
-        plan_version,
-        step_id: crate::TaskStepId::new(step_id)?,
-        role: AgentRole::Executor,
-        status,
-        title: Some(step_id.to_owned()),
-        summary: None,
-        reason: None,
     })
 }
 
@@ -451,16 +248,20 @@ fn task_status_as_str_matches_serde_wire_values() -> Result<()> {
 }
 
 #[test]
-fn task_pause_request_binds_exact_task_and_plan_version() -> Result<()> {
-    let mut request = TaskPauseRequest::new(task_id("task_1")?, 3);
+fn task_pause_request_binds_exact_direct_authority() -> Result<()> {
+    let mut request = TaskPauseRequest::direct(task_id("task_1")?, "admission-1");
 
     assert!(request.has_exact_identity());
     assert!(request.request_id.starts_with("task-pause-"));
-    request.execution = crate::TaskExecutionBindingV1::Plan { plan_version: 4 };
+    request.execution = crate::TaskExecutionBindingV1::Direct {
+        admission_id: "admission-2".to_owned(),
+    };
     assert!(!request.has_exact_identity());
     request.request_id = request.expected_request_id();
     assert!(request.has_exact_identity());
-    request.execution = crate::TaskExecutionBindingV1::Plan { plan_version: 0 };
+    request.execution = crate::TaskExecutionBindingV1::Direct {
+        admission_id: String::new(),
+    };
     request.request_id = request.expected_request_id();
     assert!(!request.has_exact_identity());
     Ok(())
@@ -551,540 +352,6 @@ fn task_control_entries_roundtrip() -> Result<()> {
 }
 
 #[test]
-fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","display_name":"Scout 1","detail":"read first","role":"planner"}],"reason":"initial"}"#.to_owned(),
-    };
-
-    let entry = task_plan_update_entry(&context, &call)?;
-
-    assert_eq!(entry.plan_version, 1);
-    assert_eq!(entry.status, TaskPlanStatus::Accepted);
-    assert_eq!(entry.steps[0].role, AgentRole::Planner);
-    assert_eq!(entry.steps[0].display_name.as_deref(), Some("Scout 1"));
-    assert_eq!(entry.steps[0].detail.as_deref(), Some("read first"));
-    assert!(task_plan_update_result_content(&entry).contains(r#""steps":1"#));
-
-    let wrong_tool = ToolCall {
-        name: "other".to_owned(),
-        ..call.clone()
-    };
-    assert!(task_plan_update_entry(&context, &wrong_tool).is_err());
-
-    let zero_version = ToolCall {
-        args_json: r#"{"plan_version":0,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"}]}"#.to_owned(),
-        ..call.clone()
-    };
-    assert!(task_plan_update_entry(&context, &zero_version).is_err());
-
-    let too_many_steps = ToolCall {
-        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"},{"step_id":"step_2","title":"edit","role":"subagent_write"}]}"#.to_owned(),
-        ..call.clone()
-    };
-    assert!(task_plan_update_entry(&context, &too_many_steps).is_err());
-
-    let unsupported_status = ToolCall {
-        args_json: r#"{"plan_version":1,"status":"done","steps":[{"step_id":"step_1","title":"inspect","role":"executor"}]}"#.to_owned(),
-        ..call.clone()
-    };
-    assert!(task_plan_update_entry(&context, &unsupported_status).is_err());
-
-    let invalid_display_name = ToolCall {
-        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","display_name":"bad\nname","role":"executor"}]}"#.to_owned(),
-        ..call
-    };
-    assert!(task_plan_update_entry(&context, &invalid_display_name).is_err());
-    Ok(())
-}
-
-#[test]
-fn task_guidance_apply_binds_model_choice_to_host_eligible_steps() -> Result<()> {
-    let first_step = step_id("step_1")?;
-    let context = TaskGuidanceAssessmentContext {
-        queue_id: ConversationInputQueueId::new("queue_1")?,
-        task_id: task_id("task_1")?,
-        plan_version: 2,
-        dispatch_run_id: "dispatch_1".to_owned(),
-        accepted_plan: TaskPlanEntry {
-            task_id: task_id("task_1")?,
-            plan_version: 2,
-            status: TaskPlanStatus::Accepted,
-            steps: vec![
-                read_step("step_1", Vec::new())?,
-                write_step("step_2", vec![first_step.clone()])?,
-            ],
-            reason: Some("current accepted plan".to_owned()),
-        },
-        eligible_pending_step_ids: vec![first_step.clone()],
-    };
-    let call = ToolCall {
-        id: "call-guidance-1".to_owned(),
-        name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-        args_json: r#"{"reason":"clarifies_existing_step","target_step_ids":["step_1"]}"#
-            .to_owned(),
-    };
-
-    let entry = task_guidance_applied_entry(&context, &call)?;
-
-    assert_eq!(entry.queue_id, context.queue_id);
-    assert_eq!(entry.task_id, context.task_id);
-    assert_eq!(entry.plan_version, 2);
-    assert_eq!(entry.dispatch_run_id, "dispatch_1");
-    assert_eq!(entry.reason, TaskGuidanceApplyReason::ClarifiesExistingStep);
-    assert_eq!(entry.target_step_ids, vec![first_step]);
-
-    let ineligible = ToolCall {
-        args_json: r#"{"reason":"adds_execution_constraint","target_step_ids":["step_2"]}"#
-            .to_owned(),
-        ..call.clone()
-    };
-    assert!(task_guidance_applied_entry(&context, &ineligible).is_err());
-
-    let duplicate = ToolCall {
-        args_json: r#"{"reason":"prioritizes_pending_step","target_step_ids":["step_1","step_1"]}"#
-            .to_owned(),
-        ..call.clone()
-    };
-    assert!(task_guidance_applied_entry(&context, &duplicate).is_err());
-
-    let wrong_tool = ToolCall {
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        ..call
-    };
-    assert!(task_guidance_applied_entry(&context, &wrong_tool).is_err());
-    Ok(())
-}
-
-#[test]
-fn task_guidance_tool_delegates_semantic_routing_to_the_model() {
-    let spec = task_guidance_apply_tool_spec();
-    let schema = spec.input_schema.to_string();
-
-    assert!(spec.description.contains("clarifies"));
-    assert!(spec.description.contains("call task_plan_update"));
-    assert!(schema.contains("target_step_ids"));
-    assert!(schema.contains("clarifies_existing_step"));
-    assert!(schema.contains("adds_execution_constraint"));
-    assert!(!schema.contains("keyword"));
-    assert!(!schema.contains("regex"));
-}
-
-#[test]
-fn task_plan_update_projects_sensitive_model_fields_before_durable_control() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let raw_url = "https://example.com/private?signature=task-plan-secret";
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: serde_json::json!({
-            "plan_version": 1,
-            "status": "accepted",
-            "steps": [{
-                "step_id": "step_1",
-                "title": format!("Inspect {raw_url}"),
-                "detail": "use token=task-detail-secret",
-                "role": "executor"
-            }],
-            "reason": format!("requested from {raw_url}")
-        })
-        .to_string(),
-    };
-
-    let entry = task_plan_update_entry(&context, &call)?;
-    let durable = serde_json::to_string(&entry)?;
-
-    for forbidden in [raw_url, "task-plan-secret", "task-detail-secret"] {
-        assert!(!durable.contains(forbidden));
-    }
-    assert!(entry.steps[0].title.contains("[redacted]"));
-    assert_eq!(
-        entry.steps[0].detail.as_deref(),
-        Some("use token=[redacted]")
-    );
-    Ok(())
-}
-
-#[test]
-fn task_replan_budget_rejects_plan_versions_beyond_limit() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 2,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{"plan_version":3,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"planner"}]}"#.to_owned(),
-    };
-
-    let error = task_plan_update_entry(&context, &call)
-        .expect_err("plan version above bounded replan budget should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("task plan version 3 exceeds maximum 2")
-    );
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
-    let spec = task_plan_update_tool_spec();
-
-    assert!(spec.description.contains("Do not call task"));
-    assert!(spec.description.contains("subagent_read"));
-    assert!(spec.description.contains("subagent_write"));
-    assert!(
-        spec.description
-            .contains("executor for ordinary main-session")
-    );
-    assert!(spec.description.contains("changeset_only is proposal-only"));
-    assert!(spec.description.contains("pauses for manual merge review"));
-    assert!(spec.description.contains("explicit objective paths"));
-    assert!(spec.description.contains("worktree isolation"));
-    assert!(spec.input_schema.to_string().contains("display_name"));
-    assert!(spec.input_schema.to_string().contains("depends_on"));
-    assert!(spec.input_schema.to_string().contains("shared_read_only"));
-    assert!(spec.input_schema.to_string().contains("changeset_only"));
-    assert!(spec.input_schema.to_string().contains("worktree"));
-    assert!(
-        spec.input_schema
-            .to_string()
-            .contains("sequential_workspace_write")
-    );
-    assert!(spec.description.contains("system-owned"));
-    assert!(!spec.input_schema.to_string().contains("\"verify\""));
-}
-
-#[test]
-fn task_plan_update_hides_and_rejects_unavailable_worktree_isolation() -> Result<()> {
-    let spec = super::task_plan_update_tool_spec_for_worktree(
-        TaskPlannerWorktreeAvailability::UnavailableHeadless,
-    );
-    let isolation_modes =
-        spec.input_schema["properties"]["steps"]["items"]["properties"]["isolation"]["enum"]
-            .as_array()
-            .expect("isolation enum");
-    assert!(
-        isolation_modes
-            .iter()
-            .all(|value| value.as_str() != Some("worktree"))
-    );
-    assert!(
-        spec.description
-            .contains("this headless run cannot complete")
-    );
-
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::UnavailableHeadless,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[{
-                "step_id":"write",
-                "title":"Write",
-                "role":"subagent_write",
-                "mode":"write",
-                "isolation":"worktree"
-            }]
-        }"#
-        .to_owned(),
-    };
-    let error =
-        task_plan_update_entry(&context, &call).expect_err("unavailable worktree must fail closed");
-    assert!(
-        error
-            .to_string()
-            .contains("worktree isolation is unavailable")
-    );
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_rejects_subagent_write_without_changeset_only() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[
-                {
-                    "step_id":"write",
-                    "title":"Write",
-                    "role":"subagent_write",
-                    "mode":"write",
-                    "isolation":"sequential_workspace_write"
-                }
-            ]
-        }"#
-        .to_owned(),
-    };
-
-    let error = task_plan_update_entry(&context, &call)
-        .expect_err("subagent_write must use changeset_only isolation");
-
-    assert!(error.to_string().contains("requires changeset_only"));
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_rejects_changeset_only_without_subagent_write() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[
-                {
-                    "step_id":"write",
-                    "title":"Write",
-                    "role":"executor",
-                    "mode":"write",
-                    "isolation":"changeset_only"
-                }
-            ]
-        }"#
-        .to_owned(),
-    };
-
-    let error = task_plan_update_entry(&context, &call)
-        .expect_err("changeset_only is reserved for subagent_write");
-
-    assert!(error.to_string().contains("requires subagent_write"));
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_normalizes_model_mode_isolation_mismatches() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 3,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[
-                {
-                    "step_id":"write",
-                    "title":"Write",
-                    "role":"executor",
-                    "mode":"write",
-                    "isolation":"shared_read_only"
-                },
-                {
-                    "step_id":"read",
-                    "title":"Read",
-                    "role":"executor",
-                    "mode":"read",
-                    "isolation":"sequential_workspace_write"
-                },
-                {
-                    "step_id":"defaulted",
-                    "title":"Defaulted",
-                    "role":"executor"
-                }
-            ]
-        }"#
-        .to_owned(),
-    };
-
-    let entry = task_plan_update_entry(&context, &call)?;
-
-    assert_eq!(
-        entry.steps[0].effective_isolation(),
-        TaskIsolationMode::SequentialWorkspaceWrite
-    );
-    assert_eq!(
-        entry.steps[1].effective_isolation(),
-        TaskIsolationMode::SharedReadOnly
-    );
-    assert_eq!(entry.steps[2].effective_mode(), TaskStepMode::Write);
-    assert_eq!(
-        entry.steps[2].effective_isolation(),
-        TaskIsolationMode::SequentialWorkspaceWrite
-    );
-    Ok(())
-}
-
-#[test]
-fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 3,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-1".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[
-                {
-                    "step_id":"explore",
-                    "title":"Explore",
-                    "role":"subagent_read",
-                    "mode":"read",
-                    "isolation":"shared_read_only"
-                },
-                {
-                    "step_id":"implement",
-                    "title":"Implement",
-                    "role":"executor",
-                    "depends_on":["explore"],
-                    "mode":"write",
-                    "isolation":"sequential_workspace_write"
-                },
-                {
-                    "step_id":"review",
-                    "title":"Review",
-                    "role":"subagent_read",
-                    "depends_on":["implement"],
-                    "mode":"review",
-                    "isolation":"shared_read_only"
-                }
-            ]
-        }"#
-        .to_owned(),
-    };
-
-    let entry = task_plan_update_entry(&context, &call)?;
-
-    assert_eq!(entry.steps[0].effective_mode(), TaskStepMode::Read);
-    assert_eq!(
-        entry.steps[1].effective_isolation(),
-        TaskIsolationMode::SequentialWorkspaceWrite
-    );
-    assert_eq!(entry.steps[2].depends_on, vec![step_id("implement")?]);
-
-    let graph = TaskGraphProjection::from_plan_entry(&entry)?;
-    assert_eq!(graph.graph_version, 1);
-    assert_eq!(graph.steps.len(), 3);
-    assert_eq!(graph.steps[0].mode, TaskStepMode::Read);
-    assert_eq!(graph.steps[1].depends_on, vec![step_id("explore")?]);
-
-    let projection = TaskStateProjection::from_entries(&[SessionLogEntry::Control(
-        ControlEntry::TaskPlan(entry),
-    )]);
-    let projected_graph = projection
-        .latest_task()
-        .and_then(|task| task.plans.get(&1))
-        .and_then(|plan| plan.graph.as_ref())
-        .expect("accepted plan should project valid task graph");
-    assert_eq!(projected_graph.steps[2].mode, TaskStepMode::Review);
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_rejects_system_owned_verify_participant_steps() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-verify".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{
-            "plan_version":1,
-            "status":"accepted",
-            "steps":[{
-                "step_id":"verify",
-                "title":"Compile",
-                "role":"executor",
-                "mode":"verify",
-                "isolation":"shared_read_only"
-            }]
-        }"#
-        .to_owned(),
-    };
-
-    let error = task_plan_update_entry(&context, &call)
-        .expect_err("planner-created verify participant must fail closed");
-    assert!(error.to_string().contains("system-owned"));
-    Ok(())
-}
-
-#[test]
-fn task_plan_update_rejects_delegated_verification_capability() -> Result<()> {
-    let context = TaskPlanUpdateContext {
-        task_id: task_id("task_1")?,
-        max_plan_steps: 1,
-        max_plan_versions: 1,
-        worktree_availability: TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    };
-    let call = ToolCall {
-        id: "call-verification-capability".to_owned(),
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: serde_json::json!({
-            "plan_version": 1,
-            "status": "accepted",
-            "steps": [{
-                "step_id": "inspect",
-                "title": "Inspect before trusted checks",
-                "role": "executor",
-                "mode": "read",
-                "required_capabilities": ["verification_run"],
-                "check_spec_refs": ["check:kernel"]
-            }]
-        })
-        .to_string(),
-    };
-
-    let error = task_plan_update_commit_v2(&context, &call)
-        .expect_err("verification execution must remain host-owned");
-    assert!(
-        error
-            .to_string()
-            .contains("cannot delegate verification_run")
-    );
-    Ok(())
-}
-
-#[test]
 fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Result<()> {
     let read_step = TaskStepSpec {
         step_id: step_id("read")?,
@@ -1163,262 +430,6 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
 }
 
 #[test]
-fn task_dag_read_only_ready_queue_batches_independent_read_steps() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            read_step("read_a", Vec::new())?,
-            read_step("read_b", Vec::new())?,
-            write_step("write", vec![step_id("read_a")?, step_id("read_b")?])?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(2),
-    );
-
-    assert_eq!(
-        queue
-            .read_only_batch
-            .iter()
-            .map(|step| step.step_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["read_a", "read_b"]
-    );
-    assert!(queue.sequential_step.is_none());
-    assert!(queue.deferred.iter().all(|step| {
-        step.reason == TaskReadyDeferredReason::SequentialWrite
-            || step.reason == TaskReadyDeferredReason::ConcurrencyBudget
-    }));
-    Ok(())
-}
-
-#[test]
-fn task_dag_read_only_ready_queue_respects_concurrency_budget() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            read_step("read_a", Vec::new())?,
-            read_step("read_b", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(1),
-    );
-
-    assert_eq!(queue.read_only_batch.len(), 1);
-    assert_eq!(queue.read_only_batch[0].step_id.as_str(), "read_a");
-    assert_eq!(queue.deferred.len(), 1);
-    assert_eq!(queue.deferred[0].step_id.as_str(), "read_b");
-    assert_eq!(
-        queue.deferred[0].reason,
-        TaskReadyDeferredReason::ConcurrencyBudget
-    );
-    Ok(())
-}
-
-#[test]
-fn task_dag_changeset_ready_queue_batches_independent_proposals() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            changeset_step("proposal_a", Vec::new())?,
-            changeset_step("proposal_b", Vec::new())?,
-            changeset_step("proposal_c", Vec::new())?,
-            write_step("workspace_write", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(4).with_max_concurrent_changeset_only(2),
-    );
-
-    assert!(queue.read_only_batch.is_empty());
-    assert_eq!(
-        queue
-            .changeset_only_batch
-            .iter()
-            .map(|step| step.step_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["proposal_a", "proposal_b"]
-    );
-    assert!(queue.sequential_step.is_none());
-    assert!(queue.deferred.iter().any(|step| {
-        step.step_id.as_str() == "proposal_c"
-            && step.reason == TaskReadyDeferredReason::ConcurrencyBudget
-    }));
-    assert!(queue.deferred.iter().any(|step| {
-        step.step_id.as_str() == "workspace_write"
-            && step.reason == TaskReadyDeferredReason::RunningChangesetOnly
-    }));
-    Ok(())
-}
-
-#[test]
-fn task_dag_worktree_ready_queue_batches_independent_writers() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            worktree_step("worktree_a", Vec::new())?,
-            worktree_step("worktree_b", Vec::new())?,
-            worktree_step("worktree_c", Vec::new())?,
-            write_step("workspace_write", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(4).with_max_concurrent_changeset_only(2),
-    );
-
-    assert!(queue.read_only_batch.is_empty());
-    assert!(queue.changeset_only_batch.is_empty());
-    assert_eq!(
-        queue
-            .worktree_batch
-            .iter()
-            .map(|step| step.step_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["worktree_a", "worktree_b"]
-    );
-    assert!(queue.sequential_step.is_none());
-    assert!(queue.deferred.iter().any(|step| {
-        step.step_id.as_str() == "worktree_c"
-            && step.reason == TaskReadyDeferredReason::ConcurrencyBudget
-    }));
-    assert!(queue.deferred.iter().any(|step| {
-        step.step_id.as_str() == "workspace_write"
-            && step.reason == TaskReadyDeferredReason::RunningWorktree
-    }));
-    Ok(())
-}
-
-#[test]
-fn task_dag_read_only_ready_queue_keeps_write_steps_sequential() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            read_step("read", Vec::new())?,
-            write_step("write", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(4),
-    );
-
-    assert_eq!(queue.read_only_batch.len(), 1);
-    assert_eq!(queue.read_only_batch[0].step_id.as_str(), "read");
-    assert!(queue.sequential_step.is_none());
-    assert_eq!(queue.deferred.len(), 1);
-    assert_eq!(queue.deferred[0].step_id.as_str(), "write");
-    assert_eq!(
-        queue.deferred[0].reason,
-        TaskReadyDeferredReason::SequentialWrite
-    );
-
-    let completed_read_statuses = std::collections::BTreeMap::from([(
-        (1, step_id("read")?),
-        step_projection(task_id("task_1")?, 1, "read", TaskStepStatus::Completed)?,
-    )]);
-    let write_queue = graph.ready_queue(&completed_read_statuses, TaskReadyQueueOptions::new(4));
-    assert!(write_queue.read_only_batch.is_empty());
-    assert_eq!(
-        write_queue
-            .sequential_step
-            .as_ref()
-            .map(|step| step.step_id.as_str()),
-        Some("write")
-    );
-    Ok(())
-}
-
-#[test]
-fn task_dag_read_only_ready_queue_blocks_when_write_is_running() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            write_step("write", Vec::new())?,
-            read_step("read", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-    let statuses = std::collections::BTreeMap::from([(
-        (1, step_id("write")?),
-        step_projection(task_id("task_1")?, 1, "write", TaskStepStatus::Running)?,
-    )]);
-
-    let queue = graph.ready_queue(&statuses, TaskReadyQueueOptions::new(4));
-
-    assert!(queue.read_only_batch.is_empty());
-    assert!(queue.sequential_step.is_none());
-    assert!(queue.deferred.iter().any(|step| {
-        step.step_id.as_str() == "read" && step.reason == TaskReadyDeferredReason::RunningWrite
-    }));
-    Ok(())
-}
-
-#[test]
-fn task_dag_ready_queue_blocks_when_write_lease_is_active() -> Result<()> {
-    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![
-            read_step("read", Vec::new())?,
-            write_step("write", Vec::new())?,
-        ],
-        reason: None,
-    })?;
-
-    let queue = graph.ready_queue_with_active_write_lease(
-        &std::collections::BTreeMap::new(),
-        TaskReadyQueueOptions::new(4),
-        true,
-    );
-
-    assert!(queue.read_only_batch.is_empty());
-    assert!(queue.sequential_step.is_none());
-    assert_eq!(
-        queue
-            .deferred
-            .iter()
-            .map(|step| (step.step_id.as_str().to_owned(), step.reason))
-            .collect::<Vec<_>>(),
-        vec![
-            ("read".to_owned(), TaskReadyDeferredReason::ActiveWriteLease),
-            (
-                "write".to_owned(),
-                TaskReadyDeferredReason::ActiveWriteLease
-            ),
-        ]
-    );
-    Ok(())
-}
-
-#[test]
 fn task_dag_read_only_write_denial_rejects_shared_read_only_write_step() -> Result<()> {
     let unsafe_write = TaskStepSpec {
         step_id: step_id("write")?,
@@ -1469,16 +480,8 @@ fn task_verify_mode_separates_review_advisory_from_system_verifier() -> Result<(
     assert!(!verify_step.is_review_advisory());
     assert!(verify_step.requires_system_verifier());
 
-    let entry = TaskPlanEntry {
-        task_id: task_id("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![review_step, verify_step],
-        reason: None,
-    };
-    let graph = TaskGraphProjection::from_plan_entry(&entry)?;
-    assert_eq!(graph.steps[0].mode, TaskStepMode::Review);
-    assert_eq!(graph.steps[1].mode, TaskStepMode::Verify);
+    assert_eq!(review_step.effective_mode(), TaskStepMode::Review);
+    assert_eq!(verify_step.effective_mode(), TaskStepMode::Verify);
     Ok(())
 }
 
@@ -1920,12 +923,7 @@ fn task_projection_creates_placeholder_for_plan_before_run() -> Result<()> {
 fn task_root_terminal_evaluator_requires_direct_attempt_terminal_candidate() -> Result<()> {
     let task_id = task_id("task-terminal-direct")?;
     let objective = "complete exactly one direct task";
-    let admission = TaskDirectExecutionAdmittedV1::planner_fallback(
-        task_id.clone(),
-        objective,
-        "planner-attempt-terminal",
-        1,
-    );
+    let admission = TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), objective, 1);
     let attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
     let projection = TaskStateProjection::from_entries(&[
         SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
@@ -1950,7 +948,7 @@ fn task_root_terminal_evaluator_requires_direct_attempt_terminal_candidate() -> 
     );
     let candidate = TaskRootTerminalCandidateV1::DirectExecution {
         attempt_id: attempt.attempt_id,
-        status: TaskParticipantAttemptStatus::Completed,
+        status: TaskExecutionAttemptStatus::Completed,
     };
     assert!(
         projection
@@ -1958,6 +956,197 @@ fn task_root_terminal_evaluator_requires_direct_attempt_terminal_candidate() -> 
             .expect("direct task should project")
             .allows_completed()
     );
+    Ok(())
+}
+
+#[test]
+fn direct_task_completion_waits_for_exact_owned_background_agents() -> Result<()> {
+    let direct_task_id = task_id("task-background-owner")?;
+    let other_task_id = task_id("another-task-background-owner")?;
+    let objective = "complete the direct task after its owned background work";
+    let direct_admission =
+        TaskDirectExecutionAdmittedV1::task_request(direct_task_id.clone(), objective, 1);
+    let attempt = TaskDirectExecutionAttemptV1::started(&direct_admission, 1);
+    let thread_id = AgentThreadId::new("agent_direct_task_background")?;
+    let unrelated_thread_id = AgentThreadId::new("agent_other_task_background")?;
+    let grant_for = |grant_task_id: TaskId| crate::AgentInvocationGrantRecord {
+        grant_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        source: crate::AgentInvocationGrantSource::DirectTask {
+            task_id: grant_task_id.clone(),
+        },
+        authority: crate::DelegationAuthorityRecord::DirectTask {
+            task_id: grant_task_id,
+        },
+        profile_id: crate::AgentProfileId::new("explore").expect("profile id"),
+        role: AgentRole::SubagentRead,
+        isolation: TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        network_upper_bound: crate::NetworkPolicy::Deny,
+        tool_contract_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        workspace_snapshot_id: None,
+        root_run_fingerprint: format!("sha256:{}", "d".repeat(64)),
+        root_cancellation_scope_fingerprint: format!("sha256:{}", "e".repeat(64)),
+        expires_at_ms: 100,
+    };
+    let child_admission =
+        |thread_id: AgentThreadId, grant_task_id: TaskId| crate::AgentDelegationAdmissionEntry {
+            thread_id,
+            profile_id: crate::AgentProfileId::new("explore").expect("profile id"),
+            invocation_mode: crate::AgentInvocationMode::Background,
+            invocation_source: crate::AgentInvocationSource::Task,
+            authority: crate::DelegationAuthorityRecord::DirectTask {
+                task_id: direct_task_id.clone(),
+            },
+            objective_hash: format!("sha256:{}", "f".repeat(64)),
+            tool_contract_fingerprint: format!("sha256:{}", "c".repeat(64)),
+            invocation_grant: Some(grant_for(grant_task_id)),
+            admitted_at_ms: Some(2),
+        };
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: direct_task_id.clone(),
+            parent_session_ref: session_ref("parent.jsonl")?,
+            objective: objective.to_owned(),
+            title: None,
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            direct_admission.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAttemptV1(attempt.clone())),
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(child_admission(
+            thread_id.clone(),
+            direct_task_id.clone(),
+        ))),
+        SessionLogEntry::Control(ControlEntry::AgentDelegationAdmitted(child_admission(
+            unrelated_thread_id,
+            other_task_id,
+        ))),
+    ];
+    let candidate = TaskRootTerminalCandidateV1::DirectExecution {
+        attempt_id: attempt.attempt_id,
+        status: TaskExecutionAttemptStatus::Completed,
+    };
+    let projection = TaskStateProjection::from_entries(&entries);
+    assert_eq!(
+        projection.direct_task_for_background_agent(&thread_id),
+        Some(&direct_task_id)
+    );
+    assert_eq!(
+        projection.unfinished_direct_task_background_agents(&direct_task_id),
+        vec![thread_id.clone()]
+    );
+    assert_eq!(
+        projection.direct_task_background_agents(&direct_task_id),
+        vec![thread_id.clone()]
+    );
+    assert_eq!(
+        projection
+            .direct_task_for_background_agent(&AgentThreadId::new("agent_other_task_background")?),
+        None,
+        "a grant for another Task must not be attributed to this Direct Task"
+    );
+    let evaluation = projection
+        .evaluate_root_terminal(&direct_task_id, TaskRunStatus::Completed, Some(&candidate))
+        .expect("direct task should project");
+    assert_eq!(evaluation.effective_status, TaskRunStatus::Paused);
+    assert_eq!(
+        evaluation.unfinished_direct_task_background_agents,
+        vec![thread_id.clone()]
+    );
+    assert!(
+        evaluation
+            .completion_blockers
+            .contains(&TaskRootCompletionBlockerV1::UnfinishedBackgroundAgent)
+    );
+
+    let mut interrupted_entries = entries.clone();
+    interrupted_entries.push(SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(
+        crate::AgentRunInterruptedEntry {
+            thread_id: thread_id.clone(),
+            attempt_id: crate::AgentRunAttemptId::new("attempt-owner-lost")?,
+            reason: "agent run interrupted during session restore".to_owned(),
+        },
+    )));
+    let interrupted = TaskStateProjection::from_entries(&interrupted_entries);
+    assert_eq!(
+        interrupted.agent_thread_status(&thread_id),
+        Some(crate::AgentThreadStatus::Interrupted),
+        "attempt-level recovery must reach the Task projection"
+    );
+
+    let mut cancelled_entries = entries.clone();
+    cancelled_entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(crate::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: crate::AgentThreadStatus::Cancelled,
+            reason: Some("parent Task cancelled".to_owned()),
+            updated_at_ms: Some(4),
+        }),
+    ));
+    cancelled_entries.push(SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(
+        crate::AgentRunInterruptedEntry {
+            thread_id: thread_id.clone(),
+            attempt_id: crate::AgentRunAttemptId::new("attempt-cancelled")?,
+            reason: "the cancelled attempt did not finish normally".to_owned(),
+        },
+    )));
+    let cancelled = TaskStateProjection::from_entries(&cancelled_entries);
+    assert_eq!(
+        cancelled.agent_thread_status(&thread_id),
+        Some(crate::AgentThreadStatus::Cancelled),
+        "attempt interruption must not overwrite a durable terminal thread status"
+    );
+    assert!(
+        cancelled
+            .unfinished_direct_task_background_agents(&direct_task_id)
+            .is_empty()
+    );
+
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(crate::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: crate::AgentThreadStatus::Completed,
+            reason: None,
+            updated_at_ms: Some(3),
+        }),
+    ));
+    let settled = TaskStateProjection::from_entries(&entries)
+        .evaluate_root_terminal(&direct_task_id, TaskRunStatus::Completed, Some(&candidate))
+        .expect("direct task should project after child status completion");
+    assert_eq!(settled.effective_status, TaskRunStatus::Paused);
+    assert_eq!(
+        settled.unfinished_direct_task_background_agents,
+        vec![thread_id.clone()],
+        "a completed status is not collected until the child result is durable"
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentThreadResultRecorded(crate::AgentThreadResultRecordedEntry {
+            result: crate::AgentThreadResult {
+                thread_id: thread_id.clone(),
+                session_ref: SessionRef::new_relative(
+                    "children/agents/agent_direct_task_background.jsonl",
+                )?,
+                status: crate::AgentThreadTerminalStatus::Completed,
+                summary: "child result".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:child-result".to_owned(),
+                final_answer_ref: None,
+            },
+        }),
+    ));
+    let settled = TaskStateProjection::from_entries(&entries)
+        .evaluate_root_terminal(&direct_task_id, TaskRunStatus::Completed, Some(&candidate))
+        .expect("direct task should project after child result is durable");
+    assert!(settled.allows_completed());
+    assert!(settled.unfinished_direct_task_background_agents.is_empty());
     Ok(())
 }
 
@@ -2412,9 +1601,15 @@ fn task_projection_replays_child_session_display_name_entries() -> Result<()> {
 #[test]
 fn task_projection_rejects_orphan_participant_results() -> Result<()> {
     let task_id = task_id("task_1")?;
-    let attempt_id =
-        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
-    let summary = "orphan planner result".to_owned();
+    let step_id = step_id("inspect")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let summary = "orphan step result".to_owned();
     let projection = TaskStateProjection::from_entries(&[
         SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
         SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
@@ -2430,7 +1625,6 @@ fn task_projection_rejects_orphan_participant_results() -> Result<()> {
                 artifact_refs: Vec::new(),
                 changed_paths: Vec::new(),
                 verification_refs: Vec::new(),
-                completion_claim: None,
             },
         )),
     ]);
@@ -2445,156 +1639,16 @@ fn task_projection_rejects_orphan_participant_results() -> Result<()> {
 }
 
 #[test]
-fn task_projection_tracks_pending_retry_from_terminal_zero_effect_attempt() -> Result<()> {
+fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result<()> {
     let task_id = task_id("task_1")?;
     let step_id = step_id("inspect")?;
-    let failed_attempt_id = task_participant_attempt_id(
+    let attempt_id = task_participant_attempt_id(
         &task_id,
         TaskParticipantPurpose::Step,
         Some(1),
         Some(&step_id),
         1,
     )?;
-    let retry_attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        2,
-    )?;
-    let failed = TaskParticipantAttemptEntry {
-        attempt_id: failed_attempt_id.clone(),
-        task_id: task_id.clone(),
-        purpose: TaskParticipantPurpose::Step,
-        ordinal: 1,
-        plan_version: Some(1),
-        step_id: Some(step_id.clone()),
-        role: AgentRole::SubagentRead,
-        child_session_ref: task_participant_session_ref(&task_id, &failed_attempt_id)?,
-        status: TaskParticipantAttemptStatus::Failed,
-        reason: Some("rate limited".to_owned()),
-    };
-    let schedule = TaskParticipantRetryScheduledEntry {
-        task_id: task_id.clone(),
-        failed_attempt_id,
-        retry_attempt_id: retry_attempt_id.clone(),
-        purpose: TaskParticipantPurpose::Step,
-        retry_ordinal: 2,
-        plan_version: Some(1),
-        step_id: Some(step_id.clone()),
-        route_fingerprint: format!("sha256:{}", "1".repeat(64)),
-        input_hash: "2".repeat(64),
-        scheduled_at_unix_ms: 10,
-        not_before_unix_ms: 15,
-        retry_after_ms: 5,
-        proof: TaskParticipantRetryProof::ProviderConfirmedNoConsumption {
-            physical_attempt_id: "physical-attempt-1".to_owned(),
-            request_material_fingerprint: format!("hmac-sha256:{}", "3".repeat(64)),
-            zero_output: true,
-            zero_tool: true,
-            zero_effect: true,
-        },
-    };
-    schedule.validate_shape()?;
-    let projection = TaskStateProjection::from_entries(&[
-        SessionLogEntry::Control(run_entry(TaskRunStatus::Running)?),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(failed)),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantRetryScheduled(
-            schedule.clone(),
-        )),
-    ]);
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
-
-    assert_eq!(
-        task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step_id)),
-        Some(&schedule)
-    );
-    assert_eq!(
-        task.participant_retry_wait_ms(TaskParticipantPurpose::Step, Some(1), Some(&step_id)),
-        5
-    );
-    assert_eq!(task.participant_conflicts, 0);
-
-    let mut started_retry = TaskParticipantAttemptEntry {
-        attempt_id: retry_attempt_id.clone(),
-        task_id: task_id.clone(),
-        purpose: TaskParticipantPurpose::Step,
-        ordinal: 2,
-        plan_version: Some(1),
-        step_id: Some(step_id.clone()),
-        role: AgentRole::SubagentRead,
-        child_session_ref: task_participant_session_ref(&task_id, &retry_attempt_id)?,
-        status: TaskParticipantAttemptStatus::Started,
-        reason: None,
-    };
-    let mut entries = vec![
-        SessionLogEntry::Control(run_entry(TaskRunStatus::Running)?),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
-            TaskParticipantAttemptEntry {
-                attempt_id: schedule.failed_attempt_id.clone(),
-                task_id: task_id.clone(),
-                purpose: TaskParticipantPurpose::Step,
-                ordinal: 1,
-                plan_version: Some(1),
-                step_id: Some(step_id.clone()),
-                role: AgentRole::SubagentRead,
-                child_session_ref: task_participant_session_ref(
-                    &task_id,
-                    &schedule.failed_attempt_id,
-                )?,
-                status: TaskParticipantAttemptStatus::Failed,
-                reason: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantRetryScheduled(schedule)),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(started_retry.clone())),
-    ];
-    started_retry.status = TaskParticipantAttemptStatus::Completed;
-    entries.push(SessionLogEntry::Control(
-        ControlEntry::TaskParticipantAttempt(started_retry),
-    ));
-    let projection = TaskStateProjection::from_entries(&entries);
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
-    assert!(
-        task.pending_participant_retry(TaskParticipantPurpose::Step, Some(1), Some(&step_id))
-            .is_none()
-    );
-    Ok(())
-}
-
-#[test]
-fn provider_protocol_retry_proof_requires_read_only_zero_effect_evidence() -> Result<()> {
-    let valid = TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput {
-        physical_attempt_id: "physical-attempt-protocol-1".to_owned(),
-        request_material_fingerprint: format!("hmac-sha256:{}", "a".repeat(64)),
-        read_only_step: true,
-        zero_effect: true,
-    };
-    valid.validate_shape()?;
-    assert_eq!(valid.recovery_label(), "provider protocol recovery");
-
-    let mut invalid = valid.clone();
-    let TaskParticipantRetryProof::ProviderProtocolRejectedAfterOutput { read_only_step, .. } =
-        &mut invalid
-    else {
-        unreachable!("test constructed the protocol recovery variant")
-    };
-    *read_only_step = false;
-    assert!(invalid.validate_shape().is_err());
-    Ok(())
-}
-
-#[test]
-fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result<()> {
-    let task_id = task_id("task_1")?;
-    let attempt_id =
-        task_participant_attempt_id(&task_id, TaskParticipantPurpose::Planner, None, None, 1)?;
     let summary = "bounded summary".to_owned();
     let entry = TaskParticipantResultEntry {
         attempt_id,
@@ -2608,201 +1662,12 @@ fn participant_result_shape_rejects_unbounded_parent_reference_lists() -> Result
         artifact_refs: Vec::new(),
         changed_paths: vec!["path".to_owned(); TASK_PARTICIPANT_RESULT_CHANGED_PATH_MAX_ITEMS + 1],
         verification_refs: Vec::new(),
-        completion_claim: None,
     };
 
     let error = entry
         .validate_shape()
         .expect_err("unbounded changed paths must fail closed");
     assert!(format!("{error:#}").contains("too many changed paths"));
-    Ok(())
-}
-
-#[test]
-fn task_projection_rejects_final_commit_for_another_plan_version() -> Result<()> {
-    let task_id = task_id("task_1")?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    let summary = "completed plan v1".to_owned();
-    let output_hash = format!("sha256:{}", "1".repeat(64));
-    let projection = TaskStateProjection::from_entries(&[
-        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
-            TaskParticipantAttemptEntry {
-                attempt_id: attempt_id.clone(),
-                task_id: task_id.clone(),
-                purpose: TaskParticipantPurpose::Synthesis,
-                ordinal: 1,
-                plan_version: Some(1),
-                step_id: None,
-                role: AgentRole::Planner,
-                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-                status: TaskParticipantAttemptStatus::Completed,
-                reason: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
-            TaskParticipantResultEntry {
-                attempt_id: attempt_id.clone(),
-                task_id: task_id.clone(),
-                summary_hash: sha256_prefixed(&summary),
-                output_hash: output_hash.clone(),
-                summary,
-                summary_truncated: false,
-                terminal_status: None,
-                final_answer_ref: None,
-                artifact_refs: Vec::new(),
-                changed_paths: Vec::new(),
-                verification_refs: Vec::new(),
-                completion_claim: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
-            TaskFinalAnswerCommittedEntry {
-                task_id: task_id.clone(),
-                plan_version: 2,
-                synthesis_attempt_id: attempt_id.clone(),
-                message_id: task_final_message_id(&task_id, &attempt_id),
-                content_hash: output_hash,
-            },
-        )),
-    ]);
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
-
-    assert!(task.final_answer.is_none());
-    assert_eq!(task.participant_conflicts, 1);
-    Ok(())
-}
-
-#[test]
-fn task_projection_rejects_result_ref_outside_attempt_session() -> Result<()> {
-    let task_id = task_id("task_1")?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    let summary = "completed plan v1".to_owned();
-    let output_digest = "2".repeat(64);
-    let projection = TaskStateProjection::from_entries(&[
-        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
-            TaskParticipantAttemptEntry {
-                attempt_id: attempt_id.clone(),
-                task_id: task_id.clone(),
-                purpose: TaskParticipantPurpose::Synthesis,
-                ordinal: 1,
-                plan_version: Some(1),
-                step_id: None,
-                role: AgentRole::Planner,
-                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-                status: TaskParticipantAttemptStatus::Completed,
-                reason: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
-            TaskParticipantResultEntry {
-                attempt_id,
-                task_id: task_id.clone(),
-                summary_hash: sha256_prefixed(&summary),
-                output_hash: format!("sha256:{output_digest}"),
-                summary,
-                summary_truncated: false,
-                terminal_status: None,
-                final_answer_ref: Some(AgentFinalAnswerRef {
-                    session_ref: SessionRef::new_relative("children/another-attempt.jsonl")?,
-                    message_id: "child-final".to_owned(),
-                    content_hash: output_digest,
-                    char_count: 17,
-                }),
-                artifact_refs: Vec::new(),
-                changed_paths: Vec::new(),
-                verification_refs: Vec::new(),
-                completion_claim: None,
-            },
-        )),
-    ]);
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
-
-    assert!(task.participant_results.is_empty());
-    assert_eq!(task.participant_conflicts, 1);
-    Ok(())
-}
-
-#[test]
-fn task_projection_rejects_non_deterministic_parent_final_message_id() -> Result<()> {
-    let task_id = task_id("task_1")?;
-    let attempt_id = task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Synthesis,
-        Some(1),
-        None,
-        1,
-    )?;
-    let summary = "completed plan v1".to_owned();
-    let output_hash = format!("sha256:{}", "3".repeat(64));
-    let projection = TaskStateProjection::from_entries(&[
-        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantAttempt(
-            TaskParticipantAttemptEntry {
-                attempt_id: attempt_id.clone(),
-                task_id: task_id.clone(),
-                purpose: TaskParticipantPurpose::Synthesis,
-                ordinal: 1,
-                plan_version: Some(1),
-                step_id: None,
-                role: AgentRole::Planner,
-                child_session_ref: task_participant_session_ref(&task_id, &attempt_id)?,
-                status: TaskParticipantAttemptStatus::Completed,
-                reason: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskParticipantResult(
-            TaskParticipantResultEntry {
-                attempt_id: attempt_id.clone(),
-                task_id: task_id.clone(),
-                summary_hash: sha256_prefixed(&summary),
-                output_hash: output_hash.clone(),
-                summary,
-                summary_truncated: false,
-                terminal_status: None,
-                final_answer_ref: None,
-                artifact_refs: Vec::new(),
-                changed_paths: Vec::new(),
-                verification_refs: Vec::new(),
-                completion_claim: None,
-            },
-        )),
-        SessionLogEntry::Control(ControlEntry::TaskFinalAnswerCommitted(
-            TaskFinalAnswerCommittedEntry {
-                task_id: task_id.clone(),
-                plan_version: 1,
-                synthesis_attempt_id: attempt_id,
-                message_id: "task-final-wrong".to_owned(),
-                content_hash: output_hash,
-            },
-        )),
-    ]);
-    let task = projection
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
-
-    assert!(task.final_answer.is_none());
-    assert_eq!(task.participant_conflicts, 1);
     Ok(())
 }
 
@@ -2823,16 +1688,13 @@ fn resumable_task_entries() -> Result<Vec<SessionLogEntry>> {
 fn continuation_selection(
     session_scope_id: &str,
     message_id: &str,
-    plan_version: u32,
 ) -> Result<TaskContinuationSelectedEntry> {
     let guidance = "continue with the revised requirement";
     let prompt = project_conversation_prompt_for_persistence(guidance);
     Ok(TaskContinuationSelectedEntry {
         task_id: task_id("task_1")?,
         source_turn: ConversationTurnRef::new(session_scope_id, message_id, "continuation-run-1")?,
-        plan_version: Some(plan_version),
         task_status: TaskRunStatus::Paused,
-        plan_status: Some(TaskPlanStatus::Accepted),
         route_contract_fingerprint: "sha256:continuation-route".to_owned(),
         control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: prompt.prompt_hash,
@@ -2924,7 +1786,14 @@ fn explicit_plan_draft_clears_task_focus_and_late_task_activity_does_not_reclaim
 
 #[test]
 fn exact_continuation_selection_restores_focus_but_stale_plan_fails_closed() -> Result<()> {
-    let mut entries = resumable_task_entries()?;
+    let task = task_id("task_1")?;
+    let mut entries = vec![
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(
+            TaskDirectExecutionAdmittedV1::task_request(task, "ship planner", 1),
+        )),
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Paused)?),
+    ];
     let mut user = ModelMessage::user("continue with the revised requirement");
     user.id = "continuation-message-1".to_owned();
     entries.push(SessionLogEntry::User(user));
@@ -2932,7 +1801,6 @@ fn exact_continuation_selection_restores_focus_but_stale_plan_fails_closed() -> 
         ControlEntry::TaskContinuationSelected(continuation_selection(
             "session-1",
             "continuation-message-1",
-            1,
         )?),
     ));
 
@@ -2946,12 +1814,10 @@ fn exact_continuation_selection_restores_focus_but_stale_plan_fails_closed() -> 
     entries.push(SessionLogEntry::User(ModelMessage::user(
         "another unrelated request",
     )));
+    let mut stale_selection = continuation_selection("session-1", "continuation-message-1")?;
+    stale_selection.task_status = TaskRunStatus::Started;
     entries.push(SessionLogEntry::Control(
-        ControlEntry::TaskContinuationSelected(continuation_selection(
-            "session-1",
-            "continuation-message-1",
-            2,
-        )?),
+        ControlEntry::TaskContinuationSelected(stale_selection),
     ));
     let stale = TaskStateProjection::from_entries(&entries);
     assert!(stale.current_task().is_none());
@@ -3011,80 +1877,40 @@ fn explicit_run_target_selection_restores_focus_but_stale_plan_fails_closed() ->
 }
 
 #[test]
-fn task_completion_claim_validates_immutable_requirement_bindings() -> Result<()> {
-    let task_id = TaskId::new("task_claim")?;
-    let step_id = TaskStepId::new("step_claim")?;
-    let requirement = TaskCompletionRequirementClaimV1 {
-        source: TaskCompletionRequirementSourceV1::TaskStepContract {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            step_id: step_id.clone(),
-            field: TaskCompletionRequirementFieldV1::AcceptanceCriterion,
-            index: 0,
-            contract_set_sha256: format!("sha256:{}", "a".repeat(64)),
-        },
-        required: true,
-        outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
+fn task_participant_result_ignores_retired_completion_claim_field() -> Result<()> {
+    let task_id = task_id("task_without_legacy_claim")?;
+    let step_id = step_id("step_without_legacy_claim")?;
+    let attempt_id = task_participant_attempt_id(
+        &task_id,
+        TaskParticipantPurpose::Step,
+        Some(1),
+        Some(&step_id),
+        1,
+    )?;
+    let summary = "Current participant result".to_owned();
+    let mut value = serde_json::to_value(TaskParticipantResultEntry {
+        attempt_id,
+        task_id,
+        summary_hash: sha256_prefixed(&summary),
+        output_hash: format!("sha256:{}", "e".repeat(64)),
+        summary: summary.clone(),
+        summary_truncated: false,
+        terminal_status: Some(TaskParticipantAttemptStatus::Completed),
+        final_answer_ref: None,
         artifact_refs: Vec::new(),
-        event_refs: vec!["event-1".to_owned()],
-        explanation: "criterion satisfied by the recorded result".to_owned(),
-    };
-    let claim = TaskCompletionClaimV1 {
-        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-        subject: TaskCompletionClaimSubjectV1::Step {
-            task_id,
-            plan_version: 1,
-            step_id,
-        },
-        attempt_id: "attempt-claim".to_owned(),
-        evidence_frontier: format!("sha256:{}", "b".repeat(64)),
-        status: TaskCompletionClaimStatusV1::Completed,
-        requirements: vec![requirement],
-        artifact_refs: Vec::new(),
-        explanation: String::new(),
-    };
-    claim.validate_shape()?;
-    assert!(claim.declares_completed_delivery());
-    Ok(())
-}
+        changed_paths: Vec::new(),
+        verification_refs: Vec::new(),
+    })?;
+    value
+        .as_object_mut()
+        .expect("serialized participant result is an object")
+        .insert(
+            "completion_claim".to_owned(),
+            serde_json::json!({"schema_version": "retired", "subject": [null]}),
+        );
 
-#[test]
-fn task_completion_claim_rejects_inconsistent_delivery_status() -> Result<()> {
-    let task_id = TaskId::new("task_claim_invalid")?;
-    let step_id = TaskStepId::new("step_claim_invalid")?;
-    let source = TaskCompletionRequirementSourceV1::TaskStepContract {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        field: TaskCompletionRequirementFieldV1::Deliverable,
-        index: 0,
-        contract_set_sha256: format!("sha256:{}", "c".repeat(64)),
-    };
-    let requirement = TaskCompletionRequirementClaimV1 {
-        source,
-        required: true,
-        outcome: TaskCompletionRequirementOutcomeV1::Unfulfilled,
-        artifact_refs: Vec::new(),
-        event_refs: Vec::new(),
-        explanation: "the deliverable is still pending".to_owned(),
-    };
-    let claim = TaskCompletionClaimV1 {
-        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-        subject: TaskCompletionClaimSubjectV1::Step {
-            task_id,
-            plan_version: 1,
-            step_id,
-        },
-        attempt_id: "attempt-claim-invalid".to_owned(),
-        evidence_frontier: format!("sha256:{}", "d".repeat(64)),
-        status: TaskCompletionClaimStatusV1::Completed,
-        requirements: vec![requirement],
-        artifact_refs: Vec::new(),
-        explanation: String::new(),
-    };
-    let error = claim
-        .validate_shape()
-        .expect_err("completed claim cannot leave a required requirement unfulfilled");
-    assert!(error.to_string().contains("required requirements"));
+    let parsed: TaskParticipantResultEntry = serde_json::from_value(value)?;
+    parsed.validate_shape()?;
+    assert_eq!(parsed.summary, summary);
     Ok(())
 }

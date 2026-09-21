@@ -108,7 +108,7 @@ fn cutover_predecessor_requires_exactly_eighteen_passing_historical_probes() {
 }
 
 #[test]
-fn cutover_predecessor_rejects_unknown_versions_extra_fields_and_duplicate_json_keys() {
+fn cutover_predecessor_rejects_unknown_versions_but_ignores_extra_fields() {
     let original = String::from_utf8(encode(&historical_manifest())).expect("utf8");
     for version in [0, 2, 99] {
         let bytes = original.replace(
@@ -122,15 +122,22 @@ fn cutover_predecessor_rejects_unknown_versions_extra_fields_and_duplicate_json_
     }
     for bytes in [
         original.replacen('{', "{\"composition\":{},", 1),
-        original.replacen('{', "{\"schema_version\":1,", 1),
         original.replace("\"passed\":true", "\"passed\":true,\"unrecognized\":1"),
-        "{broken".to_owned(),
     ] {
-        assert_eq!(
-            validate_bootstrap_cutover_predecessor_v1(bytes.as_bytes()),
-            Err(CutoverPredecessorErrorV1::InvalidManifest)
-        );
+        assert!(validate_bootstrap_cutover_predecessor_v1(bytes.as_bytes()).is_ok());
     }
+    assert!(
+        validate_bootstrap_cutover_predecessor_v1(
+            original
+                .replacen('{', "{\"schema_version\":1,", 1)
+                .as_bytes()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        validate_bootstrap_cutover_predecessor_v1(b"{broken"),
+        Err(CutoverPredecessorErrorV1::InvalidManifest)
+    );
 }
 
 #[test]
@@ -148,4 +155,165 @@ fn cutover_predecessor_rejects_legacy_epoch_and_invalid_identity() {
             Err(CutoverPredecessorErrorV1::InvalidManifest)
         );
     }
+}
+
+fn optional_terminal_manifest() -> OptionalTerminalManifestV2 {
+    OptionalTerminalManifestV2 {
+        schema_version: 2,
+        application_instance_id: "sigil:test-predecessor".to_owned(),
+        selected_epoch: StartupEpochV1::NewCurrentSchema,
+        application_generation: 2,
+        authority_generation_digest: CanonicalHash::from_bytes([0x55; 32]),
+        composition: OptionalTerminalCompositionV2 {
+            profile: RuntimeCompositionProfile::Core,
+            enhancements: Vec::new(),
+        },
+        mandatory_readiness: historical_manifest()
+            .mandatory_readiness
+            .into_iter()
+            .filter(|probe| {
+                !matches!(
+                    probe.adapter,
+                    MandatoryAdapterKindV1::ExecutionTerminal
+                        | MandatoryAdapterKindV1::ExecutionExtension
+                        | MandatoryAdapterKindV1::StorageMemory
+                        | MandatoryAdapterKindV1::ProductStateUpdater
+                        | MandatoryAdapterKindV1::BorrowedReleaseOutput
+                )
+            })
+            .collect(),
+        // Independently encoded seven-field schema-2 Core hash, with the original 13 probes.
+        manifest_hash: serde_json::from_str(
+            "\"13c56d77830af7985a34baee8140d86fdc9ce05abcba87026e81718e9212edca\"",
+        )
+        .expect("historical hash"),
+    }
+}
+
+#[test]
+fn optional_terminal_predecessor_accepts_old_core_identity_but_never_current_readiness() {
+    let manifest = optional_terminal_manifest();
+    assert_eq!(
+        optional_terminal_manifest_hash(&manifest),
+        manifest.manifest_hash
+    );
+    let bytes = serde_json::to_vec(&manifest).expect("historical bytes");
+    let historical = validate_optional_terminal_cutover_predecessor_v2(&bytes)
+        .expect("complete old Core predecessor");
+    assert_eq!(historical.application_generation(), 2);
+    assert_eq!(historical.manifest_hash(), manifest.manifest_hash);
+    let current = serde_json::from_slice(&bytes).expect("same wire schema");
+    assert_eq!(
+        super::super::validate_cutover_manifest(&current),
+        Err(CutoverErrorV1::MissingReadinessProbe)
+    );
+    assert_ne!(
+        super::super::CutoverSurfaceStatusV1::from_manifest(&current).authority,
+        super::super::CutoverAuthorityStateV1::Ready
+    );
+}
+
+#[test]
+fn optional_terminal_predecessor_requires_the_exact_selected_historical_closure() {
+    for enhancements in [
+        vec![OptionalCapability::Memory],
+        vec![OptionalCapability::Skills, OptionalCapability::Updater],
+        vec![OptionalCapability::Mcp],
+    ] {
+        let mut manifest = optional_terminal_manifest();
+        for probe in historical_manifest().mandatory_readiness {
+            if matches!(probe.adapter, MandatoryAdapterKindV1::StorageMemory)
+                && enhancements.contains(&OptionalCapability::Memory)
+                || matches!(probe.adapter, MandatoryAdapterKindV1::ExecutionExtension)
+                    && (enhancements.contains(&OptionalCapability::Skills)
+                        || enhancements.contains(&OptionalCapability::Mcp))
+                || matches!(
+                    probe.adapter,
+                    MandatoryAdapterKindV1::ProductStateUpdater
+                        | MandatoryAdapterKindV1::BorrowedReleaseOutput
+                ) && enhancements.contains(&OptionalCapability::Updater)
+            {
+                manifest.mandatory_readiness.push(probe);
+            }
+        }
+        manifest.composition.enhancements = enhancements;
+        manifest.manifest_hash = optional_terminal_manifest_hash(&manifest);
+        let bytes = serde_json::to_vec(&manifest).expect("selected historical bytes");
+        validate_optional_terminal_cutover_predecessor_v2(&bytes)
+            .expect("selected enhancements retain their own required probes");
+        manifest.mandatory_readiness.pop();
+        manifest.manifest_hash = optional_terminal_manifest_hash(&manifest);
+        assert_eq!(
+            validate_optional_terminal_cutover_predecessor_v2(
+                &serde_json::to_vec(&manifest).expect("missing bytes")
+            ),
+            Err(CutoverErrorV1::MissingReadinessProbe.into())
+        );
+    }
+}
+
+#[test]
+fn optional_terminal_predecessor_rejects_missing_failed_duplicate_or_extra_probes() {
+    for variant in 0..4 {
+        let mut manifest = optional_terminal_manifest();
+        match variant {
+            0 => {
+                manifest.mandatory_readiness.pop();
+            }
+            1 => manifest.mandatory_readiness[0].passed = false,
+            2 => manifest.mandatory_readiness.push(Schema1ReadinessProbe {
+                adapter: MandatoryAdapterKindV1::ExecutionOneShot,
+                passed: true,
+                evidence_digest: CanonicalHash::from_bytes([0x33; 32]),
+            }),
+            _ => manifest.mandatory_readiness.push(Schema1ReadinessProbe {
+                adapter: MandatoryAdapterKindV1::ExecutionTerminal,
+                passed: true,
+                evidence_digest: CanonicalHash::from_bytes([0x33; 32]),
+            }),
+        }
+        manifest.manifest_hash = optional_terminal_manifest_hash(&manifest);
+        assert!(
+            validate_optional_terminal_cutover_predecessor_v2(
+                &serde_json::to_vec(&manifest).expect("invalid bytes")
+            )
+            .is_err(),
+            "variant {variant}"
+        );
+    }
+}
+
+#[test]
+fn optional_terminal_predecessor_rejects_tampering_and_ignores_extra_fields() {
+    let original = serde_json::to_string(&optional_terminal_manifest()).expect("fixture");
+    for bytes in [
+        original.replace(
+            "\"application_generation\":2",
+            "\"application_generation\":3",
+        ),
+        original.replace("\"profile\":\"core\"", "\"profile\":\"standard\""),
+        original.replace("\"enhancements\":[]", "\"enhancements\":[\"terminal\"]"),
+        original.replace(
+            "\"enhancements\":[]",
+            "\"enhancements\":[\"memory\",\"memory\"]",
+        ),
+        original.replace("\"profile\":\"core\",", ""),
+        original.replace("NewCurrentSchema", "Legacy"),
+    ] {
+        assert!(validate_optional_terminal_cutover_predecessor_v2(bytes.as_bytes()).is_err());
+    }
+    for bytes in [
+        original.replacen('{', "{\"unknown\":true,", 1),
+        original.replace("\"passed\":true", "\"passed\":true,\"unknown\":true"),
+    ] {
+        assert!(validate_optional_terminal_cutover_predecessor_v2(bytes.as_bytes()).is_ok());
+    }
+    assert!(
+        validate_optional_terminal_cutover_predecessor_v2(
+            original
+                .replacen('{', "{\"schema_version\":2,", 1)
+                .as_bytes()
+        )
+        .is_err()
+    );
 }

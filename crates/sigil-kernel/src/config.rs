@@ -108,7 +108,7 @@ impl fmt::Debug for RootConfig {
 /// only further restrict this policy with a non-persistent policy cap; they must not use it to
 /// enable a route that this root policy disables.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct WebConfig {
     #[serde(default = "default_web_enabled")]
     pub enabled: bool,
@@ -271,7 +271,7 @@ pub struct WebSearchMcpConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct WebSearchMcpConfigWire {
     server: String,
     tool: String,
@@ -438,7 +438,7 @@ fn min_optional_cap(base: Option<u32>, cap: Option<u32>) -> Option<u32> {
 
 /// Controls the runtime-private bundled stable search profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct WebBundledSearchConfig {
     #[serde(default = "default_web_bundled_search_enabled")]
     pub enabled: bool,
@@ -620,7 +620,7 @@ impl ModelRequestConfig {
 /// The canonical user-facing table is `[recovery.provider]`. Existing schedules keep their
 /// persisted policy fingerprint and never change when this configuration changes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnRecoveryConfig {
     #[serde(default = "default_provider_turn_max_transport_retries")]
     pub max_transport_retries: u32,
@@ -821,7 +821,7 @@ impl Default for ModelRequestTimeouts {
 /// This config is parsed by the shared root config so entrypoints preserve it while
 /// `sigil-code-intel` owns the actual LSP lifecycle and language analysis behavior.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CodeIntelligenceConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -912,7 +912,7 @@ impl Default for TerminalNotificationConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct TerminalNotificationConfigWire {
     #[serde(default)]
     enabled: bool,
@@ -3011,7 +3011,7 @@ fn default_session_retention_expire_older_than_ms() -> Option<u64> {
 
 /// User-local storage root configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct StorageConfig {
     #[serde(default)]
     pub state_root: StorageRoot,
@@ -3170,9 +3170,9 @@ pub struct AgentConfig {
     pub tool_timeout_secs: u64,
 }
 
-/// Planner/executor task mode configuration.
+/// Model-owned Task execution and agent-thread capability configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskConfig {
     #[serde(default = "default_task_enabled")]
     pub enabled: bool,
@@ -3189,18 +3189,10 @@ pub struct TaskConfig {
     pub subagent_read: RoleModelConfig,
     #[serde(default)]
     pub subagent_write: RoleModelConfig,
-    #[serde(default = "default_max_plan_steps")]
-    pub max_plan_steps: usize,
-    #[serde(default = "default_max_replans")]
-    pub max_replans: usize,
     #[serde(default = "default_max_subagents")]
     pub max_subagents: usize,
-    #[serde(default = "default_max_parallel_read_steps")]
-    pub max_parallel_read_steps: usize,
-    #[serde(default = "default_max_parallel_changeset_steps")]
-    pub max_parallel_changeset_steps: usize,
-    #[serde(default = "default_max_planning_research_agents")]
-    pub max_planning_research_agents: usize,
+    #[serde(default = "default_max_concurrent_provider_routes")]
+    pub max_concurrent_provider_routes: usize,
     #[serde(default = "default_allow_write_subagents")]
     pub allow_write_subagents: bool,
     #[serde(default)]
@@ -3216,12 +3208,8 @@ impl Default for TaskConfig {
             executor: RoleModelConfig::default(),
             subagent_read: RoleModelConfig::default(),
             subagent_write: RoleModelConfig::default(),
-            max_plan_steps: default_max_plan_steps(),
-            max_replans: default_max_replans(),
             max_subagents: default_max_subagents(),
-            max_parallel_read_steps: default_max_parallel_read_steps(),
-            max_parallel_changeset_steps: default_max_parallel_changeset_steps(),
-            max_planning_research_agents: default_max_planning_research_agents(),
+            max_concurrent_provider_routes: default_max_concurrent_provider_routes(),
             allow_write_subagents: default_allow_write_subagents(),
             multi_agent_mode: MultiAgentMode::default(),
         }
@@ -3347,7 +3335,7 @@ impl MemoryConfig {
 
 /// Skill discovery configuration shared by runtime entrypoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct SkillConfig {
     #[serde(default = "default_skill_enabled")]
     pub enabled: bool,
@@ -3375,7 +3363,7 @@ impl Default for SkillConfig {
 
 /// Context compaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionConfig {
     /// Request-layout and admission policy. V3 remains provider-capability gated at runtime.
     #[serde(default)]
@@ -3563,7 +3551,6 @@ pub struct McpStreamableHttpConfig {
 /// Secrets, discovered registration metadata and tokens are deliberately excluded. They are
 /// runtime-owned and may only be persisted in the native system credential store.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct McpOAuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
@@ -3581,7 +3568,7 @@ pub enum McpRemoteClientCapability {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "transport", rename_all = "snake_case")]
 enum McpServerConfigWire {
     Stdio {
         name: String,
@@ -4130,28 +4117,12 @@ fn default_task_enabled() -> bool {
     true
 }
 
-fn default_max_plan_steps() -> usize {
-    12
-}
-
-fn default_max_replans() -> usize {
-    2
-}
-
 fn default_max_subagents() -> usize {
     8
 }
 
-fn default_max_parallel_read_steps() -> usize {
+fn default_max_concurrent_provider_routes() -> usize {
     4
-}
-
-fn default_max_parallel_changeset_steps() -> usize {
-    2
-}
-
-fn default_max_planning_research_agents() -> usize {
-    3
 }
 
 fn default_allow_write_subagents() -> bool {

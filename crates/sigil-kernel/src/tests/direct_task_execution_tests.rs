@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::{
-    PlanId, TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1, TaskId,
-    TaskParticipantAttemptStatus,
+    PlanId, TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
+    TaskExecutionAttemptStatus, TaskId,
 };
 
 #[test]
@@ -33,18 +33,33 @@ fn approved_plan_direct_admission_is_objective_bound_and_deterministic() -> Resu
 
 #[test]
 fn direct_attempt_has_no_task_plan_or_step_identity() -> Result<()> {
-    let admission = TaskDirectExecutionAdmittedV1::planner_fallback(
+    let admission = TaskDirectExecutionAdmittedV1::task_request(
         TaskId::new("task-fallback")?,
         "Do the work",
-        "planner-attempt-1",
         20,
     );
     let mut attempt = TaskDirectExecutionAttemptV1::started(&admission, 1);
     attempt.validate()?;
-    attempt.status = TaskParticipantAttemptStatus::Completed;
+    attempt.status = TaskExecutionAttemptStatus::Completed;
     attempt.reason = Some("done".to_owned());
     attempt.final_message_id = Some("message-direct-final".to_owned());
     attempt.output_hash = Some(format!("sha256:{}", "a".repeat(64)));
     attempt.validate()?;
+    Ok(())
+}
+
+#[test]
+fn task_request_direct_admission_has_no_planner_identity() -> Result<()> {
+    let admission = TaskDirectExecutionAdmittedV1::task_request(
+        TaskId::new("task-model-owned")?,
+        "Decide and execute the requested change",
+        20,
+    );
+    admission.validate()?;
+    assert!(matches!(
+        admission.source,
+        crate::TaskDirectExecutionSourceV1::TaskRequest
+    ));
+    assert!(admission.matches_objective("Decide and execute the requested change"));
     Ok(())
 }

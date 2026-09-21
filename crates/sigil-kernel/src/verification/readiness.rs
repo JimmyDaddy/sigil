@@ -462,10 +462,49 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
         );
     }
 
-    if input.policy.required_checks.is_empty() {
-        if input.workspace_knowledge.is_unknown_dirty() {
-            return missing_for_mutation(input, reasons, required_actions);
+    let prior_passed = input
+        .verification_receipts
+        .iter()
+        .any(|receipt| receipt.check_status == ReceiptStatus::Succeeded);
+    if input.workspace_knowledge.is_unknown_dirty() {
+        let unknown_dirty_mutation = input
+            .mutations
+            .iter()
+            .find(|mutation| mutation.unknown_dirty);
+        if let Some(reason) =
+            unknown_dirty_mutation.and_then(WorkspaceMutationEvidence::source_readiness_reason)
+        {
+            reasons.push(reason);
         }
+        let event_id = unknown_dirty_mutation.map(|mutation| mutation.event_id.clone());
+        reasons.push(ReadinessReason::WorkspaceUnknownDirty {
+            event_id: event_id.clone(),
+        });
+        required_actions.push(RequiredAction::ResolveUnknownDirty);
+        let verdict =
+            if !input.policy.required_checks.is_empty() && event_id.is_some() && prior_passed {
+                VerificationVerdict::Stale
+            } else {
+                VerificationVerdict::Inconclusive
+            };
+        if verdict == VerificationVerdict::Stale {
+            reasons.push(ReadinessReason::VerificationStale(VerificationStaleCause {
+                reason: VerificationStaleReason::UnknownDirty(
+                    input
+                        .mutations
+                        .iter()
+                        .find(|mutation| mutation.unknown_dirty)
+                        .map(|mutation| mutation.event_id.clone())
+                        .unwrap_or_else(|| "unknown_dirty".to_owned()),
+                ),
+                from_workspace_snapshot_id: None,
+                to_workspace_snapshot_id: None,
+            }));
+        }
+        return finalize_new_run(input.run_status, verdict, reasons, required_actions);
+    }
+
+    if input.policy.required_checks.is_empty() {
         reasons.push(ReadinessReason::NoVerificationRequired);
         return evaluation(
             input.run_status,
@@ -487,51 +526,6 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
             reasons,
             required_actions,
         );
-    }
-
-    let prior_passed = input
-        .verification_receipts
-        .iter()
-        .any(|receipt| receipt.check_status == ReceiptStatus::Succeeded);
-    if input.workspace_knowledge.is_unknown_dirty() {
-        let unknown_dirty_mutation = input
-            .mutations
-            .iter()
-            .find(|mutation| mutation.unknown_dirty);
-        if let Some(reason) =
-            unknown_dirty_mutation.and_then(WorkspaceMutationEvidence::source_readiness_reason)
-        {
-            reasons.push(reason);
-        }
-        let event_id = unknown_dirty_mutation.map(|mutation| mutation.event_id.clone());
-        reasons.push(ReadinessReason::WorkspaceUnknownDirty {
-            event_id: event_id.clone(),
-        });
-        required_actions.push(RequiredAction::ResolveUnknownDirty);
-        let verdict = if event_id.is_some() {
-            if prior_passed {
-                VerificationVerdict::Stale
-            } else {
-                VerificationVerdict::Inconclusive
-            }
-        } else {
-            VerificationVerdict::Inconclusive
-        };
-        if verdict == VerificationVerdict::Stale {
-            reasons.push(ReadinessReason::VerificationStale(VerificationStaleCause {
-                reason: VerificationStaleReason::UnknownDirty(
-                    input
-                        .mutations
-                        .iter()
-                        .find(|mutation| mutation.unknown_dirty)
-                        .map(|mutation| mutation.event_id.clone())
-                        .unwrap_or_else(|| "unknown_dirty".to_owned()),
-                ),
-                from_workspace_snapshot_id: None,
-                to_workspace_snapshot_id: None,
-            }));
-        }
-        return finalize_new_run(input.run_status, verdict, reasons, required_actions);
     }
 
     if let Some(stale_cause) = latest_stale_cause(input) {
@@ -726,41 +720,6 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
             )
         }
     }
-}
-
-fn missing_for_mutation(
-    input: &ReadinessInput,
-    mut reasons: Vec<ReadinessReason>,
-    mut required_actions: Vec<RequiredAction>,
-) -> ReadinessEvaluation {
-    if input.workspace_knowledge.is_unknown_dirty() {
-        let unknown_dirty_mutation = input
-            .mutations
-            .iter()
-            .find(|mutation| mutation.unknown_dirty);
-        if let Some(reason) =
-            unknown_dirty_mutation.and_then(WorkspaceMutationEvidence::source_readiness_reason)
-        {
-            reasons.push(reason);
-        }
-        reasons.push(ReadinessReason::WorkspaceUnknownDirty {
-            event_id: unknown_dirty_mutation.map(|mutation| mutation.event_id.clone()),
-        });
-        required_actions.push(RequiredAction::ResolveUnknownDirty);
-        return finalize_new_run(
-            input.run_status,
-            VerificationVerdict::Inconclusive,
-            reasons,
-            required_actions,
-        );
-    }
-    required_actions.push(RequiredAction::ProvideVerificationConfig);
-    finalize_new_run(
-        input.run_status,
-        VerificationVerdict::Missing,
-        reasons,
-        required_actions,
-    )
 }
 
 fn latest_stale_cause(input: &ReadinessInput) -> Option<VerificationStaleCause> {

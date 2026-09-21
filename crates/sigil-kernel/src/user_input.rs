@@ -7,9 +7,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AgentRouteId, AgentRouteStatus, AgentThreadId, ControlEntry, PlanId, Session, SessionLogEntry,
-    SessionRef, TaskId, ToolAccess, ToolArtifactSensitivity, ToolCategory, ToolExecutionStatus,
+    SessionRef, ToolAccess, ToolArtifactSensitivity, ToolCategory, ToolExecutionStatus,
     ToolPreviewCapability, ToolResult, ToolResultMeta, ToolResultRecordedV3, ToolSpec,
 };
+
+#[cfg(test)]
+use crate::TaskId;
 
 pub const USER_INPUT_SCHEMA_VERSION: u16 = 1;
 pub const AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION: u16 = 1;
@@ -23,6 +26,10 @@ pub const MAX_USER_INPUT_DESCRIPTION_CHARS: usize = 512;
 pub const MAX_USER_INPUT_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_USER_INPUT_ANSWER_BYTES: usize = 16 * 1024;
 
+fn default_user_input_required() -> bool {
+    true
+}
+
 /// Model-visible schema for the host-owned user-input suspension tool.
 ///
 /// Identity, lifecycle generation, source binding, allowed actions, and continuation ownership
@@ -30,29 +37,13 @@ pub const MAX_USER_INPUT_ANSWER_BYTES: usize = 16 * 1024;
 /// the exact assistant tool call before returning control to a product surface.
 #[must_use]
 pub fn request_user_input_tool_spec() -> ToolSpec {
-    let options_schema = json!({
-        "type": "array",
-        "minItems": 2,
-        "maxItems": MAX_USER_INPUT_OPTIONS,
-        "items": {
-            "type": "object",
-            "properties": {
-                "id": {"type": "string", "minLength": 1, "maxLength": 48},
-                "label": {"type": "string", "minLength": 1, "maxLength": 80},
-                "description": {"type": "string", "maxLength": 240}
-            },
-            "required": ["id", "label"],
-            "additionalProperties": false
-        }
-    });
     ToolSpec {
         name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
-        description: "Pause this run and ask the user for one to three missing decisions that are required before work can continue. Use only when the answer materially changes the implementation or safety boundary and cannot be discovered from the workspace. Keep questions short, mutually independent, and typed; do not ask for passwords, API keys, tokens, private keys, or other credentials. The host persists the request and resumes the same logical run after the user answers."
+        description: "Pause this run and ask the user for one to three missing decisions that are required before work can continue. Use only when the answer materially changes the implementation or safety boundary and cannot be discovered from the workspace. Each question has an id and question text; add options for a choice question and set multiple to true for multi-select. The host always permits a free-form answer. Do not ask for passwords, API keys, tokens, private keys, or other credentials. The host persists the request and resumes the same logical run after the user answers."
             .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "minLength": 1, "maxLength": MAX_USER_INPUT_PROMPT_CHARS},
                 "questions": {
                     "type": "array",
                     "minItems": 1,
@@ -61,70 +52,28 @@ pub fn request_user_input_tool_spec() -> ToolSpec {
                         "type": "object",
                         "properties": {
                             "id": {"type": "string", "minLength": 1, "maxLength": 48},
-                            "header": {"type": "string", "minLength": 1, "maxLength": 32},
                             "question": {"type": "string", "minLength": 1, "maxLength": 512},
                             "description": {"type": "string", "maxLength": MAX_USER_INPUT_DESCRIPTION_CHARS},
-                            "required": {"type": "boolean"},
-                            "field": {
-                                "oneOf": [
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "kind": {"const": "text"},
-                                            "multiline": {"type": "boolean"},
-                                            "max_chars": {"type": "integer", "minimum": 1, "maximum": MAX_USER_INPUT_TEXT_CHARS}
-                                        },
-                                        "required": ["kind", "multiline", "max_chars"],
-                                        "additionalProperties": false
+                            "options": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": MAX_USER_INPUT_OPTIONS,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+                                        "description": {"type": "string", "maxLength": 240}
                                     },
-                                    {
-                                        "type": "object",
-                                        "properties": {"kind": {"const": "number"}},
-                                        "required": ["kind"],
-                                        "additionalProperties": false
-                                    },
-                                    {
-                                        "type": "object",
-                                        "properties": {"kind": {"const": "integer"}},
-                                        "required": ["kind"],
-                                        "additionalProperties": false
-                                    },
-                                    {
-                                        "type": "object",
-                                        "properties": {"kind": {"const": "boolean"}},
-                                        "required": ["kind"],
-                                        "additionalProperties": false
-                                    },
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "kind": {"const": "single_select"},
-                                            "options": options_schema.clone(),
-                                            "allow_other": {"type": "boolean", "default": false}
-                                        },
-                                        "required": ["kind", "options"],
-                                        "additionalProperties": false
-                                    },
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "kind": {"const": "multi_select"},
-                                            "options": options_schema,
-                                            "max_selected": {"type": "integer", "minimum": 1, "maximum": MAX_USER_INPUT_OPTIONS}
-                                        },
-                                        "required": ["kind", "options", "max_selected"],
-                                        "additionalProperties": false
-                                    }
-                                ]
-                            }
+                                    "required": ["label"],
+                                }
+                            },
+                            "multiple": {"type": "boolean"}
                         },
-                        "required": ["id", "header", "question", "required", "field"],
-                        "additionalProperties": false
+                        "required": ["id", "question"],
                     }
                 }
             },
-            "required": ["prompt", "questions"],
-            "additionalProperties": false
+            "required": ["questions"],
         }),
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
@@ -214,7 +163,7 @@ impl UserInputClaimId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputIdentityV1 {
     pub session_scope_id: SessionScopeId,
     pub root_logical_run_id: LogicalRunId,
@@ -234,7 +183,7 @@ impl UserInputIdentityV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum UserInputSourceV1 {
     Agent,
     PlanReviewResearch {
@@ -244,9 +193,6 @@ pub enum UserInputSourceV1 {
     PlanRevision {
         base_plan_id: PlanId,
         base_plan_hash: String,
-    },
-    Planner {
-        task_id: TaskId,
     },
     Mcp {
         server_id: String,
@@ -260,17 +206,11 @@ impl UserInputSourceV1 {
     }
 
     pub fn starts_agent_continuation(&self) -> bool {
-        matches!(
-            self,
-            Self::Agent | Self::PlanReviewResearch { .. } | Self::Planner { .. }
-        )
+        matches!(self, Self::Agent | Self::PlanReviewResearch { .. })
     }
 
     fn counts_against_root_limit(&self) -> bool {
-        matches!(
-            self,
-            Self::Agent | Self::PlanReviewResearch { .. } | Self::Planner { .. }
-        )
+        matches!(self, Self::Agent | Self::PlanReviewResearch { .. })
     }
 
     fn validate(&self) -> Result<()> {
@@ -280,7 +220,6 @@ impl UserInputSourceV1 {
             Self::PlanRevision { base_plan_hash, .. } => {
                 validate_sha256("base plan hash", base_plan_hash)
             }
-            Self::Planner { .. } => Ok(()),
             Self::Mcp { server_id, call_id } => {
                 validate_bounded_text("MCP server id", server_id, 128, false)?;
                 validate_bounded_text("MCP call id", call_id, 128, false)
@@ -308,7 +247,7 @@ pub enum UserInputActionV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputOptionV1 {
     pub id: String,
     pub label: String,
@@ -328,68 +267,23 @@ impl UserInputOptionV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum UserInputFieldKindV1 {
-    Text {
-        multiline: bool,
-        max_chars: u32,
-    },
-    Number,
-    Integer,
-    Boolean,
-    SingleSelect {
-        options: Vec<UserInputOptionV1>,
-        #[serde(default)]
-        allow_other: bool,
-    },
-    MultiSelect {
-        options: Vec<UserInputOptionV1>,
-        max_selected: u32,
-    },
-}
-
-impl UserInputFieldKindV1 {
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Text { max_chars, .. } => {
-                if !(1..=MAX_USER_INPUT_TEXT_CHARS).contains(max_chars) {
-                    bail!("user input text max_chars is outside the supported range");
-                }
-            }
-            Self::Number | Self::Integer | Self::Boolean => {}
-            Self::SingleSelect { options, .. } => validate_options(options)?,
-            Self::MultiSelect {
-                options,
-                max_selected,
-            } => {
-                validate_options(options)?;
-                let max_selected = usize::try_from(*max_selected)
-                    .context("user input multi-select max exceeds usize")?;
-                if max_selected == 0 || max_selected > options.len() {
-                    bail!("user input multi-select max_selected is invalid");
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputQuestionV1 {
     pub id: String,
-    pub header: String,
     pub question: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default = "default_user_input_required")]
     pub required: bool,
-    pub field: UserInputFieldKindV1,
+    #[serde(default)]
+    pub options: Vec<UserInputOptionV1>,
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 impl UserInputQuestionV1 {
     fn validate(&self) -> Result<()> {
         validate_field_id("user input question id", &self.id)?;
-        validate_bounded_text("user input question header", &self.header, 32, false)?;
         validate_bounded_text(
             "user input question",
             &self.question,
@@ -404,12 +298,19 @@ impl UserInputQuestionV1 {
                 true,
             )?;
         }
-        self.field.validate()
+        if self.options.is_empty() {
+            if self.multiple {
+                bail!("text user input question must not enable multiple");
+            }
+        } else {
+            validate_options(&self.options)?;
+        }
+        Ok(())
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputContinuationBindingV1 {
     pub assistant_message_id: String,
     pub tool_call_id: String,
@@ -432,7 +333,7 @@ impl UserInputContinuationBindingV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputRequestV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -511,7 +412,7 @@ impl UserInputRequestV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputRequestedV1 {
     pub request: UserInputRequestV1,
     pub request_hash: String,
@@ -541,15 +442,6 @@ pub enum UserInputAnswerValueV1 {
     Text {
         value: String,
     },
-    Number {
-        value: String,
-    },
-    Integer {
-        value: i64,
-    },
-    Boolean {
-        value: bool,
-    },
     SingleSelect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         option_id: Option<String>,
@@ -558,11 +450,13 @@ pub enum UserInputAnswerValueV1 {
     },
     MultiSelect {
         option_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        other: Option<String>,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputAnswerV1 {
     pub question_id: String,
     pub value: UserInputAnswerValueV1,
@@ -596,7 +490,7 @@ impl UserInputDurableDecisionV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputDecisionAcceptedV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -745,7 +639,7 @@ impl UserInputDecisionAcceptedV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputContinuationClaimedV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -768,7 +662,7 @@ impl UserInputContinuationClaimedV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputContinuationStartedV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -800,7 +694,7 @@ pub enum UserInputContinuationReleaseReasonV1 {
 
 /// Durable proof that one continuation attempt may be retried without consuming the answer twice.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputContinuationReleasedV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -836,7 +730,7 @@ pub enum UserInputResolutionV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputResolvedV1 {
     pub schema_version: u16,
     pub identity: UserInputIdentityV1,
@@ -1332,7 +1226,7 @@ fn validate_requested_history<'a>(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputDecisionCommandV1 {
     pub identity: UserInputIdentityV1,
     pub request_hash: String,
@@ -1341,7 +1235,7 @@ pub struct UserInputDecisionCommandV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputDecisionReceiptV1 {
     pub request: PublicUserInputRequestV1,
     pub idempotent_replay: bool,
@@ -1567,7 +1461,7 @@ pub fn recoverable_user_input_decision_from_entries(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputContinuationPreparationV1 {
     pub request: PublicUserInputRequestV1,
     pub continuation: UserInputContinuationStartedV1,
@@ -1865,7 +1759,7 @@ pub enum PublicUserInputDecisionKindV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicUserInputAnswerReceiptV1 {
     pub command_id: UserInputCommandId,
     pub decision: PublicUserInputDecisionKindV1,
@@ -1876,7 +1770,7 @@ pub struct PublicUserInputAnswerReceiptV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicUserInputRequestV1 {
     pub identity: UserInputIdentityV1,
     pub request_hash: String,
@@ -1900,7 +1794,7 @@ pub struct PublicUserInputRequestV1 {
 /// reference needed to route an exact decision. Appending a terminal route update removes the
 /// request from root attention without copying the private answer into the parent session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct AgentUserInputRouteEntryV1 {
     pub schema_version: u16,
     pub route_id: AgentRouteId,
@@ -1934,11 +1828,8 @@ impl AgentUserInputRouteEntryV1 {
         if self.request.identity.source_thread_id != self.source_thread_id {
             bail!("agent user-input route source thread does not match its request identity");
         }
-        if !matches!(
-            self.request.source,
-            UserInputSourceV1::Agent | UserInputSourceV1::Planner { .. }
-        ) {
-            bail!("agent user-input route must reference an agent- or planner-owned request");
+        if !matches!(self.request.source, UserInputSourceV1::Agent) {
+            bail!("agent user-input route must reference an agent-owned request");
         }
         if !matches!(
             self.status,
@@ -2079,7 +1970,7 @@ fn route_status_is_terminal(status: AgentRouteStatus) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UserInputRequestRefV1 {
     pub identity: UserInputIdentityV1,
     pub request_hash: String,
@@ -2277,60 +2168,56 @@ fn validate_answer_value(
     question: &UserInputQuestionV1,
     answer: &UserInputAnswerValueV1,
 ) -> Result<()> {
-    match (&question.field, answer) {
-        (UserInputFieldKindV1::Text { max_chars, .. }, UserInputAnswerValueV1::Text { value }) => {
+    if question.options.is_empty() {
+        let UserInputAnswerValueV1::Text { value } = answer else {
+            bail!("text user input answer has the wrong kind");
+        };
+        validate_bounded_text(
+            "user input text answer",
+            value,
+            MAX_USER_INPUT_TEXT_CHARS as usize,
+            false,
+        )?;
+        return Ok(());
+    }
+
+    if question.multiple {
+        let UserInputAnswerValueV1::MultiSelect { option_ids, other } = answer else {
+            bail!("multi-select user input answer has the wrong kind");
+        };
+        let selected = option_ids.iter().collect::<BTreeSet<_>>();
+        if selected.is_empty()
+            || selected.len() != option_ids.len()
+            || selected.len() > question.options.len()
+            || selected
+                .iter()
+                .any(|id| !question.options.iter().any(|option| option.id == **id))
+        {
+            bail!("user input multi-select answer is invalid");
+        }
+        if let Some(other) = other {
             validate_bounded_text(
-                "user input text answer",
-                value,
-                usize::try_from(*max_chars).context("user input text bound exceeds usize")?,
-                !question.required,
+                "user input other answer",
+                other,
+                MAX_USER_INPUT_TEXT_CHARS as usize,
+                false,
             )?;
         }
-        (UserInputFieldKindV1::Number, UserInputAnswerValueV1::Number { value }) => {
-            validate_bounded_text("user input number answer", value, 64, false)?;
-            let parsed = value
-                .parse::<f64>()
-                .context("user input number answer is not numeric")?;
-            if !parsed.is_finite() {
-                bail!("user input number answer must be finite");
-            }
-        }
-        (UserInputFieldKindV1::Integer, UserInputAnswerValueV1::Integer { .. })
-        | (UserInputFieldKindV1::Boolean, UserInputAnswerValueV1::Boolean { .. }) => {}
-        (
-            UserInputFieldKindV1::SingleSelect {
-                options,
-                allow_other,
-            },
-            UserInputAnswerValueV1::SingleSelect { option_id, other },
-        ) => match (option_id, other) {
-            (Some(option_id), None) if options.iter().any(|option| option.id == *option_id) => {}
-            (None, Some(other)) if *allow_other => {
+    } else {
+        let UserInputAnswerValueV1::SingleSelect { option_id, other } = answer else {
+            bail!("single-select user input answer has the wrong kind");
+        };
+        match (option_id, other) {
+            (Some(option_id), None)
+                if question
+                    .options
+                    .iter()
+                    .any(|option| option.id == *option_id) => {}
+            (None, Some(other)) => {
                 validate_bounded_text("user input other answer", other, 512, false)?;
             }
             _ => bail!("user input single-select answer is invalid"),
-        },
-        (
-            UserInputFieldKindV1::MultiSelect {
-                options,
-                max_selected,
-            },
-            UserInputAnswerValueV1::MultiSelect { option_ids },
-        ) => {
-            let selected = option_ids.iter().collect::<BTreeSet<_>>();
-            if selected.is_empty()
-                || selected.len() != option_ids.len()
-                || selected.len()
-                    > usize::try_from(*max_selected)
-                        .context("user input multi-select bound exceeds usize")?
-                || selected
-                    .iter()
-                    .any(|id| !options.iter().any(|option| option.id == **id))
-            {
-                bail!("user input multi-select answer is invalid");
-            }
         }
-        _ => bail!("user input answer kind does not match the question"),
     }
     Ok(())
 }

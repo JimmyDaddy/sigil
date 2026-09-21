@@ -1565,6 +1565,7 @@ fn dispatch_status_from_agent_terminal(
 ) -> DispatchTraceStatus {
     match status {
         crate::AgentThreadTerminalStatus::Completed => DispatchTraceStatus::Completed,
+        crate::AgentThreadTerminalStatus::Blocked => DispatchTraceStatus::Blocked,
         crate::AgentThreadTerminalStatus::Failed => DispatchTraceStatus::Failed,
         crate::AgentThreadTerminalStatus::Cancelled => DispatchTraceStatus::Cancelled,
         crate::AgentThreadTerminalStatus::Interrupted => DispatchTraceStatus::Interrupted,

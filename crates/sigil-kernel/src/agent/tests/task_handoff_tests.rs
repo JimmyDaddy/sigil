@@ -17,12 +17,7 @@ fn direct_continuation_fixture() -> Result<(Session, TaskContinuationHandoffBind
         reason: None,
     }))?;
     session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
-        TaskDirectExecutionAdmittedV1::planner_fallback(
-            task_id.clone(),
-            objective,
-            "planner-attempt",
-            1,
-        ),
+        TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), objective, 1),
     ))?;
     let guidance = "continue the existing task";
     let message = ModelMessage::user(guidance);
@@ -36,9 +31,7 @@ fn direct_continuation_fixture() -> Result<(Session, TaskContinuationHandoffBind
     let binding = TaskContinuationHandoffBinding {
         task_id,
         source_turn,
-        plan_version: None,
         task_status: TaskRunStatus::Paused,
-        plan_status: None,
         effective_capability: AutomaticRouteCapability::DirectTask,
         policy_snapshot_hash: "policy-fixture".to_owned(),
         route_contract_fingerprint: "route-fixture".to_owned(),
@@ -49,6 +42,83 @@ fn direct_continuation_fixture() -> Result<(Session, TaskContinuationHandoffBind
         safe_guidance: safe.safe_prompt,
     };
     Ok((session, binding))
+}
+
+#[test]
+fn start_task_atomically_admits_direct_execution() -> Result<()> {
+    let mut session = Session::new("fixture", "fixture");
+    let objective = "inspect the repository and fix the reported issue";
+    let user_message = ModelMessage::user(objective);
+    let source_turn = ConversationTurnRef::new(
+        session.session_scope_id(),
+        user_message.id.clone(),
+        "task-handoff-run",
+    )?;
+    session.append_user_message(user_message)?;
+
+    let binding = TaskStartHandoffBinding {
+        handoff_id: crate::TaskHandoffId::new("start-task-admission")?,
+        task_id: TaskId::new("direct-task-admission")?,
+        source_turn,
+        parent_session_ref: crate::SessionRef::new_relative("parent.jsonl")?,
+        objective: objective.to_owned(),
+        policy_snapshot_hash: "sha256:policy".to_owned(),
+        route_contract_fingerprint: "sha256:route".to_owned(),
+        requested_at_ms: 1,
+        decided_at_ms: 2,
+    };
+    let call = ToolCall {
+        id: "call-start-task".to_owned(),
+        name: START_TASK_TOOL_NAME.to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let mut outcome = AgentRunOutcome::default();
+    let mut results = Vec::new();
+    let accepted = handle_start_task_call(
+        &mut session,
+        &mut crate::event::NoopEventHandler,
+        &mut outcome,
+        &call,
+        &binding,
+        "task-handoff-run",
+        &mut results,
+    )?
+    .expect("the exact host-bound handoff should be accepted");
+    assert_eq!(accepted.task_id, binding.task_id);
+
+    let task = session
+        .task_state_projection()
+        .tasks
+        .get(&binding.task_id)
+        .cloned()
+        .expect("accepted handoff should durably create its Task");
+    let admission = task
+        .direct_execution_admission
+        .expect("accepted handoff should durably admit direct execution");
+    admission.validate()?;
+    assert!(admission.matches_objective(objective));
+    assert_eq!(
+        admission.source,
+        TaskDirectExecutionAdmittedV1::task_request(binding.task_id.clone(), objective, 2).source
+    );
+
+    let task_run_index = session
+        .entries()
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskRun(task_run))
+                    if task_run.task_id == binding.task_id
+            )
+        })
+        .expect("TaskRun should be durable");
+    assert!(matches!(
+        session.entries().get(task_run_index + 1),
+        Some(SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(entry)))
+            if entry == &admission
+    ));
+    Ok(())
 }
 
 #[test]
@@ -73,7 +143,6 @@ fn direct_task_continuation_requires_no_executable_plan() -> Result<()> {
         )?;
         let accepted = result.expect("a direct admission must resume without an executable plan");
         assert_eq!(accepted.task_id, binding.task_id);
-        assert_eq!(accepted.plan_version, None);
         assert!(
             session
                 .entries()

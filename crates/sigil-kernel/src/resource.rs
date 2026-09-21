@@ -946,6 +946,10 @@ pub enum ManagedStorageSemanticOwnerV1 {
     DurableMemory(MemoryScopeClassV1),
     WorkspaceMutationState,
     ApplicationControlLog,
+    /// Rebuildable index of the canonical application command journal.
+    ApplicationCommandIndex,
+    /// Authority-owned immutable control-log recovery phase metadata.
+    ApplicationControlRecovery,
     PlanStore,
     SessionCatalog,
     ProviderConnectionState,

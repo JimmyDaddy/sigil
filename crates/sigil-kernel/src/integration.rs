@@ -1627,7 +1627,7 @@ impl IntegrationPlanState {
     /// promotion must be terminal-success and bind either a passed parent verification record or
     /// a projection-validated `NotApplicable` record for an exact no-check policy.
     #[must_use]
-    pub fn synthesis_ready_attempt(&self) -> Option<&IntegrationPromotionAttemptId> {
+    pub fn parent_verification_ready_attempt(&self) -> Option<&IntegrationPromotionAttemptId> {
         if self.inconsistent {
             return None;
         }

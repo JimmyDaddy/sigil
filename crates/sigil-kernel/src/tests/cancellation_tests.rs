@@ -150,6 +150,65 @@ fn durable_cancellation_recovery_is_interrupted_and_idempotent() -> anyhow::Resu
 }
 
 #[test]
+fn durable_cancellation_recovery_keeps_a_live_run_scope_open() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = crate::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = crate::Session::new("provider", "model").with_store(store.clone());
+    for (request_id, run_scope_id) in [("cancel-stale", "run-stale"), ("cancel-live", "run-live")] {
+        append_run_cancellation_requested(
+            &mut session,
+            &RunCancellationRequestedEntry {
+                request_id: request_id.to_owned(),
+                run_scope_id: run_scope_id.to_owned(),
+                target: RunCancellationTarget::Run,
+                reason: "user request".to_owned(),
+                requested_at_ms: 10,
+                quiescence_deadline_ms: 20,
+            },
+        )?;
+    }
+
+    let live_store =
+        store
+            .clone()
+            .with_live_run_cancellation_scopes(std::collections::BTreeSet::from([
+                "run-live".to_owned()
+            ]));
+    let _active_session = crate::Session::load_from_store("provider", "model", live_store)?;
+    let finalized_scopes = || -> anyhow::Result<std::collections::BTreeSet<String>> {
+        Ok(
+            crate::JsonlSessionStore::read_event_records(temp.path().join("session.jsonl"))?
+                .into_iter()
+                .filter_map(|record| {
+                    let payload = &record.stored_event().payload;
+                    (payload.get("record").and_then(serde_json::Value::as_str) == Some("finalized"))
+                        .then(|| {
+                            payload
+                                .get("run_scope_id")
+                                .and_then(serde_json::Value::as_str)
+                                .expect("finalized records carry their run scope")
+                                .to_owned()
+                        })
+                })
+                .collect(),
+        )
+    };
+    assert_eq!(
+        finalized_scopes()?,
+        std::collections::BTreeSet::from(["run-stale".to_owned()]),
+        "an expired deadline cannot recover a cancellation owned by a live run"
+    );
+
+    let _recovered_session = crate::Session::load_from_store("provider", "model", store)?;
+    assert_eq!(
+        finalized_scopes()?,
+        std::collections::BTreeSet::from(["run-live".to_owned(), "run-stale".to_owned()]),
+        "a later ownerless reopen still recovers the live scope after its owner is gone"
+    );
+    Ok(())
+}
+
+#[test]
 fn durable_cancellation_terminal_is_exactly_once() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let store = crate::JsonlSessionStore::new(temp.path().join("session.jsonl"))?;

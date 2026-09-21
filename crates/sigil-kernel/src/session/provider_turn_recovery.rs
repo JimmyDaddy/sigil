@@ -34,7 +34,7 @@ pub const DEFAULT_PROVIDER_TURN_MAX_CUMULATIVE_DELAY_MS: u64 = 120_000;
 
 /// Durable output settlement visible to the recovery policy.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderOutputStateV1 {
     None,
     TransientOnly,
@@ -43,7 +43,7 @@ pub enum ProviderOutputStateV1 {
 
 /// Exact settlement boundary for a local or hosted effect.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum EffectSettlementStateV1 {
     None,
     Settled,
@@ -56,7 +56,7 @@ pub enum EffectSettlementStateV1 {
 /// safe for a bounded retry while the current owner still holds and verifies it, but it must never
 /// be treated as restart-safe authority.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderTurnRequestMaterialAvailabilityV1 {
     DurableFrontierAndRuntimeInputs,
     ExactFrozenInCurrentProcess,
@@ -65,7 +65,7 @@ pub enum ProviderTurnRequestMaterialAvailabilityV1 {
 
 /// Recovery evidence derived from a terminal physical attempt; callers cannot invent booleans.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnRecoveryEvidenceV1 {
     pub logical_run_id: String,
     pub failed_physical_attempt_id: ProviderPhysicalAttemptId,
@@ -166,7 +166,7 @@ impl ProviderTurnRecoveryEvidenceV1 {
 
 /// Durable accounting for a logical provider-turn retry budget.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBudgetProjectionV1 {
     pub retry_count: u32,
     pub max_transport_retries: u32,
@@ -388,7 +388,7 @@ impl ProviderTurnRecoveryPolicyV1 {
 
 /// Direct durable authority that permits exactly one subsequent physical attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnRecoveryScheduledEntry {
     pub schema_version: u16,
     pub recovery_id: String,
@@ -408,7 +408,7 @@ pub struct ProviderTurnRecoveryScheduledEntry {
 /// Secret-free sidecar proving that live partial output from a failed physical attempt was
 /// deliberately excluded from the next request and replaced on product surfaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnPartialOutputDiscardedEntryV1 {
     pub schema_version: u16,
     pub logical_run_id: String,
@@ -420,7 +420,7 @@ pub struct ProviderTurnPartialOutputDiscardedEntryV1 {
 
 /// Product-safe replacement signal for one failed streaming attempt.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicProviderTurnPartialOutputDiscardedViewV1 {
     pub text_discarded: bool,
     pub reasoning_discarded: bool,
@@ -442,7 +442,7 @@ impl From<&ProviderTurnPartialOutputDiscardedEntryV1>
 /// Distinguishes an ordinary pre-output retry from a bounded retry that first discarded a live
 /// partial stream. Both retain the same physical-attempt and request-frontier authority.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderTurnRecoveryRetryKindV1 {
     Transport,
     PartialOutput,
@@ -450,7 +450,7 @@ pub enum ProviderTurnRecoveryRetryKindV1 {
 
 /// Durable consumption of one scheduled recovery before its matching physical attempt starts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnRecoveryStartedEntry {
     pub schema_version: u16,
     pub recovery_id: String,
@@ -463,7 +463,7 @@ pub struct ProviderTurnRecoveryStartedEntry {
 /// recovery schedule can dispatch. It intentionally carries opaque fingerprints rather than a
 /// URL, tenant, request body, or provider diagnostic.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnTransportFallbackSelectedEntryV1 {
     pub schema_version: u16,
     pub recovery_id: String,
@@ -476,7 +476,7 @@ pub struct ProviderTurnTransportFallbackSelectedEntryV1 {
 
 /// Durable terminal when a logical provider turn cannot automatically continue.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTurnRecoveryExhaustedEntry {
     pub schema_version: u16,
     pub logical_run_id: String,
@@ -487,7 +487,7 @@ pub struct ProviderTurnRecoveryExhaustedEntry {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderTurnRecoveryTerminalDispositionV1 {
     Blocked,
     Paused,
@@ -498,7 +498,7 @@ pub enum ProviderTurnRecoveryTerminalDispositionV1 {
 /// Product-safe lifecycle phase for one logical provider turn. It intentionally omits physical
 /// attempt ids, request digests, and provider diagnostics.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum PublicProviderTurnRecoveryPhaseV1 {
     Waiting,
     Recovering,
@@ -509,7 +509,7 @@ pub enum PublicProviderTurnRecoveryPhaseV1 {
 /// Typed user action advertised by a recovery projection. Dispatch remains an application-owned
 /// command and must revalidate the durable schedule/effect boundary before doing I/O.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum PublicProviderTurnRecoveryActionV1 {
     RetryNow,
     UpdateConnection,
@@ -519,7 +519,7 @@ pub enum PublicProviderTurnRecoveryActionV1 {
 
 /// Bounded recovery state shared by all product surfaces.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicProviderTurnRecoveryViewV1 {
     pub phase: PublicProviderTurnRecoveryPhaseV1,
     /// Count for the currently active retry class. This keeps the user-visible denominator

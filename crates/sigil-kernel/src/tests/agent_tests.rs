@@ -21,58 +21,109 @@ use std::os::unix::fs::symlink;
 
 use crate::session::SessionWriterFault;
 use crate::{
-    AgentRole, AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode,
-    AssistantMessageKind, AutoApproveHandler, AutomaticRouteCapability, BackgroundTaskHandle,
-    BackgroundTaskStatus, CONTINUE_EXISTING_TASK_TOOL_NAME,
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, CompactionConfig, CompletionRequest, ContextBodyRef,
+    AgentRunDisposition, AgentRunPurpose, ApprovalHandler, ApprovalMode, AssistantMessageKind,
+    AutoApproveHandler, AutomaticRouteCapability, BackgroundTaskHandle, BackgroundTaskStatus,
+    CONTINUE_EXISTING_TASK_TOOL_NAME, CompactionConfig, CompletionRequest, ContextBodyRef,
     ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
-    ControlEntry, ConversationInputQueueId, ConversationPurposeContext, ConversationRoute,
-    ConversationRouteReason, ConversationTurnRef, DurableEventType, EventHandler,
-    ExternalDirectoryConfig, ExternalDirectoryRule, ExternalEvidenceLevel, ExternalSourceRecord,
+    ControlEntry, ConversationPurposeContext, ConversationRoute, ConversationRouteReason,
+    ConversationTurnRef, DurableEventType, EventHandler, ExternalDirectoryConfig,
+    ExternalDirectoryRule, ExternalEvidenceLevel, ExternalSourceRecord,
     FrozenProviderRequestMaterial, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, MutationEventRecorder, PermissionConfig, PermissionDecision, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanId, PlanPermissionGrantedEntry,
-    PlanReviewHandoffBinding, PlanReviewPurposeContext, PreparedToolExecution,
-    PromotedConversationInput, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ProviderFailureClassV1, ProviderFailureObservationV1,
+    ModelMessage, MutationEventRecorder, PendingPlanHandoffBinding, PermissionConfig,
+    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanId,
+    PlanPermissionGrantedEntry, PlanReviewHandoffBinding, PlanReviewPurposeContext,
+    PreparedToolExecution, PromotedConversationInput, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ProviderFailureClassV1, ProviderFailureObservationV1,
     ProviderPhysicalAttemptOutcome, ProviderPhysicalAttemptProjection,
     ProviderPhysicalAttemptStartedEntry, ProviderPhysicalAttemptTerminalEntry,
     ProviderRequestRejection, ProviderTurnRecoveryEvidenceV1, ProviderTurnRecoveryPolicyV1,
-    ProviderWireStateV1, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
-    REQUEST_USER_INPUT_TOOL_NAME, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, RunCancellationOwner, RunEvent, RuntimeContextCandidates,
-    SUBMIT_PLAN_DRAFT_TOOL_NAME, SecretString, Session, SessionLogEntry, SessionRef,
-    SessionStreamRecord, SourceCacheStatus, SourceFreshness, TASK_GUIDANCE_APPLY_TOOL_NAME,
-    TASK_PLAN_UPDATE_TOOL_NAME, TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskContinuationHandoffBinding,
-    TaskGuidanceApplyReason, TaskGuidanceAssessmentContext, TaskHandoffId, TaskId,
-    TaskParticipantAttemptId, TaskParticipantContext, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskPlannerWorktreeAvailability, TaskPlanningHandoffBinding,
-    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolApprovalAllowSource, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolArtifactReadOutcome, ToolArtifactReadRecordedV1,
-    ToolArtifactRefV1, ToolArtifactSelectorV1, ToolCall, ToolCategory, ToolConcurrencyClass,
-    ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionId, ToolExecutionStatus,
-    ToolMutationTracking, ToolPreparation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolProgressEvent, ToolRegistry, ToolRestartPolicy, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats, UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration,
-    VerificationVerdict, VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
-    conversation_route_decision_id_for_source, conversation_route_routing_contract_material,
-    direct_conversation_continuation_prompt_contract_material, plan_review_attempt_id_for_review,
-    plan_review_id_for_source, plan_review_plan_id_for_attempt, plan_review_policy_snapshot_hash,
-    plan_text_hash, route_surface_tool_specs,
-    task_participant_finalization_prompt_contract_material,
-    task_participant_system_prompt_contract_material,
+    ProviderWireStateV1, REQUEST_PLAN_REVIEW_TOOL_NAME, REQUEST_USER_INPUT_TOOL_NAME,
+    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle,
+    RunCancellationOwner, RunEvent, RuntimeContextCandidates, START_TASK_TOOL_NAME, SecretString,
+    Session, SessionLogEntry, SessionRef, SessionStreamRecord, SourceCacheStatus, SourceFreshness,
+    TOOL_ARTIFACT_READ_SCHEMA_VERSION, TaskContinuationHandoffBinding,
+    TaskDirectExecutionAdmittedV1, TaskHandoffId, TaskId, TaskRoutingPolicy, TaskRunEntry,
+    TaskRunStatus, TaskStartHandoffBinding, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAllowSource, ToolApprovalAuditAction, ToolApprovalUserDecision,
+    ToolArtifactReadOutcome, ToolArtifactReadRecordedV1, ToolArtifactRefV1, ToolArtifactSelectorV1,
+    ToolCall, ToolCategory, ToolConcurrencyClass, ToolContext, ToolEgressAudit, ToolErrorKind,
+    ToolExecutionId, ToolExecutionStatus, ToolMutationTracking, ToolPreparation, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolProgressEvent, ToolRegistry, ToolRestartPolicy,
+    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
+    UserUrlCapabilityRegistrar, UserUrlCapabilityRegistration, VerificationVerdict,
+    VisibleCompletionState, WebUrlProvenanceKind, WorkspaceMutationDetected,
+    conversation_auto_execution_contract_material, conversation_route_decision_id_for_source,
+    plan_review_attempt_id_for_review, plan_review_id_for_source, plan_review_plan_id_for_attempt,
+    plan_review_policy_snapshot_hash, plan_text_hash,
 };
 
 use super::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
     AgentRunTerminalReason, AgentToolDelegate, FinalAnswerContext,
-    PendingConversationInputProvider, RoutingMicroturnEventFilter, build_task_step_checkpoint,
-    emit_tool_result,
+    PendingConversationInputProvider, emit_tool_result,
 };
+
+#[path = "agent_network_grant_tests.rs"]
+mod network_grants;
 
 #[path = "agent_coordinated_readiness_tests.rs"]
 mod coordinated_readiness;
+
+#[path = "agent_task_progress_tests.rs"]
+mod task_progress;
+
+#[path = "agent_auto_execution_tests.rs"]
+mod auto_execution;
+
+#[test]
+fn flat_request_user_input_arguments_allow_required_subset_and_ignore_unknown_superset() {
+    let parsed = super::user_input::parse_request_user_input_args(
+        r#"{"questions":[{"id":"scope","question":"Which scope?"},{"id":"mode","question":"Which modes?","multiple":true,"options":[{"label":"Fast"},{"label":"Safe"}]}]}"#,
+    )
+    .expect("flat arguments should parse with only required fields on the first question");
+    assert_eq!(
+        parsed.prompt,
+        "Please answer the following questions before continuing."
+    );
+    assert!(parsed.questions[0].options.is_empty());
+    assert!(parsed.questions[1].multiple);
+    assert_eq!(parsed.questions[1].options.len(), 2);
+
+    let strict_optional = super::user_input::parse_request_user_input_args(
+        r#"{"questions":[{"id":"scope","question":"Which scope?","multiple":null}]}"#,
+    )
+    .expect("strict provider optional bool encoding should normalize");
+    assert!(!strict_optional.questions[0].multiple);
+
+    let unknown = super::user_input::parse_request_user_input_args(
+        r#"{"questions":[{"id":"scope","question":"Which scope?","future":true}]}"#,
+    )
+    .expect("unknown fields are ignored while known fields are normalized");
+    assert_eq!(unknown.questions[0].id, "scope");
+}
+
+#[test]
+fn malformed_request_user_input_arguments_report_category_and_location() {
+    let error = super::user_input::parse_request_user_input_args(
+        r#"{"questions":[{"id":"scope","question":"x"}"#,
+    )
+    .expect_err("malformed JSON must be rejected");
+    let message = error.to_string();
+    assert!(message.contains("truncated JSON"));
+    assert!(message.contains("line"));
+    assert!(message.contains("column"));
+    assert!(message.contains("expected"));
+}
+
+#[test]
+fn request_user_input_schema_has_required_subset_and_no_polymorphic_field_union() {
+    let schema = crate::request_user_input_tool_spec().input_schema;
+    let question = &schema["properties"]["questions"]["items"];
+    assert_eq!(question["required"], serde_json::json!(["id", "question"]));
+    assert!(question["properties"].get("field").is_none());
+    assert!(question["properties"].get("options").is_some());
+    assert!(schema["properties"].get("prompt").is_none());
+}
 
 /// Host-shaped plan review binding for routing tests; identity is derived from the source turn.
 fn test_plan_review_handoff_binding(
@@ -374,10 +425,6 @@ struct CapturingTextProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
-struct CapturingRoutingProvider {
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-}
-
 struct PlanReviewRoutingProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -386,9 +433,38 @@ struct PlanReviewWithMemoryRoutingProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
 
-struct ChatDecisionRoutingProvider {
+struct ToolSideEffectProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
+
+#[derive(Default)]
+struct ToolRunFactsDelegate {
+    root_logical_run_id: Option<String>,
+    delegation_context: Option<crate::AgentDelegationRunContext>,
+}
+
+struct EvolvingToolFactsProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+    turns: AtomicUsize,
+}
+
+#[derive(Default)]
+struct EvolvingToolRunFactsDelegate;
+
+#[derive(Default)]
+struct SettlingToolRunFactsDelegate;
+
+struct SequencedFinalAnswerBlockerDelegate {
+    blockers: VecDeque<Option<String>>,
+    fallback: Option<String>,
+}
+
+struct ForegroundTerminalProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+    tool_completed: Arc<AtomicBool>,
+}
+
+struct WorkspaceMutationToolProvider;
 
 #[async_trait]
 impl Provider for PlanReviewRoutingProvider {
@@ -431,7 +507,7 @@ impl Provider for PlanReviewRoutingProvider {
 #[async_trait]
 impl Provider for PlanReviewWithMemoryRoutingProvider {
     fn name(&self) -> &str {
-        "mock-plan-review-with-memory-routing"
+        "mock-plan-review-after-memory"
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -442,111 +518,47 @@ impl Provider for PlanReviewWithMemoryRoutingProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
-        let memory_args = r#"{"statement":"When I say finish, create the commit."}"#;
-        let route_args = r#"{"reason_codes":["architectural_tradeoff"]}"#;
+        let turn = {
+            let mut captured = self.captured.lock().expect("captured requests lock");
+            captured.push(request);
+            captured.len()
+        };
+        let (id, name, args) = match turn {
+            1 => (
+                "call-remember-routing",
+                crate::REMEMBER_USER_PREFERENCE_TOOL_NAME,
+                r#"{"statement":"When I say finish, create the commit."}"#,
+            ),
+            2 => (
+                "call-plan-review-with-memory",
+                crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
+                r#"{"reason_codes":["architectural_tradeoff"]}"#,
+            ),
+            _ => anyhow::bail!("handoff should end the conversation after the second request"),
+        };
         Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ReasoningDelta(
-                "memory routing reasoning stays internal".to_owned(),
+                "ordinary memory reasoning".to_owned(),
             )),
             Ok(ProviderChunk::TextDelta(
-                "memory routing narrative stays internal".to_owned(),
+                "ordinary memory progress".to_owned(),
             )),
             Ok(ProviderChunk::ToolCallStart {
-                id: "call-plan-review-with-memory".to_owned(),
-                name: crate::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+                id: id.to_owned(),
+                name: name.to_owned(),
             }),
             Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-plan-review-with-memory".to_owned(),
-                delta: route_args.to_owned(),
+                id: id.to_owned(),
+                delta: args.to_owned(),
             }),
             Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-plan-review-with-memory".to_owned(),
-                name: crate::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
-                args_json: route_args.to_owned(),
-            })),
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-remember-routing".to_owned(),
-                name: crate::REMEMBER_USER_PREFERENCE_TOOL_NAME.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-remember-routing".to_owned(),
-                delta: memory_args.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-remember-routing".to_owned(),
-                name: crate::REMEMBER_USER_PREFERENCE_TOOL_NAME.to_owned(),
-                args_json: memory_args.to_owned(),
+                id: id.to_owned(),
+                name: name.to_owned(),
+                args_json: args.to_owned(),
             })),
             Ok(ProviderChunk::Done),
         ])))
     }
-}
-
-#[async_trait]
-impl Provider for ChatDecisionRoutingProvider {
-    fn name(&self) -> &str {
-        "mock-chat-decision-routing"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        WriteMockProvider.capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let is_routing_microturn = request
-            .tools
-            .iter()
-            .any(|tool| tool.name == crate::REQUEST_PLAN_REVIEW_TOOL_NAME);
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
-        if is_routing_microturn {
-            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::ReasoningDelta(
-                    "internal routing reasoning".to_owned(),
-                )),
-                Ok(ProviderChunk::TextDelta(
-                    "internal routing narrative".to_owned(),
-                )),
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-chat-decision".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-chat-decision".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-chat-decision".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ReasoningDelta(
-                "work reasoning is visible".to_owned(),
-            )),
-            Ok(ProviderChunk::TextDelta(
-                "queue promotion is a durable CAS promotion".to_owned(),
-            )),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-struct LateTaskHandoffProvider {
-    calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
@@ -590,215 +602,6 @@ impl Provider for CapturingTextProvider {
             Ok(ProviderChunk::Done),
         ])))
     }
-}
-
-#[async_trait]
-impl Provider for CapturingRoutingProvider {
-    fn name(&self) -> &str {
-        "mock-capturing-routing"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        CapturingTextProvider {
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
-        .capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let routing_microturn = request
-            .tools
-            .iter()
-            .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME);
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
-        if routing_microturn {
-            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-routing-side-effect".to_owned(),
-                    name: "handoff_side_effect".to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-routing-side-effect".to_owned(),
-                    delta: "{}".to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-routing-side-effect".to_owned(),
-                    name: "handoff_side_effect".to_owned(),
-                    args_json: "{}".to_owned(),
-                })),
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-continue-routing".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-continue-routing".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-continue-routing".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta("captured".to_owned())),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-#[async_trait]
-impl Provider for LateTaskHandoffProvider {
-    fn name(&self) -> &str {
-        "mock-late-task-handoff"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        CapturingTextProvider {
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
-        .capabilities()
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
-        if turn == 0 {
-            let args = r#"{"reason":"does_not_meet_task_planning_criteria"}"#;
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-continue-routing".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-continue-routing".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-continue-routing".to_owned(),
-                    name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        if turn == 1 {
-            let args = r#"{"reason_codes":["cross_layer"]}"#;
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-late-handoff".to_owned(),
-                    name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-late-handoff".to_owned(),
-                    delta: args.to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-late-handoff".to_owned(),
-                    name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-                    args_json: args.to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta("ordinary answer".to_owned())),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-struct DegradingRoutingProvider {
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl Provider for DegradingRoutingProvider {
-    fn name(&self) -> &str {
-        "mock-degrading-routing"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        CapturingTextProvider {
-            captured: Arc::new(Mutex::new(Vec::new())),
-        }
-        .capabilities()
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let turn = self.calls.fetch_add(1, Ordering::SeqCst);
-        if turn < 2 {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta("captured".to_owned())),
-                Ok(ProviderChunk::ToolCallStart {
-                    id: "call-invalid-routing-tool".to_owned(),
-                    name: "handoff_side_effect".to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallArgsDelta {
-                    id: "call-invalid-routing-tool".to_owned(),
-                    delta: "{}".to_owned(),
-                }),
-                Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: "call-invalid-routing-tool".to_owned(),
-                    name: "handoff_side_effect".to_owned(),
-                    args_json: "{}".to_owned(),
-                })),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::TextDelta("final answer".to_owned())),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-struct ToolSideEffectProvider {
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-}
-#[derive(Default)]
-struct ToolRunFactsDelegate {
-    root_logical_run_id: Option<String>,
-}
-struct EvolvingToolFactsProvider {
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-    turns: AtomicUsize,
-}
-#[derive(Default)]
-struct EvolvingToolRunFactsDelegate;
-#[derive(Default)]
-struct SettlingToolRunFactsDelegate;
-struct SequencedFinalAnswerBlockerDelegate {
-    blockers: VecDeque<Option<String>>,
-    fallback: Option<String>,
-}
-struct ForegroundTerminalProvider {
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-    tool_completed: Arc<AtomicBool>,
-}
-struct WorkspaceMutationToolProvider;
-struct PostMutationReadLoopProvider {
-    calls: Arc<AtomicUsize>,
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-}
-struct RepeatedReadLoopProvider {
-    calls: Arc<AtomicUsize>,
-    captured: Arc<Mutex<Vec<CompletionRequest>>>,
-    finalization_text: Option<String>,
 }
 
 #[async_trait]
@@ -898,6 +701,13 @@ impl Provider for EvolvingToolFactsProvider {
 impl AgentToolDelegate for ToolRunFactsDelegate {
     fn set_root_logical_run_id(&mut self, logical_run_id: Option<&str>) {
         self.root_logical_run_id = logical_run_id.map(str::to_owned);
+    }
+
+    fn set_agent_delegation_run_context(
+        &mut self,
+        context: Option<&crate::AgentDelegationRunContext>,
+    ) {
+        self.delegation_context = context.cloned();
     }
 
     async fn handle_agent_tool_call(
@@ -1181,114 +991,6 @@ impl Provider for WorkspaceMutationToolProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
-    }
-}
-
-#[async_trait]
-impl Provider for PostMutationReadLoopProvider {
-    fn name(&self) -> &str {
-        "mock-post-mutation-read-loop"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        MockProvider.capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
-        let tools_disabled = request.tools.is_empty();
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
-        if tools_disabled {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta(
-                    "mutation complete after bounded inspection".to_owned(),
-                )),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-
-        let (name, args_json) = if call_index == 0 {
-            ("workspace_mutation", "{}")
-        } else {
-            ("echo", r#"{"value":"inspect again"}"#)
-        };
-        let call_id = format!("call-post-mutation-{call_index}");
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: call_id.clone(),
-                name: name.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: call_id.clone(),
-                delta: args_json.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: call_id,
-                name: name.to_owned(),
-                args_json: args_json.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-#[async_trait]
-impl Provider for RepeatedReadLoopProvider {
-    fn name(&self) -> &str {
-        "mock-repeated-read-loop"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        MockProvider.capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
-        let tools_disabled = request.tools.is_empty();
-        self.captured
-            .lock()
-            .expect("captured requests lock should not be poisoned")
-            .push(request);
-        if tools_disabled {
-            let mut chunks = Vec::new();
-            if let Some(text) = self.finalization_text.as_deref() {
-                if !text.is_empty() {
-                    chunks.push(Ok(ProviderChunk::TextDelta(text.to_owned())));
-                }
-            } else {
-                chunks.push(Ok(ProviderChunk::TextDelta(
-                    "bounded result after repeated analysis".to_owned(),
-                )));
-            }
-            chunks.push(Ok(ProviderChunk::Done));
-            return Ok(Box::pin(stream::iter(chunks)));
-        }
-        let call_id = format!("call-repeated-read-{call_index}");
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: call_id.clone(),
-                name: "echo".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: call_id.clone(),
-                delta: r#"{"value":"same semantic read"}"#.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: call_id,
-                name: "echo".to_owned(),
-                args_json: r#"{"value":"same semantic read"}"#.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
     }
 }
 
@@ -2594,81 +2296,6 @@ impl EventHandler for RecordingEventHandler {
     }
 }
 
-#[derive(Default)]
-struct CommitControlsRecordingEventHandler {
-    events: Vec<RunEvent>,
-    committed_batches: Vec<Vec<ControlEntry>>,
-    live_attempts: Vec<String>,
-}
-
-impl EventHandler for CommitControlsRecordingEventHandler {
-    fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
-        self.live_attempts.push(physical_attempt_id.to_owned());
-        Ok(())
-    }
-
-    fn handle(&mut self, event: RunEvent) -> Result<()> {
-        self.events.push(event);
-        Ok(())
-    }
-
-    fn commit_controls(
-        &mut self,
-        session: &mut Session,
-        controls: Vec<ControlEntry>,
-    ) -> Result<Vec<crate::StoredEvent>> {
-        self.committed_batches.push(controls.clone());
-        let events = session.append_controls_with_events(controls.clone())?;
-        for control in controls {
-            self.handle(RunEvent::Control(control))?;
-        }
-        Ok(events)
-    }
-}
-
-#[test]
-fn routing_microturn_filter_preserves_attempt_identity_and_content_filtering() -> Result<()> {
-    let mut inner = CommitControlsRecordingEventHandler::default();
-    for (suppressed, attempt) in [(true, "routing-attempt"), (false, "visible-attempt")] {
-        let mut filter = RoutingMicroturnEventFilter::new(&mut inner, suppressed);
-        filter.begin_live_attempt(attempt)?;
-        filter.handle(RunEvent::TextDelta(attempt.to_owned()))?;
-    }
-    assert_eq!(inner.live_attempts, ["routing-attempt", "visible-attempt"]);
-    assert!(
-        matches!(inner.events.as_slice(), [RunEvent::TextDelta(text)] if text == "visible-attempt")
-    );
-    Ok(())
-}
-
-#[test]
-fn routing_microturn_filter_forwards_control_commits_to_its_inner_handler() -> Result<()> {
-    let mut session = Session::new("mock-routing-filter", "mock-model");
-    let mut inner = CommitControlsRecordingEventHandler::default();
-    {
-        let mut filter = RoutingMicroturnEventFilter::new(&mut inner, true);
-        filter.commit_controls(
-            &mut session,
-            vec![ControlEntry::Note {
-                kind: "routing_control".to_owned(),
-                data: json!({"source": "test"}),
-            }],
-        )?;
-    }
-
-    assert_eq!(inner.committed_batches.len(), 1);
-    assert!(matches!(
-        inner.committed_batches[0].as_slice(),
-        [ControlEntry::Note { kind, data }]
-            if kind == "routing_control" && data["source"] == "test"
-    ));
-    assert!(matches!(
-        session.entries(),
-        [SessionLogEntry::Control(ControlEntry::Note { kind, .. })] if kind == "routing_control"
-    ));
-    Ok(())
-}
-
 struct SessionReadLockingEventHandler {
     session_path: PathBuf,
     shared_lock: Option<std::fs::File>,
@@ -3785,10 +3412,19 @@ async fn agent_tool_delegate_receives_root_logical_run_identity() -> Result<()> 
     let mut approval_handler = AutoApproveHandler;
     let mut delegate = ToolRunFactsDelegate::default();
 
+    let task_id = TaskId::new("direct-delegation-context")?;
     agent
         .run_with_approval_input_and_agent_delegate(
             &mut session,
-            AgentRunInput::user("delegate").with_logical_run_id("root-logical-run-for-agent-tool"),
+            AgentRunInput::user("delegate")
+                .with_run_purpose(AgentRunPurpose::TaskDirectExecution(
+                    crate::TaskDirectExecutionContext {
+                        task_id: task_id.clone(),
+                        admission_id: "admission-direct-delegation-context".to_owned(),
+                        attempt_id: "attempt-direct-delegation-context".to_owned(),
+                    },
+                ))
+                .with_logical_run_id("root-logical-run-for-agent-tool"),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
                 max_turns: Some(4),
@@ -3812,6 +3448,13 @@ async fn agent_tool_delegate_receives_root_logical_run_identity() -> Result<()> 
     assert_eq!(
         delegate.root_logical_run_id.as_deref(),
         Some("root-logical-run-for-agent-tool")
+    );
+    assert_eq!(
+        delegate
+            .delegation_context
+            .as_ref()
+            .map(|context| &context.authority),
+        Some(&crate::DelegationAuthority::DirectTask { task_id })
     );
     Ok(())
 }
@@ -5997,272 +5640,6 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
 }
 
 #[tokio::test]
-async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
-    let stream_calls = Arc::new(AtomicUsize::new(0));
-    let agent = Agent::new(
-        PlanUpdateProvider {
-            valid: true,
-            stream_calls: Some(Arc::clone(&stream_calls)),
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-plan", "mock-model");
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
-                task_id: TaskId::new("task_1")?,
-                max_plan_steps: 4,
-                max_plan_versions: 1,
-                worktree_availability:
-                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-            }),
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(
-        output.result.final_text,
-        "task plan accepted; orchestration will continue"
-    );
-    assert_eq!(output.result.final_message_id, None);
-    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(output.outcome.tool_errors.len(), 0);
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-                if plan.task_id.as_str() == "task_1"
-                    && plan.plan_version == 1
-                    && plan.status == TaskPlanStatus::Accepted
-                    && plan.steps.len() == 1
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.call_id == "call-plan-1"
-                    && execution.tool_name == TASK_PLAN_UPDATE_TOOL_NAME
-                    && execution.status == ToolExecutionStatus::Started
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.call_id == "call-plan-1"
-                    && execution.tool_name == TASK_PLAN_UPDATE_TOOL_NAME
-                    && execution.status == ToolExecutionStatus::Completed
-                    && execution.model_content_hash.is_some()
-        )
-    }));
-    Ok(())
-}
-
-fn task_guidance_assessment_context() -> Result<TaskGuidanceAssessmentContext> {
-    let task_id = TaskId::new("task_1")?;
-    let step_id = TaskStepId::new("step_1")?;
-    Ok(TaskGuidanceAssessmentContext {
-        queue_id: ConversationInputQueueId::new("queue_1")?,
-        task_id: task_id.clone(),
-        plan_version: 2,
-        dispatch_run_id: "dispatch_1".to_owned(),
-        accepted_plan: TaskPlanEntry {
-            task_id,
-            plan_version: 2,
-            status: TaskPlanStatus::Accepted,
-            steps: vec![TaskStepSpec {
-                step_id: step_id.clone(),
-                title: "Inspect current implementation".to_owned(),
-                display_name: None,
-                detail: None,
-                role: AgentRole::Executor,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: None,
-                isolation: None,
-            }],
-            reason: Some("current accepted plan".to_owned()),
-        },
-        eligible_pending_step_ids: vec![step_id],
-    })
-}
-
-#[tokio::test]
-async fn task_guidance_semantics_are_selected_by_model_tool_call() -> Result<()> {
-    let observed_tools = Arc::new(Mutex::new(Vec::new()));
-    let agent = Agent::new(
-        GuidanceDecisionProvider {
-            decision: GuidanceDecision::Apply,
-            observed_tools: Arc::clone(&observed_tools),
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-guidance", "mock-model");
-    let mut handler = CommitControlsRecordingEventHandler::default();
-    let exact_guidance = "请把验证顺序放到实现之前，而不是扩大任务范围";
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(exact_guidance)])
-                .with_task_plan_update(TaskPlanUpdateContext {
-                    task_id: TaskId::new("task_1")?,
-                    max_plan_steps: 4,
-                    max_plan_versions: 3,
-                    worktree_availability:
-                        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-                })
-                .with_task_guidance_assessment(task_guidance_assessment_context()?),
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(2),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::TaskPlanAccepted);
-    let observed_tools = observed_tools
-        .lock()
-        .expect("observed tools lock should not be poisoned");
-    assert!(
-        observed_tools
-            .iter()
-            .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
-    );
-    assert!(
-        observed_tools
-            .iter()
-            .any(|name| name == TASK_PLAN_UPDATE_TOOL_NAME)
-    );
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied))
-                if applied.queue_id.as_str() == "queue_1"
-                    && applied.plan_version == 2
-                    && applied.reason == TaskGuidanceApplyReason::PrioritizesPendingStep
-                    && applied.target_step_ids
-                        == vec![TaskStepId::new("step_1").expect("valid step id")]
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-                if plan.plan_version == 2 && plan.status == TaskPlanStatus::Accepted
-        )
-    }));
-    assert!(handler.committed_batches.iter().any(|controls| {
-        matches!(
-            controls.as_slice(),
-            [ControlEntry::TaskGuidanceApplied(_), ControlEntry::TaskPlan(plan)]
-                if plan.plan_version == 2 && plan.status == TaskPlanStatus::Accepted
-        )
-    }));
-    let applied = session
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(applied)) => Some(applied),
-            _ => None,
-        })
-        .expect("model apply decision should be durable");
-    assert!(!serde_json::to_string(applied)?.contains(exact_guidance));
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_guidance_model_can_choose_a_new_plan_version() -> Result<()> {
-    let observed_tools = Arc::new(Mutex::new(Vec::new()));
-    let agent = Agent::new(
-        GuidanceDecisionProvider {
-            decision: GuidanceDecision::Replan,
-            observed_tools,
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-guidance-replan", "mock-model");
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                "新增一个独立安全审查步骤",
-            )])
-            .with_task_plan_update(TaskPlanUpdateContext {
-                task_id: TaskId::new("task_1")?,
-                max_plan_steps: 4,
-                max_plan_versions: 3,
-                worktree_availability:
-                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-            })
-            .with_task_guidance_assessment(task_guidance_assessment_context()?),
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(2),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::TaskPlanAccepted);
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
-                if plan.plan_version == 3 && plan.status == TaskPlanStatus::Accepted
-        )
-    }));
-    assert!(!session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskGuidanceApplied(_))
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
 async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let executions = Arc::new(AtomicUsize::new(0));
@@ -6271,7 +5648,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
         executions: Arc::clone(&executions),
     }));
     let agent = Agent::new(
-        CapturingRoutingProvider {
+        CapturingTextProvider {
             captured: Arc::clone(&captured),
         },
         tools,
@@ -6300,7 +5677,7 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
                     writable_memory_routing: false,
                     task_continuation: None,
                     plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
+                    task_handoff: Some(TaskStartHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-semantic-routing")?,
                         task_id: TaskId::new("task-semantic-routing")?,
                         source_turn,
@@ -6340,13 +5717,14 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
     let requests = captured
         .lock()
         .expect("captured requests lock should not be poisoned");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     let request = &requests[0];
     let routing_index = request
         .messages
         .iter()
         .position(|message| {
-            message.content.as_deref() == Some(conversation_route_routing_contract_material())
+            message.content.as_deref()
+                == Some(crate::conversation_auto_execution_contract_material())
         })
         .expect("automatic routing request should include the semantic routing policy");
     let user_index = request
@@ -6355,60 +5733,16 @@ async fn automatic_task_routing_exposes_semantic_policy_before_the_user_turn() -
         .position(|message| message.content.as_deref() == Some(prompt))
         .expect("request should include the user turn");
     assert!(routing_index < user_index);
-    assert_eq!(request.tools.len(), 3);
-    assert!(
-        request
-            .tools
-            .iter()
-            .any(|tool| tool.name == REQUEST_TASK_PLANNING_TOOL_NAME)
-    );
-    assert!(
-        request
-            .tools
-            .iter()
-            .any(|tool| tool.name == crate::REQUEST_PLAN_REVIEW_TOOL_NAME)
-    );
-    assert!(
-        request
-            .tools
-            .iter()
-            .any(|tool| tool.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME)
-    );
-    assert!(requests[1].tools.iter().all(|tool| {
-        tool.name != REQUEST_TASK_PLANNING_TOOL_NAME
-            && tool.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-    }));
-    assert!(requests[1].messages.iter().any(|message| {
-        message.content.as_deref()
-            == Some(direct_conversation_continuation_prompt_contract_material())
-    }));
+    let names = request
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(names.contains("handoff_side_effect"));
+    assert!(names.contains(REQUEST_USER_INPUT_TOOL_NAME));
+    assert!(names.contains(START_TASK_TOOL_NAME));
+    assert!(names.contains(REQUEST_PLAN_REVIEW_TOOL_NAME));
     assert_eq!(executions.load(Ordering::SeqCst), 0);
-    assert!(handler.events.iter().all(|event| {
-        !matches!(
-            event,
-            RunEvent::ToolCallStarted(call)
-                | RunEvent::ToolCallCompleted(call)
-                if matches!(
-                    call.id.as_str(),
-                    "call-routing-side-effect" | "call-continue-routing"
-                )
-        ) && !matches!(
-            event,
-            RunEvent::ToolResult(result)
-                if matches!(
-                    result.call_id.as_str(),
-                    "call-routing-side-effect" | "call-continue-routing"
-                )
-        ) && !matches!(
-            event,
-            RunEvent::Notice(message) if message.contains("routing")
-        )
-    }));
-    assert!(
-        settled_tool_results(&session)
-            .iter()
-            .any(|(call_id, _)| call_id == "call-routing-side-effect")
-    );
     Ok(())
 }
 
@@ -6417,7 +5751,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
     let root = tempfile::tempdir()?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
-        CapturingRoutingProvider {
+        CapturingTextProvider {
             captured: Arc::clone(&captured),
         },
         ToolRegistry::new(),
@@ -6452,13 +5786,19 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
     let request = session.build_pre_turn_candidate_request(
         root.path(),
         &options.memory_config,
-        route_surface_tool_specs(AutomaticRouteCapability::DirectTask),
+        crate::conversation_tool_specs_for_bound_context(
+            Vec::new(),
+            AutomaticRouteCapability::DirectTask,
+            false,
+            false,
+            false,
+        ),
         None,
         options.reasoning_effort.clone(),
         None,
         None,
         &[
-            ModelMessage::system(conversation_route_routing_contract_material()),
+            ModelMessage::system(crate::conversation_auto_execution_contract_material()),
             exact_user,
         ],
         RuntimeContextCandidates::default(),
@@ -6483,7 +5823,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
                 writable_memory_routing: false,
                 task_continuation: None,
                 plan_review: Some(test_plan_review_handoff_binding(&source_turn, safe_prompt)),
-                task_handoff: Some(TaskPlanningHandoffBinding {
+                task_handoff: Some(TaskStartHandoffBinding {
                     handoff_id: TaskHandoffId::new("handoff-frozen-routing")?,
                     task_id: TaskId::new("task-frozen-routing")?,
                     source_turn,
@@ -6507,7 +5847,7 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
     let requests = captured
         .lock()
         .expect("captured requests lock should not be poisoned");
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0]
             .messages
@@ -6517,26 +5857,24 @@ async fn automatic_task_routing_accepts_only_an_exact_frozen_routing_candidate()
         Some(exact_prompt)
     );
     assert_eq!(
-        requests[0]
-            .tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
-            REQUEST_TASK_PLANNING_TOOL_NAME,
-            CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-        ]
+        serde_json::to_value(&requests[0].tools)?,
+        serde_json::to_value(crate::conversation_tool_specs_for_bound_context(
+            Vec::new(),
+            AutomaticRouteCapability::DirectTask,
+            false,
+            false,
+            false
+        ))?
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Result<()> {
+async fn automatic_task_routing_rejects_a_frozen_incomplete_tool_request() -> Result<()> {
     let root = tempfile::tempdir()?;
     let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
-        CapturingRoutingProvider {
+        CapturingTextProvider {
             captured: Arc::clone(&captured),
         },
         ToolRegistry::new(),
@@ -6573,7 +5911,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
                 writable_memory_routing: false,
                 task_continuation: None,
                 plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                task_handoff: Some(TaskPlanningHandoffBinding {
+                task_handoff: Some(TaskStartHandoffBinding {
                     handoff_id: TaskHandoffId::new("handoff-invalid-frozen-routing")?,
                     task_id: TaskId::new("task-invalid-frozen-routing")?,
                     source_turn,
@@ -6610,9 +5948,11 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
             &mut handler,
         )
         .await
-        .expect_err("ordinary frozen request must not bypass routing-only materialization");
+        .expect_err(
+            "ordinary frozen request must not bypass automatic conversation materialization",
+        );
 
-    assert!(error.to_string().contains("automatic routing"));
+    assert!(error.to_string().contains("automatic conversation"));
     assert!(
         captured
             .lock()
@@ -6623,7 +5963,7 @@ async fn automatic_task_routing_rejects_a_frozen_ordinary_tool_request() -> Resu
 }
 
 #[tokio::test]
-async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<()> {
+async fn direct_task_system_contract_precedes_the_goal() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
         CapturingTextProvider {
@@ -6633,76 +5973,17 @@ async fn task_participant_system_contract_precedes_the_step_prompt() -> Result<(
     );
     let mut session = Session::new("mock-capturing", "mock-model");
     let step_prompt = "Edit src/lib.rs for the accepted parser step.";
-    let input =
-        AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(step_prompt)])
-            .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-                task_id: TaskId::new("task-participant-contract")?,
-                plan_version: 1,
-                step_id: TaskStepId::new("parser-step")?,
-                attempt_id: TaskParticipantAttemptId::new("participant-attempt-1")?,
-            }));
-    let mut handler = crate::event::NoopEventHandler;
-
-    agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(2),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    let requests = captured
-        .lock()
-        .expect("captured requests lock should not be poisoned");
-    let request = requests.first().expect("participant request");
-    let contract_index = request
-        .messages
-        .iter()
-        .position(|message| {
-            message.content.as_deref() == Some(task_participant_system_prompt_contract_material())
-        })
-        .expect("participant request should include its system contract");
-    let prompt_index = request
-        .messages
-        .iter()
-        .position(|message| message.content.as_deref() == Some(step_prompt))
-        .expect("participant request should include the step prompt");
-    assert!(contract_index < prompt_index);
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_direct_system_contract_precedes_the_goal_without_participant_contract() -> Result<()>
-{
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let agent = Agent::new(
-        CapturingTextProvider {
-            captured: Arc::clone(&captured),
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-capturing", "mock-model");
-    let step_prompt = "Edit src/lib.rs for the accepted parser step.";
+    let admission = task_progress::admit_direct_fixture(
+        &mut session,
+        "task-participant-contract",
+        step_prompt,
+    )?;
     let input =
         AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(step_prompt)])
             .with_run_purpose(AgentRunPurpose::TaskDirectExecution(
                 crate::TaskDirectExecutionContext {
                     task_id: TaskId::new("task-participant-contract")?,
-                    admission_id: "direct-admission-1".to_owned(),
+                    admission_id: admission.admission_id,
                     attempt_id: "direct-attempt-1".to_owned(),
                 },
             ));
@@ -6733,7 +6014,7 @@ async fn task_direct_system_contract_precedes_the_goal_without_participant_contr
     let requests = captured
         .lock()
         .expect("captured requests lock should not be poisoned");
-    let request = requests.first().expect("participant request");
+    let request = requests.first().expect("direct Task request");
     let contract_index = request
         .messages
         .iter()
@@ -6741,297 +6022,13 @@ async fn task_direct_system_contract_precedes_the_goal_without_participant_contr
             message.content.as_deref()
                 == Some(crate::task_direct_execution_system_prompt_contract_material())
         })
-        .expect("participant request should include its system contract");
+        .expect("direct Task request should include its system contract");
     let prompt_index = request
         .messages
         .iter()
         .position(|message| message.content.as_deref() == Some(step_prompt))
-        .expect("participant request should include the step prompt");
+        .expect("direct Task request should include its objective");
     assert!(contract_index < prompt_index);
-    assert!(!request.messages.iter().any(|message| {
-        message.content.as_deref() == Some(task_participant_system_prompt_contract_material())
-    }));
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_participant_repeated_reads_use_only_configured_turn_limit() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace)?;
-    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WorkspaceMutatingCustomTool));
-    registry.register(Arc::new(EchoTool));
-    let agent = Agent::new(
-        PostMutationReadLoopProvider {
-            calls: Arc::clone(&calls),
-            captured: Arc::clone(&captured),
-        },
-        registry,
-    );
-    let mut session = Session::new("mock-post-mutation-read-loop", "mock-model").with_store(store);
-    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        "Apply the accepted mutation and return the result.",
-    )])
-    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-        task_id: TaskId::new("task-convergence")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("write-step")?,
-        attempt_id: TaskParticipantAttemptId::new("participant-convergence-1")?,
-    }));
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: workspace,
-                max_turns: Some(20),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::FinalAnswerBlocked
-    );
-    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
-    assert!(output.result.final_message_id.is_none());
-    assert!(!output.result.final_text.is_empty());
-    assert_eq!(
-        output.result.tool_calls, 19,
-        "the configured final reporting turn follows one mutation and eighteen reads"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 20);
-    let requests = captured.lock().expect("requests");
-    assert!(
-        requests[..19]
-            .iter()
-            .all(|request| !request.tools.is_empty())
-    );
-    assert!(requests[19].tools.is_empty());
-    assert_eq!(
-        output.result.final_text,
-        "mutation complete after bounded inspection"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_participant_repeated_frontier_respects_configured_max_turns() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(EchoTool));
-    let agent = Agent::new(
-        RepeatedReadLoopProvider {
-            calls: Arc::clone(&calls),
-            captured: Arc::clone(&captured),
-            finalization_text: None,
-        },
-        registry,
-    );
-    let mut session = Session::new("mock-repeated-read-loop", "mock-model").with_store(store);
-    let attempt_id = TaskParticipantAttemptId::new("participant-repeated-frontier-1")?;
-    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        "Inspect the accepted step and return a bounded result.",
-    )])
-    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-        task_id: TaskId::new("task-repeated-frontier")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("read-step")?,
-        attempt_id: attempt_id.clone(),
-    }));
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: temp.path().to_path_buf(),
-                max_turns: Some(20),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::MaxTurns
-    );
-    assert_eq!(output.disposition, AgentRunDisposition::Interrupted);
-    assert!(output.result.final_message_id.is_none());
-    assert!(output.result.final_text.is_empty());
-    assert_eq!(output.result.tool_calls, 20);
-    assert_eq!(calls.load(Ordering::SeqCst), 20);
-    let checkpoints = session
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskStepCheckpointV2(checkpoint))
-                if checkpoint.attempt_id == attempt_id =>
-            {
-                Some(checkpoint.no_progress_count)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        checkpoints,
-        (0..20).collect::<Vec<_>>(),
-        "checkpoints retain evidence without forcing a final answer"
-    );
-    let requests = captured.lock().expect("requests");
-    assert!(requests.iter().all(|request| !request.tools.is_empty()));
-    Ok(())
-}
-
-#[test]
-fn task_checkpoint_treats_artifact_pagination_and_changed_output_as_progress() -> Result<()> {
-    let context = TaskParticipantContext {
-        task_id: TaskId::new("task-artifact-pagination")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("read-artifact")?,
-        attempt_id: TaskParticipantAttemptId::new("participant-artifact-pagination-1")?,
-    };
-    let artifact_ref = ToolArtifactRefV1 {
-        artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
-    };
-    artifact_ref.validate()?;
-    let first_call = ToolCall {
-        id: "page-1".to_owned(),
-        name: "read_tool_artifact".to_owned(),
-        args_json: json!({
-            "artifact_ref": artifact_ref,
-            "selector": {"kind": "line_page", "start_line": 1, "max_lines": 200}
-        })
-        .to_string(),
-    };
-    let second_call = ToolCall {
-        id: "page-2".to_owned(),
-        name: "read_tool_artifact".to_owned(),
-        args_json: json!({
-            "artifact_ref": ToolArtifactRefV1 {
-                artifact_id: "ta1_0123456789abcdef0123456789abcdef".to_owned(),
-            },
-            "selector": {"kind": "line_page", "start_line": 201, "max_lines": 200}
-        })
-        .to_string(),
-    };
-    let first_result = ToolResult::ok(
-        "page-1",
-        "read_tool_artifact",
-        "lines 1 through 200",
-        ToolResultMeta {
-            returned_lines: Some(200),
-            total_lines: Some(400),
-            truncated: true,
-            ..ToolResultMeta::default()
-        },
-    );
-    let second_result = ToolResult::ok(
-        "page-2",
-        "read_tool_artifact",
-        "lines 201 through 400",
-        ToolResultMeta {
-            returned_lines: Some(200),
-            total_lines: Some(400),
-            ..ToolResultMeta::default()
-        },
-    );
-
-    let first = build_task_step_checkpoint(&context, 1, &[(first_call, first_result)], &[], None)?;
-    let second = build_task_step_checkpoint(
-        &context,
-        2,
-        &[(second_call, second_result)],
-        &[],
-        Some(&first),
-    )?;
-
-    assert_ne!(first.semantic_call_hash, second.semantic_call_hash);
-    assert_ne!(first.result_frontier_hash, second.result_frontier_hash);
-    assert_eq!(second.no_progress_count, 0);
-    Ok(())
-}
-
-#[test]
-fn task_checkpoint_detects_repeated_bounded_observation_only_when_output_is_unchanged() -> Result<()>
-{
-    let context = TaskParticipantContext {
-        task_id: TaskId::new("task-bounded-observation")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("inspect")?,
-        attempt_id: TaskParticipantAttemptId::new("participant-bounded-observation-1")?,
-    };
-    let checkpoint = |turn, command: &str, output: &str, previous| {
-        let result = ToolResult::ok(
-            format!("call-{turn}"),
-            "bash",
-            output,
-            ToolResultMeta::default(),
-        );
-        build_task_step_checkpoint(
-            &context,
-            turn,
-            &[(
-                &ToolCall {
-                    id: format!("call-{turn}"),
-                    name: "bash".to_owned(),
-                    args_json: json!({"command": command}).to_string(),
-                },
-                &result,
-            )]
-            .into_iter()
-            .map(|(call, result)| (call.clone(), result.clone()))
-            .collect::<Vec<_>>(),
-            &[],
-            previous,
-        )
-    };
-
-    let first = checkpoint(1, "git status", "clean", None)?;
-    let cosmetic_rewrite = checkpoint(2, "git status --short", "clean", Some(&first))?;
-    assert_eq!(cosmetic_rewrite.no_progress_count, 1);
-    let changed_output = checkpoint(
-        3,
-        "git status --short",
-        "M crates/sigil-kernel/src/agent.rs",
-        Some(&cosmetic_rewrite),
-    )?;
-    assert_eq!(changed_output.no_progress_count, 0);
-    assert_ne!(
-        cosmetic_rewrite.result_frontier_hash,
-        changed_output.result_frontier_hash
-    );
     Ok(())
 }
 
@@ -7159,152 +6156,22 @@ async fn ordinary_conversation_preserves_long_novel_research_without_task() -> R
         .lock()
         .expect("captured requests lock should not be poisoned");
     assert!(requests.iter().all(|request| !request.tools.is_empty()));
-    assert!(requests.iter().all(|request| {
-        request.messages.iter().all(|message| {
-            message.content.as_deref()
-                != Some(task_participant_finalization_prompt_contract_material())
-        })
-    }));
     Ok(())
 }
 
 #[tokio::test]
-async fn automatic_task_routing_degrades_to_ordinary_conversation_after_two_untyped_decisions()
--> Result<()> {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let executions = Arc::new(AtomicUsize::new(0));
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(TaskHandoffSideEffectTool {
-        executions: Arc::clone(&executions),
-    }));
-    let agent = Agent::new(
-        DegradingRoutingProvider {
-            calls: Arc::clone(&calls),
-        },
-        tools,
-    );
-    let mut session = Session::new("mock-untyped-routing", "mock-model");
-    let prompt = "coordinate parser and formatter changes";
-    let logical_run_id = "untyped-routing-run";
-    let input = AgentRunInput::user(prompt);
-    let source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        input
-            .persisted_user_message_id
-            .clone()
-            .expect("direct input owns a message id"),
-        logical_run_id,
-    )?;
-    let input =
-        input
-            .with_logical_run_id(logical_run_id)
-            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
-                ConversationPurposeContext {
-                    root_run_id: logical_run_id.to_owned(),
-                    source_turn: source_turn.clone(),
-                    routing_policy: TaskRoutingPolicy::Auto,
-                    route_capability: AutomaticRouteCapability::DirectTask,
-                    writable_memory_routing: false,
-                    task_continuation: None,
-                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
-                        handoff_id: TaskHandoffId::new("handoff-untyped-routing")?,
-                        task_id: TaskId::new("task-untyped-routing")?,
-                        source_turn,
-                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-                        objective: prompt.to_owned(),
-                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
-                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
-                        requested_at_ms: 42,
-                        decided_at_ms: 43,
-                    }),
-                },
-            )));
-    let mut handler = RecordingEventHandler::default();
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(3),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_context: crate::PermissionEvaluationContext::default(),
-                permission_mode_override: None,
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::FinalAnswer
-    );
-    assert_eq!(output.result.final_text, "final answer");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        3,
-        "two routing microturns then one degraded ordinary turn"
-    );
-    assert!(session.messages().iter().any(|message| {
-        message.role == MessageRole::Assistant && message.content.as_deref() == Some("final answer")
-    }));
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-    assert!(handler.events.iter().all(|event| {
-        !matches!(
-            event,
-            RunEvent::ToolCallStarted(call)
-                | RunEvent::ToolCallCompleted(call)
-                if call.id == "call-invalid-routing-tool"
-        ) && !matches!(
-            event,
-            RunEvent::ToolResult(result) if result.call_id == "call-invalid-routing-tool"
-        ) && !matches!(
-            event,
-            RunEvent::Notice(message) if message.contains("routing")
-        )
-    }));
-    assert!(
-        settled_tool_results(&session)
-            .iter()
-            .any(|(call_id, preview)| {
-                call_id == "call-invalid-routing-tool"
-                    && preview.contains(
-                        "ordinary tools are not available during the typed task-routing microturn",
-                    )
-            })
-    );
-    assert!(
-        session.entries().iter().any(|entry| matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(_))
-        )),
-        "the degraded conversation must record the chat route decision"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_conversation()
--> Result<()> {
+async fn pending_plan_status_question_uses_one_ordinary_provider_call() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
     let agent = Agent::new(
         CapturingTextProvider {
             captured: Arc::clone(&captured),
         },
-        ToolRegistry::new(),
+        registry,
     );
     let mut session = Session::new("mock-pure-free-text-routing", "mock-model");
-    let prompt = "hello";
+    let prompt = "What is the status of my pending plan?";
     let logical_run_id = "pure-free-text-routing-run";
     let input = AgentRunInput::user(prompt);
     let source_turn = ConversationTurnRef::new(
@@ -7315,6 +6182,11 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
             .expect("direct input owns a message id"),
         logical_run_id,
     )?;
+    let mut plan_review = test_plan_review_handoff_binding(&source_turn, prompt);
+    plan_review.pending_plan = Some(PendingPlanHandoffBinding {
+        plan_id: PlanId::new("pending-plan-status")?,
+        plan_hash: "sha256:pending-plan-status".to_owned(),
+    });
     let input =
         input
             .with_logical_run_id(logical_run_id)
@@ -7326,8 +6198,8 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
                     route_capability: AutomaticRouteCapability::DirectTask,
                     writable_memory_routing: false,
                     task_continuation: None,
-                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
+                    plan_review: Some(plan_review),
+                    task_handoff: Some(TaskStartHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-pure-free-text")?,
                         task_id: TaskId::new("task-pure-free-text")?,
                         source_turn,
@@ -7348,7 +6220,7 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
             input,
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: Some(3),
+                max_turns: Some(1),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -7375,18 +6247,30 @@ async fn automatic_task_routing_degrades_a_pure_free_text_microturn_to_ordinary_
             .lock()
             .expect("captured requests lock should not be poisoned")
             .len(),
-        3,
-        "two routing microturns then one degraded ordinary turn"
+        1,
+        "an ordinary answer does not need a routing-only provider call"
+    );
+    let requests = captured.lock().expect("captured request lock");
+    assert!(requests[0].tools.iter().any(|tool| tool.name == "echo"));
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "run_pending_plan")
     );
     assert!(session.messages().iter().any(|message| {
         message.role == MessageRole::Assistant && message.content.as_deref() == Some("captured")
     }));
     assert!(
-        session.entries().iter().any(|entry| matches!(
+        !session.entries().iter().any(|entry| matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(_))
         )),
-        "the degraded conversation must record the chat route decision"
+        "ordinary chat answers do not create a synthetic route decision"
+    );
+    assert!(
+        session.task_state_projection().tasks.is_empty(),
+        "a pending-Plan status answer must not start or continue a Task"
     );
     Ok(())
 }
@@ -7565,103 +6449,6 @@ async fn queued_follow_up_is_injected_at_the_final_answer_gate_without_interrupt
 }
 
 #[tokio::test]
-async fn automatic_task_routing_rejects_a_handoff_after_the_negative_decision() -> Result<()> {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let agent = Agent::new(
-        LateTaskHandoffProvider {
-            calls: Arc::clone(&calls),
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-late-task-handoff", "mock-model");
-    let prompt = "what does this symbol mean?";
-    let logical_run_id = "late-handoff-run";
-    let input = AgentRunInput::user(prompt);
-    let source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        input
-            .persisted_user_message_id
-            .clone()
-            .expect("direct input owns a message id"),
-        logical_run_id,
-    )?;
-    let input =
-        input
-            .with_logical_run_id(logical_run_id)
-            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
-                ConversationPurposeContext {
-                    root_run_id: logical_run_id.to_owned(),
-                    source_turn: source_turn.clone(),
-                    routing_policy: TaskRoutingPolicy::Auto,
-                    route_capability: AutomaticRouteCapability::DirectTask,
-                    writable_memory_routing: false,
-                    task_continuation: None,
-                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
-                        handoff_id: TaskHandoffId::new("handoff-late-routing")?,
-                        task_id: TaskId::new("task-late-routing")?,
-                        source_turn,
-                        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-                        objective: prompt.to_owned(),
-                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
-                        route_contract_fingerprint: "sha256:test-route-contract-v1".to_owned(),
-                        requested_at_ms: 42,
-                        decided_at_ms: 43,
-                    }),
-                },
-            )));
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_eq!(output.result.final_text, "ordinary answer");
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    assert!(!session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(
-                ControlEntry::TaskHandoffRequested(_)
-                    | ControlEntry::TaskHandoffResolved(_)
-                    | ControlEntry::TaskRun(_)
-            )
-        )
-    }));
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::ToolResultV3(result)
-                if result.call_id == "call-late-handoff"
-                    && result
-                        .initial_model_view
-                        .preview
-                        .contains("not available after the routing microturn")
-        )
-    }));
-    Ok(())
-}
-
-#[tokio::test]
 async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::new(
@@ -7726,25 +6513,32 @@ async fn manual_task_routing_exposes_neither_automatic_policy_nor_tool() -> Resu
         .expect("captured requests lock should not be poisoned");
     assert_eq!(requests.len(), 1);
     assert!(requests[0].messages.iter().all(|message| {
-        message.content.as_deref() != Some(conversation_route_routing_contract_material())
+        message.content.as_deref() != Some(conversation_auto_execution_contract_material())
     }));
     assert!(
         requests[0]
             .tools
             .iter()
-            .all(|tool| tool.name != REQUEST_TASK_PLANNING_TOOL_NAME)
+            .all(|tool| tool.name != START_TASK_TOOL_NAME)
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batch() -> Result<()> {
+async fn accepted_task_handoff_is_typed_durable_and_binds_the_root_scope() -> Result<()> {
     let executions = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TaskHandoffSideEffectTool {
         executions: Arc::clone(&executions),
     }));
-    let agent = Agent::new(TaskHandoffProvider, registry);
+    let agent = Agent::new(
+        ScriptedTurnToolProvider::new(vec![vec![(
+            "call-handoff-1".to_owned(),
+            START_TASK_TOOL_NAME.to_owned(),
+            r#"{"title":"Cross-crate orchestration"}"#.to_owned(),
+        )]]),
+        registry,
+    );
     let mut session = Session::new("mock-task-handoff", "mock-model");
     let mut handler = crate::event::NoopEventHandler;
     let prompt = "ship the cross-crate orchestration change";
@@ -7758,6 +6552,8 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
             .expect("direct input owns a message id"),
         logical_run_id,
     )?;
+    let continuation =
+        auto_execution::bound_continuation_fixture(&mut session, &source_turn, prompt)?;
     let handoff_id = TaskHandoffId::new("handoff-automatic-1")?;
     let task_id = TaskId::new("task-automatic-1")?;
     let cancellation_owner = RunCancellationOwner::new();
@@ -7771,9 +6567,9 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
                 routing_policy: TaskRoutingPolicy::Auto,
                 route_capability: AutomaticRouteCapability::DirectTask,
                 writable_memory_routing: false,
-                task_continuation: None,
+                task_continuation: Some(continuation),
                 plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                task_handoff: Some(TaskPlanningHandoffBinding {
+                task_handoff: Some(TaskStartHandoffBinding {
                     handoff_id: handoff_id.clone(),
                     task_id: task_id.clone(),
                     source_turn: source_turn.clone(),
@@ -7882,19 +6678,9 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::TaskRun(run))
-            if run.task_id == action.task_id && run.status == TaskRunStatus::Started
-    )));
-    assert!(session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-            if execution.call_id == "call-side-effect"
-                && execution.status == ToolExecutionStatus::Cancelled
-    )));
-    assert!(session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-            if execution.call_id == "call-handoff-2"
-                && execution.status == ToolExecutionStatus::Cancelled
+            if run.task_id == action.task_id
+                && run.status == TaskRunStatus::Started
+                && run.title.as_deref() == Some("Cross-crate orchestration")
     )));
     assert!(!session.entries().iter().any(|entry| matches!(
         entry,
@@ -7905,7 +6691,7 @@ async fn accepted_task_handoff_is_typed_durable_and_ignores_the_rest_of_the_batc
 }
 
 #[tokio::test]
-async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Result<()> {
+async fn accepted_task_continuation_follows_ordinary_tools_in_the_same_model_loop() -> Result<()> {
     let executions = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TaskHandoffSideEffectTool {
@@ -7923,23 +6709,9 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
         status: TaskRunStatus::Started,
         reason: None,
     }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step-current-1")?,
-            title: "implement original scope".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: Some("accepted v1".to_owned()),
-    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), "ship the original task", 1),
+    ))?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: task_id.clone(),
         parent_session_ref: parent_session_ref.clone(),
@@ -7975,9 +6747,7 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
                     task_continuation: Some(TaskContinuationHandoffBinding {
                         task_id: task_id.clone(),
                         source_turn: source_turn.clone(),
-                        plan_version: Some(1),
                         task_status: TaskRunStatus::Paused,
-                        plan_status: Some(TaskPlanStatus::Accepted),
                         effective_capability: AutomaticRouteCapability::DirectTask,
                         policy_snapshot_hash: "sha256:task-continuation-policy-v1".to_owned(),
                         route_contract_fingerprint: route_contract_fingerprint.clone(),
@@ -7988,7 +6758,7 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
                         safe_guidance: prompt_projection.safe_prompt,
                     }),
                     plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
+                    task_handoff: Some(TaskStartHandoffBinding {
                         handoff_id: TaskHandoffId::new("handoff-decoy-for-continuation")?,
                         task_id: TaskId::new("task-decoy-for-continuation")?,
                         source_turn: source_turn.clone(),
@@ -8030,10 +6800,9 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
     };
     assert_eq!(action.task_id, task_id);
     assert_eq!(action.source_turn, source_turn);
-    assert_eq!(action.plan_version, Some(1));
     assert_eq!(action.task_status, TaskRunStatus::Paused);
     assert_eq!(action.guidance.expose_secret(), prompt);
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(
         output.outcome.terminal_reason,
         AgentRunTerminalReason::TaskHandoff
@@ -8047,499 +6816,8 @@ async fn accepted_task_continuation_is_typed_and_ignores_ordinary_tools() -> Res
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.call_id == "call-side-effect-before-continuation"
-                && execution.status == ToolExecutionStatus::Cancelled
+                && execution.status == ToolExecutionStatus::Completed
     )));
-    Ok(())
-}
-
-#[tokio::test]
-async fn rejected_task_guidance_recovery_blocks_input_but_allows_independent_chat() -> Result<()> {
-    let executions = Arc::new(AtomicUsize::new(0));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(TaskHandoffSideEffectTool {
-        executions: Arc::clone(&executions),
-    }));
-    let agent = Agent::new(TaskContinuationProvider, registry);
-    let mut session = Session::new("mock-task-continuation", "mock-model");
-    let task_id = TaskId::new("task-current-1")?;
-    let parent_session_ref = SessionRef::new_relative("session.jsonl")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_session_ref.clone(),
-        objective: "ship the original task".to_owned(),
-        title: None,
-        status: TaskRunStatus::Started,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step-current-1")?,
-            title: "implement original scope".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: Some("accepted v1".to_owned()),
-    }))?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: parent_session_ref.clone(),
-        objective: "ship the original task".to_owned(),
-        title: None,
-        status: TaskRunStatus::Paused,
-        reason: None,
-    }))?;
-
-    let original = crate::project_conversation_prompt_for_persistence("preserve the original API");
-    let applied = crate::TaskGuidanceAppliedEntry {
-        queue_id: ConversationInputQueueId::new("pending-guidance-queue")?,
-        task_id: task_id.clone(),
-        plan_version: 1,
-        dispatch_run_id: "pending-guidance-dispatch".to_owned(),
-        reason: crate::TaskGuidanceApplyReason::AddsExecutionConstraint,
-        target_step_ids: vec![TaskStepId::new("step-current-1")?],
-    };
-    let materialized = crate::TaskGuidanceMaterializedEntry::new(
-        &applied,
-        original.prompt_hash,
-        original.exact_prompt_required,
-        original.safe_prompt,
-    )?;
-    session.append_controls(vec![
-        ControlEntry::TaskGuidanceApplied(applied),
-        ControlEntry::TaskGuidanceMaterialized(materialized),
-    ])?;
-
-    let prompt = "continue, but also add the compatibility check";
-    let logical_run_id = "task-continuation-run-1";
-    let input = AgentRunInput::user(prompt);
-    let source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        input
-            .persisted_user_message_id
-            .clone()
-            .expect("direct input owns a message id"),
-        logical_run_id,
-    )?;
-    let prompt_projection = crate::project_conversation_prompt_for_persistence(prompt);
-    let route_contract_fingerprint = "sha256:task-continuation-contract-v1".to_owned();
-    let input =
-        input
-            .with_logical_run_id(logical_run_id)
-            .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
-                ConversationPurposeContext {
-                    root_run_id: logical_run_id.to_owned(),
-                    source_turn: source_turn.clone(),
-                    routing_policy: TaskRoutingPolicy::Auto,
-                    route_capability: AutomaticRouteCapability::DirectTask,
-                    writable_memory_routing: false,
-                    task_continuation: Some(TaskContinuationHandoffBinding {
-                        task_id: task_id.clone(),
-                        source_turn: source_turn.clone(),
-                        plan_version: Some(1),
-                        task_status: TaskRunStatus::Paused,
-                        plan_status: Some(TaskPlanStatus::Accepted),
-                        effective_capability: AutomaticRouteCapability::DirectTask,
-                        policy_snapshot_hash: "sha256:task-continuation-policy-v1".to_owned(),
-                        route_contract_fingerprint: route_contract_fingerprint.clone(),
-                        decided_at_ms: 43,
-                        exact_guidance: SecretString::new(prompt),
-                        prompt_hash: prompt_projection.prompt_hash,
-                        exact_prompt_required: prompt_projection.exact_prompt_required,
-                        safe_guidance: prompt_projection.safe_prompt,
-                    }),
-                    plan_review: Some(test_plan_review_handoff_binding(&source_turn, prompt)),
-                    task_handoff: Some(TaskPlanningHandoffBinding {
-                        handoff_id: TaskHandoffId::new("handoff-decoy-for-continuation")?,
-                        task_id: TaskId::new("task-decoy-for-continuation")?,
-                        source_turn: source_turn.clone(),
-                        parent_session_ref,
-                        objective: prompt.to_owned(),
-                        policy_snapshot_hash: "sha256:task-routing-v1".to_owned(),
-                        route_contract_fingerprint,
-                        requested_at_ms: 42,
-                        decided_at_ms: 43,
-                    }),
-                },
-            )));
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert!(matches!(output.disposition, AgentRunDisposition::Blocked));
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::TaskRoutingUnsatisfied
-    );
-    assert!(output.result.final_message_id.is_none());
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-    assert_eq!(session.entries().iter().filter(|entry| matches!(entry,
-        SessionLogEntry::ToolResultV3(result)
-            if result.call_id == "call-continue-existing-task" && result.facts.error.is_some()
-    )).count(), 1, "the rejected continuation batch must settle once before stopping");
-    assert!(!session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(_))
-    )));
-    assert_eq!(
-        session.task_state_projection().tasks[&task_id].status,
-        TaskRunStatus::Paused
-    );
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let chat = Agent::new(
-        ChatDecisionRoutingProvider {
-            captured: Arc::clone(&captured),
-        },
-        ToolRegistry::new(),
-    );
-    let prompt = "explain queue promotion";
-    let input = AgentRunInput::user(prompt);
-    let source = ConversationTurnRef::new(
-        session.session_scope_id(),
-        input
-            .persisted_user_message_id
-            .clone()
-            .expect("independent input owns its message"),
-        "independent-chat-after-recovery-rejection",
-    )?;
-    let input = input
-        .with_logical_run_id(source.logical_run_id.clone())
-        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
-            ConversationPurposeContext {
-                root_run_id: source.logical_run_id.clone(),
-                source_turn: source.clone(),
-                routing_policy: TaskRoutingPolicy::Auto,
-                route_capability: AutomaticRouteCapability::DirectTask,
-                writable_memory_routing: false,
-                task_continuation: None,
-                plan_review: Some(test_plan_review_handoff_binding(&source, prompt)),
-                task_handoff: None,
-            },
-        )));
-    let chat_output = chat
-        .run_with_input(&mut session, input, scripted_run_options(4), &mut handler)
-        .await?;
-    assert!(matches!(
-        chat_output.disposition,
-        AgentRunDisposition::FinalAnswer
-    ));
-    assert_eq!(
-        chat_output.result.final_text,
-        "queue promotion is a durable CAS promotion"
-    );
-    assert_eq!(
-        session.task_state_projection().tasks[&task_id].status,
-        TaskRunStatus::Paused
-    );
-    Ok(())
-}
-
-#[test]
-fn exact_natural_language_reentry_reuses_pending_selection_without_forking() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let session_path = temp.path().join("pending-exact-natural-reentry.jsonl");
-    let store = JsonlSessionStore::new(&session_path)?;
-    crate::session::append_current_test_session_identity(&store)?;
-    let mut session = Session::new("mock-task-continuation", "mock-model").with_store(store);
-    let task_id = TaskId::new("task-pending-exact-selection")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-        objective: "finish the pending exact continuation".to_owned(),
-        title: None,
-        status: TaskRunStatus::Paused,
-        reason: Some("crashed after typed selection".to_owned()),
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step-pending-exact")?,
-            title: "apply exact recovery guidance".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-
-    let exact_guidance = "finish step with authorization=original-secret";
-    let projected = crate::project_conversation_prompt_for_persistence(exact_guidance);
-    assert!(projected.exact_prompt_required);
-    let old_source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        "message-pending-exact-selection",
-        "run-pending-exact-selection",
-    )?;
-    let mut old_source = ModelMessage::user(projected.safe_prompt.clone());
-    old_source.id = old_source_turn.message_id.clone();
-    session.append_user_message(old_source)?;
-    let old_route_fingerprint = "sha256:pending-exact-selection-route".to_owned();
-    session.append_controls(vec![
-        ControlEntry::ConversationRouteDecisionRecorded(
-            crate::ConversationRouteDecisionRecordedEntry {
-                decision_id: conversation_route_decision_id_for_source(&old_source_turn),
-                source_turn: old_source_turn.clone(),
-                route: ConversationRoute::Task,
-                reason_codes: Vec::new(),
-                configured_policy: TaskRoutingPolicy::Auto,
-                effective_capability: AutomaticRouteCapability::DirectTask,
-                policy_snapshot_hash: "sha256:pending-exact-selection-policy".to_owned(),
-                route_contract_fingerprint: old_route_fingerprint.clone(),
-                decided_at_ms: 1,
-            },
-        ),
-        ControlEntry::TaskContinuationSelected(crate::TaskContinuationSelectedEntry {
-            task_id: task_id.clone(),
-            source_turn: old_source_turn.clone(),
-            plan_version: Some(1),
-            task_status: TaskRunStatus::Paused,
-            plan_status: Some(TaskPlanStatus::Accepted),
-            route_contract_fingerprint: old_route_fingerprint.clone(),
-            control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
-            prompt_hash: projected.prompt_hash.clone(),
-            exact_prompt_required: projected.exact_prompt_required,
-            guidance: projected.safe_prompt.clone(),
-            selected_at_ms: 1,
-        }),
-    ])?;
-
-    {
-        let mut invoke = |message_id: &str,
-                          logical_run_id: &str,
-                          guidance: &str,
-                          call_id: &str|
-         -> Result<(Option<crate::ContinueDurableTaskAction>, usize)> {
-            let source_turn =
-                ConversationTurnRef::new(session.session_scope_id(), message_id, logical_run_id)?;
-            let source_projection = crate::project_conversation_prompt_for_persistence(guidance);
-            let mut source = ModelMessage::user(source_projection.safe_prompt.clone());
-            source.id = source_turn.message_id.clone();
-            session.append_user_message(source)?;
-            let binding = TaskContinuationHandoffBinding {
-                task_id: task_id.clone(),
-                source_turn,
-                plan_version: Some(1),
-                task_status: TaskRunStatus::Paused,
-                plan_status: Some(TaskPlanStatus::Accepted),
-                effective_capability: AutomaticRouteCapability::DirectTask,
-                policy_snapshot_hash: "sha256:new-exact-reentry-policy".to_owned(),
-                route_contract_fingerprint: format!("sha256:{logical_run_id}"),
-                decided_at_ms: 2,
-                exact_guidance: SecretString::new(guidance),
-                prompt_hash: source_projection.prompt_hash,
-                exact_prompt_required: source_projection.exact_prompt_required,
-                safe_guidance: source_projection.safe_prompt,
-            };
-            let call = ToolCall {
-                id: call_id.to_owned(),
-                name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-                args_json: r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#.to_owned(),
-            };
-            let mut handler = RecordingEventHandler::default();
-            let mut outcome = AgentRunOutcome::default();
-            let mut batch_results = Vec::new();
-            let action = super::handle_continue_existing_task_call(
-                &mut session,
-                &mut handler,
-                &mut outcome,
-                &call,
-                &binding,
-                Some("scope-pending-exact-reentry"),
-                &mut batch_results,
-            )?;
-            let selection_count = session
-                .entries()
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry,
-                        SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
-                            if selected.task_id == task_id
-                    )
-                })
-                .count();
-            Ok((action, selection_count))
-        };
-
-        let (mismatched, mismatched_selection_count) = invoke(
-            "message-pending-exact-mismatch",
-            "run-pending-exact-mismatch",
-            "replace the plan with authorization=different-secret",
-            "call-pending-exact-mismatch",
-        )?;
-        assert!(mismatched.is_none());
-        assert_eq!(
-            mismatched_selection_count, 1,
-            "mismatched natural-language re-entry must not append another selection"
-        );
-
-        let (action, recovered_selection_count) = invoke(
-            "message-pending-exact-reentry",
-            "run-pending-exact-reentry",
-            exact_guidance,
-            "call-pending-exact-reentry",
-        )?;
-        let action =
-            action.expect("matching natural-language re-entry must reuse the pending selection");
-        assert_eq!(action.source_turn, old_source_turn);
-        assert_eq!(action.route_contract_fingerprint, old_route_fingerprint);
-        assert_eq!(action.guidance.expose_secret(), exact_guidance);
-        assert_eq!(
-            recovered_selection_count, 1,
-            "matching natural-language re-entry must reuse, not duplicate, the old receipt"
-        );
-    }
-    drop(session);
-
-    let reopened = Session::load_from_store(
-        "mock-task-continuation",
-        "mock-model",
-        JsonlSessionStore::new(&session_path)?,
-    )?;
-    assert_eq!(
-        reopened
-            .task_state_projection()
-            .current_task()
-            .map(|task| &task.task_id),
-        Some(&task_id),
-        "a crash after handler return must retain the exact Task as the current recovery target"
-    );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    SessionLogEntry::Control(ControlEntry::TaskContinuationSelected(selected))
-                        if selected.task_id == task_id
-                )
-            })
-            .count(),
-        1
-    );
-    assert_eq!(
-        reopened
-            .entries()
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(selected))
-                        if selected.task_id == task_id
-                            && selected.run_scope_id == "scope-pending-exact-reentry"
-                )
-            })
-            .count(),
-        1
-    );
-    let recovered =
-        crate::recoverable_task_guidance_review(&reopened, &task_id, Some(exact_guidance))?.expect(
-            "the original pending authority remains recoverable after handler-boundary restart",
-        );
-    assert!(matches!(
-        recovered.authority,
-        crate::RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selected)
-            if selected.source_turn == old_source_turn
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Result<()> {
-    let agent = Agent::new(
-        PlanUpdateProvider {
-            valid: false,
-            stream_calls: None,
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-plan", "mock-model");
-    let mut handler = crate::event::NoopEventHandler;
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
-                task_id: TaskId::new("task_1")?,
-                max_plan_steps: 4,
-                max_plan_versions: 1,
-                worktree_availability:
-                    TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-            }),
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(4),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-
-    assert_eq!(output.result.final_text, "done");
-    assert!(output.outcome.tool_errors.iter().any(|error| {
-        error.kind == ToolErrorKind::InvalidInput
-            && error
-                .message
-                .contains("task plan must contain at least one step")
-    }));
-    assert!(
-        !session
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
-    );
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.call_id == "call-plan-1"
-                    && execution.status == ToolExecutionStatus::Failed
-        )
-    }));
     Ok(())
 }
 
@@ -8552,19 +6830,6 @@ struct SessionGrantCargoCheckProvider {
 }
 struct InvalidWriteArgsProvider;
 struct LoopingToolProvider;
-struct PlanUpdateProvider {
-    valid: bool,
-    stream_calls: Option<Arc<AtomicUsize>>,
-}
-#[derive(Clone, Copy)]
-enum GuidanceDecision {
-    Apply,
-    Replan,
-}
-struct GuidanceDecisionProvider {
-    decision: GuidanceDecision,
-    observed_tools: Arc<Mutex<Vec<String>>>,
-}
 
 #[tokio::test]
 async fn automatic_routing_plan_review_decision_records_route_and_starts_review() -> Result<()> {
@@ -8668,12 +6933,20 @@ async fn automatic_routing_plan_review_decision_records_route_and_starts_review(
     )));
     let captured_requests = captured.lock().expect("capture lock");
     assert_eq!(captured_requests.len(), 1);
-    assert_eq!(captured_requests[0].tools.len(), 3);
+    let expected_tools = vec![
+        crate::request_user_input_tool_spec(),
+        crate::request_plan_review_tool_spec(),
+        crate::start_task_tool_spec(),
+    ];
+    assert_eq!(
+        serde_json::to_value(&captured_requests[0].tools)?,
+        serde_json::to_value(expected_tools)?
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn routing_microturn_executes_approved_memory_before_starting_plan_review() -> Result<()> {
+async fn ordinary_auto_executes_approved_memory_before_a_later_plan_handoff() -> Result<()> {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let memory_executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
@@ -8705,6 +6978,8 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
     )?;
     let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
     let cancellation_owner = RunCancellationOwner::new();
+    let continuation =
+        auto_execution::bound_continuation_fixture(&mut session, &source_turn, prompt)?;
     let input = input
         .with_logical_run_id(logical_run_id)
         .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
@@ -8714,7 +6989,7 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
                 routing_policy: TaskRoutingPolicy::Auto,
                 route_capability: AutomaticRouteCapability::DirectTask,
                 writable_memory_routing: true,
-                task_continuation: None,
+                task_continuation: Some(continuation),
                 plan_review: Some(plan_review_binding),
                 task_handoff: None,
             },
@@ -8752,16 +7027,12 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
         AgentRunDisposition::StartPlanReview(_)
     ));
     assert!(memory_executed.load(Ordering::SeqCst));
-    assert!(handler.events.iter().all(|event| {
-        !matches!(
-            event,
-            RunEvent::ReasoningDelta(delta)
-                if delta == "memory routing reasoning stays internal"
-        ) && !matches!(
-            event,
-            RunEvent::TextDelta(delta) if delta == "memory routing narrative stays internal"
-        )
-    }));
+    assert!(handler.events.iter().any(|event| matches!(
+        event, RunEvent::TextDelta(delta) if delta == "ordinary memory progress"
+    )));
+    assert!(handler.events.iter().any(|event| matches!(
+        event, RunEvent::ReasoningDelta(delta) if delta == "ordinary memory reasoning"
+    )));
     assert!(handler.events.iter().any(|event| {
         matches!(
             event,
@@ -8775,6 +7046,7 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
         )
     }));
     let captured = captured.lock().expect("capture lock");
+    assert_eq!(captured.len(), 2);
     let exposed = captured[0]
         .tools
         .iter()
@@ -8838,7 +7110,7 @@ async fn routing_microturn_executes_approved_memory_before_starting_plan_review(
         .collect::<Vec<_>>();
     assert_eq!(
         result_order,
-        vec!["call-plan-review-with-memory", "call-remember-routing"]
+        vec!["call-remember-routing", "call-plan-review-with-memory"]
     );
     Ok(())
 }
@@ -8866,6 +7138,8 @@ async fn bound_writable_memory_routing_fails_closed_without_canonical_tools() ->
     )?;
     let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
     let cancellation_owner = RunCancellationOwner::new();
+    let continuation =
+        auto_execution::bound_continuation_fixture(&mut session, &source_turn, prompt)?;
     let input = input
         .with_logical_run_id(logical_run_id)
         .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
@@ -8875,7 +7149,7 @@ async fn bound_writable_memory_routing_fails_closed_without_canonical_tools() ->
                 routing_policy: TaskRoutingPolicy::Auto,
                 route_capability: AutomaticRouteCapability::DirectTask,
                 writable_memory_routing: true,
-                task_continuation: None,
+                task_continuation: Some(continuation),
                 plan_review: Some(plan_review_binding),
                 task_handoff: None,
             },
@@ -9088,131 +7362,13 @@ async fn review_first_capability_hides_the_direct_task_decision() -> Result<()> 
     assert_eq!(
         tool_names,
         vec![
-            crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
-            CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
+            REQUEST_USER_INPUT_TOOL_NAME,
+            crate::REQUEST_PLAN_REVIEW_TOOL_NAME
         ]
     );
     Ok(())
 }
 
-#[tokio::test]
-async fn chat_decision_records_route_decision_without_effect_authority() -> Result<()> {
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let agent = Agent::new(
-        ChatDecisionRoutingProvider {
-            captured: Arc::clone(&captured),
-        },
-        ToolRegistry::new(),
-    );
-    let mut session = Session::new("mock-chat-routing", "mock-model");
-    let prompt = "explain how the queue promotion works";
-    let logical_run_id = "chat-routing-run";
-    let input = AgentRunInput::user(prompt);
-    let source_turn = ConversationTurnRef::new(
-        session.session_scope_id(),
-        input
-            .persisted_user_message_id
-            .clone()
-            .expect("direct input owns a message id"),
-        logical_run_id,
-    )?;
-    let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
-    let cancellation_owner = RunCancellationOwner::new();
-    let input = input
-        .with_logical_run_id(logical_run_id)
-        .with_run_purpose(AgentRunPurpose::Conversation(Box::new(
-            ConversationPurposeContext {
-                root_run_id: logical_run_id.to_owned(),
-                source_turn,
-                routing_policy: TaskRoutingPolicy::Auto,
-                route_capability: AutomaticRouteCapability::ReviewFirst,
-                writable_memory_routing: false,
-                task_continuation: None,
-                plan_review: Some(plan_review_binding),
-                task_handoff: None,
-            },
-        )))
-        .with_cancellation(cancellation_owner.handle());
-    let mut handler = CommitControlsRecordingEventHandler::default();
-
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
-                max_turns: Some(3),
-                tool_timeout_secs: 5,
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                traffic_partition_key: None,
-                interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
-                permission_mode_override: None,
-                permission_context: crate::PermissionEvaluationContext::default(),
-                memory_config: MemoryConfig::with_enabled(false),
-                compaction_config: CompactionConfig::default(),
-                tool_authority: None,
-            },
-            &mut handler,
-        )
-        .await?;
-    assert!(matches!(
-        output.disposition,
-        AgentRunDisposition::FinalAnswer
-    ));
-    let decisions = session
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::ConversationRouteDecisionRecorded(decision)) => {
-                Some(decision.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(decisions.len(), 1);
-    assert_eq!(decisions[0].route, ConversationRoute::Chat);
-    assert!(decisions[0].reason_codes.is_empty());
-    assert!(handler.committed_batches.iter().any(|controls| {
-        matches!(
-            controls.as_slice(),
-            [ControlEntry::ConversationRouteDecisionRecorded(decision)]
-                if decision.route == ConversationRoute::Chat
-        )
-    }));
-    assert!(session.entries().iter().all(|entry| !matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskHandoffRequested(_))
-    )));
-    let captured_requests = captured.lock().expect("capture lock");
-    assert_eq!(captured_requests.len(), 2);
-    let reasoning = handler
-        .events
-        .iter()
-        .filter_map(|event| match event {
-            RunEvent::ReasoningDelta(delta) => Some(delta.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(reasoning, vec!["work reasoning is visible"]);
-    assert!(handler.events.iter().all(|event| {
-        !matches!(event, RunEvent::TextDelta(delta) if delta == "internal routing narrative")
-    }));
-    assert!(handler.events.iter().all(|event| {
-        !matches!(
-            event,
-            RunEvent::ToolCallStarted(call)
-                | RunEvent::ToolCallCompleted(call)
-                if call.id == "call-chat-decision"
-        ) && !matches!(
-            event,
-            RunEvent::ToolResult(result) if result.call_id == "call-chat-decision"
-        )
-    }));
-    Ok(())
-}
-
-struct TaskHandoffProvider;
 struct TaskContinuationProvider;
 struct TaskHandoffSideEffectTool {
     executions: Arc<AtomicUsize>,
@@ -9374,183 +7530,6 @@ impl Provider for SessionGrantCargoCheckProvider {
 }
 
 #[async_trait]
-impl Provider for PlanUpdateProvider {
-    fn name(&self) -> &str {
-        "mock-plan"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities {
-            exact_prefix_cache: false,
-            reports_cache_tokens: false,
-            reasoning_stream: ReasoningStreamSupport::Native,
-            supports_reasoning_effort: true,
-            supports_tool_stream: true,
-            supports_background_tasks: false,
-            supports_response_handles: false,
-            supports_reasoning_artifacts: false,
-            supports_structured_output: false,
-            supports_assistant_prefix_seed: false,
-            supports_schema_constrained_tools: false,
-            supports_agent_background_resume: false,
-            supports_agent_thread_usage: false,
-            supports_agent_result_replay: false,
-            supports_infill_completion: false,
-            supports_system_fingerprint: false,
-            tool_name_max_chars: 64,
-        }
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        if let Some(stream_calls) = &self.stream_calls {
-            stream_calls.fetch_add(1, Ordering::SeqCst);
-        }
-        let tool_used = request
-            .messages
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool));
-        if tool_used {
-            return Ok(Box::pin(stream::iter(vec![
-                Ok(ProviderChunk::TextDelta("done".to_owned())),
-                Ok(ProviderChunk::Done),
-            ])));
-        }
-
-        let args = if self.valid {
-            r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"}]}"#
-        } else {
-            r#"{"plan_version":1,"status":"accepted","steps":[]}"#
-        };
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-plan-1".to_owned(),
-                name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-plan-1".to_owned(),
-                delta: args.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-plan-1".to_owned(),
-                name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-                args_json: args.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-#[async_trait]
-impl Provider for GuidanceDecisionProvider {
-    fn name(&self) -> &str {
-        "mock-guidance-decision"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        WriteMockProvider.capabilities()
-    }
-
-    async fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        self.observed_tools
-            .lock()
-            .expect("observed tools lock should not be poisoned")
-            .extend(request.tools.iter().map(|tool| tool.name.clone()));
-        let (name, args) = match self.decision {
-            GuidanceDecision::Apply => (
-                TASK_GUIDANCE_APPLY_TOOL_NAME,
-                r#"{"reason":"prioritizes_pending_step","target_step_ids":["step_1"]}"#,
-            ),
-            GuidanceDecision::Replan => (
-                TASK_PLAN_UPDATE_TOOL_NAME,
-                r#"{"plan_version":3,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"},{"step_id":"step_2","title":"security review","role":"subagent_read","depends_on":["step_1"]}],"reason":"guidance changes required steps"}"#,
-            ),
-        };
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-guidance-decision".to_owned(),
-                name: name.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-guidance-decision".to_owned(),
-                delta: args.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-guidance-decision".to_owned(),
-                name: name.to_owned(),
-                args_json: args.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-#[async_trait]
-impl Provider for TaskHandoffProvider {
-    fn name(&self) -> &str {
-        "mock-task-handoff"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        WriteMockProvider.capabilities()
-    }
-
-    async fn stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let handoff_args = r#"{"reason_codes":["cross_layer","multi_stage_change"]}"#;
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-side-effect".to_owned(),
-                name: "handoff_side_effect".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-side-effect".to_owned(),
-                delta: "{}".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-side-effect".to_owned(),
-                name: "handoff_side_effect".to_owned(),
-                args_json: "{}".to_owned(),
-            })),
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-handoff-1".to_owned(),
-                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-handoff-1".to_owned(),
-                delta: handoff_args.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-handoff-1".to_owned(),
-                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-                args_json: handoff_args.to_owned(),
-            })),
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-handoff-2".to_owned(),
-                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-handoff-2".to_owned(),
-                delta: handoff_args.to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-handoff-2".to_owned(),
-                name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-                args_json: handoff_args.to_owned(),
-            })),
-            Ok(ProviderChunk::Done),
-        ])))
-    }
-}
-
-#[async_trait]
 impl Provider for TaskContinuationProvider {
     fn name(&self) -> &str {
         "mock-task-continuation"
@@ -9562,37 +7541,37 @@ impl Provider for TaskContinuationProvider {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let continuation_args =
-            r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#;
-        Ok(Box::pin(stream::iter(vec![
-            Ok(ProviderChunk::ToolCallStart {
-                id: "call-side-effect-before-continuation".to_owned(),
-                name: "handoff_side_effect".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-side-effect-before-continuation".to_owned(),
-                delta: "{}".to_owned(),
-            }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+        let call = if request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool))
+        {
+            ToolCall {
+                id: "call-continue-existing-task".to_owned(),
+                name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+                args_json:
+                    r#"{"reason":"continue_current_task","action":"apply_current_request_as_guidance"}"#
+                        .to_owned(),
+            }
+        } else {
+            ToolCall {
                 id: "call-side-effect-before-continuation".to_owned(),
                 name: "handoff_side_effect".to_owned(),
                 args_json: "{}".to_owned(),
-            })),
+            }
+        };
+        Ok(Box::pin(stream::iter(vec![
             Ok(ProviderChunk::ToolCallStart {
-                id: "call-continue-existing-task".to_owned(),
-                name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
+                id: call.id.clone(),
+                name: call.name.clone(),
             }),
             Ok(ProviderChunk::ToolCallArgsDelta {
-                id: "call-continue-existing-task".to_owned(),
-                delta: continuation_args.to_owned(),
+                id: call.id.clone(),
+                delta: call.args_json.clone(),
             }),
-            Ok(ProviderChunk::ToolCallComplete(ToolCall {
-                id: "call-continue-existing-task".to_owned(),
-                name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-                args_json: continuation_args.to_owned(),
-            })),
+            Ok(ProviderChunk::ToolCallComplete(call)),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -15080,7 +13059,7 @@ fn conversation_run_purpose(
     routing_policy: TaskRoutingPolicy,
     route_capability: AutomaticRouteCapability,
     plan_review: Option<PlanReviewHandoffBinding>,
-    task_handoff: Option<TaskPlanningHandoffBinding>,
+    task_handoff: Option<TaskStartHandoffBinding>,
 ) -> AgentRunPurpose {
     AgentRunPurpose::Conversation(Box::new(ConversationPurposeContext {
         root_run_id: logical_run_id.to_owned(),
@@ -15750,7 +13729,7 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
     // the same assistant tool-call batch as ordinary results (exactly one durable record, one
     // provider-visible event), never through a per-tool emit outside the allocator.
 
-    // (a) request_plan_review after the routing microturn: no routing decision is pending.
+    // (a) Manual conversations cannot request an automatic handoff.
     let agent = Agent::new(
         ScriptedTurnToolProvider::new(vec![vec![(
             "call-plan-review".to_owned(),
@@ -15790,7 +13769,7 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
     assert_single_settled_result(
         &session,
         "call-plan-review",
-        "not available after the routing microturn",
+        "not available for the current source turn",
     );
     assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
     assert!(
@@ -15801,22 +13780,14 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
             .any(|error| error.kind == ToolErrorKind::Unsupported)
     );
 
-    // (b) routing microturn with only a task handoff binding: request_plan_review has no plan
-    // review binding, so it is rejected into the batch; the microturn filter still suppresses the
-    // model surface and the run retries with a typed decision.
+    // (b) Ordinary Auto with only a task handoff binding rejects an unavailable Plan review
+    // into the batch and can continue to a normal final answer.
     let agent = Agent::new(
-        ScriptedTurnToolProvider::new(vec![
-            vec![(
-                "call-plan-review".to_owned(),
-                REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
-                r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
-            )],
-            vec![(
-                "call-chat".to_owned(),
-                CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-                r#"{"reason":"does_not_meet_task_planning_criteria"}"#.to_owned(),
-            )],
-        ]),
+        ScriptedTurnToolProvider::new(vec![vec![(
+            "call-plan-review".to_owned(),
+            REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
+            r#"{"reason_codes":["architectural_tradeoff"]}"#.to_owned(),
+        )]]),
         ToolRegistry::new(),
     );
     let mut session = Session::new("mock-plan-review-unbound", "mock-model");
@@ -15831,7 +13802,7 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
             .expect("direct input owns a message id"),
         logical_run_id,
     )?;
-    let task_handoff = TaskPlanningHandoffBinding {
+    let task_handoff = TaskStartHandoffBinding {
         handoff_id: TaskHandoffId::new("handoff-unbound-1")?,
         task_id: TaskId::new("task-unbound-1")?,
         source_turn: source_turn.clone(),
@@ -15859,11 +13830,7 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
         .await?;
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
     assert_single_settled_result(&session, "call-plan-review", "not available for this run");
-    assert_eq!(
-        tool_result_event_count(&handler, "call-plan-review"),
-        0,
-        "routing correction remains durable and model-visible without leaking into product events"
-    );
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
     let decisions = session
         .entries()
         .iter()
@@ -15874,14 +13841,13 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(decisions.len(), 1);
-    assert_eq!(decisions[0].route, ConversationRoute::Chat);
+    assert!(decisions.is_empty());
 
-    // (c) plan review run without a draft binding: submit_plan_draft is rejected into the batch.
+    // (c) an unregistered tool remains an ordinary tool error during a Plan review.
     let agent = Agent::new(
         ScriptedTurnToolProvider::new(vec![vec![(
             "call-draft".to_owned(),
-            SUBMIT_PLAN_DRAFT_TOOL_NAME.to_owned(),
+            "unexpected_plan_tool".to_owned(),
             "{}".to_owned(),
         )]]),
         ToolRegistry::new(),
@@ -15914,14 +13880,14 @@ async fn plan_review_error_branches_settle_through_the_assistant_batch() -> Resu
         .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
         .await?;
     assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_single_settled_result(&session, "call-draft", "retired_plan_protocol");
+    assert_single_settled_result(&session, "call-draft", "unknown tool unexpected_plan_tool");
     assert_eq!(tool_result_event_count(&handler, "call-draft"), 1);
     assert!(
         output
             .outcome
             .tool_errors
             .iter()
-            .any(|error| error.kind == ToolErrorKind::Protocol)
+            .any(|error| error.kind == ToolErrorKind::Internal)
     );
     Ok(())
 }
@@ -15986,7 +13952,7 @@ async fn mixed_special_and_ordinary_results_settle_in_declaration_order() -> Res
     assert!(
         settled[0]
             .1
-            .contains("not available after the routing microturn")
+            .contains("not available for the current source turn")
     );
     assert!(settled[1].1.contains("declared second"));
     assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
@@ -15995,10 +13961,9 @@ async fn mixed_special_and_ordinary_results_settle_in_declaration_order() -> Res
 }
 
 #[tokio::test]
-async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settlement() -> Result<()>
-{
-    // RFC-0063 6.1: once a plan review decision is accepted, every other call in the same response
-    // gets an explicit terminal result (audited Cancelled) and every call settles exactly once.
+async fn mixed_handoff_calls_are_rejected_with_explicit_single_settlement() -> Result<()> {
+    // Positive planning handoffs must be the only call. Reject the entire mixed batch
+    // before either handoff takes effect, and settle each call exactly once.
     let agent = Agent::new(
         ScriptedTurnToolProvider::new(vec![vec![
             (
@@ -16008,8 +13973,8 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
             ),
             (
                 "call-extra".to_owned(),
-                REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-                r#"{"reason_codes":["target_requires_task_planning"]}"#.to_owned(),
+                START_TASK_TOOL_NAME.to_owned(),
+                r#"{"title":"Design migration"}"#.to_owned(),
             ),
         ]]),
         ToolRegistry::new(),
@@ -16026,8 +13991,10 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
             .expect("direct input owns a message id"),
         logical_run_id,
     )?;
+    let continuation =
+        auto_execution::bound_continuation_fixture(&mut session, &source_turn, prompt)?;
     let plan_review_binding = test_plan_review_handoff_binding(&source_turn, prompt);
-    let task_handoff = TaskPlanningHandoffBinding {
+    let task_handoff = TaskStartHandoffBinding {
         handoff_id: TaskHandoffId::new("handoff-accepted-1")?,
         task_id: TaskId::new("task-accepted-1")?,
         source_turn: source_turn.clone(),
@@ -16038,7 +14005,7 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
         requested_at_ms: 42,
         decided_at_ms: 43,
     };
-    let input = input
+    let mut input = input
         .with_logical_run_id(logical_run_id)
         .with_run_purpose(conversation_run_purpose(
             logical_run_id,
@@ -16049,25 +14016,27 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
             Some(task_handoff),
         ))
         .with_cancellation(RunCancellationOwner::new().handle());
+    if let Some(AgentRunPurpose::Conversation(context)) = input.purpose.as_mut() {
+        context.task_continuation = Some(continuation);
+    }
     let mut handler = RecordingEventHandler::default();
     let output = agent
         .run_with_input(&mut session, input, scripted_run_options(3), &mut handler)
         .await?;
     assert!(matches!(
         output.disposition,
-        AgentRunDisposition::StartPlanReview(_)
+        AgentRunDisposition::FinalAnswer
     ));
-    assert_single_settled_result(&session, "call-plan-review", "accepted");
-    assert_single_settled_result(&session, "call-extra", "ignored");
-    // Both calls still settle durably for provider correctness, while the internal routing batch
-    // stays out of product events. The Task / Plan Review runtime owns positive user feedback.
-    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 0);
-    assert_eq!(tool_result_event_count(&handler, "call-extra"), 0);
+    assert_single_settled_result(&session, "call-plan-review", "must be the only call");
+    assert_single_settled_result(&session, "call-extra", "must be the only call");
+    // Both rejections remain visible and durable in the original declaration order.
+    assert_eq!(tool_result_event_count(&handler, "call-plan-review"), 1);
+    assert_eq!(tool_result_event_count(&handler, "call-extra"), 1);
     assert!(session.entries().iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.call_id == "call-extra"
-                && execution.status == ToolExecutionStatus::Cancelled
+                && execution.status == ToolExecutionStatus::Failed
     )));
     assert_eq!(
         output.outcome.tool_call_ids,
@@ -16078,11 +14047,11 @@ async fn accepted_plan_review_terminates_extra_calls_with_explicit_single_settle
             .outcome
             .tool_errors
             .iter()
-            .any(|error| error.kind == ToolErrorKind::Unsupported)
+            .any(|error| error.kind == ToolErrorKind::InvalidInput)
     );
     assert_eq!(
         output.outcome.terminal_reason,
-        AgentRunTerminalReason::PlanReviewHandoff
+        AgentRunTerminalReason::FinalAnswer
     );
     Ok(())
 }
@@ -16095,19 +14064,13 @@ async fn request_user_input_suspends_with_durable_request_and_cancels_extra_call
                 "call-input".to_owned(),
                 REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
                 serde_json::json!({
-                    "prompt": "Choose the compatibility boundary before implementation.",
                     "questions": [{
                         "id": "compatibility",
-                        "header": "Compatibility",
                         "question": "Which compatibility target should be preserved?",
-                        "required": true,
-                        "field": {
-                            "kind": "single_select",
-                            "options": [
-                                {"id": "current", "label": "Current release"},
-                                {"id": "legacy", "label": "Legacy sessions"}
-                            ]
-                        }
+                        "options": [
+                            {"label": "Current release"},
+                            {"label": "Legacy sessions"}
+                        ]
                     }]
                 })
                 .to_string(),
@@ -16160,7 +14123,7 @@ async fn request_user_input_suspends_with_durable_request_and_cancels_extra_call
         .expect("durable request should be projected");
     assert_eq!(
         state.requested.request.prompt,
-        "Choose the compatibility boundary before implementation."
+        "Which compatibility target should be preserved?"
     );
     assert!(
         settled_tool_results(&session)
@@ -16173,52 +14136,6 @@ async fn request_user_input_suspends_with_durable_request_and_cancels_extra_call
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.call_id == "call-input"
                 && execution.status == ToolExecutionStatus::Started
-    )));
-    Ok(())
-}
-
-#[tokio::test]
-async fn submit_only_plan_finalizer_rejects_non_submit_before_tool_dispatch() -> Result<()> {
-    let executions = Arc::new(AtomicUsize::new(0));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(ReadPathTool {
-        executions: Arc::clone(&executions),
-    }));
-    let agent = Agent::new(
-        ScriptedTurnToolProvider::new(vec![vec![(
-            "call-finalizer-read".to_owned(),
-            "read_path".to_owned(),
-            r#"{"path":"src/lib.rs"}"#.to_owned(),
-        )]]),
-        registry,
-    );
-    let mut session = Session::new("mock-finalizer", "mock-model");
-    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        "Submit the draft now.",
-    )])
-    .with_logical_run_id("submit-only-finalizer")
-    .with_plan_review_submit_only();
-    let mut handler = RecordingEventHandler::default();
-    let output = agent
-        .run_with_input(&mut session, input, scripted_run_options(2), &mut handler)
-        .await?;
-
-    assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-    assert_eq!(
-        executions.load(Ordering::SeqCst),
-        0,
-        "a non-submit call must never enter the registry"
-    );
-    let result = settled_tool_results(&session)
-        .into_iter()
-        .find(|(call_id, _)| call_id == "call-finalizer-read")
-        .expect("typed protocol result");
-    assert!(result.1.contains("submit_only_protocol_violation"));
-    assert!(session.entries().iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-            if execution.call_id == "call-finalizer-read"
-                && execution.status == ToolExecutionStatus::Failed
     )));
     Ok(())
 }
@@ -16282,7 +14199,7 @@ async fn run_outcome_reflects_error_cancelled_and_completed_tool_states() -> Res
     // RFC-0062 11.5: batch settlement folds every result into the run outcome; an ordinary tool
     // error inside the batch must not fail the run, and the outcome keeps error and completed
     // states distinct. (The cancelled state is asserted by
-    // accepted_plan_review_terminates_extra_calls_with_explicit_single_settlement.)
+    // mixed_handoff_calls_are_rejected_with_explicit_single_settlement.)
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool));
     let agent = Agent::new(
@@ -16792,6 +14709,15 @@ async fn failed_execution_after_restart_uses_only_configured_max_turns() -> Resu
             },
             registry,
         );
+        let direct_admission = if direct {
+            Some(task_progress::admit_direct_fixture(
+                &mut session,
+                "guard-direct",
+                "Exercise the configured failure turn limit",
+            )?)
+        } else {
+            None
+        };
         let input = || {
             let input = AgentRunInput::without_persisted_user_message(Vec::new())
                 .with_logical_run_id("guard-restart-run");
@@ -16799,7 +14725,11 @@ async fn failed_execution_after_restart_uses_only_configured_max_turns() -> Resu
                 input.with_run_purpose(AgentRunPurpose::TaskDirectExecution(
                     crate::TaskDirectExecutionContext {
                         task_id: TaskId::new("guard-direct").expect("task id"),
-                        admission_id: "guard-admission".to_owned(),
+                        admission_id: direct_admission
+                            .as_ref()
+                            .expect("direct admission")
+                            .admission_id
+                            .clone(),
                         attempt_id: "guard-attempt".to_owned(),
                     },
                 ))
@@ -16872,168 +14802,142 @@ async fn failed_execution_after_restart_uses_only_configured_max_turns() -> Resu
     Ok(())
 }
 
-#[tokio::test]
-async fn task_participant_configured_max_turns_preserves_partial_finalization() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WorkspaceMutatingCustomTool));
-    registry.register(Arc::new(EchoTool));
-    let agent = Agent::new(
-        PostMutationReadLoopProvider {
-            calls: Arc::clone(&calls),
-            captured: Arc::clone(&captured),
-        },
-        registry,
-    );
-    let mut session = Session::new("mock-post-mutation-read-loop", "mock-model").with_store(store);
-    let input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-        "Apply the accepted mutation and return the result.",
-    )])
-    .with_run_purpose(AgentRunPurpose::TaskParticipant(TaskParticipantContext {
-        task_id: TaskId::new("task-configured-limit")?,
-        plan_version: 1,
-        step_id: TaskStepId::new("write-step")?,
-        attempt_id: TaskParticipantAttemptId::new("participant-configured-limit")?,
-    }));
-    let mut options = scripted_run_options(3);
-    options.workspace_root = temp.path().to_path_buf();
-    let output = agent
-        .run_with_input(
-            &mut session,
-            input,
-            options,
-            &mut crate::event::NoopEventHandler,
-        )
-        .await?;
-    assert_eq!(output.disposition, AgentRunDisposition::Blocked);
-    assert_eq!(
-        output.outcome.terminal_reason,
-        AgentRunTerminalReason::FinalAnswerBlocked
-    );
-    assert_eq!(
-        output.result.final_text,
-        "mutation complete after bounded inspection"
-    );
-    assert!(output.result.final_message_id.is_none());
-    assert_eq!(output.result.tool_calls, 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let requests = captured.lock().expect("requests");
-    let finalization = requests.last().expect("finalization request");
-    assert!(finalization.tools.is_empty());
-    assert!(finalization.messages.iter().any(|message| {
-        message.content.as_deref() == Some(task_participant_finalization_prompt_contract_material())
-    }));
-    Ok(())
+struct MalformedTerminalResultTool(ScheduledReadTool);
+
+#[async_trait]
+impl Tool for MalformedTerminalResultTool {
+    fn spec(&self) -> crate::ToolSpec {
+        self.0.spec()
+    }
+
+    fn mutation_tracking(&self) -> ToolMutationTracking {
+        self.0.mutation_tracking()
+    }
+
+    fn concurrency_class(&self) -> ToolConcurrencyClass {
+        self.0.concurrency_class()
+    }
+
+    fn permission_plan(
+        &self,
+        ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<crate::ToolPermissionPlanDraft> {
+        self.0.permission_plan(ctx, args)
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let mut result = self.0.execute(ctx, call_id, args).await?;
+        result.metadata.details = json!({
+            "execution_id": "terminal-test",
+            "status_detail": null
+        });
+        Ok(result)
+    }
 }
 
 #[tokio::test]
-async fn plan_review_current_results_reject_retired_tools_and_keep_ordinary_reads() -> Result<()> {
-    for retired in [
-        crate::SUBMIT_PLAN_DRAFT_TOOL_NAME,
-        crate::CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
-    ] {
-        for result_outcome in ["draft", "no_plan"] {
-            let mut registry = ToolRegistry::new();
-            registry.register(Arc::new(EchoTool));
-            let legacy_args = if retired == crate::SUBMIT_PLAN_DRAFT_TOOL_NAME {
-                r#"{"schema_version":2,"summary":"old draft","steps":[{"title":"old step"}],"target_paths":[],"suggested_checks":[]}"#
-            } else {
-                r#"{"decision":"accept"}"#
-            };
-            let result_args = serde_json::json!({
-                "schema_version": 1, "outcome": result_outcome,
-                "content": "A complete typed review result.",
+async fn post_execution_projection_failure_settles_completed_and_unstarted_calls() -> Result<()> {
+    for parallel in [false, true] {
+        let probe = Arc::new(ToolSchedulerProbe::default());
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(MalformedTerminalResultTool(ScheduledReadTool {
+            name: "malformed_terminal".to_owned(),
+            delay: Duration::ZERO,
+            parallel,
+            mutation_tracking: ToolMutationTracking::None,
+            fail: false,
+            probe: Arc::clone(&probe),
+        })));
+        registry.register(Arc::new(ScheduledReadTool {
+            name: "never_started".to_owned(),
+            delay: Duration::ZERO,
+            parallel: false,
+            mutation_tracking: ToolMutationTracking::None,
+            fail: false,
+            probe: Arc::clone(&probe),
+        }));
+        let calls = ["malformed_terminal", "never_started"]
+            .into_iter()
+            .map(|name| (format!("call-{name}"), name.to_owned(), "{}".to_owned()))
+            .collect();
+        let agent = Agent::new(ScriptedTurnToolProvider::new(vec![calls]), registry);
+        let mut session = Session::new("mock-post-execution-failure", "mock-model");
+        let mut handler = RecordingEventHandler::default();
+        let error = agent
+            .run_with_input(
+                &mut session,
+                AgentRunInput::user("read command output then perform the next operation"),
+                scripted_run_options(3),
+                &mut handler,
+            )
+            .await
+            .expect_err("invalid terminal projection must remain an internal error");
+        assert!(format!("{error:#}").contains("invalid terminal task status_detail"));
+        assert_single_settled_result(&session, "call-malformed_terminal", "malformed_terminal");
+        assert_single_settled_result(&session, "call-never_started", "before execution started");
+        assert_eq!(
+            *probe.events.lock().expect("scheduler events lock"),
+            ["start:malformed_terminal", "end:malformed_terminal"]
+        );
+        let audit = session
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) => {
+                    Some((execution.call_id.as_str(), execution.status))
+                }
+                _ => None,
             })
-            .to_string();
-            let agent = Agent::new(
-                ScriptedTurnToolProvider::new(vec![
-                    vec![
-                        (
-                            "retired".to_owned(),
-                            retired.to_owned(),
-                            legacy_args.to_owned(),
-                        ),
-                        (
-                            "ordinary-read".to_owned(),
-                            "echo".to_owned(),
-                            r#"{"value":"ordinary read survived"}"#.to_owned(),
-                        ),
-                    ],
-                    vec![(
-                        "current-result".to_owned(),
-                        crate::PLAN_REVIEW_RESULT_TOOL_NAME.to_owned(),
-                        result_args,
-                    )],
-                ]),
-                registry,
-            );
-            let mut session = Session::new("plan-protocol-retirement", "mock-model");
-            let input = AgentRunInput::user("propose a bounded change");
-            let source = ConversationTurnRef::new(
-                session.session_scope_id(),
-                input
-                    .persisted_user_message_id
-                    .clone()
-                    .expect("source message"),
-                "plan-protocol-retirement",
-            )?;
-            let binding = test_plan_review_handoff_binding(&source, "propose a bounded change");
-            let input = input
-                .with_logical_run_id("plan-protocol-retirement")
-                .with_run_purpose(AgentRunPurpose::PlanReview(PlanReviewPurposeContext {
-                    plan_review_id: binding.plan_review_id.clone(),
-                    attempt_id: binding.attempt_id.clone(),
-                    plan_id: binding.plan_id.clone(),
-                    source_turn: source.clone(),
-                    route_decision_id: None,
-                }))
-                .with_plan_review_draft(crate::PlanReviewDraftContext {
-                    plan_review_id: binding.plan_review_id.clone(),
-                    attempt_id: binding.attempt_id.clone(),
-                    plan_id: binding.plan_id.clone(),
-                    source: crate::PlanSourceRef {
-                        source_turn: Some(source),
-                        plan_review_id: Some(binding.plan_review_id),
-                        ..Default::default()
-                    },
-                    workspace_snapshot_id: None,
-                });
-            let output = agent
-                .run_with_input(
-                    &mut session,
-                    input,
-                    scripted_run_options(4),
-                    &mut RecordingEventHandler::default(),
-                )
-                .await?;
-            assert_single_settled_result(&session, "retired", "retired_plan_protocol");
-            assert!(session.entries().iter().any(|entry| matches!(entry,
-                SessionLogEntry::ToolResultV3(result)
-                    if result.call_id == "ordinary-read" && result.facts.status == "ok"
-                        && result.initial_model_view.preview.contains("ordinary read survived"))));
-            let drafts = session.plan_artifact_projection();
-            assert_eq!(drafts.plans.len(), usize::from(result_outcome == "draft"));
-            if result_outcome == "draft" {
-                assert!(matches!(
-                    output.disposition,
-                    AgentRunDisposition::PlanReviewDraftSubmitted(_)
-                ));
-                assert_eq!(
-                    drafts.plans[&binding.plan_id].inline_text.as_deref(),
-                    Some("A complete typed review result.")
-                );
-            } else {
-                assert_eq!(output.disposition, AgentRunDisposition::FinalAnswer);
-            }
-            assert!(
-                crate::TaskStateProjection::from_entries(session.entries())
-                    .tasks
-                    .is_empty()
-            );
-        }
+            .collect::<Vec<_>>();
+        assert_eq!(
+            audit,
+            [
+                ("call-malformed_terminal", ToolExecutionStatus::Started),
+                ("call-malformed_terminal", ToolExecutionStatus::Completed),
+                ("call-never_started", ToolExecutionStatus::Interrupted),
+            ]
+        );
+        assert_eq!(
+            tool_result_event_count(&handler, "call-malformed_terminal"),
+            1
+        );
+        assert_eq!(tool_result_event_count(&handler, "call-never_started"), 1);
     }
+    Ok(())
+}
+
+#[test]
+fn failed_batch_settlement_ignores_historical_started_calls_with_reused_ids() -> Result<()> {
+    let call = ToolCall {
+        id: "reused-id".into(),
+        name: "echo".into(),
+        args_json: "{}".into(),
+    };
+    let mut session = Session::new("batch-history", "fixture");
+    super::tool_audit::append_tool_execution_audit(
+        &mut session,
+        &call,
+        &[],
+        ToolExecutionStatus::Started,
+        None,
+        None,
+    )?;
+    let declared = super::DeclaredToolBatch {
+        calls: vec![call],
+        entry_start: session.entries().len(),
+    };
+    let mut outcome = AgentRunOutcome::default();
+    let mut handler = RecordingEventHandler::default();
+    let error = super::settle_failed_tool_batch(
+        &mut session,
+        &mut handler,
+        &mut outcome,
+        &declared,
+        &mut Vec::new(),
+        anyhow::anyhow!("primary failure"),
+    );
+    assert_eq!(error.to_string(), "primary failure");
+    assert_single_settled_result(&session, "reused-id", "before execution started");
     Ok(())
 }

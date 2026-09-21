@@ -7,8 +7,8 @@ use crate::{PlanDraftStep, TaskId, safe_persistence_text};
 
 /// Reserved internal tool used by an active Task executor to refresh display-only progress.
 pub const UPDATE_TASK_CHECKLIST_TOOL_NAME: &str = "update_task_checklist";
-/// A single item is intentionally not presented as a list.
-pub const TASK_CHECKLIST_MIN_ITEMS: usize = 2;
+/// An empty model update clears the progress checklist.
+pub const TASK_CHECKLIST_MIN_ITEMS: usize = 0;
 /// Product cap aligned with the compact task surfaces.
 pub const TASK_CHECKLIST_MAX_ITEMS: usize = 32;
 /// Maximum user-visible text in one checklist item.
@@ -25,7 +25,7 @@ pub enum TaskChecklistItemStatusV1 {
 
 /// One bounded display-only checklist item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskChecklistItemV1 {
     pub item_id: String,
     pub text: String,
@@ -37,7 +37,7 @@ pub struct TaskChecklistItemV1 {
 /// This contract never grants execution, permission, scheduling, dependency, role, or completion
 /// authority. Invalid or absent checklist data cannot block the owning Task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskChecklistUpdatedV1 {
     pub task_id: TaskId,
     pub revision: u32,
@@ -56,7 +56,6 @@ impl TaskChecklistUpdatedV1 {
             );
         }
         let mut ids = BTreeSet::new();
-        let mut in_progress = 0_usize;
         for item in &self.items {
             if item.item_id.is_empty()
                 || item.item_id.len() > 128
@@ -74,10 +73,6 @@ impl TaskChecklistUpdatedV1 {
             {
                 bail!("task checklist item text is invalid");
             }
-            in_progress += usize::from(item.status == TaskChecklistItemStatusV1::InProgress);
-        }
-        if in_progress > 1 {
-            bail!("task checklist can contain at most one in-progress item");
         }
         Ok(())
     }
@@ -118,7 +113,7 @@ pub fn task_checklist_from_plan_steps(
         })
         .take(TASK_CHECKLIST_MAX_ITEMS)
         .collect::<Vec<_>>();
-    if items.len() < TASK_CHECKLIST_MIN_ITEMS {
+    if items.len() < 2 {
         return None;
     }
     let checklist = TaskChecklistUpdatedV1 {
@@ -129,57 +124,14 @@ pub fn task_checklist_from_plan_steps(
     checklist.validate().ok().map(|()| checklist)
 }
 
-/// Advances the first pending item when direct execution starts.
-#[must_use]
-pub fn task_checklist_started_update(
-    current: &TaskChecklistUpdatedV1,
-) -> Option<TaskChecklistUpdatedV1> {
-    if current
-        .items
-        .iter()
-        .any(|item| item.status == TaskChecklistItemStatusV1::InProgress)
-    {
-        return None;
-    }
-    let mut next = current.clone();
-    let item = next
-        .items
-        .iter_mut()
-        .find(|item| item.status == TaskChecklistItemStatusV1::Pending)?;
-    item.status = TaskChecklistItemStatusV1::InProgress;
-    next.revision = next.revision.checked_add(1)?;
-    next.validate().ok().map(|()| next)
-}
-
-/// Settles every display item after the owning Task reaches authoritative completion.
-#[must_use]
-pub fn task_checklist_completed_update(
-    current: &TaskChecklistUpdatedV1,
-) -> Option<TaskChecklistUpdatedV1> {
-    if current
-        .items
-        .iter()
-        .all(|item| item.status == TaskChecklistItemStatusV1::Completed)
-    {
-        return None;
-    }
-    let mut next = current.clone();
-    for item in &mut next.items {
-        item.status = TaskChecklistItemStatusV1::Completed;
-    }
-    next.revision = next.revision.checked_add(1)?;
-    next.validate().ok().map(|()| next)
-}
-
 /// Returns the provider-neutral schema for the optional checklist progress tool.
 #[must_use]
 pub fn update_task_checklist_tool_spec() -> crate::ToolSpec {
     crate::ToolSpec {
         name: UPDATE_TASK_CHECKLIST_TOOL_NAME.to_owned(),
-        description: "Replace the current display-only task progress checklist. This helps the user follow multi-step work but does not authorize, schedule, or complete execution.".to_owned(),
+        description: "Track task progress with a short ordered checklist. Send the complete list of items with text and status (pending, in_progress, completed); mark each item when its work is done. Send an empty list to clear it. Skip this tool for trivial work. The checklist reports progress and does not authorize tools or prove verification passed.".to_owned(),
         input_schema: serde_json::json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["items"],
             "properties": {
                 "items": {
@@ -188,7 +140,6 @@ pub fn update_task_checklist_tool_spec() -> crate::ToolSpec {
                     "maxItems": TASK_CHECKLIST_MAX_ITEMS,
                     "items": {
                         "type": "object",
-                        "additionalProperties": false,
                         "required": ["text", "status"],
                         "properties": {
                             "text": {
@@ -213,13 +164,13 @@ pub fn update_task_checklist_tool_spec() -> crate::ToolSpec {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct RawTaskChecklistArgs {
     items: Vec<RawTaskChecklistItem>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct RawTaskChecklistItem {
     text: String,
     status: TaskChecklistItemStatusV1,

@@ -45,6 +45,7 @@ mod links;
 mod product;
 mod readiness;
 mod runner;
+mod selection;
 mod shared;
 mod snapshot;
 
@@ -58,6 +59,7 @@ pub use product::*;
 pub use readiness::*;
 pub(crate) use runner::run_verification_check_with_evidence;
 pub use runner::*;
+pub use selection::*;
 pub use snapshot::*;
 
 use discovery::normalize_check_cwd;

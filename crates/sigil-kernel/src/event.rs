@@ -183,6 +183,7 @@ durable_event_types! {
     ToolResultRecordedV3 => ("tool_result_recorded_v3", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ToolResultRecordedV2 => ("tool_result_recorded_v2", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionCompositionBound => ("session_composition_bound", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    SessionRuntimeTransitionV1 => ("session_runtime_transition_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     SessionEntryRecorded => ("session_entry_recorded", RecoveryCritical, NonCritical, SessionLogEntry, "session_log_entry"),
     RunStatusChanged => ("run_status_changed", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
     RunFinalized => ("run_finalized", RecoveryCritical, Critical, DirectJson, "run_lifecycle"),
@@ -193,14 +194,6 @@ durable_event_types! {
     PlanDraftCreated => ("plan_draft_created", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanDecisionRecorded => ("plan_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanPermissionGranted => ("plan_permission_granted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    PlanExecutionCandidatePrepared => ("plan_execution_candidate_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    PlanReadyCommitted => ("plan_ready_committed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    PlanCompileFailed => ("plan_compile_failed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    PlanExecutionAdopted => ("plan_execution_adopted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    TaskMaterializationAttemptStarted => ("task_materialization_attempt_started", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    TaskMaterializationPrepared => ("task_materialization_prepared", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    TaskMaterializationBlocked => ("task_materialization_blocked", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    TaskAdmissionAttempted => ("task_admission_attempted", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     ConversationRouteDecisionRecorded => ("conversation_route_decision_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewAttempt => ("plan_review_attempt", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     PlanReviewResolutionRecorded => ("plan_review_resolution_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -243,6 +236,8 @@ durable_event_types! {
     IntentOperationResolved => ("intent_operation_resolved", RecoveryCritical, Critical, DirectJson, "intent_operation_resolved"),
     IntentConflictRecorded => ("intent_conflict_recorded", RecoveryCritical, Critical, DirectJson, "intent_conflict_recorded"),
     IntentVersionSuperseded => ("intent_version_superseded", RecoveryCritical, Critical, DirectJson, "intent_version_superseded"),
+    ApplicationOperationPreparedV1 => ("application_operation_prepared_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
+    ApplicationOperationCommittedV1 => ("application_operation_committed_v1", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskStatusChanged => ("task_status_changed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffRequested => ("task_handoff_requested", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskHandoffResolved => ("task_handoff_resolved", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -268,7 +263,6 @@ durable_event_types! {
     TaskPromotionAuthorityConsumed => ("task_promotion_authority_consumed", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     IntegrationPromotionRecorded => ("integration_promotion_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     TaskParentVerificationRecorded => ("task_parent_verification_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
-    TaskGuidanceApplied => ("task_guidance_applied", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     OrchestrationRouteDisabled => ("orchestration_route_disabled", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     JobIntentRecorded => ("job_intent_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
     StepLeaseRecorded => ("step_lease_recorded", RecoveryCritical, Critical, SessionLogEntry, "session_log_entry"),
@@ -886,12 +880,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         | DurableEventType::MergeReviewResolved => {
             TypedDomainEvent::WriteIsolation(decode_write_isolation_record(&event)?)
         }
-        DurableEventType::TaskStatusChanged
-        | DurableEventType::PlanExecutionAdopted
-        | DurableEventType::TaskMaterializationAttemptStarted
-        | DurableEventType::TaskMaterializationPrepared
-        | DurableEventType::TaskMaterializationBlocked
-        | DurableEventType::TaskAdmissionAttempted => {
+        DurableEventType::TaskStatusChanged => {
             let control = decode_control_entry(&event)?;
             match control {
                 ControlEntry::TaskRun(_)
@@ -899,34 +888,19 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 | ControlEntry::TaskRunCancellationScopeBound(_)
                 | ControlEntry::TaskRunTargetSelected(_)
                 | ControlEntry::TaskDirectExecutionAdmittedV1(_)
+                | ControlEntry::TaskDirectRequirementsBoundV1(_)
                 | ControlEntry::TaskDirectExecutionAttemptV1(_)
                 | ControlEntry::TaskChecklistUpdatedV1(_)
                 | ControlEntry::TaskPlan(_)
                 | ControlEntry::TaskStepContractBoundV2(_)
                 | ControlEntry::TaskPlanContractSetCommittedV2(_)
-                | ControlEntry::TaskGuidanceMaterialized(_)
                 | ControlEntry::TaskStep(_)
                 | ControlEntry::TaskParticipantAttempt(_)
-                | ControlEntry::TaskParticipantRetryScheduled(_)
-                | ControlEntry::TaskParticipantResult(_)
-                | ControlEntry::TaskStepCheckpointV2(_)
-                | ControlEntry::TaskFinalAnswerCommitted(_)
-                | ControlEntry::PlanExecutionAdoptedV1(_)
-                | ControlEntry::TaskMaterializationAttemptStartedV1(_)
-                | ControlEntry::TaskMaterializationPreparedV1(_)
-                | ControlEntry::TaskMaterializationBlockedV1(_)
-                | ControlEntry::TaskAdmissionAttemptedV1(_) => {
+                | ControlEntry::TaskParticipantResult(_) => {
                     TypedDomainEvent::TaskStatusChanged(control)
                 }
                 _ => bail!("task status event carried non-task control payload"),
             }
-        }
-        DurableEventType::TaskGuidanceApplied => {
-            let control = decode_control_entry(&event)?;
-            let ControlEntry::TaskGuidanceApplied(entry) = control else {
-                bail!("task guidance applied event carried a different control payload");
-            };
-            TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskGuidanceApplied(entry))
         }
         DurableEventType::TaskHandoffRequested => {
             let control = decode_control_entry(&event)?;
@@ -1383,6 +1357,8 @@ pub enum RunEvent {
     },
     ToolCallCompleted(ToolCall),
     ToolApprovalRequested {
+        /// Display-only occurrence identity; never used for approval authority or routing.
+        display_call_id: Option<String>,
         approval_identity: ApprovalRequestIdentityV2,
         effects: BTreeSet<ToolPermissionEffect>,
         analysis: ToolAnalysisStatus,
@@ -1407,6 +1383,8 @@ pub enum RunEvent {
         preview: Option<ToolPreview>,
     },
     ToolApprovalResolved {
+        /// Display-only occurrence identity; never used for approval authority or routing.
+        display_call_id: Option<String>,
         call_id: String,
         approval_request_id: String,
         approved: bool,
@@ -1652,6 +1630,9 @@ pub enum PublicRunEventKind {
         call: ToolCall,
     },
     ApprovalRequested {
+        /// Display-only occurrence identity; authoritative call IDs remain unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_call_id: Option<String>,
         approval_identity: ApprovalRequestIdentityV2,
         effects: BTreeSet<ToolPermissionEffect>,
         analysis: ToolAnalysisStatus,
@@ -1686,6 +1667,9 @@ pub enum PublicRunEventKind {
         preview: Option<ToolPreview>,
     },
     ApprovalResolved {
+        /// Display-only occurrence identity; authoritative call IDs remain unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_call_id: Option<String>,
         call_id: String,
         approval_request_id: String,
         approved: bool,
@@ -1776,6 +1760,7 @@ impl From<RunEvent> for PublicRunEventKind {
             RunEvent::ToolCallArgsDelta { id, delta } => Self::ToolCallArgsDelta { id, delta },
             RunEvent::ToolCallCompleted(call) => Self::ToolCallCompleted { call },
             RunEvent::ToolApprovalRequested {
+                display_call_id,
                 approval_identity,
                 effects,
                 analysis,
@@ -1799,6 +1784,7 @@ impl From<RunEvent> for PublicRunEventKind {
                 command_permission_matches,
                 preview,
             } => Self::ApprovalRequested {
+                display_call_id,
                 approval_identity,
                 effects,
                 analysis,
@@ -1823,11 +1809,13 @@ impl From<RunEvent> for PublicRunEventKind {
                 preview,
             },
             RunEvent::ToolApprovalResolved {
+                display_call_id,
                 call_id,
                 approval_request_id,
                 approved,
                 reason,
             } => Self::ApprovalResolved {
+                display_call_id,
                 call_id,
                 approval_request_id,
                 approved,
@@ -1857,6 +1845,9 @@ impl From<RunEvent> for PublicRunEventKind {
 pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
     match entry {
         ControlEntry::SessionCompositionBound(_) => "session_composition_bound",
+        ControlEntry::SessionRuntimeTransitionV1(_) => "session_runtime_transition_v1",
+        ControlEntry::ApplicationOperationPreparedV1(_) => "application_operation_prepared_v1",
+        ControlEntry::ApplicationOperationCommittedV1(_) => "application_operation_committed_v1",
         ControlEntry::SessionIdentity { .. } => "session_identity",
         ControlEntry::SessionModelSelected { .. } => "session_model_selected",
         ControlEntry::SessionRouteRebound { .. } => "session_route_rebound",
@@ -1869,6 +1860,7 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ContextAssemblySkipped(_) => "context_assembly_skipped",
         ControlEntry::ExternalProvenance(_) => "external_provenance",
         ControlEntry::WebUrlCapabilityDescriptor(_) => "web_url_capability_descriptor",
+        ControlEntry::ProviderDiagnostic(_) => "provider_diagnostic",
         ControlEntry::UsageSnapshot(_) => "usage_snapshot",
         ControlEntry::SemanticCompactionUsageSnapshot(_) => "semantic_compaction_usage_snapshot",
         ControlEntry::ToolApproval(_) => "tool_approval",
@@ -1906,19 +1898,10 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::PlanReviewAttempt(_) => "plan_review_attempt",
         ControlEntry::PlanReviewCandidateRecordedV1(_) => "plan_review_candidate_recorded_v1",
         ControlEntry::PlanReviewResolutionRecordedV1(_) => "plan_review_resolution_recorded_v1",
-        ControlEntry::ExecutablePlanCandidatePreparedV1(_) => "plan_execution_candidate_prepared",
-        ControlEntry::PlanReadyCommittedV1(_) => "plan_ready_committed",
-        ControlEntry::PlanCompileFailedV1(_) => "plan_compile_failed",
-        ControlEntry::PlanExecutionAdoptedV1(_) => "plan_execution_adopted",
-        ControlEntry::TaskMaterializationAttemptStartedV1(_) => {
-            "task_materialization_attempt_started"
-        }
-        ControlEntry::TaskMaterializationPreparedV1(_) => "task_materialization_prepared",
-        ControlEntry::TaskMaterializationBlockedV1(_) => "task_materialization_blocked",
-        ControlEntry::TaskAdmissionAttemptedV1(_) => "task_admission_attempted",
         ControlEntry::TaskCreatedFromPlan(_) => "task_created_from_plan",
         ControlEntry::TaskDirectExecutionAdmittedV1(_) => "task_direct_execution_admitted_v1",
         ControlEntry::TaskDirectExecutionAttemptV1(_) => "task_direct_execution_attempt_v1",
+        ControlEntry::TaskDirectRequirementsBoundV1(_) => "task_direct_requirements_bound_v1",
         ControlEntry::TaskChecklistUpdatedV1(_) => "task_checklist_updated_v1",
         ControlEntry::TaskHandoffRequested(_) => "task_handoff_requested",
         ControlEntry::TaskHandoffResolved(_) => "task_handoff_resolved",
@@ -1929,14 +1912,9 @@ pub(crate) fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskStepContractBoundV2(_) => "task_step_contract_bound_v2",
         ControlEntry::TaskPlanContractSetCommittedV2(_) => "task_plan_contract_set_committed_v2",
-        ControlEntry::TaskGuidanceApplied(_) => "task_guidance_applied",
-        ControlEntry::TaskGuidanceMaterialized(_) => "task_guidance_materialized",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskParticipantAttempt(_) => "task_participant_attempt",
-        ControlEntry::TaskParticipantRetryScheduled(_) => "task_participant_retry_scheduled",
         ControlEntry::TaskParticipantResult(_) => "task_participant_result",
-        ControlEntry::TaskStepCheckpointV2(_) => "task_step_checkpoint_v2",
-        ControlEntry::TaskFinalAnswerCommitted(_) => "task_final_answer_committed",
         ControlEntry::OrchestrationRouteDisabled(_) => "orchestration_route_disabled",
         ControlEntry::TaskChildSession(_) => "task_child_session",
         ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",

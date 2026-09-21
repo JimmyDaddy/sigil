@@ -65,7 +65,7 @@ impl IntentOperationAuthorityV1 {
 
 /// Renderer-to-runtime request. It carries no path, bytes, hash, dependency closure or approval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentDropRequestV1 {
     pub operation_id: IntentOperationId,
     pub stack_version: crate::IntentStackVersion,
@@ -102,7 +102,7 @@ pub struct IntentOperationSummaryV1 {
 /// Exact execution result. Conflicts and explicit rejection are durable successful protocol
 /// outcomes rather than unstructured errors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentOperationExecutionV1 {
     pub preview: IntentOperationPreviewV1,
     pub resolution: IntentOperationResolution,

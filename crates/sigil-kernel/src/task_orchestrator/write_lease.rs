@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn acquire_task_write_lease<H>(
     session: &mut Session,
     handler: &mut H,
-    request: &SequentialTaskRequest,
+    request: &DirectTaskRequest,
     plan_version: u32,
     step: &TaskStepSpec,
     options: &AgentRunOptions,

@@ -9,9 +9,8 @@ use crate::{
     session::{ControlEntry, Session, SessionLogEntry, SessionStreamRecord, ToolExecutionStatus},
     verification::{
         DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EvidenceScope, ReadinessEvaluatedEntry,
-        ReadinessInput, RunStatus, VerificationPolicy, VerificationScope,
-        WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
-        evaluate_readiness, stable_workspace_id,
+        ReadinessInput, RunStatus, VerificationScope, WorkspaceMutationEvidence, WorkspaceTrust,
+        build_workspace_snapshot_for_event, evaluate_readiness, stable_workspace_id,
     },
 };
 
@@ -19,6 +18,7 @@ use super::{
     AgentRunOptions, AgentRunOutcome,
     tool_audit::{execution_mutation_profile_from_details, terminal_task_id_from_tool_metadata},
 };
+use crate::terminal_task::terminal_task_generation_is_newer;
 
 /// Computes the readiness verdict that would be recorded for a final run answer.
 ///
@@ -37,14 +37,15 @@ pub fn projected_agent_run_readiness(
     }
     let scope = EvidenceScope::Run(final_message_id.to_owned());
     let projection = session.verification_state_projection();
-    let policy = projection
-        .latest_policy(&scope)
-        .map(|entry| entry.policy.clone())
-        .unwrap_or_else(|| {
-            VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH)
-        });
     let workspace_id = stable_workspace_id(&options.workspace_root)?;
-    let mut mutations =
+    let policy = projection.selected_policy(
+        &[
+            EvidenceScope::Workspace(workspace_id.clone()),
+            scope.clone(),
+        ],
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    )?;
+    let mutations =
         agent_run_workspace_mutation_evidence(session, &policy.verification_scope, outcome)?;
     let policy_requires_snapshot = !policy.required_checks.is_empty()
         || policy.completion_criteria != crate::CompletionCriteria::NoChecksRequired;
@@ -63,11 +64,6 @@ pub fn projected_agent_run_readiness(
     } else {
         None
     };
-    if let Some(snapshot) = snapshot.as_ref()
-        && let Some(unknown_dirty) = snapshot.unknown_dirty_evidence.clone()
-    {
-        mutations.push(unknown_dirty);
-    }
     let has_workspace_mutation = has_recorded_workspace_mutation || !mutations.is_empty();
     let policy_hash = policy.stable_hash()?;
     let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
@@ -238,6 +234,7 @@ fn active_terminal_mutation_evidence(
     let mut open_profiles = BTreeMap::<String, (ExecutionMutationProfile, String, u64)>::new();
     let mut terminal_profiles = BTreeMap::<String, (ExecutionMutationProfile, String, u64)>::new();
     let mut active_terminals = BTreeMap::<String, (String, u64)>::new();
+    let mut terminal_generations = BTreeMap::<String, u64>::new();
 
     for record in records {
         let (entry, event_id, stream_sequence) = match record {
@@ -270,6 +267,11 @@ fn active_terminal_mutation_evidence(
             }
             SessionLogEntry::Control(ControlEntry::TerminalTask(entry)) => {
                 let task_id = entry.handle.task_id.as_str().to_owned();
+                let current_generation = terminal_generations.get(&task_id).copied();
+                if !terminal_task_generation_is_newer(current_generation, entry.generation) {
+                    continue;
+                }
+                terminal_generations.insert(task_id.clone(), entry.generation);
                 if entry.status.is_active() {
                     active_terminals.insert(task_id, (event_id.clone(), stream_sequence));
                 } else {

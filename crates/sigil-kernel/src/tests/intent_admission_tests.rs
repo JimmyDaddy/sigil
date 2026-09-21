@@ -95,9 +95,12 @@ fn provider_proposal_cannot_serialize_or_supply_acceptance_authority() -> Result
             "acceptance_kind".to_owned(),
             json!("explicit_user_confirmation"),
         );
+    let parsed = serde_json::from_value::<IntentPlanProposalV1>(forged)?;
     assert!(
-        serde_json::from_value::<IntentPlanProposalV1>(forged).is_err(),
-        "provider JSON cannot extend the proposal schema with acceptance"
+        !serde_json::to_value(parsed)?
+            .as_object()
+            .expect("proposal object")
+            .contains_key("acceptance_kind")
     );
 
     let context = IntentAdmissionContextV1::initial(

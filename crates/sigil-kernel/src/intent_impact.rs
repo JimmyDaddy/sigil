@@ -21,7 +21,7 @@ use crate::{
 ///
 /// It does not carry acceptance authority, execution authority, file effects, or mutation bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentRevisionProposalV1 {
     pub schema_version: u16,
     pub proposal_id: String,
@@ -151,7 +151,7 @@ impl IntentRevisionProposalV1 {
 
 /// Read-only application-state effect for one member of a dependency closure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentApplicationImpactV1 {
     pub intent_ref: IntentVersionRef,
     pub application_state: IntentApplicationState,
@@ -160,7 +160,7 @@ pub struct IntentApplicationImpactV1 {
 /// Bounded read-only revise/replace impact. The embedded operation preview has no file effects and
 /// cannot be converted into mutation authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentImpactPreviewV1 {
     pub operation: IntentOperationPreviewV1,
     pub application_impacts: Vec<IntentApplicationImpactV1>,

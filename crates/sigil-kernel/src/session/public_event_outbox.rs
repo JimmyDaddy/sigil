@@ -13,7 +13,7 @@ pub const PUBLIC_EVENT_DELIVERY_BATCH_MAX_BYTES: usize = 256 * 1024;
 
 /// Public event retained before it is dispatched to one product adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicEventOutboxEntryV1 {
     pub schema_version: u16,
     pub public_event_id: String,
@@ -27,7 +27,7 @@ pub struct PublicEventOutboxEntryV1 {
 
 /// Idempotent adapter acknowledgement for one exact public event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicEventDeliveryReceiptV1 {
     pub schema_version: u16,
     pub public_event_id: String,

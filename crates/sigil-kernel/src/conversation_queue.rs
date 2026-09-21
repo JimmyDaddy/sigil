@@ -81,7 +81,7 @@ impl ConversationInputQueueId {
 
 /// A precise durable queue cursor used by mutation and promotion compare-and-swap checks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationQueueRevision {
     pub stream_sequence: u64,
     pub event_id: EventId,
@@ -127,7 +127,7 @@ impl ConversationQueueRevision {
 
 /// One provider-neutral append-only queue mutation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "action", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "action")]
 pub enum ConversationQueueMutation {
     Enqueue {
         entry: ConversationInputQueuedEntry,
@@ -191,7 +191,7 @@ impl ConversationQueueMutation {
 
 /// Exact compare-and-swap command for one durable queue mutation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationQueueMutationCommand {
     pub expected_queue_revision: ConversationQueueRevision,
     pub mutation: ConversationQueueMutation,
@@ -206,7 +206,7 @@ pub struct ConversationQueueMutationReceipt {
 
 /// Exact durable tail observed while deriving one promoted run's terminal evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationInputTerminalFrontier {
     pub stream_sequence: u64,
     pub event_id: EventId,
@@ -245,7 +245,7 @@ impl ConversationInputTerminalFrontier {
 /// promotion exists, terminal delivery binds instead to the promotion's logical dispatch run id;
 /// unrelated queue mutations must not invalidate that already-owned run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "phase", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "phase")]
 pub enum ConversationInputTerminalExpectation {
     Queued {
         expected_queue_revision: ConversationQueueRevision,
@@ -269,7 +269,7 @@ impl ConversationInputTerminalExpectation {
 
 /// Conditional terminal queue append owned by the runtime that observed the matching phase.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationInputTerminalCommand {
     pub expectation: ConversationInputTerminalExpectation,
     pub terminal: ConversationInputStatusEntry,
@@ -313,7 +313,7 @@ impl ConversationInputTerminalCommand {
 /// Critical direct event which atomically binds one queued input to its safe durable user
 /// message. The exact prompt remains process-local and is never represented here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationInputPromotedEntry {
     pub queue_id: ConversationInputQueueId,
     pub expected_queue_revision: ConversationQueueRevision,
@@ -395,17 +395,17 @@ impl ConversationInputPromotedEntry {
     }
 }
 
-/// Critical scheduler binding for one task-targeted guidance item.
+/// Critical execution binding for one direct Task guidance item.
 ///
 /// The durable payload contains only the safe prompt projection. Exact prompt material remains
-/// process-local and must match `prompt_hash` before a continuation attempt can start.
+/// process-local and must match `prompt_hash` before a continuation attempt can start. Guidance
+/// applies to a direct Task and is independent of TaskPlan state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskGuidancePromotedEntry {
     pub queue_id: ConversationInputQueueId,
     pub expected_queue_revision: ConversationQueueRevision,
     pub task_id: TaskId,
-    pub plan_version: u32,
     pub source_turn: ConversationTurnRef,
     pub prompt_hash: String,
     pub exact_prompt_required: bool,
@@ -415,18 +415,18 @@ pub struct TaskGuidancePromotedEntry {
 }
 
 impl TaskGuidancePromotedEntry {
-    /// Validates the content-safe scheduler binding without relying on a stream.
+    /// Validates the content-safe direct Task binding without relying on a stream.
     pub fn validate_shape(&self) -> Result<()> {
         self.expected_queue_revision.validate()?;
         TaskId::new(self.task_id.as_str())?;
-        if self.plan_version == 0 {
-            bail!("task guidance promotion plan version must be non-zero");
-        }
         ConversationTurnRef::new(
             self.source_turn.session_scope_id.clone(),
             self.source_turn.message_id.clone(),
             self.source_turn.logical_run_id.clone(),
         )?;
+        if self.source_turn.logical_run_id != self.dispatch_run_id {
+            bail!("task guidance source turn must use its dispatch run id");
+        }
         validate_queue_prompt_projection(&self.guidance, &self.prompt_hash)?;
         let exact_prompt_required = self
             .prompt_hash

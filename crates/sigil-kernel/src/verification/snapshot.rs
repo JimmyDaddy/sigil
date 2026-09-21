@@ -23,9 +23,36 @@ pub struct VerificationPolicyChangedEntry {
     pub policy: VerificationPolicy,
     pub policy_hash: PolicyHash,
     pub source_event_id: EventId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirement_sources: Vec<VerificationRequirementSourceV1>,
 }
 
 impl VerificationPolicyChangedEntry {
+    /// Checks the one authoritative required set and its optional, same-record provenance.
+    /// Existing records without provenance retain their original required-check strength.
+    pub fn validate(&self) -> Result<()> {
+        if self.policy_hash != self.policy.stable_hash()? {
+            bail!("verification policy hash does not match its content");
+        }
+        if !self.requirement_sources.is_empty() {
+            let selected = self
+                .policy
+                .required_checks
+                .iter()
+                .map(|check| check.check_spec_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let sourced = self
+                .requirement_sources
+                .iter()
+                .map(VerificationRequirementSourceV1::check_spec_id)
+                .collect::<BTreeSet<_>>();
+            if selected != sourced {
+                bail!("verification requirement provenance does not cover its canonical policy");
+            }
+        }
+        Ok(())
+    }
+
     /// Builds a policy entry and computes its content hash.
     ///
     /// # Errors
@@ -42,6 +69,7 @@ impl VerificationPolicyChangedEntry {
             policy,
             policy_hash,
             source_event_id: source_event_id.into(),
+            requirement_sources: Vec::new(),
         })
     }
 }
@@ -81,6 +109,8 @@ pub enum WorkspaceKnowledge {
     Clean(WorkspaceRevision),
     Dirty(WorkspaceRevision),
     UnknownDirty,
+    /// The bounded observation is incomplete; this does not assert an unknown effect.
+    SnapshotUnavailable,
 }
 
 impl WorkspaceKnowledge {
@@ -127,8 +157,6 @@ pub struct WorkspaceSnapshotBuild {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<WorkspaceSnapshotId>,
     pub workspace_knowledge: WorkspaceKnowledge,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unknown_dirty_evidence: Option<WorkspaceMutationEvidence>,
 }
 
 /// Builds a content-bound workspace snapshot for a verification scope.
@@ -183,7 +211,7 @@ fn build_workspace_snapshot_inner(
     workspace_id: WorkspaceId,
     scope: &VerificationScope,
     workspace_revision: WorkspaceRevision,
-    source_event: Option<(EventId, u64)>,
+    _source_event: Option<(EventId, u64)>,
 ) -> Result<WorkspaceSnapshotBuild> {
     let canonical_root = fs::canonicalize(workspace_root)
         .with_context(|| format!("failed to canonicalize {}", workspace_root.display()))?;
@@ -219,34 +247,15 @@ fn build_workspace_snapshot_inner(
         entries,
     };
     let workspace_snapshot_id = manifest.workspace_snapshot_id().ok();
-    let unknown_dirty_evidence = workspace_snapshot_id
-        .is_none()
-        .then_some(source_event)
-        .flatten()
-        .map(
-            |(event_id, recorded_at_stream_sequence)| WorkspaceMutationEvidence {
-                event_id,
-                source_event_type: "workspace_snapshot_incomplete".to_owned(),
-                source_label: None,
-                recovery_hint: None,
-                scope_hash: scope.scope_hash.clone(),
-                recorded_at_stream_sequence,
-                from_workspace_snapshot_id: None,
-                to_workspace_snapshot_id: None,
-                tool_effect: ToolEffect::Unknown,
-                unknown_dirty: true,
-            },
-        );
     let workspace_knowledge = if workspace_snapshot_id.is_some() {
         WorkspaceKnowledge::Clean(workspace_revision)
     } else {
-        WorkspaceKnowledge::UnknownDirty
+        WorkspaceKnowledge::SnapshotUnavailable
     };
     Ok(WorkspaceSnapshotBuild {
         manifest,
         workspace_snapshot_id,
         workspace_knowledge,
-        unknown_dirty_evidence,
     })
 }
 
@@ -365,14 +374,29 @@ fn read_git_index_paths(git_dir: &Path) -> Option<Vec<PathBuf>> {
             return None;
         }
         let entry = &bytes[cursor..];
-        let name_start = fixed_entry_bytes;
-        let name_end = entry[name_start..].iter().position(|byte| *byte == 0)? + name_start;
+        let flags = u16::from_be_bytes(
+            entry[fixed_entry_bytes - 2..fixed_entry_bytes]
+                .try_into()
+                .ok()?,
+        );
+        // Git index v3 CE_EXTENDED inserts a second 16-bit flags word before the name.
+        // It is part of the entry length used for 8-byte padding (git index-format).
+        let extended = flags & 0x4000 != 0;
+        if extended && version == 2 {
+            return None;
+        }
+        let name_start = fixed_entry_bytes + usize::from(extended) * 2;
+        let name_end = entry
+            .get(name_start..)?
+            .iter()
+            .position(|byte| *byte == 0)?
+            + name_start;
         paths.push(PathBuf::from(
             String::from_utf8_lossy(&entry[name_start..name_end]).into_owned(),
         ));
         let entry_end = cursor.checked_add(name_end + 1)?;
         let entry_name_bytes = name_end - name_start + 1;
-        let padding = (8 - (fixed_entry_bytes + entry_name_bytes) % 8) % 8;
+        let padding = (8 - (name_start + entry_name_bytes) % 8) % 8;
         cursor = entry_end.checked_add(padding)?;
         if cursor > bytes.len() {
             return None;

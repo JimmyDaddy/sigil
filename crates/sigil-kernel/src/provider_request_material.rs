@@ -16,7 +16,7 @@ static PROVIDER_REQUEST_MATERIAL_FINGERPRINT_KEY: OnceLock<[u8; 32]> = OnceLock:
 
 /// Durable frontier that closed the provider-visible source surface before dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderRequestSourceFrontierV1 {
     pub session_id: String,
     pub durable_end_offset: u64,
@@ -43,7 +43,7 @@ impl From<&crate::ActiveProjectionFrontier> for ProviderRequestSourceFrontierV1 
 
 /// Honest reconstruction strength for one durable provider request envelope.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderRequestReconstructionDispositionV1 {
     /// No durable session frontier exists; only the process-local frozen material is exact.
     InMemoryOnly,
@@ -56,7 +56,7 @@ pub enum ProviderRequestReconstructionDispositionV1 {
 
 /// Bounded reason why exact provider material cannot be rebuilt from durable safe inputs alone.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderRequestNonReconstructableReasonV1 {
     InMemorySession,
     ExactMessageOverlay,
@@ -67,7 +67,7 @@ pub enum ProviderRequestNonReconstructableReasonV1 {
 
 /// Privacy-safe durable proof for one exact provider-neutral request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderRequestEnvelopeV1 {
     pub schema_version: u16,
     pub provider_name: String,
@@ -245,7 +245,7 @@ pub const PROVIDER_REQUEST_RECONSTRUCTION_PROOF_SCHEMA_VERSION: u16 = 1;
 
 /// Privacy-safe evidence that exact durable source and exact rebuilt request were jointly proven.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderRequestReconstructionProofV1 {
     pub schema_version: u16,
     pub session_id: String,

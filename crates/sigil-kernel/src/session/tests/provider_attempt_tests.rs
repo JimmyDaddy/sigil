@@ -636,6 +636,113 @@ async fn provider_usage_source_and_public_outbox_recover_as_one_conditional_bund
             &projection.events_in_order()[0].event.event,
             crate::PublicRunEventKind::Usage { usage } if usage.prompt_tokens == 7
         ));
+
+        // Publication is a projection of the first usage source, not another provider
+        // output. Both subsequent output and terminal append must keep the source chain.
+        attempt
+            .append_output_control(
+                &mut session,
+                ControlEntry::UsageSnapshot(crate::UsageStats {
+                    prompt_tokens: 9,
+                    ..crate::UsageStats::default()
+                }),
+                None,
+            )
+            .await?;
+        attempt
+            .finish(&session, ProviderPhysicalAttemptOutcome::Completed, None)
+            .await?;
+        let records = JsonlSessionStore::read_event_records(&path)?;
+        let attempts = ProviderPhysicalAttemptProjection::from_records(&records)?;
+        let physical = attempts.attempts_for_logical_run_id("agent-run-usage");
+        assert_eq!(physical.len(), 1, "{fault:?}");
+        let terminal = physical[0].terminal.as_ref().expect("completed attempt");
+        assert_eq!(terminal.outcome, ProviderPhysicalAttemptOutcome::Completed);
+        assert_eq!(terminal.durable_output_event_ids.len(), 2, "{fault:?}");
+        assert_eq!(
+            terminal.durable_output_event_ids[0],
+            outbox[0].domain_event_id
+        );
+        assert!(
+            !terminal
+                .durable_output_event_ids
+                .contains(&outbox[0].public_event_id)
+        );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_diagnostics_reopen_with_attempt_causation_without_output_authority() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("diagnostic-session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let mut session = Session::load_from_store("test-provider", "test-model", store.clone())?;
+    session
+        .conversation_run_lifecycle_recorder()?
+        .append_started(&crate::ConversationRunStartedEntryV1::new(
+            "diagnostic-run",
+            1,
+        )?)?;
+    let frozen = crate::FrozenProviderRequestMaterial::freeze(
+        session.session_scope_id(),
+        crate::CompletionRequest {
+            provider_name: "test-provider".to_owned(),
+            model_name: "test-model".to_owned(),
+            messages: vec![crate::ModelMessage::user("diagnostic request")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(128),
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+            hosted_tools: Vec::new(),
+        },
+    )?;
+    let mut audit =
+        ProviderPhysicalAttemptAudit::start(&session, "diagnostic-run", &frozen).await?;
+    let diagnostic = crate::ProviderDiagnosticV1::ToolsPrepared {
+        schema_mode: crate::ProviderToolSchemaModeV1::FallbackUnsupportedSchema,
+        tool_count: 3,
+    };
+    audit
+        .append_output_control(
+            &mut session,
+            ControlEntry::ProviderDiagnostic(diagnostic.clone()),
+            None,
+        )
+        .await?;
+    assert!(!audit.has_durable_output_or_side_effect());
+    audit
+        .finish(&session, ProviderPhysicalAttemptOutcome::Interrupted, None)
+        .await?;
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let projection = ProviderPhysicalAttemptProjection::from_records(&records)?;
+    let attempts = projection.attempts_for_logical_run_id("diagnostic-run");
+    assert_eq!(attempts.len(), 1);
+    let attempt = attempts[0];
+    let terminal = attempt.terminal.as_ref().expect("attempt terminal");
+    assert!(terminal.durable_output_event_ids.is_empty());
+    assert!(terminal.durable_side_effect_event_ids.is_empty());
+    let recorded = records
+        .iter()
+        .find(|record| {
+            record.stored_event().event_kind() == Some(DurableEventType::DiagnosticRecorded)
+        })
+        .expect("diagnostic record");
+    assert_eq!(
+        recorded.stored_event().correlation_id.as_deref(),
+        Some(attempt.started_event_id.as_str())
+    );
+    let reopened = Session::load_from_store("test-provider", "test-model", store)?;
+    assert!(
+        reopened.entries().iter().any(|entry| matches!(entry,
+        SessionLogEntry::Control(ControlEntry::ProviderDiagnostic(value)) if value == &diagnostic))
+    );
     Ok(())
 }

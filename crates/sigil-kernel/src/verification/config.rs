@@ -525,7 +525,7 @@ impl CheckCommand {
 
 /// User-level verification configuration loaded from `sigil.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct VerificationConfig {
     #[serde(default)]
     pub auto_run: VerificationAutoRunPolicy,
@@ -537,7 +537,7 @@ pub struct VerificationConfig {
 
 /// User-facing verification scope controls.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct VerificationScopeConfig {
     #[serde(default)]
     pub profile: VerificationScopeProfile,

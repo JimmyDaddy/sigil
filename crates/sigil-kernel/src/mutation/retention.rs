@@ -854,6 +854,7 @@ fn active_isolated_workspace_artifact_ids(
         match entry {
             SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(entry)) => {
                 let state = workspaces.entry(entry.isolated_workspace_id).or_default();
+                state.cleanup_terminal = false;
                 insert_overlay_artifact_refs(
                     &mut state.artifacts,
                     entry.overlay_artifact_ref,
@@ -862,6 +863,7 @@ fn active_isolated_workspace_artifact_ids(
             }
             SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(entry)) => {
                 let state = workspaces.entry(entry.isolated_workspace_id).or_default();
+                state.cleanup_terminal = false;
                 insert_overlay_artifact_refs(
                     &mut state.artifacts,
                     entry.overlay_artifact_ref,

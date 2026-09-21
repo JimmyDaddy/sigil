@@ -468,7 +468,7 @@ fn orchestration_route_identity() -> OrchestrationEvalRouteIdentityV1 {
         canonical_model_version: "2026-07-01".to_owned(),
         route_fingerprint: "sha256:route".to_owned(),
         routing_prompt_digest: "sha256:routing".to_owned(),
-        planner_prompt_digest: "sha256:planner".to_owned(),
+        direct_task_prompt_digest: "sha256:planner".to_owned(),
         system_prompt_digest: "sha256:system".to_owned(),
         tool_profile_contract_digest: "sha256:tools-profiles".to_owned(),
         task_config_digest: "sha256:task-config".to_owned(),

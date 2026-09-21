@@ -37,7 +37,7 @@ impl ProviderTimeoutError {
 /// vocabulary. The kernel deliberately never inspects error text when it makes recovery
 /// decisions.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderWireStateV1 {
     NoBytesSent,
     RequestBytesMayHaveBeenSent,
@@ -46,7 +46,7 @@ pub enum ProviderWireStateV1 {
 
 /// Provider-supplied scheduling information that is safe for recovery policy to consume.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderRetryHintV1 {
     None,
     RetryAfterMs(u64),
@@ -54,7 +54,7 @@ pub enum ProviderRetryHintV1 {
 
 /// Provider-neutral classification of a failed physical attempt.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderFailureClassV1 {
     RejectedBeforeDispatch,
     RateLimited,
@@ -72,7 +72,7 @@ pub enum ProviderFailureClassV1 {
 
 /// Typed, safe failure observation emitted by a provider adapter.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderFailureObservationV1 {
     pub class: ProviderFailureClassV1,
     pub retry_after_ms: Option<u64>,

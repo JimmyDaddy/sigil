@@ -29,6 +29,7 @@ pub struct Session {
 
 #[derive(Clone, Default)]
 pub(super) struct SessionRuntimeAttachments {
+    pub(super) application_operation: Option<crate::ApplicationOperationBindingV1>,
     user_url_capability_registrar: Option<Arc<dyn crate::UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn crate::ImageAttachmentResolver>>,
 }
@@ -411,6 +412,47 @@ impl Session {
         Self::from_loaded_store_entries(provider_name, model_name, entries, store)
     }
 
+    /// Builds an observational view through an existing owner's strict reader. It retains that
+    /// capability for scope validation, but performs no writer recovery, projection refresh or
+    /// synthetic startup/audit append.
+    pub(super) fn observe_existing_store(
+        store: JsonlSessionStore,
+        expected_scope: &str,
+    ) -> Result<Self> {
+        let records = store.read_handle().read_event_records()?;
+        if records.is_empty()
+            || records
+                .iter()
+                .any(|record| record.session_id() != expected_scope)
+        {
+            bail!("session observation changes its existing owner scope");
+        }
+        PublicEventOutboxProjectionV1::from_records(&records)?;
+        let entries = session_entries_from_records(&records)?;
+        let (entries, audit_needed) = validated_recovered_entries(expected_scope, entries);
+        if audit_needed {
+            bail!("session observation requires explicit external recovery");
+        }
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .context("session observation requires an existing durable identity")?;
+        let stats = session_stats_from_entries(&entries);
+        Ok(Self {
+            session_scope_id: expected_scope.to_owned(),
+            provider_name,
+            model_name,
+            resolved_model_route: session_resolved_route_from_entries(&entries),
+            durable_session_entry_count: Some(entries.len() as u64),
+            entries,
+            store: Some(store),
+            tool_artifact_store_override: None,
+            stats,
+            runtime_attachments: SessionRuntimeAttachments::default(),
+            reconstruction_records: Some(records.into()),
+            archived_fact_sources: Default::default(),
+            control_public_projection: Default::default(),
+        })
+    }
+
     /// Reconstructs the privacy-safe session source at one exact provider-request frontier.
     ///
     /// This is a read-only replay surface: records after the frontier are ignored, no recovery or
@@ -494,13 +536,18 @@ impl Session {
         ProviderContinuationPayloadCoordinator::for_store(store.clone())?
             .recover_from_records(&records)
             .context("failed to recover provider continuation payload lifecycle")?;
+        let live_run_cancellation_scope_ids = store.live_run_cancellation_scope_ids().clone();
         let mut session =
             Self::from_loaded_store_entries(provider_name, model_name, entries, store)?;
         let recovered_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        crate::reconcile_unfinished_run_cancellations(&mut session, recovered_at_ms)?;
+        crate::cancellation::reconcile_unfinished_run_cancellations_excluding_live_scopes(
+            &mut session,
+            recovered_at_ms,
+            &live_run_cancellation_scope_ids,
+        )?;
         crate::conversation_route::reconcile_plan_review_attempts_from_recovered_entries(
             &mut session,
             recovered_at_ms,
@@ -898,6 +945,10 @@ impl Session {
         entries.push(SessionLogEntry::Control(ControlEntry::ToolExecution(
             Box::new(execution),
         )));
+        if let Some(events) = self.append_bound_application_entries(&entries)? {
+            self.advance_durable_session_entry_count(&events);
+            return Ok(());
+        }
         let events = self
             .store
             .as_ref()
@@ -979,6 +1030,14 @@ impl Session {
     }
 
     pub fn append_control(&mut self, control: ControlEntry) -> Result<()> {
+        if self
+            .runtime_attachments
+            .application_operation
+            .as_ref()
+            .is_some_and(|binding| binding.target.matches(&control))
+        {
+            return self.append_controls(vec![control]);
+        }
         self.append(SessionLogEntry::Control(control))
     }
 
@@ -1232,6 +1291,10 @@ impl Session {
             .try_for_each(ControlEntry::validate_durable_contract)?;
         self.validate_user_input_controls(controls.iter())?;
         self.validate_plan_controls(controls.iter())?;
+        if let Some(events) = self.append_bound_application_controls(&controls)? {
+            self.advance_durable_session_entry_count(&events);
+            return Ok(events);
+        }
         let entries = controls
             .into_iter()
             .map(SessionLogEntry::Control)
@@ -2234,23 +2297,56 @@ impl Session {
         boundary: &ControlEntry,
         source_user_message_id: Option<&str>,
     ) -> Result<SessionContextProjection> {
+        self.context_projection_at_control(boundary, source_user_message_id, false)
+    }
+
+    /// Projects the frozen prefix before a control, including work after its exact user source.
+    /// Source identity is validated against the original prefix before context compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a missing/conflicting source or boundary, or invalid durable context.
+    pub fn context_projection_before_control_including_source(
+        &self,
+        boundary: &ControlEntry,
+        source_user_message_id: &str,
+    ) -> Result<SessionContextProjection> {
+        self.context_projection_at_control(boundary, Some(source_user_message_id), true)
+    }
+
+    fn context_projection_at_control(
+        &self,
+        boundary: &ControlEntry,
+        source_user_message_id: Option<&str>,
+        include_source_progress: bool,
+    ) -> Result<SessionContextProjection> {
         let records = match (&self.reconstruction_records, &self.store) {
             (Some(records), _) => records.clone(),
             (None, Some(store)) => store.read_event_records_writer()?.into(),
             (None, None) => {
-                let end = super::context_projection::context_prefix_end(
+                let end = super::context_projection::context_prefix_end_with_progress(
                     &self.entries,
                     boundary,
                     source_user_message_id,
+                    include_source_progress,
                 )?;
-                return Ok(SessionContextProjection::from_entries(&self.entries[..end]));
+                let mut projection = SessionContextProjection::from_entries(&self.entries[..end]);
+                if include_source_progress && let Some(source_id) = source_user_message_id {
+                    super::context_projection::include_bound_promoted_source(
+                        &mut projection,
+                        &self.entries[..end],
+                        source_id,
+                    );
+                }
+                return Ok(projection);
             }
         };
         let entries = session_entries_from_records(&records)?;
-        let end = super::context_projection::context_prefix_end(
+        let end = super::context_projection::context_prefix_end_with_progress(
             &entries,
             boundary,
             source_user_message_id,
+            include_source_progress,
         )?;
         let mut entry_index = 0;
         let mut record_end = records.len();
@@ -2268,7 +2364,16 @@ impl Session {
         if audit_needed {
             bail!("session context prefix requires unsafe external recovery");
         }
-        SessionContextProjection::from_durable_records(&entries, &records[..record_end], None)
+        let mut projection =
+            SessionContextProjection::from_durable_records(&entries, &records[..record_end], None)?;
+        if include_source_progress && let Some(source_id) = source_user_message_id {
+            super::context_projection::include_bound_promoted_source(
+                &mut projection,
+                &entries,
+                source_id,
+            );
+        }
+        Ok(projection)
     }
 
     /// Reads the current validated durable stream through this session's shared coordinator.
@@ -2560,6 +2665,24 @@ impl Session {
     /// Returns a durable agent thread projection reconstructed from append-only control entries.
     pub fn agent_thread_state_projection(&self) -> AgentThreadStateProjection {
         AgentThreadStateProjection::from_entries(&self.entries)
+    }
+
+    /// Projects result-page delivery after a caller-owned transient-context boundary.
+    ///
+    /// Historical receipts before `entry_offset` do not prove that a fresh model context
+    /// contains their body. A boundary beyond the current log yields empty coverage; result
+    /// replacements reset coverage even when they reuse the same output hash.
+    pub fn agent_result_delivery_since(
+        &self,
+        thread_id: &crate::AgentThreadId,
+        output_hash: &str,
+        entry_offset: usize,
+    ) -> crate::AgentResultDeliveryCoverage {
+        crate::AgentResultDeliveryCoverage::from_entries(
+            &self.entries[entry_offset.min(self.entries.len())..],
+            thread_id,
+            output_hash,
+        )
     }
 
     /// Rebuilds the session list row for this session directly from the durable v2 event stream.

@@ -121,7 +121,7 @@ pub enum ToolApprovalSessionGrantUnavailableReasonCode {
 
 /// Typed reason carried by the shared approval contract when session authority cannot be granted.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolApprovalSessionGrantUnavailableReason {
     pub code: ToolApprovalSessionGrantUnavailableReasonCode,
 }
@@ -325,7 +325,7 @@ pub struct PermissionRule {
 ///
 /// Patterns are matched against the normalized command text using only `*` and `?` wildcards.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CommandPermissionConfig {
     #[serde(default)]
     pub allow: Vec<String>,
@@ -359,7 +359,7 @@ impl<'de> Deserialize<'de> for CommandPermissionConfig {
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(rename_all = "snake_case", deny_unknown_fields)]
+        #[serde(rename_all = "snake_case")]
         struct RawCommandPermissionConfig {
             #[serde(default)]
             allow: Vec<String>,
@@ -450,7 +450,7 @@ pub struct ExternalDirectoryRule {
 
 /// Shared permission policy configuration for one entrypoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PermissionConfig {
     #[serde(default)]
     pub mode: PermissionMode,
@@ -792,6 +792,7 @@ impl PermissionDecision {
             ApprovalMode::Allow,
             ApprovalMode::Allow,
             None,
+            false,
             operation,
             access,
             subjects,
@@ -809,6 +810,7 @@ impl PermissionDecision {
         delegated_source_policy_decision: ApprovalMode,
         external_directory_policy_decision: ApprovalMode,
         network_effect: Option<NetworkEffect>,
+        read_only_effects_allowed: bool,
         operation: ToolOperation,
         access: ToolAccess,
         subjects: Vec<ToolSubject>,
@@ -824,8 +826,12 @@ impl PermissionDecision {
             &subject_risk_overlays,
             &subjects,
         );
-        let base_local_policy_decision =
-            apply_permission_mode_cap(policy_mode, local_policy_decision, access);
+        let base_local_policy_decision = apply_permission_mode_cap(
+            policy_mode,
+            local_policy_decision,
+            access,
+            read_only_effects_allowed,
+        );
         let base_local_policy_decision =
             apply_policy_risk_overlay(policy_mode, base_local_policy_decision, operation, risk);
         let local_policy_decision = combine_modes(vec![
@@ -1004,6 +1010,7 @@ impl PermissionDecision {
         &mut self,
         policy_mode: PermissionMode,
         effects: &BTreeSet<ToolPermissionEffect>,
+        read_only_effects_allowed: bool,
     ) {
         let floor = permission_effect_policy_floor(effects, self.access, self.operation);
         self.risk = self.risk.max(floor.risk);
@@ -1019,6 +1026,16 @@ impl PermissionDecision {
             self.base_local_policy_decision,
             self.external_directory_policy_decision,
         ]);
+        if policy_mode == PermissionMode::ReadOnly && !read_only_effects_allowed {
+            self.base_local_policy_decision = ApprovalMode::Deny;
+            self.local_policy_decision = ApprovalMode::Deny;
+            self.reasons.push(PermissionDecisionReason {
+                source: PermissionDecisionSource::HardSafety,
+                code: "read_only_effect_not_proven".to_owned(),
+                detail: "read-only mode requires a complete plan containing only read effects"
+                    .to_owned(),
+            });
+        }
         self.snapshot_required |= floor.snapshot_required;
         if self.risk == PermissionRisk::Protected {
             self.base_local_policy_decision = ApprovalMode::Deny;
@@ -1527,6 +1544,29 @@ impl<'a> PermissionPolicy<'a> {
     /// Returns an error when one configured subject glob is invalid.
     pub fn decide_with_operation_network_effect_and_default(
         &self,
+        spec: &ToolSpec,
+        tool_name: &str,
+        access: ToolAccess,
+        operation: ToolOperation,
+        network_effect: Option<NetworkEffect>,
+        subjects: Vec<ToolSubject>,
+        tool_default_mode: Option<ApprovalMode>,
+    ) -> Result<PermissionDecision> {
+        self.decide_with_operation_network_effect_and_default_and_read_only_effects(
+            spec,
+            tool_name,
+            access,
+            operation,
+            network_effect,
+            subjects,
+            tool_default_mode,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide_with_operation_network_effect_and_default_and_read_only_effects(
+        &self,
         _spec: &ToolSpec,
         tool_name: &str,
         access: ToolAccess,
@@ -1534,6 +1574,7 @@ impl<'a> PermissionPolicy<'a> {
         network_effect: Option<NetworkEffect>,
         subjects: Vec<ToolSubject>,
         tool_default_mode: Option<ApprovalMode>,
+        read_only_effects_allowed: bool,
     ) -> Result<PermissionDecision> {
         let subject_analyses = self.classify_subject_trust_analyses(&subjects);
         let subject_zones = subject_analyses
@@ -1560,7 +1601,15 @@ impl<'a> PermissionPolicy<'a> {
         let command_decision = self.decide_command_permissions(tool_name, &subjects);
         let command_mode = command_decision.mode;
         let subject_modes = if subjects.is_empty() {
-            vec![self.decide_one_subject(tool_name, access, operation, command_mode, None, None)?]
+            vec![self.decide_one_subject(
+                tool_name,
+                access,
+                operation,
+                command_mode,
+                None,
+                None,
+                read_only_effects_allowed,
+            )?]
         } else {
             subjects
                 .iter()
@@ -1573,6 +1622,7 @@ impl<'a> PermissionPolicy<'a> {
                         command_mode,
                         Some(subject),
                         Some(zone),
+                        read_only_effects_allowed,
                     )
                 })
                 .collect::<Result<Vec<_>>>()?
@@ -1627,6 +1677,7 @@ impl<'a> PermissionPolicy<'a> {
             delegated_source_policy_decision,
             external_directory_policy_decision,
             network_effect,
+            read_only_effects_allowed,
             operation,
             access,
             subjects,
@@ -1644,16 +1695,23 @@ impl<'a> PermissionPolicy<'a> {
         spec: &ToolSpec,
         plan: &ToolPermissionPlanV2,
     ) -> Result<PermissionDecision> {
-        let mut decision = self.decide_with_operation_network_effect_and_default(
-            spec,
-            &plan.tool_name,
-            plan.access,
-            plan.operation,
-            plan.network_effect(),
-            plan.subjects.clone(),
-            plan.tool_default_mode,
-        )?;
-        decision.restrict_for_permission_effects(self.config.mode, &plan.effects);
+        let read_only_effects_allowed = plan_proves_read_only_effects(plan);
+        let mut decision = self
+            .decide_with_operation_network_effect_and_default_and_read_only_effects(
+                spec,
+                &plan.tool_name,
+                plan.access,
+                plan.operation,
+                plan.network_effect(),
+                plan.subjects.clone(),
+                plan.tool_default_mode,
+                read_only_effects_allowed,
+            )?;
+        decision.restrict_for_permission_effects(
+            self.config.mode,
+            &plan.effects,
+            read_only_effects_allowed,
+        );
         if !plan.analysis.is_complete() {
             decision.restrict_for_incomplete_analysis(self.config.mode, &plan.analysis);
             return Ok(decision);
@@ -1721,10 +1779,16 @@ impl<'a> PermissionPolicy<'a> {
         command_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
         zone: Option<PathTrustZone>,
+        read_only_effects_allowed: bool,
     ) -> Result<ApprovalMode> {
-        let mut mode = self.effective_mode().baseline_for(access, operation, zone);
+        let effective_mode = self.effective_mode();
+        let mut mode = if effective_mode == PermissionMode::ReadOnly && read_only_effects_allowed {
+            ApprovalMode::Allow
+        } else {
+            effective_mode.baseline_for(access, operation, zone)
+        };
 
-        let tool_mode = self.config.tools.get(tool_name).copied();
+        let tool_mode = self.configured_tool_mode(tool_name);
         if let Some(tool_mode) = tool_mode {
             mode = tool_mode;
         }
@@ -1756,10 +1820,48 @@ impl<'a> PermissionPolicy<'a> {
                 Err(error) => Some(Err(error)),
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(matching_rule_modes
+        let selected = matching_rule_modes
             .last()
             .copied()
-            .or_else(|| self.config.tools.get(tool_name).copied()))
+            .or_else(|| self.configured_tool_mode(tool_name));
+        // A deliberately configured current key replaces retired tool-name restrictions.
+        // Otherwise retain old Ask/Deny rules with their exact subject constraints; old Allow
+        // cannot authorize the larger unified execution capability.
+        if self.config.tools.contains_key(tool_name) {
+            return Ok(selected);
+        }
+        let mut restrictions = selected.into_iter().collect::<Vec<_>>();
+        restrictions.extend(
+            retired_execution_permission_names(tool_name)
+                .iter()
+                .filter_map(|name| self.config.tools.get(*name).copied())
+                .filter(|mode| *mode != ApprovalMode::Allow),
+        );
+        for compiled in &self.rules {
+            if compiled.rule.mode == ApprovalMode::Allow
+                || compiled.tool_matcher.is_match(tool_name)?
+            {
+                continue;
+            }
+            for retired in retired_execution_permission_names(tool_name) {
+                if compiled.matches(retired, subject)? {
+                    restrictions.push(compiled.rule.mode);
+                    break;
+                }
+            }
+        }
+        Ok((!restrictions.is_empty()).then(|| combine_modes(restrictions)))
+    }
+
+    fn configured_tool_mode(&self, tool_name: &str) -> Option<ApprovalMode> {
+        self.config.tools.get(tool_name).copied().or_else(|| {
+            let restrictions = retired_execution_permission_names(tool_name)
+                .iter()
+                .filter_map(|name| self.config.tools.get(*name).copied())
+                .filter(|mode| *mode != ApprovalMode::Allow)
+                .collect::<Vec<_>>();
+            (!restrictions.is_empty()).then(|| combine_modes(restrictions))
+        })
     }
 
     fn decide_command_permissions(
@@ -1839,17 +1941,17 @@ pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperatio
         "edit_file" => ToolOperation::EditFile,
         "delete_file" => ToolOperation::DeleteFile,
         "apply_changeset" => ToolOperation::ApplyChangeSet,
-        "terminal_input" => ToolOperation::SendTerminalInput,
-        "terminal_resize" => ToolOperation::ResizeTerminalTask,
-        "terminal_cancel" => ToolOperation::CancelTerminalTask,
-        "spawn_agent" | "spawn_agents" | "request_task_discovery" => ToolOperation::SpawnAgent,
+        "exec_input" | "terminal_input" => ToolOperation::SendTerminalInput,
+        "exec_resize" | "terminal_resize" => ToolOperation::ResizeTerminalTask,
+        "exec_cancel" | "terminal_cancel" => ToolOperation::CancelTerminalTask,
+        "spawn_agent" | "spawn_agents" => ToolOperation::SpawnAgent,
         "message_agent" => ToolOperation::MessageAgent,
         "close_agent" => ToolOperation::CloseAgent,
         "load_skill" => ToolOperation::LoadSkill,
-        "bash" | "terminal_start" if access == ToolAccess::Read => {
+        "exec_command" | "bash" | "terminal_start" if access == ToolAccess::Read => {
             ToolOperation::ExecuteReadOnlyCommand
         }
-        "bash" | "terminal_start" => ToolOperation::ExecuteUnknownCommand,
+        "exec_command" | "bash" | "terminal_start" => ToolOperation::ExecuteUnknownCommand,
         _ => match access {
             ToolAccess::Read => ToolOperation::Read,
             ToolAccess::Write => ToolOperation::EditFile,
@@ -2358,6 +2460,52 @@ impl PermissionEffectPolicyFloor {
     }
 }
 
+/// Returns whether a complete permission plan proves a read-only operation.
+///
+/// This is used only to admit otherwise `Execute`-classified tools under read-only mode. Every
+/// accepted operation/effect pairing is enumerated; adding a new effect or operation does not
+/// widen this set implicitly.
+fn plan_proves_read_only_effects(plan: &ToolPermissionPlanV2) -> bool {
+    use ToolPermissionEffect as Effect;
+
+    if !plan.analysis.is_complete() || plan.effects.is_empty() || plan.access == ToolAccess::Write {
+        return false;
+    }
+
+    let file_read = BTreeSet::from([Effect::FileRead]);
+    let agent_read = BTreeSet::from([Effect::AgentLifecycle]);
+    let combined_agent_read = BTreeSet::from([Effect::AgentLifecycle, Effect::FileRead]);
+    let network_read = BTreeSet::from([Effect::NetworkRead]);
+    let file_and_network_read = BTreeSet::from([Effect::FileRead, Effect::NetworkRead]);
+    let trusted_read_command = BTreeSet::from([Effect::ExecuteTrustedBinary]);
+    match plan.operation {
+        ToolOperation::Read | ToolOperation::Search => {
+            plan.effects == file_read
+                || plan.effects == agent_read
+                || plan.effects == combined_agent_read
+        }
+        ToolOperation::LoadSkill => plan.effects == file_read,
+        ToolOperation::NetworkRequest => {
+            (plan.effects == file_read && plan.network_effect().is_none())
+                || ((plan.effects == network_read || plan.effects == file_and_network_read)
+                    && plan.network_effect() == Some(NetworkEffect::Read))
+        }
+        ToolOperation::ExecuteReadOnlyCommand => {
+            plan.access == ToolAccess::Execute && plan.effects == trusted_read_command
+        }
+        ToolOperation::SpawnAgent => {
+            plan.access == ToolAccess::Execute
+                && plan.effects == combined_agent_read
+                && plan
+                    .semantic_scope
+                    .as_ref()
+                    .and_then(|scope| scope.qualifiers.get("safe_read_only_profile"))
+                    .is_some_and(|value| value == "true")
+        }
+        _ => false,
+    }
+}
+
 /// Derives a closed, monotone safety floor from exact permission-plan effects.
 ///
 /// Every `ToolPermissionEffect` is matched explicitly so adding a new effect cannot silently fall
@@ -2507,7 +2655,13 @@ pub fn tool_approval_session_grant_availability_for_plan(
     // Network-read grants are bound by their exact endpoint/MCP subjects and route policy. They
     // do not execute through a local shell containment backend, so requiring shell backend,
     // profile, and environment metadata here would reject otherwise complete network plans.
-    if plan.network_effect().is_none() && plan.session_grant_containment_binding().is_none() {
+    if plan.network_effect().is_some() {
+        if plan.session_grant_network_binding().is_none() {
+            return ToolApprovalSessionGrantAvailability::unavailable(
+                Reason::NetworkScopeNotGrantable,
+            );
+        }
+    } else if plan.session_grant_containment_binding().is_none() {
         return ToolApprovalSessionGrantAvailability::unavailable(
             Reason::ContainmentBindingUnavailable,
         );
@@ -2862,9 +3016,12 @@ fn apply_permission_mode_cap(
     policy_mode: PermissionMode,
     mode: ApprovalMode,
     access: ToolAccess,
+    read_only_effects_allowed: bool,
 ) -> ApprovalMode {
     match policy_mode {
-        PermissionMode::ReadOnly if access != ToolAccess::Read => ApprovalMode::Deny,
+        PermissionMode::ReadOnly if access != ToolAccess::Read && !read_only_effects_allowed => {
+            ApprovalMode::Deny
+        }
         PermissionMode::ReadOnly
         | PermissionMode::Manual
         | PermissionMode::AutoEdit
@@ -2977,8 +3134,24 @@ fn compile_command_permission_patterns(
         .collect()
 }
 
+/// These are restriction-only configuration names, never registered execution aliases.
+fn retired_execution_permission_names(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "exec_command" => &["bash", "terminal_start"],
+        "exec_read" => &["terminal_read"],
+        "exec_wait" => &["terminal_wait"],
+        "exec_input" => &["terminal_input"],
+        "exec_resize" => &["terminal_resize"],
+        "exec_cancel" => &["terminal_cancel", "terminal_stop"],
+        _ => &[],
+    }
+}
+
 fn command_permission_tool_name_supported(tool_name: &str) -> bool {
-    matches!(tool_name, "bash" | "terminal_start" | "terminal_input")
+    matches!(
+        tool_name,
+        "exec_command" | "exec_input" | "bash" | "terminal_start" | "terminal_input"
+    )
 }
 
 fn normalize_command_permission_patterns(patterns: Vec<String>) -> Vec<String> {

@@ -21,11 +21,9 @@ use crate::{
     cancellation::{RunCancellationHandle, RunEffectClass, RunEffectGuard, RunEffectKind},
     config::{CompactionConfig, MemoryConfig, TaskRoutingPolicy},
     conversation_route::{
-        AutomaticRouteCapability, CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
-        ConversationRouteDecisionId, PlanReviewAttemptId, PlanReviewDraftContext,
-        PlanReviewHandoffBinding, PlanReviewId, REQUEST_PLAN_REVIEW_TOOL_NAME,
-        SUBMIT_PLAN_DRAFT_TOOL_NAME, conversation_route_routing_contract_material,
-        direct_conversation_continuation_prompt_contract_material, request_plan_review_tool_spec,
+        AutomaticRouteCapability, ConversationRouteDecisionId, PlanReviewAttemptId,
+        PlanReviewDraftContext, PlanReviewHandoffBinding, PlanReviewId,
+        REQUEST_PLAN_REVIEW_TOOL_NAME, request_plan_review_tool_spec,
         submit_plan_review_result_tool_spec,
     },
     event::{EventHandler, RunEvent},
@@ -41,33 +39,18 @@ use crate::{
         ControlEntry, Session, SessionLogEntry, ToolApprovalAuditAction,
         ToolApprovalTerminalStatusV2, ToolApprovalUserDecision, ToolExecutionStatus,
     },
-    task::{
-        TASK_COMPLETION_CLAIM_TOOL_NAME, TASK_GUIDANCE_APPLY_TOOL_NAME, TASK_PLAN_UPDATE_TOOL_NAME,
-        TASK_STEP_CONTRACT_V2_SCHEMA_VERSION, TaskCompletionClaimSubjectV1,
-        TaskCompletionRequirementFieldV1, TaskCompletionRequirementSourceV1,
-        TaskGuidanceAssessmentContext, TaskId, TaskParticipantAttemptId, TaskPlanStatus,
-        TaskPlanUpdateContext, TaskRunStatus, TaskStepCheckpointV2, TaskStepContractBoundEntryV2,
-        TaskStepId, task_completion_claim_tool_spec, task_guidance_apply_tool_spec,
-        task_plan_update_tool_spec_for_worktree,
-    },
+    task::{TaskId, TaskRunStatus},
     task_checklist::{
         TaskChecklistUpdateContextV1, UPDATE_TASK_CHECKLIST_TOOL_NAME,
         update_task_checklist_tool_spec,
     },
     task_handoff::{
-        CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-        ConversationTurnRef, KEEP_PENDING_PLAN_TOOL_NAME, REQUEST_TASK_PLANNING_TOOL_NAME,
-        RUN_PENDING_PLAN_TOOL_NAME, TaskContinuationHandoffBinding, TaskHandoffId,
-        TaskPlanningHandoffBinding, continue_existing_task_tool_spec,
-        continue_without_task_planning_tool_spec, keep_pending_plan_tool_spec,
-        request_task_planning_tool_spec, run_pending_plan_tool_spec,
+        CONTINUE_EXISTING_TASK_TOOL_NAME, ConversationTurnRef, RUN_PENDING_PLAN_TOOL_NAME,
+        START_TASK_TOOL_NAME, TaskContinuationHandoffBinding, TaskHandoffId,
+        TaskStartHandoffBinding, continue_existing_task_tool_spec, run_pending_plan_tool_spec,
+        start_task_tool_spec,
     },
-    task_orchestrator::{
-        task_direct_execution_system_prompt_contract_material,
-        task_participant_finalization_prompt_contract_material,
-        task_participant_system_prompt_contract_material,
-        task_planner_system_prompt_contract_material,
-    },
+    task_orchestrator::task_direct_execution_system_prompt_contract_material,
     tool::{
         PreparedToolCall, ToolAccess, ToolCategory, ToolConcurrencyClass, ToolContext,
         ToolErrorKind, ToolMutationTracking, ToolProgressEvent, ToolProgressSink, ToolRegistry,
@@ -80,6 +63,9 @@ use crate::permission::PermissionPolicy;
 
 mod approval_policy;
 mod assistant_messages;
+pub mod execution;
+#[cfg(test)]
+mod execution_tests;
 mod plan_draft;
 mod plan_review;
 mod preview;
@@ -87,10 +73,7 @@ mod provider_stream;
 mod readiness;
 mod run_lifecycle;
 mod task_checklist;
-mod task_completion_claim;
-mod task_guidance;
 mod task_handoff;
-mod task_plan;
 pub(crate) mod tool_audit;
 mod tool_results;
 mod user_input;
@@ -120,23 +103,10 @@ use run_lifecycle::{
     append_paused_run_lifecycle_events, append_run_lifecycle_events,
 };
 use task_checklist::handle_task_checklist_update_call;
-use task_completion_claim::handle_task_completion_claim_call;
-use task_guidance::{
-    append_tool_ignored_after_task_guidance_acceptance, handle_task_guidance_apply_call,
-    task_guidance_apply_call_is_accepted,
-};
 use task_handoff::{
-    append_tool_ignored_after_routing_decision, append_tool_ignored_after_task_handoff,
-    append_tool_rejected_during_task_routing, continue_existing_task_call_is_accepted,
-    continue_without_task_planning_call_is_accepted, handle_continue_existing_task_call,
-    handle_continue_without_task_planning_call, handle_keep_pending_plan_call,
-    handle_run_pending_plan_call, handle_task_planning_request_call,
-    keep_pending_plan_call_is_accepted, run_pending_plan_call_is_accepted,
-    task_planning_request_call_is_accepted,
-};
-use task_plan::{
-    append_tool_ignored_after_task_plan_acceptance, handle_task_plan_update_call,
-    task_plan_update_call_is_accepted,
+    append_tool_ignored_after_task_handoff, continue_existing_task_call_is_accepted,
+    handle_continue_existing_task_call, handle_run_pending_plan_call, handle_start_task_call,
+    run_pending_plan_call_is_accepted, start_task_call_is_accepted,
 };
 pub use tool_audit::durable_tool_execution_entry;
 use tool_audit::{
@@ -164,68 +134,6 @@ use user_input::{
 };
 
 const MAX_FINAL_ANSWER_BLOCKER_RETRIES: usize = 3;
-
-struct RoutingMicroturnEventFilter<'a, H> {
-    inner: &'a mut H,
-    suppress_internal_activity: bool,
-}
-
-impl<'a, H> RoutingMicroturnEventFilter<'a, H> {
-    fn new(inner: &'a mut H, suppress_internal_activity: bool) -> Self {
-        Self {
-            inner,
-            suppress_internal_activity,
-        }
-    }
-}
-
-impl<H> EventHandler for RoutingMicroturnEventFilter<'_, H>
-where
-    H: EventHandler,
-{
-    fn begin_live_attempt(&mut self, physical_attempt_id: &str) -> Result<()> {
-        self.inner.begin_live_attempt(physical_attempt_id)
-    }
-
-    fn handle(&mut self, event: RunEvent) -> Result<()> {
-        let suppress = self.suppress_internal_activity
-            && match &event {
-                RunEvent::TextDelta(_)
-                | RunEvent::ReasoningDelta(_)
-                | RunEvent::AssistantMessage(_)
-                | RunEvent::ToolCallArgsDelta { .. } => true,
-                RunEvent::ToolCallStarted(call) | RunEvent::ToolCallCompleted(call) => {
-                    !is_writable_memory_route_tool(&call.name)
-                }
-                RunEvent::ToolApprovalRequested { call, .. } => {
-                    !is_writable_memory_route_tool(&call.name)
-                }
-                RunEvent::ToolProgress(progress) => {
-                    !is_writable_memory_route_tool(&progress.tool_name)
-                }
-                RunEvent::ToolResult(result) => !is_writable_memory_route_tool(&result.tool_name),
-                RunEvent::ToolApprovalResolved { .. }
-                | RunEvent::Usage(_)
-                | RunEvent::ContinuationState(_)
-                | RunEvent::ProviderTurnRecovery(_)
-                | RunEvent::ProviderTurnPartialOutputDiscarded(_)
-                | RunEvent::Control(_)
-                | RunEvent::Notice(_) => false,
-            };
-        if suppress {
-            return Ok(());
-        }
-        self.inner.handle(event)
-    }
-
-    fn commit_controls(
-        &mut self,
-        session: &mut Session,
-        controls: Vec<ControlEntry>,
-    ) -> Result<Vec<crate::StoredEvent>> {
-        self.inner.commit_controls(session, controls)
-    }
-}
 
 /// Runtime knobs for one agent run.
 #[derive(Debug, Clone)]
@@ -292,8 +200,6 @@ pub struct AgentRunResult {
     pub final_text: String,
     pub tool_calls: usize,
     pub final_message_id: Option<String>,
-    /// Model-reported Task completion claim, if this run used the typed claim tool.
-    pub completion_claim: Option<crate::TaskCompletionClaimV1>,
 }
 
 /// Host-owned purpose for one model run.
@@ -301,10 +207,7 @@ pub struct AgentRunResult {
 pub enum AgentRunPurpose {
     Conversation(Box<ConversationPurposeContext>),
     PlanReview(PlanReviewPurposeContext),
-    TaskPlanner(TaskPlannerContext),
     TaskDirectExecution(TaskDirectExecutionContext),
-    TaskParticipant(TaskParticipantContext),
-    TaskSynthesis(TaskSynthesisContext),
 }
 
 /// Root conversation facts controlling internal tool visibility and handoff authority.
@@ -319,10 +222,10 @@ pub struct ConversationPurposeContext {
     /// tool registry for this run.
     pub writable_memory_routing: bool,
     /// Direct durable task handoff binding; present only when the capability allows DirectTask.
-    pub task_handoff: Option<TaskPlanningHandoffBinding>,
+    pub task_handoff: Option<TaskStartHandoffBinding>,
     /// Plan review handoff binding; present whenever automatic routing may choose PlanReview.
     pub plan_review: Option<PlanReviewHandoffBinding>,
-    /// Exact current resumable Task that may be selected by the routing microturn.
+    /// Exact current resumable Task available to the model for an explicit operation.
     pub task_continuation: Option<TaskContinuationHandoffBinding>,
 }
 
@@ -339,185 +242,12 @@ pub struct PlanReviewPurposeContext {
     pub route_decision_id: Option<ConversationRouteDecisionId>,
 }
 
-/// Purpose binding for the internal task planner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskPlannerContext {
-    pub task_id: TaskId,
-    pub attempt_id: Option<TaskParticipantAttemptId>,
-}
-
 /// Purpose binding for a first-class direct Task execution attempt.
-///
-/// Unlike [`TaskParticipantContext`], this context deliberately has no plan version or step id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDirectExecutionContext {
     pub task_id: TaskId,
     pub admission_id: String,
     pub attempt_id: String,
-}
-
-/// Purpose binding for one task plan participant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskParticipantContext {
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub step_id: TaskStepId,
-    pub attempt_id: TaskParticipantAttemptId,
-}
-
-/// Purpose binding for the single task synthesis run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskSynthesisContext {
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub attempt_id: TaskParticipantAttemptId,
-}
-
-fn task_completion_claim_authority(
-    purpose: Option<&AgentRunPurpose>,
-) -> Option<(TaskCompletionClaimSubjectV1, String)> {
-    match purpose? {
-        AgentRunPurpose::TaskDirectExecution(context) => Some((
-            TaskCompletionClaimSubjectV1::Direct {
-                task_id: context.task_id.clone(),
-                admission_id: context.admission_id.clone(),
-            },
-            context.attempt_id.clone(),
-        )),
-        AgentRunPurpose::TaskParticipant(context) => Some((
-            TaskCompletionClaimSubjectV1::Step {
-                task_id: context.task_id.clone(),
-                plan_version: context.plan_version,
-                step_id: context.step_id.clone(),
-            },
-            context.attempt_id.as_str().to_owned(),
-        )),
-        AgentRunPurpose::TaskSynthesis(context) => Some((
-            TaskCompletionClaimSubjectV1::Task {
-                task_id: context.task_id.clone(),
-                plan_version: context.plan_version,
-            },
-            context.attempt_id.as_str().to_owned(),
-        )),
-        _ => None,
-    }
-}
-
-/// Renders the exact authority and source identities a Task model may place in its completion
-/// claim. These are durable ids and hashes already present in the host projection; no user text
-/// or provider material is copied into the prompt.
-fn task_completion_claim_binding_material(
-    session: &Session,
-    purpose: Option<&AgentRunPurpose>,
-) -> Option<String> {
-    let (subject, attempt_id) = task_completion_claim_authority(purpose)?;
-    let mut sources = Vec::new();
-    match purpose? {
-        AgentRunPurpose::TaskDirectExecution(context) => {
-            let objective_hash = session
-                .task_state_projection()
-                .tasks
-                .get(&context.task_id)
-                .and_then(|task| task.direct_execution_admission.as_ref())
-                .filter(|admission| admission.admission_id == context.admission_id)
-                .map(|admission| admission.objective_hash.clone());
-            if let Some(objective_hash) = objective_hash {
-                sources.push(
-                    serde_json::to_value(TaskCompletionRequirementSourceV1::DirectObjective {
-                        admission_id: context.admission_id.clone(),
-                        objective_hash,
-                    })
-                    .ok()?,
-                );
-            }
-        }
-        AgentRunPurpose::TaskParticipant(context) => {
-            let projection = session.task_state_projection();
-            if let Some(plan) = projection
-                .tasks
-                .get(&context.task_id)
-                .and_then(|task| task.plans.get(&context.plan_version))
-            {
-                let bindings = plan
-                    .step_contracts
-                    .iter()
-                    .map(|(step_id, contract)| TaskStepContractBoundEntryV2 {
-                        task_id: context.task_id.clone(),
-                        plan_version: context.plan_version,
-                        step_id: step_id.clone(),
-                        contract: contract.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                if bindings.is_empty() {
-                    sources.push(
-                        serde_json::to_value(TaskCompletionRequirementSourceV1::TaskStepOutcome {
-                            task_id: context.task_id.clone(),
-                            plan_version: context.plan_version,
-                            step_id: context.step_id.clone(),
-                        })
-                        .ok()?,
-                    );
-                } else {
-                    let contract_set_sha256 =
-                        crate::task::task_contract_set_sha256(&bindings).ok()?;
-                    if let Some(contract) = plan.step_contracts.get(&context.step_id) {
-                        for (field, count) in [
-                            (
-                                TaskCompletionRequirementFieldV1::Deliverable,
-                                contract.deliverables.len(),
-                            ),
-                            (
-                                TaskCompletionRequirementFieldV1::AcceptanceCriterion,
-                                contract.acceptance_criteria.len(),
-                            ),
-                        ] {
-                            for index in 0..count {
-                                sources.push(
-                                    serde_json::to_value(
-                                        TaskCompletionRequirementSourceV1::TaskStepContract {
-                                            task_id: context.task_id.clone(),
-                                            plan_version: context.plan_version,
-                                            step_id: context.step_id.clone(),
-                                            field,
-                                            index: u32::try_from(index).ok()?,
-                                            contract_set_sha256: contract_set_sha256.clone(),
-                                        },
-                                    )
-                                    .ok()?,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            if sources.is_empty() {
-                sources.push(
-                    serde_json::to_value(TaskCompletionRequirementSourceV1::TaskStepOutcome {
-                        task_id: context.task_id.clone(),
-                        plan_version: context.plan_version,
-                        step_id: context.step_id.clone(),
-                    })
-                    .ok()?,
-                );
-            }
-        }
-        AgentRunPurpose::TaskSynthesis(context) => {
-            sources.push(
-                serde_json::to_value(TaskCompletionRequirementSourceV1::TaskPlanOutcome {
-                    task_id: context.task_id.clone(),
-                    plan_version: context.plan_version,
-                })
-                .ok()?,
-            );
-        }
-        _ => return None,
-    }
-    Some(format!(
-        "Task completion claim binding (copy these exact identities; do not invent values):\nsubject={}\nattempt_id={}\nallowed requirement source templates={}\nSet each requirement's required/outcome fields from the evidence you actually have. If no finer-grained contract source is listed, use the supplied step or plan outcome source.",
-        serde_json::to_string(&subject).ok()?,
-        attempt_id,
-        serde_json::to_string(&sources).ok()?
-    ))
 }
 
 /// Typed disposition that callers must inspect before finalizing a root run.
@@ -530,8 +260,6 @@ pub enum AgentRunDisposition {
     StartDurableTask(StartDurableTaskAction),
     ContinueDurableTask(Box<ContinueDurableTaskAction>),
     RunPendingPlan(RunPendingPlanAction),
-    PendingPlanDecisionRequired(PendingPlanDecisionRequiredAction),
-    TaskPlanAccepted,
     Interrupted,
     Blocked,
 }
@@ -542,12 +270,6 @@ pub struct RunPendingPlanAction {
     pub plan_id: PlanId,
     pub plan_hash: String,
     pub source_turn: ConversationTurnRef,
-}
-
-/// Host-bound negative decision that preserves a pending Plan without starting ordinary work.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingPlanDecisionRequiredAction {
-    pub plan_id: PlanId,
 }
 
 /// Stable action emitted after a PlanReview route decision is accepted.
@@ -586,9 +308,7 @@ pub struct StartDurableTaskAction {
 pub struct ContinueDurableTaskAction {
     pub task_id: TaskId,
     pub source_turn: ConversationTurnRef,
-    pub plan_version: Option<u32>,
     pub task_status: TaskRunStatus,
-    pub plan_status: Option<TaskPlanStatus>,
     pub route_contract_fingerprint: String,
     /// Model-selected, host-validated continuation operation. The host never derives it from a
     /// localized or reconstructed natural-language prompt.
@@ -628,11 +348,8 @@ pub struct AgentRunInput {
     pub initial_context: Vec<ModelMessage>,
     pub transient_context: Vec<ModelMessage>,
     pub runtime_context: RuntimeContextCandidates,
-    pub task_plan_update: Option<TaskPlanUpdateContext>,
     pub task_checklist_update: Option<TaskChecklistUpdateContextV1>,
     pub plan_review_draft: Option<PlanReviewDraftContext>,
-    pub plan_review_submit_only: bool,
-    pub task_guidance_assessment: Option<TaskGuidanceAssessmentContext>,
     pub agent_delegation: Option<AgentDelegationRequirement>,
     pub purpose: Option<AgentRunPurpose>,
     agent_invocation_grant: Option<crate::AgentInvocationGrant>,
@@ -660,14 +377,6 @@ pub struct AgentRunInput {
     suppressed_tool_names: Vec<String>,
     web_task_tree_budget: Option<Arc<crate::WebTaskTreeBudget>>,
     tool_artifact_read_budget: Option<crate::session::ToolArtifactReadBudgetV1>,
-    /// Optional advisory prompt injected once at a safe model-turn boundary.
-    soft_checkpoint: Option<SoftCheckpoint>,
-}
-
-#[derive(Debug, Clone)]
-struct SoftCheckpoint {
-    after_turns: usize,
-    prompt: String,
 }
 
 impl fmt::Debug for AgentRunInput {
@@ -690,26 +399,7 @@ impl fmt::Debug for AgentRunInput {
                 "tool_artifact_read_budget",
                 &self.tool_artifact_read_budget.is_some(),
             )
-            .field(
-                "soft_checkpoint",
-                &self
-                    .soft_checkpoint
-                    .as_ref()
-                    .map(|checkpoint| checkpoint.after_turns),
-            )
-            .field("task_plan_update", &self.task_plan_update)
             .field("task_checklist_update", &self.task_checklist_update)
-            .field(
-                "task_guidance_assessment",
-                &self.task_guidance_assessment.as_ref().map(|context| {
-                    (
-                        context.queue_id.as_str(),
-                        context.task_id.as_str(),
-                        context.plan_version,
-                        context.eligible_pending_step_ids.len(),
-                    )
-                }),
-            )
             .field("agent_delegation", &self.agent_delegation)
             .field("purpose", &self.purpose)
             .field(
@@ -811,11 +501,8 @@ impl AgentRunInput {
             initial_context: Vec::new(),
             transient_context: Vec::new(),
             runtime_context: RuntimeContextCandidates::default(),
-            task_plan_update: None,
             task_checklist_update: None,
             plan_review_draft: None,
-            plan_review_submit_only: false,
-            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -838,7 +525,6 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
-            soft_checkpoint: None,
         }
     }
 
@@ -851,11 +537,8 @@ impl AgentRunInput {
             initial_context: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
-            task_plan_update: None,
             task_checklist_update: None,
             plan_review_draft: None,
-            plan_review_submit_only: false,
-            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -878,7 +561,6 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
-            soft_checkpoint: None,
         }
     }
 
@@ -890,11 +572,8 @@ impl AgentRunInput {
             initial_context: Vec::new(),
             transient_context,
             runtime_context: RuntimeContextCandidates::default(),
-            task_plan_update: None,
             task_checklist_update: None,
             plan_review_draft: None,
-            plan_review_submit_only: false,
-            task_guidance_assessment: None,
             agent_delegation: None,
             purpose: None,
             agent_invocation_grant: None,
@@ -917,7 +596,6 @@ impl AgentRunInput {
             suppressed_tool_names: Vec::new(),
             web_task_tree_budget: None,
             tool_artifact_read_budget: None,
-            soft_checkpoint: None,
         }
     }
 
@@ -983,17 +661,6 @@ impl AgentRunInput {
             })
     }
 
-    pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
-        if self.purpose.is_none() {
-            self.purpose = Some(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
-                task_id: context.task_id.clone(),
-                attempt_id: None,
-            }));
-        }
-        self.task_plan_update = Some(context);
-        self
-    }
-
     /// Enables best-effort display checklist updates for one exact Task.
     ///
     /// Checklist state never grants execution or completion authority and malformed model output
@@ -1011,42 +678,7 @@ impl AgentRunInput {
         self
     }
 
-    /// Restricts a Plan review continuation to the typed draft submission protocol.
-    #[must_use]
-    pub fn with_plan_review_submit_only(mut self) -> Self {
-        self.plan_review_submit_only = true;
-        self
-    }
-
-    /// Adds a one-shot advisory checkpoint for a long-running multi-turn run. The prompt is
-    /// inserted only after the requested number of completed model turns and does not alter tool
-    /// authority, max-turn handling, or the run's terminal semantics.
-    #[must_use]
-    pub fn with_soft_checkpoint(mut self, after_turns: usize, prompt: impl Into<String>) -> Self {
-        if after_turns > 0 {
-            self.soft_checkpoint = Some(SoftCheckpoint {
-                after_turns,
-                prompt: prompt.into(),
-            });
-        }
-        self
-    }
-
-    /// Enables model-owned review of whether guidance supplements the accepted plan or replans it.
-    #[must_use]
-    pub fn with_task_guidance_assessment(mut self, context: TaskGuidanceAssessmentContext) -> Self {
-        if self.purpose.is_none() {
-            self.purpose = Some(AgentRunPurpose::TaskPlanner(TaskPlannerContext {
-                task_id: context.task_id.clone(),
-                attempt_id: None,
-            }));
-        }
-        self.task_guidance_assessment = Some(context);
-        self
-    }
-
     /// Binds the host-owned run purpose used for internal protocol admission.
-    #[must_use]
     pub fn with_run_purpose(mut self, purpose: AgentRunPurpose) -> Self {
         self.purpose = Some(purpose);
         self
@@ -1314,66 +946,6 @@ fn validate_initial_frozen_request(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_initial_frozen_task_routing_request(
-    session: &Session,
-    frozen_request: &FrozenProviderRequestMaterial,
-    binding: &TaskPlanningHandoffBinding,
-    route_capability: AutomaticRouteCapability,
-    options: &AgentRunOptions,
-    max_output_tokens: Option<u32>,
-    transient_context: &[ModelMessage],
-    runtime_context: RuntimeContextCandidates,
-    writable_memory_routing: bool,
-    task_continuation_available: bool,
-) -> Result<()> {
-    validate_initial_frozen_routing_request(
-        session,
-        frozen_request,
-        &binding.source_turn,
-        &binding.objective,
-        route_surface_tool_specs_for_context(
-            route_capability,
-            writable_memory_routing,
-            task_continuation_available,
-        ),
-        options,
-        max_output_tokens,
-        transient_context,
-        runtime_context,
-    )
-}
-
-fn validate_initial_frozen_plan_review_routing_request(
-    session: &Session,
-    frozen_request: &FrozenProviderRequestMaterial,
-    binding: &PlanReviewHandoffBinding,
-    route_capability: AutomaticRouteCapability,
-    options: &AgentRunOptions,
-    max_output_tokens: Option<u32>,
-    transient_context: &[ModelMessage],
-    runtime_context: RuntimeContextCandidates,
-    writable_memory_routing: bool,
-    task_continuation_available: bool,
-) -> Result<()> {
-    validate_initial_frozen_routing_request(
-        session,
-        frozen_request,
-        &binding.source_turn,
-        &binding.objective,
-        route_surface_tool_specs_for_bound_context(
-            route_capability,
-            writable_memory_routing,
-            task_continuation_available,
-            binding.pending_plan.is_some(),
-        ),
-        options,
-        max_output_tokens,
-        transient_context,
-        runtime_context,
-    )
-}
-
 fn validate_initial_frozen_routing_request(
     session: &Session,
     frozen_request: &FrozenProviderRequestMaterial,
@@ -1437,7 +1009,7 @@ fn validate_initial_frozen_routing_request(
         ));
     }
     normalized_request.messages[*message_index] = durable_user;
-    normalize_routing_system_message_id(&mut normalized_request)?;
+    normalize_conversation_system_message_id(&mut normalized_request)?;
 
     let mut expected_request = session.build_pre_turn_candidate_request(
         &options.workspace_root,
@@ -1457,7 +1029,7 @@ fn validate_initial_frozen_routing_request(
     // other overlays remain covered by the independently rebuilt expected request.
     normalized_request.deterministic_materialization =
         expected_request.deterministic_materialization;
-    normalize_routing_system_message_id(&mut expected_request)?;
+    normalize_conversation_system_message_id(&mut expected_request)?;
     let normalized_material =
         FrozenProviderRequestMaterial::freeze(session.session_scope_id(), normalized_request)?;
     let expected_material =
@@ -1474,20 +1046,15 @@ fn validate_initial_frozen_routing_request(
 
 /// Frozen tool surface for one automatic route capability.
 ///
-/// `ReviewFirst` never exposes the direct durable task decision; `DirectTask` exposes all three.
+/// `ReviewFirst` never exposes the direct Task action; `DirectTask` exposes it only when the route is available.
 #[must_use]
 pub fn route_surface_tool_specs(capability: AutomaticRouteCapability) -> Vec<ToolSpec> {
     match capability {
         AutomaticRouteCapability::Unsupported => Vec::new(),
-        AutomaticRouteCapability::ReviewFirst => vec![
-            request_plan_review_tool_spec(),
-            continue_without_task_planning_tool_spec(),
-        ],
-        AutomaticRouteCapability::DirectTask => vec![
-            request_plan_review_tool_spec(),
-            request_task_planning_tool_spec(),
-            continue_without_task_planning_tool_spec(),
-        ],
+        AutomaticRouteCapability::ReviewFirst => vec![request_plan_review_tool_spec()],
+        AutomaticRouteCapability::DirectTask => {
+            vec![request_plan_review_tool_spec(), start_task_tool_spec()]
+        }
     }
 }
 
@@ -1495,7 +1062,7 @@ pub fn route_surface_tool_specs(capability: AutomaticRouteCapability) -> Vec<Too
 ///
 /// Memory calls remain ordinary previewed/approved tool executions. They may accompany exactly
 /// one typed route decision so an explicit persistence request is not lost when the same user
-/// turn is handed to plan review or durable task planning.
+/// turn is handed to Plan review or a direct durable Task.
 #[must_use]
 pub fn route_surface_tool_specs_with_memory(
     capability: AutomaticRouteCapability,
@@ -1527,17 +1094,53 @@ pub fn route_surface_tool_specs_for_bound_context(
     task_continuation_available: bool,
     pending_plan_available: bool,
 ) -> Vec<ToolSpec> {
-    if pending_plan_available && capability.routes_automatically() {
-        return vec![run_pending_plan_tool_spec(), keep_pending_plan_tool_spec()];
-    }
     let mut specs = route_surface_tool_specs(capability);
     if task_continuation_available && capability.routes_automatically() {
         specs.push(continue_existing_task_tool_spec());
+    }
+    if pending_plan_available && capability.routes_automatically() {
+        specs.push(run_pending_plan_tool_spec());
     }
     if writable_memory && capability.routes_automatically() {
         specs.extend(writable_memory_route_tool_specs());
     }
     specs
+}
+
+/// Builds the exact conversation tool surface shared by live and queued provider requests.
+/// Existing Plan/Task bindings add their typed actions alongside ordinary business tools; the
+/// model may choose a positive handoff later in the same conversation.
+#[must_use]
+pub fn conversation_tool_specs_for_bound_context(
+    mut ordinary_tools: Vec<ToolSpec>,
+    capability: AutomaticRouteCapability,
+    writable_memory: bool,
+    task_continuation_available: bool,
+    pending_plan_available: bool,
+) -> Vec<ToolSpec> {
+    if !capability.routes_automatically() {
+        return ordinary_tools;
+    }
+    if !ordinary_tools
+        .iter()
+        .any(|tool| tool.name == crate::REQUEST_USER_INPUT_TOOL_NAME)
+    {
+        ordinary_tools.push(crate::request_user_input_tool_spec());
+    }
+    for tool in route_surface_tool_specs_for_bound_context(
+        capability,
+        writable_memory,
+        task_continuation_available,
+        pending_plan_available,
+    ) {
+        if !ordinary_tools
+            .iter()
+            .any(|existing| existing.name == tool.name)
+        {
+            ordinary_tools.push(tool);
+        }
+    }
+    ordinary_tools
 }
 
 fn validate_writable_memory_route_registry(tools: &ToolRegistry) -> Result<()> {
@@ -1558,21 +1161,22 @@ fn validate_writable_memory_route_registry(tools: &ToolRegistry) -> Result<()> {
     Ok(())
 }
 
-fn normalize_routing_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
+fn normalize_conversation_system_message_id(request: &mut crate::CompletionRequest) -> Result<()> {
     let matching_indices = request
         .messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
             (message.role == crate::MessageRole::System
-                && message.content.as_deref()
-                    == Some(conversation_route_routing_contract_material()))
+                && message.content.as_deref().is_some_and(|content| {
+                    content == crate::conversation_auto_execution_contract_material()
+                }))
             .then_some(index)
         })
         .collect::<Vec<_>>();
     let [message_index] = matching_indices.as_slice() else {
         return Err(anyhow!(
-            "automatic routing request must contain its system contract once"
+            "automatic conversation request must contain its system contract once"
         ));
     };
     let message = &mut request.messages[*message_index];
@@ -1585,59 +1189,7 @@ fn normalize_routing_system_message_id(request: &mut crate::CompletionRequest) -
             "automatic routing system contract has an invalid message shape"
         ));
     }
-    message.id = "system:conversation-route-contract-v1".to_owned();
-    Ok(())
-}
-
-fn append_chat_route_decision<H>(
-    session: &mut Session,
-    handler: &mut H,
-    source_turn: &ConversationTurnRef,
-    capability: AutomaticRouteCapability,
-    route_contract_fingerprint: &str,
-    decided_at_ms: u64,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
-    use crate::conversation_route::{
-        ConversationRoute, ConversationRouteDecisionProjection,
-        ConversationRouteDecisionRecordedEntry, conversation_route_decision_id_for_source,
-    };
-    let projection = ConversationRouteDecisionProjection::from_entries(session.entries());
-    if projection.has_conflicts() {
-        bail!("conversation route decision projection contains conflicting durable facts");
-    }
-    let decision_id = conversation_route_decision_id_for_source(source_turn);
-    if let Some(existing) = projection.decision_id_for_source(source_turn)
-        && existing != &decision_id
-    {
-        bail!("source turn is already bound to a different route decision");
-    }
-    let entry = ConversationRouteDecisionRecordedEntry {
-        decision_id,
-        source_turn: source_turn.clone(),
-        route: ConversationRoute::Chat,
-        reason_codes: Vec::new(),
-        configured_policy: TaskRoutingPolicy::Auto,
-        effective_capability: capability,
-        policy_snapshot_hash: crate::conversation_route::plan_review_policy_snapshot_hash(),
-        route_contract_fingerprint: route_contract_fingerprint.to_owned(),
-        decided_at_ms,
-    };
-    match projection.decision(&entry.decision_id) {
-        None => {
-            let control = ControlEntry::ConversationRouteDecisionRecorded(entry);
-            handler.commit_controls(session, vec![control])?;
-        }
-        Some(previous) if previous == &entry => {}
-        Some(_) => {
-            bail!(
-                "route decision {} has conflicting durable facts",
-                entry.decision_id.as_str()
-            );
-        }
-    }
+    message.id = "system:conversation-execution-contract-v1".to_owned();
     Ok(())
 }
 
@@ -1672,64 +1224,6 @@ where
         return Ok(Some(promoted.runtime_context));
     }
     Ok(None)
-}
-
-/// Records the durable chat route decision for a routing microturn whose free text was delivered
-/// as an ordinary conversation answer, keeping the source-turn decision projection consistent.
-fn record_fallback_chat_route_decision<H>(
-    session: &mut Session,
-    handler: &mut H,
-    purpose: Option<&AgentRunPurpose>,
-) -> Result<()>
-where
-    H: EventHandler + Send,
-{
-    let Some(AgentRunPurpose::Conversation(context)) = purpose else {
-        return Ok(());
-    };
-    let conversation = context.as_ref();
-    let fingerprint = conversation
-        .plan_review
-        .as_ref()
-        .map(|binding| binding.route_contract_fingerprint.clone())
-        .or_else(|| {
-            conversation
-                .task_handoff
-                .as_ref()
-                .map(|binding| binding.route_contract_fingerprint.clone())
-        })
-        .or_else(|| {
-            conversation
-                .task_continuation
-                .as_ref()
-                .map(|binding| binding.route_contract_fingerprint.clone())
-        })
-        .ok_or_else(|| anyhow!("fallback chat decision requires a route contract fingerprint"))?;
-    let decided_at_ms = conversation
-        .plan_review
-        .as_ref()
-        .map(|binding| binding.decided_at_ms)
-        .or_else(|| {
-            conversation
-                .task_handoff
-                .as_ref()
-                .map(|binding| binding.decided_at_ms)
-        })
-        .or_else(|| {
-            conversation
-                .task_continuation
-                .as_ref()
-                .map(|binding| binding.decided_at_ms)
-        })
-        .unwrap_or_default();
-    append_chat_route_decision(
-        session,
-        handler,
-        &conversation.source_turn,
-        conversation.route_capability,
-        &fingerprint,
-        decided_at_ms,
-    )
 }
 
 /// Model-visible context that should be injected before accepting a final answer.
@@ -1789,8 +1283,6 @@ pub enum AgentRunTerminalReason {
     DelegationUnsatisfied,
     FinalAnswerBlocked,
     RepairReplanRequired,
-    TaskRoutingUnsatisfied,
-    RoutingFreeTextFallback,
     AwaitingUserInput,
     TaskHandoff,
     PlanReviewHandoff,
@@ -1802,10 +1294,7 @@ impl AgentRunTerminalReason {
     pub fn blocks_successful_completion(self) -> bool {
         matches!(
             self,
-            Self::DelegationUnsatisfied
-                | Self::FinalAnswerBlocked
-                | Self::RepairReplanRequired
-                | Self::TaskRoutingUnsatisfied
+            Self::DelegationUnsatisfied | Self::FinalAnswerBlocked | Self::RepairReplanRequired
         )
     }
 
@@ -1816,8 +1305,6 @@ impl AgentRunTerminalReason {
             Self::DelegationUnsatisfied => "delegation_unsatisfied",
             Self::FinalAnswerBlocked => "final_answer_blocked",
             Self::RepairReplanRequired => "repair_replan_required",
-            Self::TaskRoutingUnsatisfied => "task_routing_unsatisfied",
-            Self::RoutingFreeTextFallback => "routing_free_text_fallback",
             Self::AwaitingUserInput => "awaiting_user_input",
             Self::TaskHandoff => "task_handoff",
             Self::PlanReviewHandoff => "plan_review_handoff",
@@ -1832,6 +1319,12 @@ impl AgentRunTerminalReason {
 /// agent supervisor without making kernel depend on runtime.
 #[async_trait]
 pub trait AgentToolDelegate: Send {
+    /// Starts a fresh transient result context, including when resuming the same logical run.
+    ///
+    /// Durable delivery receipts remain audit history; they do not prove that result text is
+    /// present in this run's transient messages. Called once before the provider loop.
+    fn begin_result_context(&mut self) {}
+
     /// Binds the current root run cancellation scope before delegated child work is admitted.
     fn set_run_cancellation(&mut self, _cancellation: Option<RunCancellationHandle>) {}
 
@@ -2434,11 +1927,8 @@ where
             initial_context,
             mut transient_context,
             mut runtime_context,
-            task_plan_update,
             mut task_checklist_update,
             plan_review_draft,
-            plan_review_submit_only,
-            task_guidance_assessment,
             agent_delegation,
             purpose,
             agent_invocation_grant,
@@ -2461,16 +1951,12 @@ where
             suppressed_tool_names,
             web_task_tree_budget,
             tool_artifact_read_budget,
-            soft_checkpoint,
         } = input;
         // An explicit per-run registrar is useful for constrained callers and tests; production
         // sessions fall back to their non-serializable session-scoped runtime attachment so live
         // capabilities survive normal multi-turn ownership moves.
         let user_url_capability_registrar =
             user_url_capability_registrar.or_else(|| session.user_url_capability_registrar());
-
-        let completion_claim_authority = task_completion_claim_authority(purpose.as_ref());
-        let mut completion_claim = None;
 
         let (task_handoff_binding, plan_review_binding, task_continuation_binding) =
             match purpose.as_ref() {
@@ -2500,18 +1986,15 @@ where
                     }
                     (None, None, None)
                 }
-                Some(
-                    AgentRunPurpose::PlanReview(_)
-                    | AgentRunPurpose::TaskPlanner(_)
-                    | AgentRunPurpose::TaskDirectExecution(_)
-                    | AgentRunPurpose::TaskParticipant(_)
-                    | AgentRunPurpose::TaskSynthesis(_),
-                )
+                Some(AgentRunPurpose::PlanReview(_) | AgentRunPurpose::TaskDirectExecution(_))
                 | None => (None, None, None),
             };
-        let routing_decision_pending = task_handoff_binding.is_some()
+        let automatic_handoff_enabled = task_handoff_binding.is_some()
             || plan_review_binding.is_some()
             || task_continuation_binding.is_some();
+        let pending_plan_available = plan_review_binding
+            .as_ref()
+            .is_some_and(|binding| binding.pending_plan.is_some());
         if let Some(context) = purpose.as_ref().and_then(|purpose| match purpose {
             AgentRunPurpose::Conversation(context) => Some(context.as_ref()),
             _ => None,
@@ -2543,33 +2026,19 @@ where
                     authority: crate::DelegationAuthority::ModelProactive,
                 })
             }
-            Some(AgentRunPurpose::TaskParticipant(context)) => {
+            Some(AgentRunPurpose::TaskDirectExecution(context)) => {
                 Some(crate::AgentDelegationRunContext {
-                    source: crate::AgentInvocationGrantSource::AcceptedTaskPlan {
+                    source: crate::AgentInvocationGrantSource::DirectTask {
                         task_id: context.task_id.clone(),
-                        plan_version: context.plan_version,
-                        step_id: context.step_id.clone(),
                     },
-                    authority: crate::DelegationAuthority::AcceptedTaskPlan {
+                    authority: crate::DelegationAuthority::DirectTask {
                         task_id: context.task_id.clone(),
-                        plan_version: context.plan_version,
-                        step_id: context.step_id.clone(),
                     },
                 })
             }
-            Some(
-                AgentRunPurpose::TaskPlanner(_)
-                | AgentRunPurpose::TaskDirectExecution(_)
-                | AgentRunPurpose::TaskSynthesis(_),
-            )
-            | None => None,
+            None => None,
             Some(AgentRunPurpose::PlanReview(_)) => None,
         };
-        let task_participant_context = purpose.as_ref().and_then(|purpose| match purpose {
-            AgentRunPurpose::TaskParticipant(context) => Some(context.clone()),
-            _ => None,
-        });
-        let is_task_participant = task_participant_context.is_some();
         if tools
             .spec_for(crate::REQUEST_USER_INPUT_TOOL_NAME)
             .is_some()
@@ -2579,14 +2048,12 @@ where
                 crate::REQUEST_USER_INPUT_TOOL_NAME
             ));
         }
-        if routing_decision_pending {
+        if automatic_handoff_enabled {
             for reserved in [
-                REQUEST_TASK_PLANNING_TOOL_NAME,
+                START_TASK_TOOL_NAME,
                 REQUEST_PLAN_REVIEW_TOOL_NAME,
                 CONTINUE_EXISTING_TASK_TOOL_NAME,
-                CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
                 RUN_PENDING_PLAN_TOOL_NAME,
-                KEEP_PENDING_PLAN_TOOL_NAME,
             ] {
                 if tools.spec_for(reserved).is_some() {
                     return Err(anyhow!(
@@ -2596,7 +2063,7 @@ where
             }
             transient_context.insert(
                 0,
-                ModelMessage::system(conversation_route_routing_contract_material()),
+                ModelMessage::system(crate::conversation_auto_execution_contract_material()),
             );
         }
         if let Some(draft_context) = plan_review_draft.as_ref() {
@@ -2605,11 +2072,7 @@ where
                     "plan review draft context requires the PlanReview run purpose"
                 ));
             }
-            for reserved in [
-                PLAN_REVIEW_RESULT_TOOL_NAME,
-                SUBMIT_PLAN_DRAFT_TOOL_NAME,
-                CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME,
-            ] {
+            for reserved in [PLAN_REVIEW_RESULT_TOOL_NAME] {
                 if tools.spec_for(reserved).is_some() {
                     return Err(anyhow!(
                         "tool registry collides with reserved internal tool {reserved}"
@@ -2656,70 +2119,59 @@ where
         if let Some(frozen_request) = initial_frozen_provider_request.as_ref() {
             session.ensure_frozen_request_runtime_context_v2(frozen_request)?;
         }
+        let frozen_routing_tools = || {
+            conversation_tool_specs_for_bound_context(
+                tools
+                    .specs()
+                    .into_iter()
+                    .filter(|spec| !suppressed_tool_names.contains(&spec.name))
+                    .collect(),
+                route_capability,
+                writable_memory_routing,
+                task_continuation_binding.is_some(),
+                pending_plan_available,
+            )
+        };
         if let (Some(binding), Some(frozen_request)) = (
             task_handoff_binding.as_ref(),
             initial_frozen_provider_request.as_ref(),
         ) {
-            validate_initial_frozen_task_routing_request(
+            validate_initial_frozen_routing_request(
                 session,
                 frozen_request,
-                binding,
-                route_capability,
+                &binding.source_turn,
+                &binding.objective,
+                frozen_routing_tools(),
                 &options,
                 max_output_tokens,
                 &transient_context,
                 runtime_context.clone(),
-                writable_memory_routing,
-                task_continuation_binding.is_some(),
             )?;
         }
         if let (Some(binding), Some(frozen_request)) = (
             plan_review_binding.as_ref(),
             initial_frozen_provider_request.as_ref(),
         ) {
-            validate_initial_frozen_plan_review_routing_request(
+            validate_initial_frozen_routing_request(
                 session,
                 frozen_request,
-                binding,
-                route_capability,
+                &binding.source_turn,
+                &binding.objective,
+                frozen_routing_tools(),
                 &options,
                 max_output_tokens,
                 &transient_context,
                 runtime_context.clone(),
-                writable_memory_routing,
-                task_continuation_binding.is_some(),
             )?;
         }
         match purpose.as_ref() {
-            Some(AgentRunPurpose::TaskPlanner(_)) => transient_context.insert(
-                0,
-                ModelMessage::system(task_planner_system_prompt_contract_material()),
-            ),
             Some(AgentRunPurpose::TaskDirectExecution(_)) => transient_context.insert(
                 0,
                 ModelMessage::system(task_direct_execution_system_prompt_contract_material()),
             ),
-            Some(AgentRunPurpose::TaskParticipant(_)) => transient_context.insert(
-                0,
-                ModelMessage::system(task_participant_system_prompt_contract_material()),
-            ),
             Some(AgentRunPurpose::Conversation(_))
             | Some(AgentRunPurpose::PlanReview(_))
-            | Some(AgentRunPurpose::TaskSynthesis(_))
             | None => {}
-        }
-        if let Some(binding_material) =
-            task_completion_claim_binding_material(session, purpose.as_ref())
-        {
-            let insert_at = usize::min(1, transient_context.len());
-            transient_context.insert(insert_at, ModelMessage::system(binding_material));
-        }
-        if task_guidance_assessment.is_some()
-            && tools.spec_for(TASK_GUIDANCE_APPLY_TOOL_NAME).is_some()
-        {
-            return Err(anyhow!(
-                "tool registry collides with reserved internal tool {TASK_GUIDANCE_APPLY_TOOL_NAME}"
-            ));
         }
         if task_checklist_update.is_some()
             && tools.spec_for(UPDATE_TASK_CHECKLIST_TOOL_NAME).is_some()
@@ -2744,14 +2196,6 @@ where
                 }
             }
         }
-        if completion_claim_authority.is_some()
-            && tools.spec_for(TASK_COMPLETION_CLAIM_TOOL_NAME).is_some()
-        {
-            return Err(anyhow!(
-                "tool registry collides with reserved internal tool {TASK_COMPLETION_CLAIM_TOOL_NAME}"
-            ));
-        }
-
         if cancellation
             .as_ref()
             .is_some_and(RunCancellationHandle::is_cancel_requested)
@@ -2881,6 +2325,7 @@ where
             return Err(anyhow!("user-input root logical run id is empty"));
         }
         if let Some(delegate) = agent_delegate.as_deref_mut() {
+            delegate.begin_result_context();
             delegate.set_root_logical_run_id(Some(&logical_run_id));
         }
         let has_initial_frozen_provider_request = initial_frozen_provider_request.is_some();
@@ -2895,25 +2340,16 @@ where
         let agent_delegation_enforced = agent_delegation;
         let mut satisfied_agent_tool_calls = 0usize;
         let mut delegation_retry_used = false;
-        let mut task_routing_decision_pending = routing_decision_pending;
-        let mut task_routing_retry_used = false;
+        let mut automatic_handoff_available = automatic_handoff_enabled;
         let mut final_answer_context_key: Option<String> = None;
         let mut final_answer_context_message_index: Option<usize> = None;
         let mut final_answer_blocker_prompt: Option<String> = None;
         let mut final_answer_blocker_message_index: Option<usize> = None;
         let mut final_answer_blocker_retries = 0usize;
         let mut pending_join_context_keys: Vec<String> = Vec::new();
-        let mut participant_finalization_pending = false;
-        let mut participant_finalization_prompt_injected = false;
-        let mut participant_finalization_dispatched = false;
-        let mut latest_task_step_checkpoint =
-            task_participant_context.as_ref().and_then(|context| {
-                latest_task_step_checkpoint_for_attempt(session.entries(), &context.attempt_id)
-            });
         let tool_artifact_read_budget = tool_artifact_read_budget.unwrap_or_default();
 
         let mut model_turns = 0usize;
-        let mut soft_checkpoint_injected = false;
         let mut hosted_unavailable_noticed = false;
         loop {
             // RFC-0059 §10.3: per-model-turn window; no-op for delegated children.
@@ -2934,21 +2370,6 @@ where
                     pending_join_context_keys.clear();
                 }
                 return Err(anyhow!("run cancellation requested before next model turn"));
-            }
-            if is_task_participant
-                && !participant_finalization_dispatched
-                && !outcome.changed_files.is_empty()
-                && options.max_turns.is_some_and(|max_turns| {
-                    max_turns > 0 && model_turns.saturating_add(1) >= max_turns
-                })
-            {
-                participant_finalization_pending = true;
-            }
-            if participant_finalization_pending && !participant_finalization_prompt_injected {
-                transient_context.push(ModelMessage::system(
-                    task_participant_finalization_prompt_contract_material(),
-                ));
-                participant_finalization_prompt_injected = true;
             }
             if let Some(max_turns) = options.max_turns
                 && model_turns >= max_turns
@@ -2971,7 +2392,6 @@ where
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
-                        completion_claim: None,
                     },
                     outcome,
                     disposition: AgentRunDisposition::Interrupted,
@@ -3012,23 +2432,10 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            if !soft_checkpoint_injected
-                && soft_checkpoint
-                    .as_ref()
-                    .is_some_and(|checkpoint| model_turns >= checkpoint.after_turns)
-            {
-                if let Some(checkpoint) = soft_checkpoint.as_ref() {
-                    transient_context.push(ModelMessage::system(checkpoint.prompt.clone()));
-                }
-                soft_checkpoint_injected = true;
-            }
-
             // Safe-point follow-up injection: after the first provider turn, a queued
             // follow-up is promoted into the session and answered by the same run, without
-            // interrupting it. The provider is an explicit opt-in from the runtime owner;
-            // routing microturns remain exempt.
+            // interrupting it. The provider is an explicit opt-in from the runtime owner.
             if model_turns >= 2
-                && !task_routing_decision_pending
                 && let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
@@ -3038,72 +2445,52 @@ where
                 )
                 .await?
             {
+                automatic_handoff_available = false;
                 runtime_context = follow_up_context;
                 continue;
             }
 
-            let participant_finalization_turn =
-                participant_finalization_pending && !participant_finalization_dispatched;
-            let mut tool_specs = if participant_finalization_turn {
-                Vec::new()
-            } else if task_routing_decision_pending {
-                route_surface_tool_specs_for_bound_context(
+            let ordinary = tools
+                .specs()
+                .into_iter()
+                .filter(|spec| !suppressed_tool_names.contains(&spec.name))
+                .collect();
+            let mut tool_specs = if automatic_handoff_available {
+                conversation_tool_specs_for_bound_context(
+                    ordinary,
                     route_capability,
                     writable_memory_routing,
                     task_continuation_binding.is_some(),
-                    plan_review_binding
-                        .as_ref()
-                        .is_some_and(|binding| binding.pending_plan.is_some()),
+                    pending_plan_available,
                 )
+                .into_iter()
+                .filter(|spec| !suppressed_tool_names.contains(&spec.name))
+                .collect()
             } else {
-                tools
-                    .specs()
-                    .into_iter()
-                    .filter(|spec| !suppressed_tool_names.contains(&spec.name))
-                    .collect::<Vec<_>>()
+                ordinary
             };
-            if !task_routing_decision_pending && !participant_finalization_turn {
-                if matches!(
-                    purpose.as_ref(),
-                    Some(
-                        AgentRunPurpose::Conversation(_)
-                            | AgentRunPurpose::PlanReview(_)
-                            | AgentRunPurpose::TaskPlanner(_)
-                            | AgentRunPurpose::TaskDirectExecution(_)
-                    )
-                ) && !plan_review_submit_only
-                    && !suppressed_tool_names
-                        .iter()
-                        .any(|name| name == crate::REQUEST_USER_INPUT_TOOL_NAME)
-                    || user_input_root_logical_run_id.is_some()
-                {
-                    tool_specs.push(crate::request_user_input_tool_spec());
-                }
-                if let Some(context) = task_plan_update.as_ref() {
-                    tool_specs.push(task_plan_update_tool_spec_for_worktree(
-                        context.worktree_availability,
-                    ));
-                }
-                if task_checklist_update.is_some() {
-                    tool_specs.push(update_task_checklist_tool_spec());
-                }
-                if completion_claim_authority.is_some() {
-                    tool_specs.push(task_completion_claim_tool_spec());
-                }
-                if plan_review_draft.is_some() {
-                    tool_specs.push(submit_plan_review_result_tool_spec());
-                }
-                if task_guidance_assessment.is_some()
-                    && !suppressed_tool_names
-                        .iter()
-                        .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
-                {
-                    tool_specs.push(task_guidance_apply_tool_spec());
-                }
+            if (matches!(
+                purpose.as_ref(),
+                Some(
+                    AgentRunPurpose::Conversation(_)
+                        | AgentRunPurpose::PlanReview(_)
+                        | AgentRunPurpose::TaskDirectExecution(_)
+                )
+            ) && !suppressed_tool_names
+                .iter()
+                .any(|name| name == crate::REQUEST_USER_INPUT_TOOL_NAME)
+                || user_input_root_logical_run_id.is_some())
+                && !tool_specs
+                    .iter()
+                    .any(|spec| spec.name == crate::REQUEST_USER_INPUT_TOOL_NAME)
+            {
+                tool_specs.push(crate::request_user_input_tool_spec());
             }
-            if participant_finalization_turn {
-                participant_finalization_pending = false;
-                participant_finalization_dispatched = true;
+            if task_checklist_update.is_some() {
+                tool_specs.push(update_task_checklist_tool_spec());
+            }
+            if plan_review_draft.is_some() {
+                tool_specs.push(submit_plan_review_result_tool_spec());
             }
             let initial_frozen_request = initial_frozen_provider_request.take();
             let provider_logical_run_id = if initial_frozen_request.is_some() {
@@ -3151,12 +2538,9 @@ where
                                 runtime_context.clone(),
                                 &current_run_overlays,
                             )?;
-                        let prepared_hosted_turn = match (
-                            participant_finalization_turn,
-                            hosted_turn_preparer.as_ref(),
-                        ) {
-                            (true, _) | (false, None) => None,
-                            (false, Some(preparer)) => match preparer.prepare_turn().await? {
+                        let prepared_hosted_turn = match hosted_turn_preparer.as_ref() {
+                            None => None,
+                            Some(preparer) => match preparer.prepare_turn().await? {
                                 Some(turn) => Some(turn),
                                 None => {
                                     // The run-wide hosted budget stays exhausted for the rest of the
@@ -3171,15 +2555,9 @@ where
                                 }
                             },
                         };
-                        let current_hosted_tools = if participant_finalization_turn {
-                            &[][..]
-                        } else {
-                            prepared_hosted_turn
-                                .as_ref()
-                                .map_or(hosted_tools.as_slice(), |turn| {
-                                    turn.hosted_tools.as_slice()
-                                })
-                        };
+                        let current_hosted_tools = prepared_hosted_turn
+                            .as_ref()
+                            .map_or(hosted_tools.as_slice(), |turn| turn.hosted_tools.as_slice());
                         request.hosted_tools = current_hosted_tools.to_vec();
                         let current_hosted_processor = prepared_hosted_turn
                             .as_ref()
@@ -3231,8 +2609,6 @@ where
             let provider_turn_result = {
                 let current_provider_physical_attempt_id =
                     initial_provider_physical_attempt_id.take();
-                let mut provider_event_handler =
-                    RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending);
                 collect_run_provider_turn(
                     &self.provider,
                     self.provider_turn_recovery_policy,
@@ -3242,7 +2618,7 @@ where
                     &provider_logical_run_id,
                     &mut previous_response_handle,
                     total_tool_calls,
-                    &mut provider_event_handler,
+                    handler,
                     cancellation.as_ref(),
                     provider_stream::ProviderTurnDispatchContext {
                         hosted_processor: current_hosted_processor.as_ref(),
@@ -3299,11 +2675,7 @@ where
                     delegate.confirm_join_context_delivery(session, handler, &context_key)?;
                 }
             }
-            let assistant_text = if task_routing_decision_pending {
-                String::new()
-            } else {
-                provider_turn.assistant_text
-            };
+            let assistant_text = provider_turn.assistant_text;
             let completed_calls = provider_turn
                 .completed_calls
                 .into_iter()
@@ -3312,9 +2684,7 @@ where
             let pending_states = provider_turn.pending_states;
             let hosted_finalized = provider_turn.hosted_finalized;
 
-            if !task_routing_decision_pending {
-                append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
-            }
+            append_reasoning_trace(session, &provider_turn.reasoning_trace)?;
 
             if !completed_calls.is_empty() {
                 let tool_call_ids_before_batch = outcome.tool_call_ids.len();
@@ -3326,7 +2696,7 @@ where
                 total_tool_calls += completed_calls.len();
                 let tool_preamble_overlay = append_tool_preamble_message(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
+                    handler,
                     tools,
                     &logical_run_id,
                     &assistant_text,
@@ -3378,55 +2748,33 @@ where
                 if let Some(budget) = web_task_tree_budget.as_ref() {
                     tool_ctx = tool_ctx.with_web_task_tree_budget(Arc::clone(budget));
                 }
-                let accepted_task_plan_in_batch = completed_calls.iter().any(|call| {
-                    task_plan_update
+                let first_plan_result_in_batch = completed_calls.iter().find_map(|call| {
+                    plan_review_draft
                         .as_ref()
-                        .is_some_and(|context| task_plan_update_call_is_accepted(context, call))
+                        .and_then(|context| submit_plan_review_result_call_outcome(context, call))
                 });
-                let first_plan_result_in_batch = (!accepted_task_plan_in_batch)
-                    .then(|| {
-                        completed_calls.iter().find_map(|call| {
-                            plan_review_draft.as_ref().and_then(|context| {
-                                submit_plan_review_result_call_outcome(context, call)
-                            })
-                        })
-                    })
-                    .flatten();
                 let accepted_plan_result_in_batch = first_plan_result_in_batch.is_some();
                 let accepted_plan_draft_in_batch =
                     first_plan_result_in_batch == Some(PlanReviewResultOutcome::Draft);
                 let pending_plan_bound = plan_review_binding
                     .as_ref()
                     .is_some_and(|binding| binding.pending_plan.is_some());
-                let accepted_run_pending_plan_in_batch = task_routing_decision_pending
-                    && pending_plan_bound
+                let accepted_run_pending_plan_in_batch = pending_plan_bound
                     && completed_calls
                         .iter()
                         .any(run_pending_plan_call_is_accepted);
-                let accepted_keep_pending_plan_in_batch = task_routing_decision_pending
-                    && pending_plan_bound
-                    && !accepted_run_pending_plan_in_batch
-                    && completed_calls
-                        .iter()
-                        .any(keep_pending_plan_call_is_accepted);
-                let accepted_task_continuation_in_batch = task_routing_decision_pending
-                    && !accepted_run_pending_plan_in_batch
-                    && !accepted_keep_pending_plan_in_batch
+                let accepted_task_continuation_in_batch = !accepted_run_pending_plan_in_batch
                     && task_continuation_binding.is_some()
                     && completed_calls
                         .iter()
                         .any(continue_existing_task_call_is_accepted);
-                let accepted_task_handoff_in_batch = task_routing_decision_pending
+                let accepted_task_handoff_in_batch = automatic_handoff_available
                     && !accepted_run_pending_plan_in_batch
-                    && !accepted_keep_pending_plan_in_batch
                     && !accepted_task_continuation_in_batch
                     && task_handoff_binding.is_some()
-                    && completed_calls
-                        .iter()
-                        .any(task_planning_request_call_is_accepted);
-                let accepted_plan_review_in_batch = task_routing_decision_pending
+                    && completed_calls.iter().any(start_task_call_is_accepted);
+                let accepted_plan_review_in_batch = automatic_handoff_available
                     && !accepted_run_pending_plan_in_batch
-                    && !accepted_keep_pending_plan_in_batch
                     && !accepted_task_handoff_in_batch
                     && plan_review_binding.is_some()
                     && completed_calls.iter().any(|call| {
@@ -3434,50 +2782,46 @@ where
                             .as_ref()
                             .is_some_and(|binding| plan_review_call_is_accepted(binding, call))
                     });
-                let accepted_direct_conversation_in_batch = task_routing_decision_pending
-                    && !accepted_run_pending_plan_in_batch
-                    && !accepted_keep_pending_plan_in_batch
-                    && !accepted_task_handoff_in_batch
-                    && !accepted_plan_review_in_batch
-                    && completed_calls
-                        .iter()
-                        .any(continue_without_task_planning_call_is_accepted);
-                let accepted_task_guidance_in_batch = !accepted_task_plan_in_batch
-                    && task_guidance_assessment.is_some()
+                let mixed_handoff_batch = automatic_handoff_available
+                    && completed_calls.len() > 1
                     && completed_calls.iter().any(|call| {
-                        task_guidance_assessment.as_ref().is_some_and(|context| {
-                            task_guidance_apply_call_is_accepted(context, call)
-                        })
+                        matches!(
+                            call.name.as_str(),
+                            START_TASK_TOOL_NAME
+                                | REQUEST_PLAN_REVIEW_TOOL_NAME
+                                | CONTINUE_EXISTING_TASK_TOOL_NAME
+                                | RUN_PENDING_PLAN_TOOL_NAME
+                        )
                     });
-                let accepted_user_input_in_batch = !task_routing_decision_pending
-                    && !accepted_task_plan_in_batch
-                    && !accepted_plan_draft_in_batch
-                    && !accepted_task_guidance_in_batch
+                let accepted_user_input_in_batch = !accepted_plan_draft_in_batch
                     && completed_calls
                         .iter()
                         .any(request_user_input_call_is_accepted);
                 if let Some(delegate) = agent_delegate.as_deref_mut() {
                     delegate.set_join_batch_eligibility(&completed_calls);
                 }
-                let mut accepted_task_plan = false;
                 let mut accepted_plan_draft = false;
                 let mut accepted_plan_result = None;
                 let mut accepted_task_handoff = None;
                 let mut accepted_task_continuation = None;
                 let mut accepted_plan_review = None;
                 let mut accepted_run_pending_plan = None;
-                let mut accepted_keep_pending_plan = None;
-                let mut accepted_direct_conversation = false;
-                let mut accepted_task_guidance = false;
                 let mut accepted_user_input = None;
                 let mut assistant_batch_results: Vec<(crate::ToolCall, ToolResult)> = Vec::new();
                 let mut ordinary_tool_calls = Vec::new();
+                let declared_calls = DeclaredToolBatch {
+                    calls: completed_calls.clone(),
+                    entry_start: session.entries().len(),
+                };
                 let mut execution_calls = completed_calls;
-                if task_routing_decision_pending && writable_memory_routing {
-                    // A route decision hands this turn to another runtime immediately after the
-                    // batch settles. Execute approved memory writes first even when the provider
-                    // emitted the route call first, so a crash during handoff cannot durably
-                    // record the route while silently losing the user's explicit memory intent.
+                if writable_memory_routing
+                    && (accepted_run_pending_plan_in_batch
+                        || accepted_task_continuation_in_batch
+                        || accepted_task_handoff_in_batch
+                        || accepted_plan_review_in_batch)
+                {
+                    // Persist explicitly requested memory changes before handing control to a
+                    // separate durable Plan or Task run.
                     let (memory_calls, remaining_calls): (Vec<_>, Vec<_>) = execution_calls
                         .into_iter()
                         .partition(|call| is_writable_memory_route_tool(&call.name));
@@ -3511,6 +2855,14 @@ where
                     };
                     if let Err(error) = process_tool_call_batch(memory_context, memory_calls).await
                     {
+                        let error = settle_failed_tool_batch(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &declared_calls,
+                            &mut assistant_batch_results,
+                            error,
+                        );
                         if let Some(delegate) = agent_delegate.as_deref_mut()
                             && let Err(cleanup_error) = delegate.abort_join_dependencies(
                                 session,
@@ -3528,22 +2880,12 @@ where
                 for call in execution_calls {
                     let safe_call =
                         crate::project_tool_call_for_persistence(call.clone())?.durable_call;
-                    let retired_plan_tool = matches!(
-                        call.name.as_str(),
-                        SUBMIT_PLAN_DRAFT_TOOL_NAME | CONFIRM_PLAN_REVIEW_CANDIDATE_TOOL_NAME
-                    );
-                    if retired_plan_tool
-                        || (plan_review_submit_only && call.name != PLAN_REVIEW_RESULT_TOOL_NAME)
-                    {
+                    if mixed_handoff_batch {
                         let mut result = ToolResult::error(
                             call.id.clone(),
                             call.name.clone(),
-                            ToolErrorKind::Protocol,
-                            if retired_plan_tool {
-                                "retired_plan_protocol: use the advertised submit_plan_review_result tool"
-                            } else {
-                                "submit_only_protocol_violation: plan finalization accepts only submit_plan_review_result"
-                            },
+                            ToolErrorKind::InvalidInput,
+                            "an object handoff must be the only call in its batch; no calls in this batch ran; finish ordinary tools first, then issue the handoff in a separate turn",
                         );
                         attach_tool_call_context(&mut result, &call, &[]);
                         append_tool_execution_audit(
@@ -3562,6 +2904,51 @@ where
                         );
                         continue;
                     }
+                    if automatic_handoff_available
+                        && matches!(
+                            call.name.as_str(),
+                            START_TASK_TOOL_NAME | REQUEST_PLAN_REVIEW_TOOL_NAME
+                        )
+                    {
+                        let blocker = if !outcome.interrupted_tool_calls.is_empty()
+                            || outcome
+                                .tool_errors
+                                .iter()
+                                .any(execution::recovery_tool_error_is_active)
+                        {
+                            Some("resolve the interrupted tool or active recovery blocker before handing off this request".to_owned())
+                        } else {
+                            agent_delegate
+                                .as_deref_mut()
+                                .map(|delegate| delegate.final_answer_blocker(session))
+                                .transpose()?
+                                .flatten()
+                        };
+                        if let Some(blocker) = blocker {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::InvalidInput,
+                                format!("planning handoff is blocked: {blocker}"),
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            tool_results::record_tool_result_to_batch(
+                                &mut outcome,
+                                &call,
+                                result,
+                                &mut assistant_batch_results,
+                            );
+                            continue;
+                        }
+                    }
                     if accepted_user_input_in_batch
                         && (call.name != crate::REQUEST_USER_INPUT_TOOL_NAME
                             || accepted_user_input.is_some())
@@ -3574,11 +2961,9 @@ where
                         )?;
                         continue;
                     }
-                    if (accepted_run_pending_plan_in_batch || accepted_keep_pending_plan_in_batch)
-                        && ((call.name != RUN_PENDING_PLAN_TOOL_NAME
+                    if accepted_run_pending_plan_in_batch
+                        && (call.name != RUN_PENDING_PLAN_TOOL_NAME
                             || accepted_run_pending_plan.is_some())
-                            && (call.name != KEEP_PENDING_PLAN_TOOL_NAME
-                                || accepted_keep_pending_plan.is_some()))
                     {
                         append_tool_ignored_after_task_handoff(
                             session,
@@ -3603,8 +2988,7 @@ where
                     }
                     if accepted_task_handoff_in_batch
                         && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
-                        && (call.name != REQUEST_TASK_PLANNING_TOOL_NAME
-                            || accepted_task_handoff.is_some())
+                        && (call.name != START_TASK_TOOL_NAME || accepted_task_handoff.is_some())
                     {
                         append_tool_ignored_after_task_handoff(
                             session,
@@ -3620,28 +3004,6 @@ where
                             || accepted_plan_review.is_some())
                     {
                         append_tool_ignored_after_plan_review_decision(
-                            session,
-                            &mut outcome,
-                            &call,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if accepted_direct_conversation_in_batch
-                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
-                        && (call.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-                            || accepted_direct_conversation)
-                    {
-                        append_tool_ignored_after_routing_decision(
-                            session,
-                            &mut outcome,
-                            &call,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if accepted_task_plan_in_batch && call.name != TASK_PLAN_UPDATE_TOOL_NAME {
-                        append_tool_ignored_after_task_plan_acceptance(
                             session,
                             &mut outcome,
                             &call,
@@ -3667,80 +3029,13 @@ where
                         )?;
                         continue;
                     }
-                    if accepted_task_guidance_in_batch
-                        && (call.name != TASK_GUIDANCE_APPLY_TOOL_NAME || accepted_task_guidance)
-                    {
-                        append_tool_ignored_after_task_guidance_acceptance(
-                            session,
-                            &mut outcome,
-                            &call,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
                     if call.name == RUN_PENDING_PLAN_TOOL_NAME {
-                        if !task_routing_decision_pending {
-                            append_tool_rejected_during_task_routing(
-                                session,
-                                &mut outcome,
-                                &call,
-                                &mut assistant_batch_results,
-                            )?;
-                            continue;
-                        }
                         let Some(binding) = plan_review_binding.as_ref() else {
-                            append_tool_rejected_during_task_routing(
-                                session,
-                                &mut outcome,
-                                &call,
-                                &mut assistant_batch_results,
-                            )?;
-                            continue;
-                        };
-                        accepted_run_pending_plan = handle_run_pending_plan_call(
-                            session,
-                            &mut outcome,
-                            &call,
-                            binding,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if call.name == KEEP_PENDING_PLAN_TOOL_NAME {
-                        if !task_routing_decision_pending {
-                            append_tool_rejected_during_task_routing(
-                                session,
-                                &mut outcome,
-                                &call,
-                                &mut assistant_batch_results,
-                            )?;
-                            continue;
-                        }
-                        let Some(binding) = plan_review_binding.as_ref() else {
-                            append_tool_rejected_during_task_routing(
-                                session,
-                                &mut outcome,
-                                &call,
-                                &mut assistant_batch_results,
-                            )?;
-                            continue;
-                        };
-                        accepted_keep_pending_plan = handle_keep_pending_plan_call(
-                            session,
-                            &mut outcome,
-                            &call,
-                            binding,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if call.name == CONTINUE_EXISTING_TASK_TOOL_NAME {
-                        if !task_routing_decision_pending {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
                                 call.name.clone(),
                                 ToolErrorKind::Unsupported,
-                                "continue_existing_task is not available after the routing microturn",
+                                "run_pending_plan is not available for this request",
                             );
                             attach_tool_call_context(&mut result, &call, &[]);
                             append_tool_execution_audit(
@@ -3753,7 +3048,17 @@ where
                             )?;
                             assistant_batch_results.push((call.clone(), result));
                             continue;
-                        }
+                        };
+                        accepted_run_pending_plan = handle_run_pending_plan_call(
+                            session,
+                            &mut outcome,
+                            &call,
+                            binding,
+                            &mut assistant_batch_results,
+                        )?;
+                        continue;
+                    }
+                    if call.name == CONTINUE_EXISTING_TASK_TOOL_NAME {
                         let Some(binding) = task_continuation_binding.as_ref() else {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
@@ -3775,7 +3080,7 @@ where
                         };
                         accepted_task_continuation = handle_continue_existing_task_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, false),
+                            handler,
                             &mut outcome,
                             &call,
                             binding,
@@ -3784,43 +3089,13 @@ where
                         )?;
                         continue;
                     }
-                    if call.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME {
-                        if !task_routing_decision_pending {
+                    if call.name == START_TASK_TOOL_NAME {
+                        if !automatic_handoff_available {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
                                 call.name.clone(),
                                 ToolErrorKind::Unsupported,
-                                "continue_without_task_planning is not available after the routing microturn",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        }
-                        let accepted = handle_continue_without_task_planning_call(
-                            session,
-                            &mut outcome,
-                            &call,
-                            !pending_plan_bound,
-                            &mut assistant_batch_results,
-                        )?;
-                        accepted_direct_conversation = accepted_direct_conversation || accepted;
-                        continue;
-                    }
-                    if call.name == REQUEST_TASK_PLANNING_TOOL_NAME {
-                        if !task_routing_decision_pending {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "request_task_planning is not available after the routing microturn",
+                                "start_task is not available for the current source turn",
                             );
                             attach_tool_call_context(&mut result, &call, &[]);
                             append_tool_execution_audit(
@@ -3839,7 +3114,7 @@ where
                                 call.id.clone(),
                                 call.name.clone(),
                                 ToolErrorKind::Unsupported,
-                                "request_task_planning is not available for this run",
+                                "start_task is not available for this run",
                             );
                             attach_tool_call_context(&mut result, &call, &[]);
                             append_tool_execution_audit(
@@ -3853,9 +3128,9 @@ where
                             assistant_batch_results.push((call.clone(), result));
                             continue;
                         };
-                        accepted_task_handoff = handle_task_planning_request_call(
+                        accepted_task_handoff = handle_start_task_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, false),
+                            handler,
                             &mut outcome,
                             &call,
                             binding,
@@ -3870,12 +3145,12 @@ where
                         continue;
                     }
                     if call.name == REQUEST_PLAN_REVIEW_TOOL_NAME {
-                        if !task_routing_decision_pending {
+                        if !automatic_handoff_available {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
                                 call.name.clone(),
                                 ToolErrorKind::Unsupported,
-                                "request_plan_review is not available after the routing microturn",
+                                "request_plan_review is not available for the current source turn",
                             );
                             attach_tool_call_context(&mut result, &call, &[]);
                             append_tool_execution_audit(
@@ -3910,7 +3185,7 @@ where
                         };
                         accepted_plan_review = handle_request_plan_review_call(
                             session,
-                            &mut RoutingMicroturnEventFilter::new(handler, false),
+                            handler,
                             &mut outcome,
                             &call,
                             binding,
@@ -3922,17 +3197,6 @@ where
                                     )
                                 })?
                                 .scope_id(),
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if task_routing_decision_pending
-                        && !(writable_memory_routing && is_writable_memory_route_tool(&call.name))
-                    {
-                        append_tool_rejected_during_task_routing(
-                            session,
-                            &mut outcome,
-                            &call,
                             &mut assistant_batch_results,
                         )?;
                         continue;
@@ -3959,11 +3223,6 @@ where
                                             attempt_id: context.attempt_id.clone(),
                                         }
                                     }
-                                    Some(AgentRunPurpose::TaskPlanner(context)) => {
-                                        crate::UserInputSourceV1::Planner {
-                                            task_id: context.task_id.clone(),
-                                        }
-                                    }
                                     _ => crate::UserInputSourceV1::Agent,
                                 },
                             },
@@ -3977,37 +3236,6 @@ where
                                 &mut assistant_batch_results,
                             )?,
                         }
-                        continue;
-                    }
-                    if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
-                        let Some(context) = task_plan_update.as_ref() else {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "task_plan_update is not available for this run",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        };
-                        let accepted = handle_task_plan_update_call(
-                            session,
-                            handler,
-                            &mut outcome,
-                            &call,
-                            context,
-                            &mut assistant_batch_results,
-                        )?;
-                        accepted_task_plan = accepted_task_plan || accepted;
                         continue;
                     }
                     if call.name == UPDATE_TASK_CHECKLIST_TOOL_NAME {
@@ -4036,40 +3264,6 @@ where
                             &mut outcome,
                             &call,
                             context,
-                            &mut assistant_batch_results,
-                        )?;
-                        continue;
-                    }
-                    if call.name == TASK_COMPLETION_CLAIM_TOOL_NAME {
-                        let Some((expected_subject, expected_attempt_id)) =
-                            completion_claim_authority.as_ref()
-                        else {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "task_completion_claim is not available for this run",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        };
-                        handle_task_completion_claim_call(
-                            session,
-                            handler,
-                            &mut outcome,
-                            &call,
-                            expected_subject,
-                            expected_attempt_id,
-                            &mut completion_claim,
                             &mut assistant_batch_results,
                         )?;
                         continue;
@@ -4114,41 +3308,6 @@ where
                         }
                         continue;
                     }
-                    if call.name == TASK_GUIDANCE_APPLY_TOOL_NAME {
-                        let Some(context) = task_guidance_assessment.as_ref().filter(|_| {
-                            !suppressed_tool_names
-                                .iter()
-                                .any(|name| name == TASK_GUIDANCE_APPLY_TOOL_NAME)
-                        }) else {
-                            let mut result = ToolResult::error(
-                                call.id.clone(),
-                                call.name.clone(),
-                                ToolErrorKind::Unsupported,
-                                "task_guidance_apply is not available for this run",
-                            );
-                            attach_tool_call_context(&mut result, &call, &[]);
-                            append_tool_execution_audit(
-                                session,
-                                &call,
-                                &[],
-                                ToolExecutionStatus::Failed,
-                                None,
-                                Some(&result),
-                            )?;
-                            assistant_batch_results.push((call.clone(), result));
-                            continue;
-                        };
-                        let accepted = handle_task_guidance_apply_call(
-                            session,
-                            handler,
-                            &mut outcome,
-                            &call,
-                            context,
-                            &mut assistant_batch_results,
-                        )?;
-                        accepted_task_guidance = accepted_task_guidance || accepted;
-                        continue;
-                    }
                     ordinary_tool_calls.push((call, safe_call));
                 }
                 let tool_call_context = ToolCallProcessingContext {
@@ -4173,6 +3332,14 @@ where
                 if let Err(error) =
                     process_tool_call_batch(tool_call_context, ordinary_tool_calls).await
                 {
+                    let error = settle_failed_tool_batch(
+                        session,
+                        handler,
+                        &mut outcome,
+                        &declared_calls,
+                        &mut assistant_batch_results,
+                        error,
+                    );
                     if let Some(delegate) = agent_delegate.as_deref_mut()
                         && let Err(cleanup_error) = delegate.abort_join_dependencies(
                             session,
@@ -4197,25 +3364,13 @@ where
                         .copied()
                         .unwrap_or(usize::MAX)
                 });
-                let task_step_checkpoint = task_participant_context
-                    .as_ref()
-                    .map(|context| {
-                        build_task_step_checkpoint(
-                            context,
-                            model_turns,
-                            &assistant_batch_results,
-                            &outcome.changed_files,
-                            latest_task_step_checkpoint.as_ref(),
-                        )
-                    })
-                    .transpose()?;
                 // RFC-0062 11.2/11.5: settle the whole assistant tool-call batch with the
                 // deterministic two-phase preview allocator before the next provider request.
                 // A settlement failure keeps the same cleanup contract as a per-tool emit
                 // failure: join dependencies are aborted before the error propagates.
                 if let Err(error) = emit_tool_result_batch(
                     session,
-                    &mut RoutingMicroturnEventFilter::new(handler, task_routing_decision_pending),
+                    handler,
                     &mut outcome,
                     std::mem::take(&mut assistant_batch_results),
                 ) {
@@ -4231,11 +3386,6 @@ where
                     }
                     return Err(error);
                 }
-                if let Some(checkpoint) = task_step_checkpoint {
-                    session
-                        .append_control(ControlEntry::TaskStepCheckpointV2(checkpoint.clone()))?;
-                    latest_task_step_checkpoint = Some(checkpoint);
-                }
                 if let Some(request) = accepted_user_input {
                     outcome.terminal_reason = AgentRunTerminalReason::AwaitingUserInput;
                     outcome.tool_calls = total_tool_calls;
@@ -4244,7 +3394,6 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::AwaitingUserInput(request),
@@ -4267,7 +3416,6 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartDurableTask(action),
@@ -4281,24 +3429,9 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::RunPendingPlan(action),
-                    });
-                }
-                if let Some(action) = accepted_keep_pending_plan {
-                    outcome.terminal_reason = AgentRunTerminalReason::PlanReviewHandoff;
-                    outcome.tool_calls = total_tool_calls;
-                    return Ok(AgentRunOutput {
-                        result: AgentRunResult {
-                            final_text: String::new(),
-                            tool_calls: total_tool_calls,
-                            final_message_id: None,
-                            completion_claim: None,
-                        },
-                        outcome,
-                        disposition: AgentRunDisposition::PendingPlanDecisionRequired(action),
                     });
                 }
                 if let Some(action) = accepted_task_continuation {
@@ -4309,7 +3442,6 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::ContinueDurableTask(Box::new(action)),
@@ -4323,123 +3455,9 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::StartPlanReview(action),
-                    });
-                }
-                if accepted_task_continuation_in_batch {
-                    handler.handle(RunEvent::Notice(
-                        "task continuation could not recover its existing authority; the task remains paused".to_owned(),
-                    ))?;
-                    outcome.terminal_reason = AgentRunTerminalReason::TaskRoutingUnsatisfied;
-                    outcome.tool_calls = total_tool_calls;
-                    claim_natural_run_terminal(
-                        cancellation.as_ref(),
-                        cancellation_terminal_authority,
-                    )?;
-                    append_run_lifecycle_events(
-                        session,
-                        "blocked",
-                        outcome.terminal_reason,
-                        None,
-                        total_tool_calls,
-                    )?;
-                    return Ok(AgentRunOutput {
-                        result: AgentRunResult {
-                            final_text: String::new(),
-                            tool_calls: total_tool_calls,
-                            final_message_id: None,
-                            completion_claim: None,
-                        },
-                        outcome,
-                        disposition: AgentRunDisposition::Blocked,
-                    });
-                }
-                if accepted_direct_conversation {
-                    task_routing_decision_pending = false;
-                    if let Some(conversation) = purpose.as_ref().and_then(|purpose| match purpose {
-                        AgentRunPurpose::Conversation(context) => Some(context.as_ref()),
-                        _ => None,
-                    }) {
-                        let fingerprint = conversation
-                            .plan_review
-                            .as_ref()
-                            .map(|binding| binding.route_contract_fingerprint.clone())
-                            .or_else(|| {
-                                conversation
-                                    .task_handoff
-                                    .as_ref()
-                                    .map(|binding| binding.route_contract_fingerprint.clone())
-                            })
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "accepted chat decision requires a route contract fingerprint"
-                                )
-                            })?;
-                        append_chat_route_decision(
-                            session,
-                            handler,
-                            &conversation.source_turn,
-                            conversation.route_capability,
-                            &fingerprint,
-                            conversation
-                                .plan_review
-                                .as_ref()
-                                .map(|binding| binding.decided_at_ms)
-                                .or_else(|| {
-                                    conversation
-                                        .task_handoff
-                                        .as_ref()
-                                        .map(|binding| binding.decided_at_ms)
-                                })
-                                .unwrap_or_default(),
-                        )?;
-                    }
-                    transient_context.push(ModelMessage::system(
-                        direct_conversation_continuation_prompt_contract_material(),
-                    ));
-                } else if task_routing_decision_pending {
-                    if !task_routing_retry_used {
-                        task_routing_retry_used = true;
-                        transient_context.push(ModelMessage::system(
-                            conversation_route_routing_contract_material(),
-                        ));
-                    } else {
-                        // The model twice failed to produce a typed routing decision. Degrade to
-                        // an ordinary conversation instead of blocking: the user message is
-                        // answered by the same run under the direct-conversation contract.
-                        record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
-                        task_routing_decision_pending = false;
-                        transient_context.push(ModelMessage::system(
-                            direct_conversation_continuation_prompt_contract_material(),
-                        ));
-                    }
-                }
-                if accepted_task_plan {
-                    outcome.tool_calls = total_tool_calls;
-                    claim_natural_run_terminal(
-                        cancellation.as_ref(),
-                        cancellation_terminal_authority,
-                    )?;
-                    append_run_lifecycle_events(
-                        session,
-                        "completed",
-                        outcome.terminal_reason,
-                        None,
-                        total_tool_calls,
-                    )?;
-                    return Ok(AgentRunOutput {
-                        result: AgentRunResult {
-                            final_text: "task plan accepted; orchestration will continue"
-                                .to_owned(),
-                            tool_calls: total_tool_calls,
-                            final_message_id: None,
-                            completion_claim: None,
-                        },
-                        outcome,
-                        disposition: AgentRunDisposition::TaskPlanAccepted,
                     });
                 }
                 if accepted_plan_result == Some(PlanReviewResultOutcome::NoPlan) {
@@ -4460,7 +3478,6 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::FinalAnswer,
@@ -4489,7 +3506,6 @@ where
                             final_text: "plan draft submitted; awaiting your decision".to_owned(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::PlanReviewDraftSubmitted(
@@ -4501,51 +3517,6 @@ where
                         ),
                     });
                 }
-                if accepted_task_guidance {
-                    outcome.tool_calls = total_tool_calls;
-                    claim_natural_run_terminal(
-                        cancellation.as_ref(),
-                        cancellation_terminal_authority,
-                    )?;
-                    append_run_lifecycle_events(
-                        session,
-                        "completed",
-                        outcome.terminal_reason,
-                        None,
-                        total_tool_calls,
-                    )?;
-                    return Ok(AgentRunOutput {
-                        result: AgentRunResult {
-                            final_text:
-                                "task guidance accepted for pending steps; orchestration will continue"
-                                    .to_owned(),
-                            tool_calls: total_tool_calls,
-                            final_message_id: None,
-                            completion_claim: None,
-                        },
-                        outcome,
-                        disposition: AgentRunDisposition::TaskPlanAccepted,
-                    });
-                }
-                continue;
-            }
-
-            if task_routing_decision_pending {
-                if !task_routing_retry_used {
-                    task_routing_retry_used = true;
-                    transient_context.push(ModelMessage::system(
-                        conversation_route_routing_contract_material(),
-                    ));
-                    continue;
-                }
-                // The model twice failed to produce a typed routing decision. Degrade to an
-                // ordinary conversation instead of blocking: the user message is answered by
-                // the same run under the direct-conversation contract.
-                record_fallback_chat_route_decision(session, handler, purpose.as_ref())?;
-                task_routing_decision_pending = false;
-                transient_context.push(ModelMessage::system(
-                    direct_conversation_continuation_prompt_contract_material(),
-                ));
                 continue;
             }
 
@@ -4580,7 +3551,6 @@ where
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
                         final_message_id: None,
-                        completion_claim: None,
                     },
                     outcome,
                     disposition: AgentRunDisposition::Blocked,
@@ -4616,7 +3586,6 @@ where
                             final_text: String::new(),
                             tool_calls: total_tool_calls,
                             final_message_id: None,
-                            completion_claim: None,
                         },
                         outcome,
                         disposition: AgentRunDisposition::Blocked,
@@ -4647,37 +3616,10 @@ where
                 }
             }
             final_answer_blocker_prompt = None;
-            if participant_finalization_dispatched {
-                handler.handle(RunEvent::Notice(
-                    "the configured turn allowance ended after a partial reporting turn; the Task remains unfinished"
-                        .to_owned(),
-                ))?;
-                outcome.terminal_reason = AgentRunTerminalReason::FinalAnswerBlocked;
-                outcome.tool_calls = total_tool_calls;
-                claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
-                append_run_lifecycle_events(
-                    session,
-                    "blocked",
-                    outcome.terminal_reason,
-                    None,
-                    total_tool_calls,
-                )?;
-                return Ok(AgentRunOutput {
-                    result: AgentRunResult {
-                        final_text: crate::safe_persistence_text(&assistant_text),
-                        tool_calls: total_tool_calls,
-                        final_message_id: None,
-                        completion_claim: None,
-                    },
-                    outcome,
-                    disposition: AgentRunDisposition::Blocked,
-                });
-            }
             // Final-answer gate: a queued follow-up keeps the run alive instead of finalizing.
             // The pending assistant text is persisted so the follow-up answer continues the
             // transcript instead of replacing it.
-            if !task_routing_decision_pending
-                && let Some(provider) = pending_input_provider.as_ref()
+            if let Some(provider) = pending_input_provider.as_ref()
                 && let Some(follow_up_context) = promote_pending_follow_up(
                     provider.as_ref(),
                     &mut *session,
@@ -4686,6 +3628,7 @@ where
                 )
                 .await?
             {
+                automatic_handoff_available = false;
                 runtime_context = follow_up_context;
                 if !assistant_text.trim().is_empty() {
                     let exact_message = ModelMessage::assistant_with_kind(
@@ -4704,6 +3647,7 @@ where
                 }
                 continue;
             }
+            outcome.tool_calls = total_tool_calls;
             claim_natural_run_terminal(cancellation.as_ref(), cancellation_terminal_authority)?;
             let mut hosted_finalized = hosted_finalized;
             let url_capability_registrations = hosted_finalized
@@ -4740,7 +3684,6 @@ where
                 }
             }
 
-            outcome.tool_calls = total_tool_calls;
             // Readiness is a durable workspace projection and must not inspect paths or emit a
             // control receipt without durable workspace and session capabilities.
             let readiness = (options.workspace_capability().is_available()
@@ -4764,7 +3707,6 @@ where
                     final_text: assistant_text,
                     tool_calls: total_tool_calls,
                     final_message_id: Some(final_message_id),
-                    completion_claim: completion_claim.take(),
                 },
                 outcome,
                 disposition: AgentRunDisposition::FinalAnswer,
@@ -4840,119 +3782,6 @@ struct AuthorizedToolCall {
     explicit_user_approval: bool,
     /// Keeps the root run non-quiescent from successful authorization until the body settles.
     _tool_effect: Option<RunEffectGuard>,
-}
-
-fn latest_task_step_checkpoint_for_attempt(
-    entries: &[SessionLogEntry],
-    attempt_id: &TaskParticipantAttemptId,
-) -> Option<TaskStepCheckpointV2> {
-    entries.iter().rev().find_map(|entry| match entry {
-        SessionLogEntry::Control(ControlEntry::TaskStepCheckpointV2(checkpoint))
-            if &checkpoint.attempt_id == attempt_id =>
-        {
-            Some(checkpoint.clone())
-        }
-        _ => None,
-    })
-}
-
-fn build_task_step_checkpoint(
-    context: &TaskParticipantContext,
-    model_turn: usize,
-    results: &[(ToolCall, ToolResult)],
-    changed_files: &[String],
-    previous: Option<&TaskStepCheckpointV2>,
-) -> Result<TaskStepCheckpointV2> {
-    let call_material = results
-        .iter()
-        .map(|(call, _)| {
-            let args: Value = serde_json::from_str(&call.args_json)
-                .map_err(|error| anyhow!("task checkpoint tool arguments are invalid: {error}"))?;
-            // Progress is about the semantic work lane, not a rewritten shell spelling. Keep
-            // process-observation commands normalized so cosmetic command rewrites cannot evade
-            // the guard. Artifact reads are different: the opaque source plus its page/search
-            // selector are a host-owned cursor, and advancing that cursor is genuine progress.
-            let progress_args = if matches!(
-                call.name.as_str(),
-                "bash" | "terminal_start" | "terminal_input"
-            ) {
-                serde_json::json!({"kind": "bounded_observation"})
-            } else {
-                crate::canonicalize_cache_stable_json(&args)?
-            };
-            Ok(serde_json::json!({
-                "tool": call.name,
-                "args": progress_args,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let semantic_call_hash = format!(
-        "sha256:{}",
-        crate::sha256_hex(&crate::event::canonical_json_bytes(&serde_json::json!({
-            "calls": call_material,
-        }))?)
-    );
-
-    let result_material = results
-        .iter()
-        .map(|(_, result)| {
-            let mut result_changed_files = result.metadata.changed_files.clone();
-            result_changed_files.sort();
-            result_changed_files.dedup();
-            // Only the digest is durable. Including model-visible content and bounded receipt
-            // facts lets pagination, changed command output, and newly discovered matches advance
-            // the frontier without persisting raw tool output in the checkpoint.
-            let model_content_hash = format!(
-                "sha256:{}",
-                crate::sha256_hex(result.to_model_content().as_bytes())
-            );
-            serde_json::json!({
-                "tool": result.tool_name,
-                "status": result.status,
-                "changed_files": result_changed_files,
-                "exit_code": result.metadata.exit_code,
-                "model_content_hash": model_content_hash,
-                "returned_bytes": result.metadata.returned_bytes,
-                "returned_lines": result.metadata.returned_lines,
-                "returned_matches": result.metadata.returned_matches,
-                "returned_entries": result.metadata.returned_entries,
-                "total_bytes": result.metadata.total_bytes,
-                "total_lines": result.metadata.total_lines,
-                "total_matches": result.metadata.total_matches,
-                "total_entries": result.metadata.total_entries,
-                "truncated": result.metadata.truncated,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut durable_changed_files = changed_files.to_vec();
-    durable_changed_files.sort();
-    durable_changed_files.dedup();
-    let result_frontier_hash = format!(
-        "sha256:{}",
-        crate::sha256_hex(&crate::event::canonical_json_bytes(&serde_json::json!({
-            "results": result_material,
-            "changed_files": durable_changed_files,
-        }))?)
-    );
-    let model_turn =
-        u32::try_from(model_turn).map_err(|_| anyhow!("task checkpoint model turn exceeds u32"))?;
-    let mut checkpoint = TaskStepCheckpointV2 {
-        schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
-        task_id: context.task_id.clone(),
-        plan_version: context.plan_version,
-        step_id: context.step_id.clone(),
-        attempt_id: context.attempt_id.clone(),
-        model_turn,
-        semantic_call_hash,
-        result_frontier_hash,
-        no_progress_count: 0,
-    };
-    if checkpoint.repeated_frontier(previous) {
-        checkpoint.no_progress_count =
-            previous.map_or(1, |previous| previous.no_progress_count.saturating_add(1));
-    }
-    checkpoint.validate()?;
-    Ok(checkpoint)
 }
 
 struct ToolCallProcessingContext<'run, 'policy, 'delegate, H, A> {
@@ -5040,6 +3869,54 @@ where
         execute_authorized_tool_call(context.reborrow(), authorized).await?;
     }
     execute_parallel_tool_lane(&mut context, parallel_lane).await
+}
+
+struct DeclaredToolBatch {
+    calls: Vec<ToolCall>,
+    entry_start: usize,
+}
+
+// Keep executed effects and unstarted declarations distinct when post-execution bookkeeping
+// fails. The original error remains the cause even if result persistence also fails.
+fn settle_failed_tool_batch<H: EventHandler>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    declared: &DeclaredToolBatch,
+    results: &mut Vec<(ToolCall, ToolResult)>,
+    mut error: anyhow::Error,
+) -> anyhow::Error {
+    for call in &declared.calls {
+        if results.iter().any(|(settled, _)| settled.id == call.id) {
+            continue;
+        }
+        let started = session.entries()[declared.entry_start..].iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == call.id && execution.status == ToolExecutionStatus::Started
+        ));
+        let reason = if started {
+            "tool batch interrupted after execution started; execution outcome is unavailable"
+        } else {
+            "tool batch interrupted before execution started"
+        };
+        if let Err(settlement_error) =
+            settle_unresolved_tool_interruption(session, outcome, call.clone(), reason, results)
+        {
+            error = error.context(format!(
+                "tool interruption settlement also failed: {settlement_error:#}"
+            ));
+        }
+    }
+    results.sort_by_key(|(call, _)| declared.calls.iter().position(|item| item.id == call.id));
+    if let Err(settlement_error) =
+        emit_tool_result_batch(session, handler, outcome, std::mem::take(results))
+    {
+        error = error.context(format!(
+            "tool result settlement also failed: {settlement_error:#}"
+        ));
+    }
+    error
 }
 
 fn authorized_tool_call_can_run_parallel<H, A>(
@@ -5929,6 +4806,7 @@ where
                     &approval_context,
                 )? {
                     let presentation = handler.handle(RunEvent::ToolApprovalRequested {
+                        display_call_id: None,
                         approval_identity: approval_identity.clone(),
                         effects: permission_plan.effects.clone(),
                         analysis: permission_plan.analysis.clone(),
@@ -6048,6 +4926,7 @@ where
                         preview_hash,
                     )?;
                     handler.handle(RunEvent::ToolApprovalResolved {
+                        display_call_id: None,
                         call_id: call.id.clone(),
                         approval_request_id: approval_identity.approval_request_id.clone(),
                         approved: false,
@@ -6088,6 +4967,7 @@ where
                             &mut prepared_tool_call,
                         )?;
                         handler.handle(RunEvent::ToolApprovalResolved {
+                            display_call_id: None,
                             call_id: call.id.clone(),
                             approval_request_id: approval_identity.approval_request_id.clone(),
                             approved: true,
@@ -6112,6 +4992,7 @@ where
                                 preview_hash,
                             )?;
                             handler.handle(RunEvent::ToolApprovalResolved {
+                                display_call_id: None,
                                 call_id: call.id.clone(),
                                 approval_request_id: approval_identity.approval_request_id.clone(),
                                 approved: false,
@@ -6155,6 +5036,7 @@ where
                             &permission_plan,
                         )?;
                         handler.handle(RunEvent::ToolApprovalResolved {
+                            display_call_id: None,
                             call_id: call.id.clone(),
                             approval_request_id: approval_identity.approval_request_id.clone(),
                             approved: true,
@@ -6178,6 +5060,7 @@ where
                                 preview_hash,
                             )?;
                             handler.handle(RunEvent::ToolApprovalResolved {
+                                display_call_id: None,
                                 call_id: call.id.clone(),
                                 approval_request_id: approval_identity.approval_request_id.clone(),
                                 approved: false,
@@ -6234,6 +5117,7 @@ where
                                     preview_hash,
                                 )?;
                                 handler.handle(RunEvent::ToolApprovalResolved {
+                                    display_call_id: None,
                                     call_id: approved_call.id.clone(),
                                     approval_request_id: approval_identity
                                         .approval_request_id
@@ -6268,6 +5152,7 @@ where
                                 preview_hash,
                             )?;
                             handler.handle(RunEvent::ToolApprovalResolved {
+                                display_call_id: None,
                                 call_id: approved_call.id.clone(),
                                 approval_request_id: approval_identity.approval_request_id.clone(),
                                 approved: false,
@@ -6311,6 +5196,7 @@ where
                             preview_hash,
                         )?;
                         handler.handle(RunEvent::ToolApprovalResolved {
+                            display_call_id: None,
                             call_id: call.id.clone(),
                             approval_request_id: approval_identity.approval_request_id.clone(),
                             approved: true,
@@ -6331,6 +5217,7 @@ where
                             preview_hash,
                         )?;
                         handler.handle(RunEvent::ToolApprovalResolved {
+                            display_call_id: None,
                             call_id: call.id.clone(),
                             approval_request_id: approval_identity.approval_request_id.clone(),
                             approved: false,
@@ -6404,7 +5291,7 @@ where
                     (
                         ToolErrorKind::ExternalDirectoryRequired,
                         format!(
-                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start.",
+                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use $SIGIL_SCRATCH_DIR from exec_command.",
                             if subject_label == "-" {
                                 call.name.as_str()
                             } else {
@@ -6498,6 +5385,7 @@ fn append_tool_approval_route_terminal<H: EventHandler>(
         preview_hash,
     )?;
     handler.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: call.id.clone(),
         approval_request_id: approval_identity.approval_request_id.clone(),
         approved: false,
@@ -6839,33 +5727,36 @@ fn commit_tool_execution<H, A>(
 where
     H: EventHandler,
 {
-    if let Some(binding) = prepared_audit_binding {
-        attach_prepared_tool_audit_binding(&mut result, binding)?;
-    }
-    attach_tool_call_context(&mut result, &call, &execution_subjects);
-    let status = if result.is_error() {
-        ToolExecutionStatus::Failed
-    } else {
-        ToolExecutionStatus::Completed
-    };
-    append_tool_execution_audit(
-        context.session,
-        &call,
-        &execution_subjects,
-        status,
-        Some(duration_ms(execution_started)),
-        Some(&result),
-    )?;
-    append_tool_control_entries_from_result(context.session, context.handler, &mut result)?;
-    if let Some(entry) =
-        append_terminal_task_control_from_result(context.session, context.handler, &result)?
-    {
-        reconcile_terminal_task_mutation_from_start(
+    let settlement = (|| -> Result<()> {
+        if let Some(binding) = prepared_audit_binding {
+            attach_prepared_tool_audit_binding(&mut result, binding)?;
+        }
+        attach_tool_call_context(&mut result, &call, &execution_subjects);
+        let status = if result.is_error() {
+            ToolExecutionStatus::Failed
+        } else {
+            ToolExecutionStatus::Completed
+        };
+        append_tool_execution_audit(
             context.session,
-            &context.options.workspace_root,
-            &entry,
+            &call,
+            &execution_subjects,
+            status,
+            Some(duration_ms(execution_started)),
+            Some(&result),
         )?;
-    }
+        append_tool_control_entries_from_result(context.session, context.handler, &mut result)?;
+        if let Some(entry) =
+            append_terminal_task_control_from_result(context.session, context.handler, &result)?
+        {
+            reconcile_terminal_task_mutation_from_start(
+                context.session,
+                &context.options.workspace_root,
+                &entry,
+            )?;
+        }
+        Ok(())
+    })();
     record_tool_run_outcome(context.outcome, &result);
     if tool_is_agent_category && agent_tool_result_satisfies_delegation(&result) {
         *context.satisfied_agent_tool_calls =
@@ -6874,7 +5765,7 @@ where
     let tool_transient_context = std::mem::take(&mut result.transient_context);
     context.assistant_batch_results.push((call, result));
     context.transient_context.extend(tool_transient_context);
-    Ok(())
+    settlement
 }
 
 fn authorize_prepared_tool_from_resolved_approval(

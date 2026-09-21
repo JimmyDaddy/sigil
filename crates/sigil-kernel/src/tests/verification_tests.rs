@@ -2274,6 +2274,36 @@ fn user_skip_requires_policy_support_and_maps_to_skipped() {
 }
 
 #[test]
+fn unknown_effect_blocks_both_zero_checks_and_an_authorized_skip() {
+    for checks in [Vec::new(), vec![check_spec("cargo-test")]] {
+        let mut policy = policy_with_checks(checks);
+        policy.allow_unverified_completion = true;
+        let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
+        input.skip_decision = Some(VerificationSkipDecision {
+            event_id: "authorized-skip".to_owned(),
+            reason: "skip checks".to_owned(),
+        });
+        input.workspace_knowledge = WorkspaceKnowledge::UnknownDirty;
+        let evaluated = evaluate_readiness(&input);
+        assert_eq!(
+            evaluated.verification_verdict,
+            VerificationVerdict::Inconclusive
+        );
+        assert!(
+            evaluated
+                .required_actions
+                .contains(&RequiredAction::ResolveUnknownDirty)
+        );
+        input.workspace_knowledge = WorkspaceKnowledge::SnapshotUnavailable;
+        assert!(
+            !evaluate_readiness(&input)
+                .required_actions
+                .contains(&RequiredAction::ResolveUnknownDirty)
+        );
+    }
+}
+
+#[test]
 fn required_check_failure_maps_to_failed() {
     let check = check_spec("cargo-test");
     let mut input =
@@ -3645,7 +3675,7 @@ fn workspace_snapshot_builder_marks_large_files_unsupported() {
 
     assert_eq!(
         snapshot.workspace_knowledge,
-        WorkspaceKnowledge::UnknownDirty
+        WorkspaceKnowledge::SnapshotUnavailable
     );
     assert!(snapshot.workspace_snapshot_id.is_none());
     assert!(snapshot.manifest.entries.iter().any(|entry| {
@@ -3670,7 +3700,7 @@ fn workspace_snapshot_builder_respects_scope_max_file_bytes() {
 
     assert_eq!(
         unsupported.workspace_knowledge,
-        WorkspaceKnowledge::UnknownDirty
+        WorkspaceKnowledge::SnapshotUnavailable
     );
     assert!(unsupported.workspace_snapshot_id.is_none());
     assert!(unsupported.manifest.entries.iter().any(|entry| {
@@ -3809,6 +3839,65 @@ fn workspace_snapshot_builder_uses_git_tracked_and_unignored_file_set() {
 }
 
 #[test]
+fn workspace_snapshot_builder_preserves_paths_across_extended_git_index_flags() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    run_git(temp.path(), &["init"]);
+    fs::write(temp.path().join("base.txt"), "base\n").expect("base file");
+    run_git(temp.path(), &["add", "base.txt"]);
+    fs::create_dir(temp.path().join("nested")).expect("nested directory");
+    fs::write(temp.path().join("nested/delivered.txt"), "finished work\n").expect("delivered file");
+    fs::write(temp.path().join("nested/inherited.txt"), "inherited work\n")
+        .expect("inherited file");
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1).expect("initial snapshot");
+    assert!(before.workspace_snapshot_id.is_some());
+    run_git(
+        temp.path(),
+        &[
+            "add",
+            "--intent-to-add",
+            "--",
+            "nested/delivered.txt",
+            "nested/inherited.txt",
+        ],
+    );
+    let index = fs::read(temp.path().join(".git/index")).expect("real Git index");
+    assert_eq!(
+        u32::from_be_bytes(index[4..8].try_into().expect("version")),
+        3,
+        "Git must exercise real extended index entries"
+    );
+    let after = build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1)
+        .expect("intent-to-add snapshot");
+    assert_eq!(
+        before.workspace_snapshot_id, after.workspace_snapshot_id,
+        "index bookkeeping cannot change an unchanged filesystem snapshot: {:?}",
+        after.manifest.entries
+    );
+    run_git(
+        temp.path(),
+        &["update-index", "--skip-worktree", "base.txt"],
+    );
+    let skipped = build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1)
+        .expect("skip-worktree snapshot");
+    assert_eq!(after.workspace_snapshot_id, skipped.workspace_snapshot_id);
+    fs::remove_file(temp.path().join("base.txt")).expect("delete tracked path");
+    let deleted = build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1)
+        .expect("deleted tracked snapshot");
+    assert!(deleted.workspace_snapshot_id.is_some());
+    assert_eq!(deleted.manifest.entries.len(), 3);
+    assert!(
+        deleted
+            .manifest
+            .entries
+            .iter()
+            .any(|entry| entry.normalized_path == Path::new("base.txt")
+                && entry.state == SnapshotEntryState::Missing)
+    );
+}
+
+#[test]
 fn workspace_snapshot_builder_records_deleted_git_paths_as_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     run_git(temp.path(), &["init"]);
@@ -3898,7 +3987,7 @@ fn workspace_snapshot_builder_records_internal_and_broken_symlinks() {
     }));
     assert_eq!(
         snapshot.workspace_knowledge,
-        WorkspaceKnowledge::UnknownDirty
+        WorkspaceKnowledge::SnapshotUnavailable
     );
 }
 
@@ -3936,7 +4025,7 @@ fn snapshot_entry_completeness_covers_directory_and_unsupported_states() {
 
 #[cfg(unix)]
 #[test]
-fn workspace_snapshot_builder_marks_external_symlink_unknown_dirty() {
+fn workspace_snapshot_builder_keeps_incomplete_observation_separate_from_effects() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3958,14 +4047,7 @@ fn workspace_snapshot_builder_marks_external_symlink_unknown_dirty() {
     assert_eq!(snapshot.workspace_snapshot_id, None);
     assert_eq!(
         snapshot.workspace_knowledge,
-        WorkspaceKnowledge::UnknownDirty
-    );
-    assert_eq!(
-        snapshot
-            .unknown_dirty_evidence
-            .as_ref()
-            .map(|evidence| evidence.event_id.as_str()),
-        Some("event-snapshot")
+        WorkspaceKnowledge::SnapshotUnavailable
     );
     assert!(snapshot.manifest.entries.iter().any(|entry| {
         entry.normalized_path == Path::new("leak") && entry.state == SnapshotEntryState::External
@@ -3977,7 +4059,7 @@ fn workspace_snapshot_builder_marks_external_symlink_unknown_dirty() {
         policy_with_checks(vec![check.clone()]),
     );
     input.workspace_knowledge = snapshot.workspace_knowledge;
-    input.current_workspace_snapshot_id = Some("snapshot-before".to_owned());
+    input.current_workspace_snapshot_id = snapshot.workspace_snapshot_id;
     input.verification_receipts.push(verification_receipt(
         "receipt-pass",
         &check,
@@ -3986,15 +4068,12 @@ fn workspace_snapshot_builder_marks_external_symlink_unknown_dirty() {
         ReceiptStatus::Succeeded,
         false,
     ));
-    input.mutations.push(
-        snapshot
-            .unknown_dirty_evidence
-            .expect("unknown dirty evidence"),
-    );
-
     let evaluation = evaluate_readiness(&input);
 
-    assert_eq!(evaluation.verification_verdict, VerificationVerdict::Stale);
+    assert_eq!(
+        evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
 }
 
 #[cfg(unix)]
@@ -4041,7 +4120,7 @@ fn verification_check_runner_uses_synthetic_snapshot_id_for_incomplete_scope() -
         },
     )?;
 
-    assert!(recorded.receipt.mutates_verification_scope);
+    assert!(!recorded.receipt.mutates_verification_scope);
     assert_eq!(recorded.receipt.check_status, ReceiptStatus::Inconclusive);
     assert_eq!(
         recorded.receipt.receipt.workspace_snapshot_id.as_deref(),

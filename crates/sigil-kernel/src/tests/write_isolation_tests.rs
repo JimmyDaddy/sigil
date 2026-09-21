@@ -158,6 +158,7 @@ fn write_isolation_projection_tracks_lease_and_merge_review_state() {
         overlay_content_artifact_refs: Vec::new(),
         overlay_entry_count: 0,
         materialized_snapshot_id: None,
+        baseline_tree: None,
     };
     let produced = IsolatedChangeSetProduced {
         changeset_id: change_set_id(),
@@ -269,6 +270,7 @@ fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_win
         overlay_content_artifact_refs: prepared.overlay_content_artifact_refs.clone(),
         overlay_entry_count: prepared.overlay_entry_count,
         materialized_snapshot_id: Some("snapshot-materialized".to_owned()),
+        baseline_tree: None,
     };
     let failed_cleanup = IsolatedWorkspaceCleanupRecorded {
         isolated_workspace_id: prepared.isolated_workspace_id.clone(),
@@ -305,7 +307,7 @@ fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_win
 
     let removed = WriteIsolationProjection::from_entries(&[
         SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
-        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created)),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created.clone())),
         SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCleanupRecorded(
             failed_cleanup,
         )),
@@ -322,6 +324,40 @@ fn isolated_workspace_projection_reconstructs_cleanup_inventory_across_crash_win
         Some(&removed_cleanup)
     );
     assert_eq!(removed.replay_order.len(), 4);
+
+    let mut rematerialized = removed.clone();
+    rematerialized.apply_control_entry(&ControlEntry::IsolatedWorkspaceCreated(created.clone()));
+    let state = &rematerialized.isolated_workspace_states[&created.isolated_workspace_id];
+    assert!(state.is_consistent());
+    assert!(state.requires_cleanup());
+    assert!(state.cleanup.is_none());
+    assert_eq!(rematerialized.replay_order.len(), 5);
+    assert_eq!(
+        removed.isolated_workspace_states[&created.isolated_workspace_id]
+            .cleanup
+            .as_ref(),
+        Some(&removed_cleanup)
+    );
+
+    let mut preparing_again = removed.clone();
+    preparing_again.apply_control_entry(&ControlEntry::IsolatedWorkspacePrepared(prepared));
+    let state = &preparing_again.isolated_workspace_states[&created.isolated_workspace_id];
+    assert!(state.created.is_none());
+    assert!(state.cleanup.is_none());
+    assert!(state.requires_cleanup());
+    preparing_again.apply_control_entry(&ControlEntry::IsolatedWorkspaceCreated(created.clone()));
+    assert_eq!(
+        preparing_again.isolated_workspace_states[&created.isolated_workspace_id],
+        rematerialized.isolated_workspace_states[&created.isolated_workspace_id]
+    );
+
+    let mut conflicting = removed;
+    let mut changed = created;
+    changed.base_snapshot_id = "other-baseline".to_owned();
+    conflicting.apply_control_entry(&ControlEntry::IsolatedWorkspaceCreated(changed.clone()));
+    let state = &conflicting.isolated_workspace_states[&changed.isolated_workspace_id];
+    assert!(!state.is_consistent());
+    assert_eq!(state.cleanup.as_ref(), Some(&removed_cleanup));
 }
 
 #[test]
@@ -352,11 +388,12 @@ fn isolated_workspace_projection_marks_conflicting_materialization_binding() {
         overlay_content_artifact_refs: prepared.overlay_content_artifact_refs.clone(),
         overlay_entry_count: prepared.overlay_entry_count,
         materialized_snapshot_id: None,
+        baseline_tree: None,
     };
 
     let projection = WriteIsolationProjection::from_entries(&[
         SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
-        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created)),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(created.clone())),
     ]);
     let state = projection
         .isolated_workspace_states
@@ -366,6 +403,21 @@ fn isolated_workspace_projection_marks_conflicting_materialization_binding() {
     assert!(!state.is_consistent());
     assert!(state.requires_cleanup());
     assert_eq!(projection.isolated_workspace_cleanup_inventory().len(), 1);
+
+    let mut original = created;
+    original.owner_agent_id = prepared.owner_agent_id.clone();
+    original.baseline_tree = Some("a".repeat(40));
+    let mut rebound = original.clone();
+    rebound.baseline_tree = Some("b".repeat(40));
+    let projection = WriteIsolationProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspacePrepared(prepared.clone())),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(original)),
+        SessionLogEntry::Control(ControlEntry::IsolatedWorkspaceCreated(rebound)),
+    ]);
+    assert!(
+        !projection.isolated_workspace_states[&prepared.isolated_workspace_id].is_consistent(),
+        "repeated creation cannot silently replace the exact baseline tree"
+    );
 }
 
 #[test]

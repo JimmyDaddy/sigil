@@ -665,17 +665,6 @@ fn task_compaction_preserves_task_list_memory_and_executable_projection(
             summary: None,
             reason: Some("dependency completed; awaiting continue".to_owned()),
         }),
-        crate::ControlEntry::TaskStepCheckpointV2(crate::TaskStepCheckpointV2 {
-            schema_version: crate::TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
-            task_id: task_id.clone(),
-            plan_version: 3,
-            step_id: implement_step_id.clone(),
-            attempt_id: crate::TaskParticipantAttemptId::new("attempt-compact-survival")?,
-            model_turn: 2,
-            semantic_call_hash: format!("sha256:{}", "a".repeat(64)),
-            result_frontier_hash: format!("sha256:{}", "b".repeat(64)),
-            no_progress_count: 1,
-        }),
     ])?;
 
     let session_scope_id = session_scope_id(&store)?;
@@ -694,7 +683,8 @@ fn task_compaction_preserves_task_list_memory_and_executable_projection(
         })
         .map(|record| record.event_id().to_owned())
         .collect::<Vec<_>>();
-    assert_eq!(task_control_event_ids.len(), 8);
+    // One retired participant-retry control is no longer part of the current Task lifecycle.
+    assert_eq!(task_control_event_ids.len(), 7);
     for event_id in &task_control_event_ids {
         assert!(
             request.plan.protected_events.iter().any(|protected| {
@@ -802,12 +792,6 @@ fn task_compaction_preserves_task_list_memory_and_executable_projection(
         task_projection,
         "the reloaded entry list forwarded to TUI must match durable Task replay"
     );
-    assert!(reloaded.entries().iter().any(|entry| matches!(
-        entry,
-        crate::SessionLogEntry::Control(crate::ControlEntry::TaskStepCheckpointV2(checkpoint))
-            if checkpoint.attempt_id.as_str() == "attempt-compact-survival"
-                && checkpoint.no_progress_count == 1
-    )));
     let intent_state = reloaded.public_intent_stack_state_for_workspace(temp.path())?;
     let crate::PublicIntentStackStateV1::Available { stack, .. } = intent_state else {
         panic!("accepted Intent history must survive compaction");
@@ -1513,15 +1497,21 @@ fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<(
             plan_id: plan_id.clone(),
             plan_hash: plan_hash.clone(),
             task_id: task_id.clone(),
-            task_plan_version: 1,
-            step_mapping: Vec::new(),
-            stale_reason: None,
             created_at_ms: 5,
         },
     ))?;
+    session.append_control(crate::ControlEntry::TaskDirectExecutionAdmittedV1(
+        crate::TaskDirectExecutionAdmittedV1::approved_plan(
+            task_id.clone(),
+            "Implement the scoped task",
+            plan_id.clone(),
+            plan_hash.clone(),
+            6,
+        ),
+    ))?;
     session.append_control(crate::ControlEntry::PlanPermissionGranted(
         crate::PlanPermissionGrantedEntry {
-            plan_id,
+            plan_id: plan_id.clone(),
             plan_hash,
             task_id: task_id.clone(),
             workspace_snapshot_id: Some("snapshot-v1".to_owned()),
@@ -1531,9 +1521,39 @@ fn continuity_anchor_does_not_reactivate_terminal_task_permissions() -> Result<(
                 workspace_paths: vec!["src/lib.rs".to_owned()],
             },
             expires: crate::PlanApprovalExpiry::Session,
-            granted_at_ms: 6,
+            granted_at_ms: 7,
         },
     ))?;
+    let active_records = store.read_event_records_writer()?;
+    let active_anchor = crate::SessionAnchorV1::derive(
+        &active_records,
+        &TaskMemoryV1 {
+            memory_id: "active-permission-memory".to_owned(),
+            branch_id: None,
+            valid_for_snapshot: None,
+            supersedes: None,
+            source_event_ids: Vec::new(),
+            objective: "Implement the scoped task".to_owned(),
+            active_plan: None,
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            files_changed: Vec::new(),
+            commands_run: Vec::new(),
+            verification_results: Vec::new(),
+            failed_attempts: Vec::new(),
+            risks: Vec::new(),
+            unresolved_issues: Vec::new(),
+        },
+        8,
+    )?;
+    assert_eq!(active_anchor.authorization_boundary.len(), 1);
+    assert!(matches!(
+        &active_anchor.authorization_boundary[0].authority,
+        crate::ObjectiveAuthorityRefV1::DirectTaskExecution {
+            task_id: authority_task_id,
+            ..
+        } if authority_task_id == task_id.as_str()
+    ));
     session.append_control(crate::ControlEntry::TaskRun(crate::TaskRunEntry {
         task_id,
         parent_session_ref: crate::SessionRef::new_relative("parent.jsonl")?,

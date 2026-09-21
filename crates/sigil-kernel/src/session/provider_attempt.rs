@@ -55,7 +55,7 @@ pub struct SemanticCompactionGeneration {
 
 /// Why a provider physical attempt was issued.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderPhysicalAttemptPurpose {
     ConversationGeneration,
     SemanticCompaction,
@@ -70,7 +70,7 @@ pub enum ProviderPhysicalAttemptPurpose {
 /// K25.6A. Provider wire/token/profile evidence is deliberately added by K25.7 rather than
 /// claiming byte-for-byte provider-wire identity before that proof exists.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderPhysicalAttemptStartedEntry {
     pub schema_version: u16,
     pub physical_attempt_id: ProviderPhysicalAttemptId,
@@ -133,7 +133,7 @@ impl ProviderPhysicalAttemptStartedEntry {
 
 /// Outcome recorded exactly once after a provider physical attempt reaches a known boundary.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderPhysicalAttemptOutcome {
     Completed,
     ConfirmedNoModelConsumption,
@@ -145,7 +145,7 @@ pub enum ProviderPhysicalAttemptOutcome {
 
 /// Recovery-critical terminal for one provider physical attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderPhysicalAttemptTerminalEntry {
     pub schema_version: u16,
     pub physical_attempt_id: ProviderPhysicalAttemptId,
@@ -497,6 +497,10 @@ impl ProviderPhysicalAttemptProjection {
                     .context("failed to decode provider-turn recovery start")?;
                 self.apply_recovery_start(event, entry)?;
             }
+            // The outbox projects an already-recorded provider output. It shares the
+            // attempt correlation for publication, but does not extend the model-output
+            // chain or count as a second output consumed by the terminal receipt.
+            Some(DurableEventType::PublicEventOutbox) => {}
             Some(_) | None => self.apply_output_event(event)?,
         }
 
@@ -628,9 +632,18 @@ impl ProviderPhysicalAttemptProjection {
         if event.causation_id.as_deref() != Some(attempt.last_causation_event_id.as_str()) {
             bail!("provider physical-attempt output causation does not follow its attempt chain");
         }
-        attempt
-            .causal_output_or_side_effect_event_ids
-            .push(event.event_id.clone());
+        let diagnostic = event.event_kind() == Some(DurableEventType::DiagnosticRecorded)
+            && matches!(
+                super::store::session_entry_from_stored_event(event)?,
+                Some(SessionLogEntry::Control(ControlEntry::ProviderDiagnostic(
+                    _
+                )))
+            );
+        if !diagnostic {
+            attempt
+                .causal_output_or_side_effect_event_ids
+                .push(event.event_id.clone());
+        }
         attempt.last_causation_event_id = event.event_id.clone();
         Ok(())
     }
@@ -1123,6 +1136,9 @@ impl ProviderPhysicalAttemptAudit {
         control: ControlEntry,
         publication: Option<&ProviderOutputPublicationIntentV1>,
     ) -> Result<Vec<PublicEventOutboxEntryV1>> {
+        if matches!(control, ControlEntry::ProviderDiagnostic(_)) && publication.is_some() {
+            bail!("provider diagnostics cannot create public output");
+        }
         let Self::Durable(audit) = self else {
             if publication.is_some() {
                 bail!("provider output publication requires a durable physical attempt");
@@ -1253,7 +1269,9 @@ impl ProviderPhysicalAttemptAudit {
         .context("provider output durable append task failed")??
         .context("provider output durable append was not attempted")?;
         audit.last_causation_event_id = appended.event_id.clone();
-        audit.durable_output_event_ids.push(appended.event_id);
+        if !matches!(control, ControlEntry::ProviderDiagnostic(_)) {
+            audit.durable_output_event_ids.push(appended.event_id);
+        }
         session.record_durably_appended_control(control);
         Ok(Vec::new())
     }
@@ -1365,6 +1383,15 @@ pub async fn generate_semantic_compaction(
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("semantic compaction provider stream failed")?;
             match chunk {
+                crate::ProviderChunk::Diagnostic(diagnostic) => {
+                    physical_attempt
+                        .append_output_control(
+                            session,
+                            ControlEntry::ProviderDiagnostic(diagnostic),
+                            None,
+                        )
+                        .await?;
+                }
                 crate::ProviderChunk::TextDelta(delta) => {
                     generation_observed = true;
                     if output_text.len().saturating_add(delta.len())

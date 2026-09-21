@@ -28,7 +28,7 @@ const WHOLE_EVENT_SOURCE_PATH: &str = "$event";
 /// JSON-pointer paths bind an exact durable string value. `$event` binds only the owning
 /// append-only record and is reserved for explicitly unverified model narrative.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct SourceSpanRefV1 {
     pub session_id: crate::SessionId,
     pub stream_sequence: u64,
@@ -147,7 +147,7 @@ impl SourceSpanRefV1 {
 
 /// Existing durable authority from which an anchored statement was projected.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectiveAuthorityRefV1 {
     AcceptedIntent {
         intent_ref: IntentVersionRef,
@@ -155,6 +155,10 @@ pub enum ObjectiveAuthorityRefV1 {
     DurableTask {
         task_id: String,
         plan_version: u32,
+    },
+    DirectTaskExecution {
+        task_id: String,
+        admission_id: String,
     },
     UserSourceTurn {
         event_id: crate::EventId,
@@ -164,7 +168,7 @@ pub enum ObjectiveAuthorityRefV1 {
 
 /// Exact authority-bearing statement retained across compaction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct AnchoredStatementV1 {
     pub exact_text: String,
     pub authority: ObjectiveAuthorityRefV1,
@@ -187,6 +191,14 @@ impl AnchoredStatementV1 {
             } => {
                 if task_id.trim().is_empty() || *plan_version == 0 {
                     bail!("anchored task authority is invalid");
+                }
+            }
+            ObjectiveAuthorityRefV1::DirectTaskExecution {
+                task_id,
+                admission_id,
+            } => {
+                if task_id.trim().is_empty() || admission_id.trim().is_empty() {
+                    bail!("anchored direct Task authority is invalid");
                 }
             }
             ObjectiveAuthorityRefV1::UserSourceTurn {
@@ -258,6 +270,19 @@ impl AnchoredStatementV1 {
                                 == "session_log_entry.control.task_plan.steps.title"
                             && plan.steps.iter().any(|step| step.title == self.exact_text)
                     }
+                    _ => false,
+                };
+                if !matches {
+                    bail!("anchored task statement does not match its exact durable field");
+                }
+            }
+            ObjectiveAuthorityRefV1::DirectTaskExecution {
+                task_id,
+                admission_id,
+            } => {
+                let entry = session_entry(record)?
+                    .context("anchored direct Task statement does not reference a session entry")?;
+                let matches = match entry {
                     SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
                         let exact_text = format!(
                             "plan permission {} with scope {} and expiry {}",
@@ -269,17 +294,21 @@ impl AnchoredStatementV1 {
                             && self.source.field_path
                                 == "session_log_entry.control.plan_permission_granted"
                             && exact_text == self.exact_text
-                            && task_plan_version_for_grant(
+                            && direct_task_admission_for_grant(
                                 records,
                                 grant.plan_id.as_str(),
                                 &grant.plan_hash,
                                 grant.task_id.as_str(),
-                            )? == Some(*plan_version)
+                            )?
+                            .as_deref()
+                                == Some(admission_id.as_str())
                     }
                     _ => false,
                 };
                 if !matches {
-                    bail!("anchored task statement does not match its exact durable field");
+                    bail!(
+                        "anchored direct Task statement does not match its exact durable authority"
+                    );
                 }
             }
             ObjectiveAuthorityRefV1::UserSourceTurn {
@@ -311,7 +340,7 @@ impl AnchoredStatementV1 {
 
 /// Lifecycle state of a durable constraint projection.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ConstraintStatusV1 {
     Active,
     Superseded,
@@ -322,7 +351,7 @@ pub enum ConstraintStatusV1 {
 /// One accepted constraint. Its status is derived from durable Intent lineage or an explicit
 /// durable operation; model narrative can never create or mutate it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ActiveConstraintV1 {
     pub constraint_id: String,
     pub exact_text: String,
@@ -360,7 +389,7 @@ impl ActiveConstraintV1 {
 
 /// Recoverable durable attachment metadata retained by the authority projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct DurableArtifactRefV1 {
     pub artifact_id: ArtifactId,
     pub content_hash: String,
@@ -385,7 +414,7 @@ impl DurableArtifactRefV1 {
 
 /// Complete authority projection used by V3 continuity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct SessionAnchorV1 {
     pub schema_version: u16,
     pub root_objective: AnchoredStatementV1,
@@ -586,7 +615,7 @@ impl SessionAnchorV1 {
 
 /// Stable reference from continuity to its authority projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct SessionAnchorRefV1 {
     pub anchor_id: String,
     pub canonical_hash: String,
@@ -594,7 +623,7 @@ pub struct SessionAnchorRefV1 {
 
 /// One source-grounded continuity item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct GroundedContinuityItemV2 {
     pub text: String,
     pub source_refs: Vec<SourceSpanRefV1>,
@@ -669,14 +698,14 @@ impl GroundedContinuityItemV2 {
 
 /// Model narrative may help rendering but is explicitly untrusted and source-selected.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct UntrustedModelNarrativeV2 {
     pub items: Vec<GroundedContinuityItemV2>,
 }
 
 /// Complete source-bound portable continuity snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ConversationContinuityV2 {
     pub schema_version: u16,
     pub checkpoint_id: String,
@@ -1030,7 +1059,7 @@ fn derive_authorization_boundary(
         if !active {
             continue;
         }
-        let Some(plan_version) = task_plan_version_for_grant(
+        let Some(admission_id) = direct_task_admission_for_grant(
             records,
             grant.plan_id.as_str(),
             &grant.plan_hash,
@@ -1053,9 +1082,9 @@ fn derive_authorization_boundary(
                 record.stream_sequence()
             ),
             exact_text: exact_text.clone(),
-            authority: ObjectiveAuthorityRefV1::DurableTask {
+            authority: ObjectiveAuthorityRefV1::DirectTaskExecution {
                 task_id: grant.task_id.as_str().to_owned(),
-                plan_version,
+                admission_id,
             },
             source: source_span_for_event(
                 record,
@@ -1096,23 +1125,27 @@ fn has_user_message_after(records: &[SessionStreamRecord], record_index: usize) 
     Ok(false)
 }
 
-fn task_plan_version_for_grant(
+fn direct_task_admission_for_grant(
     records: &[SessionStreamRecord],
     plan_id: &str,
     plan_hash: &str,
     task_id: &str,
-) -> Result<Option<u32>> {
+) -> Result<Option<String>> {
     for record in records {
-        let Some(SessionLogEntry::Control(ControlEntry::TaskCreatedFromPlan(binding))) =
+        let Some(SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))) =
             session_entry(record)?
         else {
             continue;
         };
-        if binding.plan_id.as_str() == plan_id
-            && binding.plan_hash == plan_hash
-            && binding.task_id.as_str() == task_id
-        {
-            return Ok(Some(binding.task_plan_version));
+        let is_matching_source = matches!(
+            &admission.source,
+            crate::TaskDirectExecutionSourceV1::ApprovedPlan {
+                plan_id: admitted_plan_id,
+                plan_hash: admitted_plan_hash,
+            } if admitted_plan_id.as_str() == plan_id && admitted_plan_hash == plan_hash
+        );
+        if admission.task_id.as_str() == task_id && is_matching_source {
+            return Ok(Some(admission.admission_id.clone()));
         }
     }
     Ok(None)

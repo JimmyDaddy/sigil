@@ -104,7 +104,7 @@ impl<'de> Deserialize<'de> for IntentStackVersion {
 
 /// Stable reference to one immutable intent definition version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentVersionRef {
     pub intent_id: IntentId,
     pub version: u64,
@@ -275,7 +275,7 @@ pub enum IntentPlanKind {
 
 /// Provenance for one intent definition. Provenance is descriptive, never mutation authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IntentSourceV1 {
     UserTurn {
         source_turn_id: String,
@@ -292,7 +292,7 @@ pub enum IntentSourceV1 {
 
 /// Untrusted criterion proposed by a provider before runtime identity resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentProposalCriterionV1 {
     pub criterion_alias: String,
     pub statement: String,
@@ -301,7 +301,7 @@ pub struct IntentProposalCriterionV1 {
 
 /// Untrusted intent proposal. Aliases are display-local and never mutation authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentProposalUnitV1 {
     pub intent_alias: String,
     pub title: String,
@@ -315,7 +315,7 @@ pub struct IntentProposalUnitV1 {
 ///
 /// It deliberately contains no [`IntentId`], stack version, execution identity, or authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentPlanProposalV1 {
     pub schema_version: u16,
     pub proposal_id: String,
@@ -445,7 +445,7 @@ impl IntentPlanProposalV1 {
 
 /// One checkable criterion attached to an immutable intent version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentAcceptanceCriterionV1 {
     pub criterion_id: IntentCriterionId,
     pub statement: String,
@@ -454,7 +454,7 @@ pub struct IntentAcceptanceCriterionV1 {
 
 /// One immutable definition inside an accepted plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentDefinitionV1 {
     pub intent_ref: IntentVersionRef,
     pub title: String,
@@ -469,7 +469,7 @@ pub struct IntentDefinitionV1 {
 
 /// Immutable, digest-bound plan admitted by the runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentPlanV1 {
     pub schema_version: u16,
     pub stack_id: IntentStackId,
@@ -636,7 +636,7 @@ pub enum IntentAuthorityState {
 
 /// Exact runtime execution origin for one intent binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IntentExecutionOriginV1 {
     Task {
         task_id: String,
@@ -665,7 +665,7 @@ pub enum IntentExecutionBindingKind {
 
 /// Provenance link from an immutable intent version to a concrete execution origin.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentExecutionBindingV1 {
     pub execution_id: IntentExecutionId,
     pub intent_ref: IntentVersionRef,
@@ -708,7 +708,7 @@ pub enum IntentArtifactAvailability {
 
 /// Half-open UTF-8 byte range in canonical before/after file bytes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentByteRangeV1 {
     pub start: u64,
     pub end: u64,
@@ -716,7 +716,7 @@ pub struct IntentByteRangeV1 {
 
 /// Bounded, adapter-neutral artifact subject. It never carries raw patch or file content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BoundedIntentArtifactSubjectV1 {
     FileHunk {
         normalized_relative_path: String,
@@ -739,7 +739,7 @@ pub enum BoundedIntentArtifactSubjectV1 {
 
 /// Durable origin evidence for an artifact binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentArtifactProvenanceV1 {
     pub source_event_id: String,
     pub execution_id: IntentExecutionId,
@@ -753,7 +753,7 @@ pub struct IntentArtifactProvenanceV1 {
 
 /// One bounded artifact binding. Raw forward/reverse patch bytes live in the artifact store.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentArtifactBindingV1 {
     pub artifact_id: IntentArtifactId,
     pub artifact_kind: IntentArtifactKind,
@@ -850,7 +850,7 @@ impl IntentArtifactBindingV1 {
 /// digest, while the final layer manifest references the resulting artifact manifest in one
 /// direction only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentLayerCoreV1 {
     pub schema_version: u16,
     pub intent_ref: IntentVersionRef,
@@ -919,7 +919,7 @@ impl IntentLayerCoreV1 {
 
 /// Exact ordered artifact set derived from one already-digested layer core.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentArtifactManifestV1 {
     pub schema_version: u16,
     pub intent_ref: IntentVersionRef,
@@ -983,7 +983,7 @@ impl IntentArtifactManifestV1 {
 
 /// Content-addressed final layer manifest with a cycle-free artifact reference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentLayerManifestV1 {
     pub schema_version: u16,
     pub core: IntentLayerCoreV1,
@@ -1034,7 +1034,7 @@ pub enum IntentCriterionEvidenceLevel {
 
 /// Bounded verification link. System verification still requires live policy validation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentCriterionEvidenceV1 {
     pub intent_ref: IntentVersionRef,
     pub criterion_id: IntentCriterionId,
@@ -1112,7 +1112,7 @@ pub enum IntentOperationFileAction {
 
 /// Bounded file effect in an exact preview. No raw bytes or absolute paths are exposed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentOperationFileSummaryV1 {
     pub normalized_relative_path: String,
     pub action: IntentOperationFileAction,
@@ -1129,7 +1129,7 @@ pub enum IntentVerificationImpact {
 
 /// Bounded verification effect in an exact preview.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentVerificationImpactV1 {
     pub receipt_id: String,
     pub impact: IntentVerificationImpact,
@@ -1137,7 +1137,7 @@ pub struct IntentVerificationImpactV1 {
 
 /// Exact, digest-bound preview shared by TUI and typed adapters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentOperationPreviewV1 {
     pub schema_version: u16,
     pub operation_id: IntentOperationId,
@@ -1234,7 +1234,7 @@ impl IntentOperationPreviewV1 {
 
 /// Structured fail-closed conflict retained by domain events and bounded DTOs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentConflictV1 {
     pub code: IntentOperationErrorCode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1255,7 +1255,7 @@ pub enum IntentAcceptanceKind {
 
 /// Exact TaskPlan version admitted in the same durable writer batch as an IntentPlan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IntentTaskPlanBindingV1 {
     pub task_id: String,
     pub task_plan_version: u32,
@@ -1266,7 +1266,7 @@ pub struct IntentTaskPlanBindingV1 {
 /// R51.0 froze this schema. R51.1 registers the stack/plan/acceptance subset; later slices register
 /// the execution, artifact, verification, and operation variants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "record", rename_all = "snake_case")]
 pub enum IntentEventV1 {
     StackCreated {
         schema_version: u16,
@@ -1576,7 +1576,7 @@ impl IntentEventV1 {
 
 /// Bounded public state for one intent card.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicIntentV1 {
     pub intent_ref: IntentVersionRef,
     pub title: String,
@@ -1599,7 +1599,7 @@ pub struct PublicIntentV1 {
 
 /// Bounded artifact inspect row for adapter renderers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicIntentArtifactSummaryV1 {
     pub artifact_id: IntentArtifactId,
     pub artifact_kind: IntentArtifactKind,
@@ -1611,7 +1611,7 @@ pub struct PublicIntentArtifactSummaryV1 {
 
 /// Bounded public provenance. It cannot carry acceptance or mutation authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicIntentSourceV1 {
     UserTurn { source_turn_id: String },
     AcceptedSuggestion { source_turn_id: String },
@@ -1620,7 +1620,7 @@ pub enum PublicIntentSourceV1 {
 
 /// Bounded adapter projection. It contains no raw patch, absolute path, or mutation authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicIntentStackV1 {
     pub schema_version: u16,
     pub stack_id: IntentStackId,
@@ -1633,7 +1633,7 @@ pub struct PublicIntentStackV1 {
 
 /// Top-level public availability contract for current durable Intent Stack projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum PublicIntentStackStateV1 {
     Available {
         schema_version: u16,
@@ -1647,7 +1647,7 @@ pub enum PublicIntentStackStateV1 {
 
 /// Bounded public operation error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicIntentOperationErrorV1 {
     pub schema_version: u16,
     pub code: IntentOperationErrorCode,

@@ -19,7 +19,7 @@ pub type CompactionAttemptId = String;
 
 /// Provider-neutral, content-free identity used by automatic-compaction circuit breakers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCircuitScopeV1 {
     pub source_cursor_event_id: EventId,
     pub layout_hash: String,
@@ -55,7 +55,7 @@ pub enum CompactionEmergencyBlockingLayerV1 {
 
 /// Input to the durable automatic-compaction circuit breaker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCircuitBreakerInputV1 {
     pub scope: CompactionCircuitScopeV1,
     pub latest_completed_real_turn_sequence: Option<u64>,
@@ -66,7 +66,7 @@ pub struct CompactionCircuitBreakerInputV1 {
 
 /// Deterministic circuit result. Only `Allowed` permits a new automatic lifecycle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CompactionCircuitBreakerDecisionV1 {
     Allowed,
     SameCursorAndLayoutFailed,
@@ -83,7 +83,7 @@ pub enum CompactionCircuitBreakerDecisionV1 {
 
 /// Durable cursor delimiting the raw session stream folded by a compaction attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCursor {
     pub session_id: SessionId,
     pub through_stream_sequence: u64,
@@ -114,7 +114,7 @@ impl CompactionCursor {
 
 /// The only fallback parent shape available before provider-observed continuation candidates.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CompactionFallbackParent {
     Root,
     InitiatedAttempt { attempt_id: CompactionAttemptId },
@@ -126,7 +126,7 @@ pub enum CompactionFallbackParent {
 /// effective target policy.  It lets the reducer recover a failed idle-auto attempt after a
 /// restart without treating an unrelated later turn as the same retry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CompactionInitiation {
     Manual,
     IdleAutomatic {
@@ -196,7 +196,7 @@ pub enum CompactionFailureReason {
 
 /// Recovery-critical record that opens one initiated V2 compaction attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionStartedEntry {
     pub attempt_id: CompactionAttemptId,
     pub fallback_parent: CompactionFallbackParent,
@@ -225,7 +225,7 @@ impl CompactionStartedEntry {
 
 /// Recovery-critical terminal that activates one V2 compaction boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionAppliedV2 {
     pub compaction_id: CompactionId,
     pub attempt_id: CompactionAttemptId,
@@ -286,7 +286,7 @@ impl CompactionAppliedV2 {
 
 /// Recovery-critical terminal for an initiated V2 compaction attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionFailureEntry {
     pub attempt_id: CompactionAttemptId,
     pub reason: CompactionFailureReason,

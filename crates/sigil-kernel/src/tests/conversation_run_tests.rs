@@ -216,7 +216,7 @@ fn recorder_rejects_missing_start_and_conflicting_reuse() -> Result<()> {
 }
 
 #[test]
-fn decoder_is_strict_for_unknown_fields_tags_and_phase_mismatch() -> Result<()> {
+fn decoder_ignores_extra_fields_but_rejects_unknown_tags_and_phase_mismatch() -> Result<()> {
     let start = started("run-1", 10)?;
     let mut payload = serde_json::to_value(
         ConversationRunLifecycleRecordV1::ConversationRunStartedV1(start.clone()),
@@ -226,14 +226,7 @@ fn decoder_is_strict_for_unknown_fields_tags_and_phase_mismatch() -> Result<()> 
         .expect("lifecycle payload should be an object")
         .insert("unexpected".to_owned(), json!(true));
     let record = lifecycle_stream_record(DurableEventType::RunStatusChanged, payload, 1)?;
-    assert!(
-        format!(
-            "{:#}",
-            conversation_run_lifecycle_record_from_stream(&record)
-                .expect_err("unknown lifecycle field must fail")
-        )
-        .contains("unknown field")
-    );
+    assert!(conversation_run_lifecycle_record_from_stream(&record)?.is_some());
 
     let unknown = lifecycle_stream_record(
         DurableEventType::RunStatusChanged,

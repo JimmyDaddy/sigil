@@ -3,7 +3,7 @@ use std::{io::Write, time::Instant};
 use anyhow::{Context, Result};
 
 use super::*;
-use crate::{ControlEntry, Session, SessionLogEntry, ToolErrorKind};
+use crate::{ControlEntry, Session, SessionLogEntry, ToolErrorKind, ToolResultMeta};
 
 fn store_fixture() -> Result<(tempfile::TempDir, ToolArtifactStore)> {
     let temp = tempfile::tempdir()?;
@@ -970,7 +970,10 @@ fn literal_search_is_linear_on_repetitive_max_artifact() -> Result<()> {
 
     assert_eq!(page.match_count, 0);
     assert!(page.body.is_empty());
-    assert!(page.eof);
+    assert!(!page.eof);
+    assert!(
+        matches!(page.next_selector, Some(ToolArtifactSelectorV1::SearchLiteral { start_offset, .. }) if start_offset == TOOL_ARTIFACT_SEARCH_SCAN_BYTES as u64)
+    );
     Ok(())
 }
 
@@ -996,7 +999,7 @@ fn selectors_reject_unbounded_requests() {
         ToolArtifactSelectorV1::SearchLiteral {
             query: "x".to_owned(),
             start_offset: 0,
-            max_matches: TOOL_ARTIFACT_SEARCH_MAX_MATCHES + 1,
+            max_matches: 0,
             context_lines: 0,
         }
         .validate()
@@ -2890,5 +2893,228 @@ fn process_capture_cross_stream_redaction_near_reservation_cap_stays_secret_free
     assert_eq!(segments[1].eligible_bytes, 1);
     assert_eq!(completeness.storage, ToolStorageCompletenessV1::Complete);
     assert_eq!(descriptor.policy_projected_bytes, body.len() as u64);
+    Ok(())
+}
+
+#[test]
+fn process_capture_v3_preserves_policy_expansion_with_exact_accounting() -> Result<()> {
+    for bytes in [b"token=x".to_vec(), vec![0xff; 96 * 1024]] {
+        let (_temp, store) = store_fixture()?;
+        let plan = crate::ToolExecutionCapturePlanV1::process_defaults(
+            store.session_scope_id_hash().to_owned(),
+            "expanded",
+            "exec_command",
+        );
+        let mut capture = store
+            .begin_policy_safe_capture(
+                "expanded",
+                "exec_command",
+                "text/plain; charset=utf-8",
+                ToolArtifactEncoding::Utf8,
+                ToolArtifactSensitivity::Ordinary,
+            )
+            .begin_process_capture(plan.process_capture_config())?;
+        capture.write_stream(crate::ToolOutputStreamV1::Stdout, &bytes)?;
+        let (descriptor, segments, completeness) = capture.finish_process_capture(
+            bytes.len() as u64,
+            0,
+            crate::ToolSourceCompletenessV1::Complete,
+        )?;
+        assert_eq!(descriptor.observed_bytes, bytes.len() as u64);
+        assert!(descriptor.policy_projected_bytes > descriptor.observed_bytes);
+        assert!(matches!(
+            descriptor.completeness,
+            ToolArtifactCompleteness::PolicyRedacted { .. }
+        ));
+        let result = crate::ToolResult::ok(
+            "expanded",
+            "exec_command",
+            "safe preview",
+            crate::ToolResultMeta::default(),
+        );
+        let (record, _) = ToolResultRecordedV3::from_process_capture(
+            &result,
+            descriptor,
+            &plan,
+            segments,
+            completeness,
+            4096,
+        )?;
+        record.validate()?;
+        let mut invalid = record.clone();
+        invalid.segments[0].eligible_bytes += 1;
+        assert!(
+            invalid.validate().is_err(),
+            "unaccounted expansion must remain invalid"
+        );
+        let mut invalid = record.clone();
+        invalid.segments[0].persisted_bytes = invalid.segments[0].eligible_bytes + 1;
+        assert!(
+            invalid.validate().is_err(),
+            "storage cannot exceed eligible output"
+        );
+        let mut invalid = record;
+        invalid.segments[0].preview_bytes = invalid.segments[0].persisted_bytes + 1;
+        assert!(
+            invalid.validate().is_err(),
+            "preview cannot exceed stored output"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn oversized_execution_details_keep_bounded_lifecycle_facts() -> Result<()> {
+    let result = ToolResult::ok(
+        "execution-facts",
+        "exec_command",
+        "",
+        ToolResultMeta {
+            details: json!({"execution_id":"execution-facts", "status":"running", "started_at_ms":1000,
+            "updated_at_ms":2000, "generation":7, "cleanup_complete":false, "verdict":"running",
+            "output_preview":"x".repeat(20_000), "call":{"summary":"command=printf token=sk-test-secret"}}),
+            ..ToolResultMeta::default()
+        },
+    );
+    let facts = ToolResultFactsV1::from_result(&result);
+    facts.validate()?;
+    assert!(serde_json::to_vec(&facts.tool_specific)?.len() <= TOOL_RESULT_FACTS_MAX_BYTES / 2);
+    assert_eq!(facts.tool_specific["execution_id"], "execution-facts");
+    assert_eq!(facts.tool_specific["status"], "running");
+    assert_eq!(facts.tool_specific["generation"], 7);
+    assert_eq!(facts.tool_specific["started_at_ms"], 1000);
+    assert_eq!(facts.tool_specific["updated_at_ms"], 2000);
+    assert!(!serde_json::to_string(&facts)?.contains("sk-test-secret"));
+    Ok(())
+}
+
+#[test]
+fn literal_search_pages_preserve_every_occurrence_and_accept_large_requests() -> Result<()> {
+    for (content, query, requested, context, expected) in [
+        ("hit\n".repeat(103), "hit", 100, 0, 103),
+        ("hit\n".repeat(103), "hit", 30, 3, 103),
+        ("a".repeat(201), "aa", 7, 0, 200),
+        (
+            format!("{}needle{}needle", "界".repeat(10_000), "界".repeat(10_000)),
+            "needle",
+            u64::MAX,
+            3,
+            2,
+        ),
+        (
+            format!("{}needle", "x".repeat(TOOL_ARTIFACT_SEARCH_SCAN_BYTES - 3)),
+            "needle",
+            50,
+            0,
+            1,
+        ),
+    ] {
+        let mut cursor = 0;
+        let mut total = 0;
+        let mut pages = 0;
+        loop {
+            let page = read_literal_search_from_bytes(
+                content.as_bytes(),
+                query,
+                cursor,
+                requested,
+                context,
+            )?;
+            assert!(page.bytes.len() <= TOOL_ARTIFACT_READ_MAX_BYTES as usize);
+            assert!(std::str::from_utf8(&page.bytes).is_ok());
+            total += usize::from(page.match_count);
+            pages += 1;
+            assert!(pages < 1000, "search must terminate");
+            if let Some(ToolArtifactSelectorV1::SearchLiteral { start_offset, .. }) =
+                page.next_selector
+            {
+                assert!(start_offset > cursor, "cursor must advance");
+                cursor = start_offset;
+            } else {
+                assert!(page.eof);
+                break;
+            }
+        }
+        assert_eq!(total, expected);
+    }
+    ToolArtifactSelectorV1::SearchLiteral {
+        query: "hit".to_owned(),
+        start_offset: 0,
+        max_matches: u64::MAX,
+        context_lines: 0,
+    }
+    .validate()?;
+    let hundred = read_literal_search_from_bytes("hit\n".repeat(103).as_bytes(), "hit", 0, 100, 0)?;
+    assert_eq!(hundred.match_count, 100);
+    Ok(())
+}
+
+#[test]
+fn literal_search_resumes_on_exact_line_boundary_and_scan_budget() -> Result<()> {
+    let content = format!(
+        "first\nhit\n{}hit",
+        "x".repeat(TOOL_ARTIFACT_SEARCH_SCAN_BYTES + 100)
+    );
+    let first = read_literal_search_from_bytes(content.as_bytes(), "hit", 6, 1, 0)?;
+    assert_eq!(first.match_count, 1);
+    assert!(first.bytes.starts_with(b"hit\n"));
+    let Some(ToolArtifactSelectorV1::SearchLiteral { start_offset, .. }) = first.next_selector
+    else {
+        panic!("scan budget must supply continuation");
+    };
+    let second = read_literal_search_from_bytes(content.as_bytes(), "hit", start_offset, 1, 0)?;
+    assert_eq!(second.match_count, 1);
+    assert!(second.eof);
+    Ok(())
+}
+
+#[test]
+fn literal_search_dense_matches_obey_context_scan_budget_without_losing_matches() -> Result<()> {
+    let content = vec![b'a'; 4096];
+    let per_match_context_cost = content.len() - 1;
+    let expected_page_matches = TOOL_ARTIFACT_SEARCH_CONTEXT_SCAN_BYTES / per_match_context_cost;
+    let mut cursor = 0;
+    let mut total_matches = 0;
+    loop {
+        let page = read_literal_search_from_bytes(&content, "a", cursor, u64::MAX, 3)?;
+        assert!(page.match_count > 0);
+        assert!(usize::from(page.match_count) <= expected_page_matches);
+        // The entire short line fits in the output budget; only context work limits this page.
+        assert_eq!(page.bytes, content);
+        total_matches += usize::from(page.match_count);
+        if let Some(ToolArtifactSelectorV1::SearchLiteral { start_offset, .. }) = page.next_selector
+        {
+            assert_eq!(start_offset, cursor + u64::from(page.match_count));
+            cursor = start_offset;
+        } else {
+            assert!(page.eof);
+            break;
+        }
+    }
+    assert_eq!(total_matches, content.len());
+    Ok(())
+}
+
+#[test]
+fn literal_search_default_fills_fifty_short_lines_in_large_artifact() -> Result<()> {
+    let content = "hit\n".repeat(100_000);
+    let page = read_literal_search_from_bytes(
+        content.as_bytes(),
+        "hit",
+        100_000,
+        TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES,
+        3,
+    )?;
+    assert_eq!(
+        u64::from(page.match_count),
+        TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES
+    );
+    assert!(matches!(
+        page.next_selector,
+        Some(ToolArtifactSelectorV1::SearchLiteral {
+            start_offset: 100_200,
+            ..
+        })
+    ));
     Ok(())
 }

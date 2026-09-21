@@ -14,7 +14,7 @@ pub const RECOVERY_BLOCKER_SCHEMA_VERSION: u16 = 1;
 
 /// Product-neutral owner of a durable recovery blocker.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryDomainV1 {
     PlanMaterialization,
     TaskExecution,
@@ -28,7 +28,7 @@ pub enum RecoveryDomainV1 {
 
 /// Adapter that could not deliver an already committed public event.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum AdapterKindV1 {
     Http,
     Desktop,
@@ -38,7 +38,7 @@ pub enum AdapterKindV1 {
 
 /// Derived view whose rebuild can degrade without changing a domain terminal.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProjectionKindV1 {
     Session,
     Task,
@@ -48,12 +48,7 @@ pub enum ProjectionKindV1 {
 
 /// Smallest durable owner that may be paused by a failure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    rename_all = "snake_case",
-    tag = "kind",
-    content = "value",
-    deny_unknown_fields
-)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum FailureScopeV1 {
     LocalOperation {
         operation_id: String,
@@ -84,7 +79,7 @@ pub enum FailureScopeV1 {
 
 /// Recovery path selected by the lowest boundary owner.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoverabilityV1 {
     Continue,
     RetrySameBoundary,
@@ -99,7 +94,7 @@ pub enum RecoverabilityV1 {
 
 /// Durable settlement state of the effect protected by a recovery decision.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum EffectSettlementV1 {
     NotStarted,
     ConfirmedNoEffect,
@@ -110,7 +105,7 @@ pub enum EffectSettlementV1 {
 
 /// Explicit safe actions that can be offered for a blocker.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum RecoveryActionV1 {
     Retry,
     RebaseWorkspace,
@@ -123,7 +118,7 @@ pub enum RecoveryActionV1 {
 
 /// One bounded, durable reason why an owner is blocked from moving forward.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBlockerV1 {
     pub schema_version: u16,
     pub blocker_id: String,
@@ -200,7 +195,7 @@ impl RecoveryBlockerV1 {
 
 /// Renderer and machine-protocol safe blocker view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicRecoveryBlockerV1 {
     pub blocker_id: String,
     pub domain: RecoveryDomainV1,
@@ -214,13 +209,13 @@ pub struct PublicRecoveryBlockerV1 {
 
 /// Typed durable blocker lifecycle entries.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBlockerRaisedV1 {
     pub blocker: RecoveryBlockerV1,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBlockerResolutionStartedV1 {
     pub blocker_id: String,
     pub action: RecoveryActionV1,
@@ -229,7 +224,7 @@ pub struct RecoveryBlockerResolutionStartedV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBlockerResolvedV1 {
     pub blocker_id: String,
     pub resolution_receipt_digest: String,
@@ -237,7 +232,7 @@ pub struct RecoveryBlockerResolvedV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RecoveryBlockerSupersededV1 {
     pub blocker_id: String,
     pub successor_blocker_id: String,
@@ -288,7 +283,7 @@ impl RecoveryBlockerSupersededV1 {
 
 /// Durable evidence for an interrupted owner. This is not an irrecoverable failure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct InterruptionReceiptV1 {
     pub scope: FailureScopeV1,
     pub reason_code: String,
@@ -297,7 +292,7 @@ pub struct InterruptionReceiptV1 {
 
 /// Durable evidence required before a domain owner may become failed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct IrrecoverableFailureV1 {
     pub scope: FailureScopeV1,
     pub reason_code: String,

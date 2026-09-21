@@ -590,6 +590,23 @@ impl Session {
                     .context("public control sequence exhausted")?;
             }
         }
+        let operation_marker = if let Some(binding) = self
+            .runtime_attachments
+            .application_operation
+            .as_ref()
+            .filter(|binding| {
+                binding.domain_session_scope_id() == self.session_scope_id()
+                    && controls
+                        .iter()
+                        .any(|control| binding.target.matches(control))
+            }) {
+            Some(super::application_operation::add_operation_marker(
+                binding,
+                &mut pending,
+            )?)
+        } else {
+            None
+        };
         let events = store.append_control_publication(pending, run_id)?;
         let domain_events = events
             .into_iter()
@@ -597,6 +614,10 @@ impl Session {
             .collect::<Vec<_>>();
         self.entries
             .extend(controls.into_iter().map(SessionLogEntry::Control));
+        if let Some(marker) = operation_marker {
+            self.entries.push(SessionLogEntry::Control(marker));
+            self.runtime_attachments.application_operation = None;
+        }
         candidate.entry_count = self.entries.len();
         self.control_public_projection = candidate;
         self.advance_durable_session_entry_count(&domain_events);

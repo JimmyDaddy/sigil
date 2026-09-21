@@ -12,7 +12,7 @@ pub const PORTABLE_COMPACTION_MINIMUM_SAVINGS_RATIO_PPM: u32 = 50_000;
 
 /// Immutable versioned identity of one provider, wire, tokenizer, or budget profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct VersionedProfileIdentity {
     pub profile_id: String,
     pub revision: u32,
@@ -54,7 +54,7 @@ impl VersionedProfileIdentity {
 
 /// The material boundary whose input tokens were measured.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum TokenMeasurementScope {
     RenderedTargetInput,
     RenderedSemanticCompressorInput,
@@ -62,7 +62,7 @@ pub enum TokenMeasurementScope {
 
 /// Versioned provider/model profile against which token evidence is valid.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TokenMeasurementBinding {
     pub schema_version: u16,
     pub provider_name: String,
@@ -95,7 +95,7 @@ impl TokenMeasurementBinding {
 
 /// Pre-send evidence for one rendered provider input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum InputTokenEvidence {
     /// Provider-local tokenizer evidence whose wire and hosted-parity profiles are both frozen.
     Exact {
@@ -181,7 +181,7 @@ impl InputTokenEvidence {
 
 /// The complete budget for a single input fit decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectiveTokenBudget {
     pub schema_version: u16,
     pub budget_profile: VersionedProfileIdentity,
@@ -232,7 +232,7 @@ impl EffectiveTokenBudget {
 
 /// Proof-carrying pre-send fit decision for one frozen provider input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RequestFitProof {
     pub schema_version: u16,
     pub input: InputTokenEvidence,
@@ -277,7 +277,7 @@ impl RequestFitProof {
 /// separately frozen pre-activation request and carries its exact provider-local token evidence.
 /// No rendered request content is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PortableCompactionEconomicsV1 {
     pub schema_version: u16,
     pub before_input: InputTokenEvidence,

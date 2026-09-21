@@ -66,10 +66,11 @@ impl DeferredModuleConfig {
     }
 }
 
-/// The root wire is strict before optional owners are considered. Only closed optional fields
-/// retain untyped payloads, so unknown root keys and core permission errors still fail closed.
+/// The root wire projects the fields needed by the current runtime before optional owners are
+/// considered. Unknown root keys are ignored; known fields still undergo their normal type,
+/// domain, permission, and authority validation.
 #[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct RootConfigDocument {
     config_version: u32,
     #[serde(default)]

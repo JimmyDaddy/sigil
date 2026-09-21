@@ -62,7 +62,7 @@ pub struct NativeProviderCompactionMetadata {
 
 /// Whether one native carrier was created under a connection that permits provider retention.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderRetentionPolicyV1 {
     Disallowed,
     Allowed,
@@ -70,7 +70,7 @@ pub enum ProviderRetentionPolicyV1 {
 
 /// Retention/store facts frozen before a native compaction request is dispatched.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct NativeCarrierPolicyV1 {
     pub provider_retention: ProviderRetentionPolicyV1,
     pub request_store_mode: bool,
@@ -97,7 +97,7 @@ impl NativeCarrierPolicyV1 {
 /// A condition that makes a native acceleration carrier unusable while leaving portable truth
 /// intact.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum NativeCarrierInvalidationV1 {
     NativePayloadUnavailable,
     ConnectionChanged,
@@ -140,7 +140,7 @@ pub enum NativeCarrierResumeDecisionV1 {
 /// The opaque bytes remain in the encrypted payload store. This record only proves how that
 /// acceleration layer is bound to an already-active portable checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct NativeCompactionCarrierV1 {
     pub schema_version: u16,
     pub connection_fingerprint: String,
@@ -390,12 +390,7 @@ pub type ProviderContinuationStateId = String;
 /// Native continuation payload identity. K25.12A records only this bounded identity; K25.12B
 /// adds the storage manifest, lifecycle, retention, and deletion protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    rename_all = "snake_case",
-    tag = "kind",
-    content = "digest",
-    deny_unknown_fields
-)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "digest")]
 pub enum ProviderContinuationPayloadIntegrity {
     Sha256(String),
     KeyedMac(String),
@@ -424,7 +419,7 @@ impl ProviderContinuationPayloadIntegrity {
 
 /// The payload class whose bytes are intentionally absent from the durable event stream.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderContinuationPayloadKind {
     Artifact,
     HandleState,
@@ -441,7 +436,7 @@ impl ProviderContinuationPayloadKind {
 
 /// Bounded identity for a payload managed by the future session-scoped continuation store.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationPayloadIdentity {
     pub payload_id: ProviderContinuationPayloadId,
     pub integrity: ProviderContinuationPayloadIntegrity,
@@ -467,7 +462,7 @@ impl ProviderContinuationPayloadIdentity {
 
 /// The only provider-native artifact composition shapes the kernel may name.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderArtifactComposition {
     ReplacementWindow,
     PrefixSegment,
@@ -475,7 +470,7 @@ pub enum ProviderArtifactComposition {
 
 /// Provider-neutral reference to an opaque compacted artifact payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderCompactionArtifactRef {
     pub candidate_id: ProviderContinuationCandidateId,
     pub payload: ProviderContinuationPayloadIdentity,
@@ -535,7 +530,7 @@ impl ProviderCompactionArtifactRef {
 
 /// Provider-neutral reference to an opaque server-side continuation handle state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationHandleRef {
     pub candidate_id: ProviderContinuationCandidateId,
     pub payload: ProviderContinuationPayloadIdentity,
@@ -596,7 +591,7 @@ impl ProviderContinuationHandleRef {
 
 /// Exactly one opaque native continuation representation is selected for a candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderContinuationCandidate {
     Artifact(ProviderCompactionArtifactRef),
     Handle(ProviderContinuationHandleRef),
@@ -749,7 +744,7 @@ impl ProviderContinuationCandidate {
 /// Opaque storage identity for a payload. It contains neither a filesystem path nor provider
 /// bytes; K25.12B2 owns backend resolution and encryption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderContinuationPayloadStorageRef {
     Artifact {
         artifact_id: ProviderContinuationArtifactId,
@@ -809,7 +804,7 @@ impl ProviderContinuationPayloadStorageRef {
 
 /// Durable source from which one payload manifest is allowed to originate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderContinuationPayloadSource {
     Initiated {
         started_event_id: EventId,
@@ -823,7 +818,7 @@ pub enum ProviderContinuationPayloadSource {
 
 /// Append-only lifecycle state for one opaque payload manifest.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderContinuationPayloadLifecycleState {
     Committed,
     Invalidated,
@@ -844,7 +839,7 @@ impl ProviderContinuationPayloadLifecycleState {
 
 /// Direct-JSON manifest and lifecycle record for one provider-native payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationPayloadLifecycleEntry {
     pub schema_version: u16,
     pub payload_id: ProviderContinuationPayloadId,
@@ -917,7 +912,7 @@ impl ProviderContinuationPayloadLifecycleEntry {
 
 /// Provider response evidence from which a native continuation candidate may be derived.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationObservedEntry {
     pub schema_version: u16,
     pub observation_id: ProviderContinuationObservationId,
@@ -995,7 +990,7 @@ impl ProviderContinuationObservedEntry {
 
 /// Critical record binding one deterministic native candidate to its prior durable source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationCandidateRecordedEntry {
     pub schema_version: u16,
     pub candidate_id: ProviderContinuationCandidateId,
@@ -1046,7 +1041,7 @@ impl ProviderContinuationCandidateRecordedEntry {
 /// This records an auditable terminal for a candidate; it does not delete its payload or change
 /// the active compaction boundary. Cleanup remains a separately ordered lifecycle step.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderContinuationCandidateInvalidationReason {
     FrozenEvidenceRejected,
     ResolutionPlanPersistenceAbsent,
@@ -1057,7 +1052,7 @@ pub enum ProviderContinuationCandidateInvalidationReason {
 
 /// Which durable evidence authorizes a provider-observed candidate invalidation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderContinuationCandidateInvalidationBasis {
     /// The candidate has no durable resolution plan, so no plan-derived evidence may be claimed.
     SourceOnly,
@@ -1082,7 +1077,7 @@ impl ProviderContinuationCandidateInvalidationBasis {
 
 /// Recovery-critical terminal that invalidates exactly one provider-observed candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationCandidateInvalidatedEntry {
     pub schema_version: u16,
     pub candidate_id: ProviderContinuationCandidateId,
@@ -1127,7 +1122,7 @@ impl ProviderContinuationCandidateInvalidatedEntry {
 /// Whether a continuation candidate can proceed immediately or must wait for response-local tool
 /// calls to close in the durable stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProviderContinuationActivationGate {
     Immediate,
     AwaitingToolClosure {
@@ -1186,7 +1181,7 @@ impl ProviderContinuationActivationGate {
 
 /// Exact durable response-local tool call that must receive a matching result before activation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderToolCallClosureRef {
     pub tool_call_id: String,
     pub tool_call_event_id: EventId,
@@ -1210,7 +1205,7 @@ impl ProviderToolCallClosureRef {
 /// Direct durable proof that one response-local provider tool call closed within its candidate's
 /// absolute lease. The result payload itself remains in the normal session stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationToolClosureRecordedEntry {
     pub schema_version: u16,
     pub candidate_id: ProviderContinuationCandidateId,
@@ -1251,7 +1246,7 @@ impl ProviderContinuationToolClosureRecordedEntry {
 /// may authorize a later semantic-compressor request, but only a separate physical-attempt
 /// record can prove that request was actually sent.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderContinuationResolutionMode {
     NativeOnly,
     NativePlusPortableModelCheckpoint,
@@ -1259,7 +1254,7 @@ pub enum ProviderContinuationResolutionMode {
 
 /// Complete target-provider identity frozen by a provider-observed resolution plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationTargetExecutionIdentity {
     pub provider_name: String,
     pub provider_route_fingerprint: String,
@@ -1306,7 +1301,7 @@ impl ProviderContinuationTargetExecutionIdentity {
 
 /// Provider-neutral execution identity for a later portable semantic checkpoint stage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationSemanticCompressorIdentity {
     pub provider_name: String,
     pub provider_route_fingerprint: String,
@@ -1357,7 +1352,7 @@ impl ProviderContinuationSemanticCompressorIdentity {
 
 /// Frozen target-input evidence shared by native before/after forms.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationTargetTokenEvidence {
     pub tokens: u64,
     pub material_fingerprint: String,
@@ -1403,12 +1398,7 @@ impl ProviderContinuationTargetTokenEvidence {
 
 /// Target input evidence before applying a provider-native continuation candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    rename_all = "snake_case",
-    tag = "kind",
-    content = "evidence",
-    deny_unknown_fields
-)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "evidence")]
 pub enum ProviderContinuationBeforeInputTokenCount {
     Exact(ProviderContinuationTargetTokenEvidence),
     ConservativeLowerBound(ProviderContinuationTargetTokenEvidence),
@@ -1447,12 +1437,7 @@ impl ProviderContinuationBeforeInputTokenCount {
 
 /// Target input evidence after applying a provider-native continuation candidate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    rename_all = "snake_case",
-    tag = "kind",
-    content = "evidence",
-    deny_unknown_fields
-)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "evidence")]
 pub enum ProviderContinuationAfterInputTokenCount {
     Exact(ProviderContinuationTargetTokenEvidence),
     ConservativeUpperBound(ProviderContinuationTargetTokenEvidence),
@@ -1480,7 +1465,7 @@ impl ProviderContinuationAfterInputTokenCount {
 
 /// Frozen semantic-compressor fit for a hybrid resolution plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationSemanticCompressorRequestFit {
     pub material_fingerprint: String,
     pub proof: RequestFitProof,
@@ -1510,7 +1495,7 @@ impl ProviderContinuationSemanticCompressorRequestFit {
 
 /// Frozen branch, snapshot, cursor, and durable source-ref set for one resolution plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderObservedResolutionPlanLineage {
     pub parent_compaction_id: Option<CompactionId>,
     pub branch_id: Option<BranchId>,
@@ -1587,7 +1572,7 @@ impl ProviderObservedResolutionPlanLineage {
 /// durable integers so later admission/recovery never reinterpret a changed floating-point
 /// configuration value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContinuationEffectiveCompactionBudget {
     pub target_request: EffectiveTokenBudget,
     pub minimum_savings_tokens: u64,
@@ -1609,7 +1594,7 @@ impl ProviderContinuationEffectiveCompactionBudget {
 /// A plan is not an initiated `CompactionStarted`, does not activate the candidate, and proves no
 /// provider I/O. It freezes the only inputs later C2/C3 code may use for admission/recovery.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderObservedResolutionPlanRecordedEntry {
     pub schema_version: u16,
     pub resolution_plan_id: ProviderObservedResolutionPlanId,

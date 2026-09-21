@@ -71,6 +71,128 @@ pub(super) fn context_prefix_end(
         .ok_or_else(|| SessionContextPrefixError::MissingSource.into())
 }
 
+pub(super) fn context_prefix_end_with_progress(
+    entries: &[SessionLogEntry],
+    boundary: &ControlEntry,
+    source_user_message_id: Option<&str>,
+    include_source_progress: bool,
+) -> Result<usize> {
+    let source_end = context_prefix_end(entries, boundary, source_user_message_id)?;
+    if !include_source_progress {
+        return Ok(source_end);
+    }
+    let boundary_end = context_prefix_end(entries, boundary, None)?;
+    let ControlEntry::ConversationRouteDecisionRecorded(decision) = boundary else {
+        return Ok(boundary_end);
+    };
+    if source_user_message_id != Some(decision.source_turn.message_id.as_str()) {
+        return Err(SessionContextPrefixError::ConflictingSource.into());
+    }
+    let expected_tool = match decision.route {
+        crate::ConversationRoute::Task => crate::START_TASK_TOOL_NAME,
+        crate::ConversationRoute::PlanReview => crate::REQUEST_PLAN_REVIEW_TOOL_NAME,
+        _ => return Ok(boundary_end),
+    };
+    // The positive receipt is committed immediately after this exact call's Started audit.
+    // Its declaration/result is routing machinery, not unfinished work inherited by the child.
+    let Some(SessionLogEntry::Control(ControlEntry::ToolExecution(execution))) = boundary_end
+        .checked_sub(1)
+        .and_then(|index| entries.get(index))
+    else {
+        return Ok(boundary_end);
+    };
+    if execution.status != crate::ToolExecutionStatus::Started
+        || execution.tool_name != expected_tool
+    {
+        return Ok(boundary_end);
+    }
+    let mut declarations = entries[source_end..boundary_end]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, entry)| match entry {
+            SessionLogEntry::Assistant(message)
+                if message.tool_calls.iter().any(|call| {
+                    call.id == execution.call_id && call.name == execution.tool_name
+                }) =>
+            {
+                Some((source_end + offset, message))
+            }
+            _ => None,
+        });
+    let declaration = declarations
+        .next()
+        .ok_or(SessionContextPrefixError::ConflictingBoundary)?;
+    if declarations.next().is_some() {
+        return Err(SessionContextPrefixError::ConflictingBoundary.into());
+    }
+    if declaration
+        .1
+        .logical_run_id
+        .as_ref()
+        .is_some_and(|run| run.as_str() != decision.source_turn.logical_run_id)
+    {
+        return Err(SessionContextPrefixError::ConflictingBoundary.into());
+    }
+    Ok(declaration.0)
+}
+
+/// A handoff can commit while its queued source is still Dispatching. Include only that
+/// already-validated promoted source, without changing the general queue visibility policy.
+pub(super) fn include_bound_promoted_source(
+    projection: &mut SessionContextProjection,
+    entries: &[SessionLogEntry],
+    source_id: &str,
+) {
+    if projection
+        .retained_entries
+        .iter()
+        .any(|entry| entry.message.id == source_id)
+    {
+        return;
+    }
+    let Some((source_index, source)) =
+        entries
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| match entry {
+                SessionLogEntry::Control(ControlEntry::ConversationInputPromoted(promotion))
+                    if promotion.durable_user_message.id == source_id =>
+                {
+                    Some((index, &promotion.durable_user_message))
+                }
+                _ => None,
+            })
+    else {
+        return;
+    };
+    let following_ids = entries[source_index + 1..]
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::User(message) | SessionLogEntry::Assistant(message) => {
+                Some(message.id.as_str())
+            }
+            SessionLogEntry::ToolResultV3(result) => Some(result.message_id.as_str()),
+            SessionLogEntry::RuntimeContextSnapshotV2(snapshot) => {
+                Some(snapshot.message.id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let index = projection
+        .retained_entries
+        .iter()
+        .position(|entry| following_ids.contains(entry.message.id.as_str()))
+        .unwrap_or(projection.retained_entries.len());
+    projection.retained_entries.insert(
+        index,
+        SessionProjectionEntry {
+            message: source.clone(),
+            origin: SessionProjectionOrigin::ConversationPromotion,
+            source_event_id: None,
+        },
+    );
+}
+
 /// One provider-visible message retained by a session context projection.
 #[derive(Debug, Clone)]
 pub struct SessionProjectionEntry {

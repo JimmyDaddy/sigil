@@ -44,17 +44,16 @@ pub fn remember_memory_tool_spec(project_scoped: bool) -> ToolSpec {
         name: name.to_owned(),
         description: description.to_owned(),
         input_schema: json!({
-            "type": "object",
-            "properties": {
-                "statement": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MEMORY_STATEMENT_MAX_BYTES,
-                    "description": "A concise standalone statement to retain durably."
-                }
-            },
-            "required": ["statement"],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+            "statement": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MEMORY_STATEMENT_MAX_BYTES,
+                "description": "A concise standalone statement to retain durably."
+            }
+        },
+        "required": ["statement"],
         }),
         category: ToolCategory::Custom,
         access: ToolAccess::Write,
@@ -72,7 +71,7 @@ pub fn writable_memory_route_tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
-/// Returns whether a tool is an approved writable-memory side effect for routing microturns.
+/// Returns whether a tool is an approved writable-memory side effect that may precede a handoff.
 #[must_use]
 pub fn is_writable_memory_route_tool(name: &str) -> bool {
     matches!(

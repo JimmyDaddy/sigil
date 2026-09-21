@@ -605,6 +605,20 @@ impl IntentStackProjectionV1 {
         self.accepted_plans.get(&stack_version.get())
     }
 
+    /// Returns the immutable Intent acceptance jointly bound to this exact Task plan.
+    #[must_use]
+    pub fn accepted_plan_for_task(
+        &self,
+        task_id: &crate::TaskId,
+        plan_version: u32,
+    ) -> Option<&AcceptedIntentPlanProjectionV1> {
+        self.accepted_plans.values().find(|accepted| {
+            accepted.task_plan_binding.as_ref().is_some_and(|binding| {
+                binding.task_id == task_id.as_str() && binding.task_plan_version == plan_version
+            })
+        })
+    }
+
     #[must_use]
     pub fn accepted_plan_for_intent_at(
         &self,
@@ -928,19 +942,11 @@ impl IntentStackProjectionV1 {
             return Ok(());
         }
 
-        // A task-bound IntentPlan acceptance is settled by the accepted TaskPlan carried in the
-        // adjacent authority record. RFC-0067 used PlanExecutionAdoptedV1; RFC-0069 retains the
-        // same envelope for the post-approval TaskMaterializationPreparedV1 receipt.
+        // A task-bound IntentPlan acceptance is settled by its accepted TaskPlan entry.
         let task_plan = match typed {
             TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskPlan(task_plan)) => {
                 Some(task_plan.clone())
             }
-            TypedDomainEvent::TaskStatusChanged(ControlEntry::PlanExecutionAdoptedV1(adoption)) => {
-                Some(adoption.adopted_candidate.task_plan.clone())
-            }
-            TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskMaterializationPreparedV1(
-                materialization,
-            )) => Some(materialization.adopted_candidate.task_plan.clone()),
             _ => None,
         };
         let Some(task_plan) = task_plan else {

@@ -135,7 +135,7 @@ pub(super) fn append_tool_ignored_after_plan_review_decision(
         call.id.clone(),
         call.name.clone(),
         ToolErrorKind::Unsupported,
-        "a typed plan review routing decision was accepted; additional tool calls in this routing microturn were ignored",
+        "a plan review handoff was accepted; additional tool calls in the same batch were not run",
     );
     attach_tool_call_context(&mut result, call, &[]);
     append_tool_execution_audit(

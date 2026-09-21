@@ -6,7 +6,8 @@ use super::writer::{
     shared_session_writer,
 };
 use super::*;
-use crate::EventId;
+use crate::{EventId, interrupted_agent_threads_excluding_live_owner};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Maximum encoded JSONL record, including its newline. Checked before allocating or decoding.
@@ -154,6 +155,8 @@ pub(super) fn classify_session_stream_line(
 pub struct JsonlSessionStore {
     path: PathBuf,
     writer: std::sync::Arc<SharedSessionCoordinator>,
+    live_background_agent_thread_ids: std::sync::Arc<BTreeSet<crate::AgentThreadId>>,
+    live_run_cancellation_scope_ids: std::sync::Arc<BTreeSet<String>>,
 }
 
 /// Read-only access to one existing store's coordinated durable record snapshots.
@@ -347,7 +350,34 @@ impl JsonlSessionStore {
     /// Creates a store rooted at `path`, creating parent directories when needed.
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let (path, writer) = shared_session_writer(path)?;
-        Ok(Self { path, writer })
+        Ok(Self {
+            path,
+            writer,
+            live_background_agent_thread_ids: std::sync::Arc::default(),
+            live_run_cancellation_scope_ids: std::sync::Arc::default(),
+        })
+    }
+
+    /// Preserves background threads whose live process-local owner is held by the exact session
+    /// attachment while this store restores its durable projection.
+    #[must_use]
+    pub fn with_live_background_agent_threads(
+        mut self,
+        thread_ids: BTreeSet<crate::AgentThreadId>,
+    ) -> Self {
+        self.live_background_agent_thread_ids = std::sync::Arc::new(thread_ids);
+        self
+    }
+
+    /// Keeps cancellation requests for these still-owned run scopes open during session reload.
+    #[must_use]
+    pub fn with_live_run_cancellation_scopes(mut self, scope_ids: BTreeSet<String>) -> Self {
+        self.live_run_cancellation_scope_ids = std::sync::Arc::new(scope_ids);
+        self
+    }
+
+    pub(super) fn live_run_cancellation_scope_ids(&self) -> &BTreeSet<String> {
+        &self.live_run_cancellation_scope_ids
     }
 
     /// Reopens one already-published durable stream without creating, permission-hardening, or
@@ -358,7 +388,12 @@ impl JsonlSessionStore {
     /// empty recovered stream is rejected rather than treated as a fresh session.
     pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self> {
         let (path, writer) = shared_existing_session_writer(path)?;
-        Ok(Self { path, writer })
+        Ok(Self {
+            path,
+            writer,
+            live_background_agent_thread_ids: std::sync::Arc::default(),
+            live_run_cancellation_scope_ids: std::sync::Arc::default(),
+        })
     }
 
     /// Structurally parses bytes previously obtained from a caller-validated session-log object.
@@ -755,6 +790,25 @@ impl JsonlSessionStore {
         }
     }
 
+    pub(super) fn append_application_queue_events(
+        &self,
+        pending: Vec<PendingStoredEvent>,
+        command: &crate::ConversationQueueMutationCommand,
+    ) -> Result<Option<StoredEvent>> {
+        self.writer
+            .append_events_if_active(pending, true, None, |projection| {
+                projection.queue().validate_mutation(command)?;
+                Ok(true)
+            })?
+            .map(|events| {
+                events
+                    .into_iter()
+                    .next()
+                    .context("application queue batch has no domain event")
+            })
+            .transpose()
+    }
+
     /// Appends one ordered set of preallocated durable events while holding the single-writer
     /// lease across both the compare predicate and the append. This is intentionally lower-level
     /// than the strict audit receipt API because typed payload validation can depend on the real
@@ -1046,20 +1100,75 @@ impl JsonlSessionStore {
             reconciled_entries.push(entry);
         }
 
-        for interruption in interrupted_agent_attempts(&entries) {
+        for interruption in crate::interrupted_agent_attempts_excluding_live_owner(
+            &entries,
+            &self.live_background_agent_thread_ids,
+        ) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interruption));
             entries.push(entry.clone());
             reconciled_entries.push(entry);
         }
 
-        for interruption in interrupted_agent_threads(&entries) {
+        for interruption in interrupted_agent_threads_excluding_live_owner(
+            &entries,
+            &self.live_background_agent_thread_ids,
+        ) {
             let entry =
                 SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(interruption));
             entries.push(entry.clone());
             reconciled_entries.push(entry);
         }
 
-        for interruption in interrupted_agent_result_continuations(&entries) {
+        let tasks = crate::TaskStateProjection::from_entries(&entries);
+        let agent_threads = crate::AgentThreadStateProjection::from_entries(&entries);
+        let interrupted_direct_tasks = tasks
+            .tasks
+            .values()
+            .filter(|task| {
+                task.status == crate::TaskRunStatus::Running
+                    && task.latest_plan_version.is_none()
+                    && task.direct_execution_admission.is_some()
+            })
+            .filter_map(|task| {
+                let children = tasks.direct_task_background_agents(&task.task_id);
+                let has_unrecoverable_child = children.iter().any(|thread_id| {
+                    tasks.agent_thread_status(thread_id)
+                        == Some(crate::AgentThreadStatus::Interrupted)
+                        && agent_threads
+                            .threads
+                            .get(thread_id)
+                            .is_none_or(|thread| thread.result.is_none())
+                });
+                let all_children_terminal = !children.is_empty()
+                    && children.iter().all(|thread_id| {
+                        tasks
+                            .agent_thread_status(thread_id)
+                            .is_some_and(|status| status.is_terminal())
+                    });
+                (has_unrecoverable_child && all_children_terminal).then(|| {
+                    SessionLogEntry::Control(ControlEntry::TaskRun(crate::TaskRunEntry {
+                        task_id: task.task_id.clone(),
+                        parent_session_ref: task.parent_session_ref.clone(),
+                        objective: task.objective.clone(),
+                        title: task.title.clone(),
+                        status: crate::TaskRunStatus::Interrupted,
+                        reason: Some(
+                            "direct Task background child lost its live owner before a durable result was recorded"
+                                .to_owned(),
+                        ),
+                    }))
+                })
+            })
+            .collect::<Vec<_>>();
+        for entry in interrupted_direct_tasks {
+            entries.push(entry.clone());
+            reconciled_entries.push(entry);
+        }
+
+        for interruption in crate::interrupted_agent_result_continuations_excluding_live_owner(
+            &entries,
+            &self.live_background_agent_thread_ids,
+        ) {
             let entry =
                 SessionLogEntry::Control(ControlEntry::AgentResultContinuation(interruption));
             entries.push(entry.clone());
@@ -1072,7 +1181,10 @@ impl JsonlSessionStore {
             reconciled_entries.push(entry);
         }
 
-        for closed_route in closed_agent_routes(&entries) {
+        for closed_route in crate::closed_agent_routes_excluding_live_owner(
+            &entries,
+            &self.live_background_agent_thread_ids,
+        ) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
             entries.push(entry.clone());
             reconciled_entries.push(entry);
@@ -1085,7 +1197,10 @@ impl JsonlSessionStore {
             reconciled_entries.push(entry);
         }
 
-        for interrupted_message in interrupted_agent_mailbox_messages(&entries) {
+        for interrupted_message in crate::interrupted_agent_mailbox_messages_excluding_live_owner(
+            &entries,
+            &self.live_background_agent_thread_ids,
+        ) {
             let entry =
                 SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(interrupted_message));
             entries.push(entry.clone());
@@ -1671,7 +1786,15 @@ pub(super) fn session_entry_event_class(event_type: DurableEventType) -> EventCl
 
 pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
     match entry {
+        ControlEntry::ProviderDiagnostic(_) => DurableEventType::DiagnosticRecorded,
         ControlEntry::SessionCompositionBound(_) => DurableEventType::SessionCompositionBound,
+        ControlEntry::SessionRuntimeTransitionV1(_) => DurableEventType::SessionRuntimeTransitionV1,
+        ControlEntry::ApplicationOperationPreparedV1(_) => {
+            DurableEventType::ApplicationOperationPreparedV1
+        }
+        ControlEntry::ApplicationOperationCommittedV1(_) => {
+            DurableEventType::ApplicationOperationCommittedV1
+        }
         ControlEntry::ToolApproval(approval)
             if approval.action == ToolApprovalAuditAction::Resolved =>
         {
@@ -1690,22 +1813,6 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::PlanDraftCreated(_) => DurableEventType::PlanDraftCreated,
         ControlEntry::PlanDecisionRecorded(_) => DurableEventType::PlanDecisionRecorded,
         ControlEntry::PlanPermissionGranted(_) => DurableEventType::PlanPermissionGranted,
-        ControlEntry::ExecutablePlanCandidatePreparedV1(_) => {
-            DurableEventType::PlanExecutionCandidatePrepared
-        }
-        ControlEntry::PlanReadyCommittedV1(_) => DurableEventType::PlanReadyCommitted,
-        ControlEntry::PlanCompileFailedV1(_) => DurableEventType::PlanCompileFailed,
-        ControlEntry::PlanExecutionAdoptedV1(_) => DurableEventType::PlanExecutionAdopted,
-        ControlEntry::TaskMaterializationAttemptStartedV1(_) => {
-            DurableEventType::TaskMaterializationAttemptStarted
-        }
-        ControlEntry::TaskMaterializationPreparedV1(_) => {
-            DurableEventType::TaskMaterializationPrepared
-        }
-        ControlEntry::TaskMaterializationBlockedV1(_) => {
-            DurableEventType::TaskMaterializationBlocked
-        }
-        ControlEntry::TaskAdmissionAttemptedV1(_) => DurableEventType::TaskAdmissionAttempted,
         ControlEntry::ConversationRouteDecisionRecorded(_) => {
             DurableEventType::ConversationRouteDecisionRecorded
         }
@@ -1721,6 +1828,7 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         | ControlEntry::UserInputResolved(_) => DurableEventType::UserInputLifecycleChanged,
         ControlEntry::TaskCreatedFromPlan(_) => DurableEventType::TaskCreatedFromPlan,
         ControlEntry::TaskDirectExecutionAdmittedV1(_)
+        | ControlEntry::TaskDirectRequirementsBoundV1(_)
         | ControlEntry::TaskDirectExecutionAttemptV1(_)
         | ControlEntry::TaskChecklistUpdatedV1(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskHandoffRequested(_) => DurableEventType::TaskHandoffRequested,
@@ -1732,14 +1840,9 @@ pub(super) fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStepContractBoundV2(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlanContractSetCommittedV2(_) => DurableEventType::TaskStatusChanged,
-        ControlEntry::TaskGuidanceApplied(_) => DurableEventType::TaskGuidanceApplied,
-        ControlEntry::TaskGuidanceMaterialized(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantAttempt(_) => DurableEventType::TaskStatusChanged,
-        ControlEntry::TaskParticipantRetryScheduled(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskParticipantResult(_) => DurableEventType::TaskStatusChanged,
-        ControlEntry::TaskStepCheckpointV2(_) => DurableEventType::TaskStatusChanged,
-        ControlEntry::TaskFinalAnswerCommitted(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
         ControlEntry::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,
         ControlEntry::StepLeaseHeartbeatRecorded(_) => DurableEventType::StepLeaseHeartbeatRecorded,
@@ -1849,6 +1952,13 @@ pub(super) fn session_entry_from_stored_event(
     ) && event.event_kind() != Some(DurableEventType::SessionCompositionBound)
     {
         bail!("session composition used the wrong durable event type");
+    }
+    if matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ProviderDiagnostic(_))
+    ) && event.event_kind() != Some(DurableEventType::DiagnosticRecorded)
+    {
+        bail!("provider diagnostic used the wrong durable event type");
     }
     if let SessionLogEntry::ToolResultV3(result) = &entry {
         if event.event_kind() != Some(DurableEventType::ToolResultRecordedV3) {

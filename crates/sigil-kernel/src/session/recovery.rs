@@ -21,7 +21,7 @@ pub(super) struct TailRecoveryIntent {
 /// bounded serialized records as a redo log, so recovery can complete an interrupted append
 /// without rerunning the tool or losing the provider-visible terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub(super) struct AppendBundleIntent {
     pub(super) start_offset: u64,
     pub(super) end_offset: u64,

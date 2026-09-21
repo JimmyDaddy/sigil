@@ -5,9 +5,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     AgentThreadId, ControlEntry, EventHandler, LogicalRunId, Session, SessionLogEntry, ToolCall,
     ToolErrorKind, ToolExecutionStatus, ToolResult, USER_INPUT_SCHEMA_VERSION, UserInputActionV1,
-    UserInputContinuationBindingV1, UserInputIdentityV1, UserInputPurposeV1, UserInputQuestionV1,
-    UserInputRequestId, UserInputRequestRefV1, UserInputRequestV1, UserInputRequestedV1,
-    UserInputSourceV1,
+    UserInputContinuationBindingV1, UserInputIdentityV1, UserInputOptionV1, UserInputPurposeV1,
+    UserInputQuestionV1, UserInputRequestId, UserInputRequestRefV1, UserInputRequestV1,
+    UserInputRequestedV1, UserInputSourceV1,
 };
 
 use super::{
@@ -19,15 +19,108 @@ use super::{
 };
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RequestUserInputArgsV1 {
-    prompt: String,
-    questions: Vec<UserInputQuestionV1>,
+    questions: Vec<RequestUserInputQuestionArgsV1>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestUserInputQuestionArgsV1 {
+    id: String,
+    question: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    options: Option<Vec<RequestUserInputOptionArgsV1>>,
+    #[serde(default)]
+    multiple: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestUserInputOptionArgsV1 {
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) struct NormalizedRequestUserInputArgs {
+    pub(super) prompt: String,
+    pub(super) questions: Vec<UserInputQuestionV1>,
+}
+
+impl RequestUserInputArgsV1 {
+    fn normalize(self) -> Result<NormalizedRequestUserInputArgs> {
+        if self.questions.is_empty() || self.questions.len() > crate::MAX_USER_INPUT_QUESTIONS {
+            bail!("request_user_input requires one to three questions");
+        }
+
+        let prompt = if self.questions.len() == 1 {
+            self.questions[0].question.clone()
+        } else {
+            "Please answer the following questions before continuing.".to_owned()
+        };
+
+        let questions = self
+            .questions
+            .into_iter()
+            .map(|question| {
+                let multiple = question.multiple.unwrap_or(false);
+                let options = match question.options {
+                    None if multiple => {
+                        bail!("request_user_input question `{}` sets multiple without options", question.id)
+                    }
+                    None => Vec::new(),
+                    Some(options) => {
+                        if options.len() < 2 || options.len() > crate::MAX_USER_INPUT_OPTIONS {
+                            bail!("request_user_input question `{}` must contain two to twelve options", question.id)
+                        }
+                        options
+                            .into_iter()
+                            .enumerate()
+                            .map(|(option_index, option)| UserInputOptionV1 {
+                                id: format!("option-{}", option_index + 1),
+                                label: option.label,
+                                description: option.description,
+                            })
+                            .collect::<Vec<_>>()
+                    }
+                };
+                Ok(UserInputQuestionV1 {
+                    id: question.id,
+                    question: question.question,
+                    description: question.description,
+                    required: true,
+                    options,
+                    multiple,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(NormalizedRequestUserInputArgs { prompt, questions })
+    }
+}
+
+pub(super) fn parse_request_user_input_args(raw: &str) -> Result<NormalizedRequestUserInputArgs> {
+    let args = serde_json::from_str::<RequestUserInputArgsV1>(raw).map_err(|error| {
+        let category = if error.is_eof() {
+            "truncated JSON"
+        } else if error.is_syntax() {
+            "invalid JSON"
+        } else {
+            "invalid argument shape"
+        };
+        anyhow!(
+            "request_user_input {category} at line {} column {}: {error}; expected {{\"questions\":[{{\"id\":\"...\",\"question\":\"...\"}}]}}",
+            error.line(),
+            error.column()
+        )
+    })?;
+    args.normalize()
 }
 
 pub(super) fn request_user_input_call_is_accepted(call: &ToolCall) -> bool {
     call.name == crate::REQUEST_USER_INPUT_TOOL_NAME
-        && serde_json::from_str::<RequestUserInputArgsV1>(&call.args_json).is_ok()
+        && parse_request_user_input_args(&call.args_json).is_ok()
 }
 
 pub(super) struct RequestUserInputContext<'a> {
@@ -47,10 +140,7 @@ pub(super) fn handle_request_user_input_call<H>(
 where
     H: EventHandler + Send,
 {
-    let args =
-        serde_json::from_str::<RequestUserInputArgsV1>(&call.args_json).map_err(|error| {
-            anyhow!("request_user_input arguments do not match the typed schema: {error}")
-        })?;
+    let args = parse_request_user_input_args(&call.args_json)?;
     reject_credential_collection(&args)?;
 
     let assistant_message_id = session
@@ -224,7 +314,7 @@ fn source_binding_hash(
     Ok(format!("sha256:{:x}", Sha256::digest(material)))
 }
 
-fn reject_credential_collection(args: &RequestUserInputArgsV1) -> Result<()> {
+fn reject_credential_collection(args: &NormalizedRequestUserInputArgs) -> Result<()> {
     let material = std::iter::once(args.prompt.as_str())
         .chain(args.questions.iter().flat_map(|question| {
             std::iter::once(question.question.as_str()).chain(question.description.as_deref())

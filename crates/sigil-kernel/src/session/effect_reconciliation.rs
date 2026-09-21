@@ -12,7 +12,7 @@ pub const EFFECT_RECONCILIATION_SCHEMA_VERSION: u16 = 1;
 
 /// Runtime-safe outcome of a read-only reconciliation probe.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum EffectReconciliationOutcomeV1 {
     ObservedApplied,
     ObservedNotApplied,
@@ -23,7 +23,7 @@ pub enum EffectReconciliationOutcomeV1 {
 /// durable request so a recovery worker cannot substitute an arbitrary shell command merely to
 /// obtain a convenient answer.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ReconciliationProbeKindV1 {
     WorkspaceObservation,
     ProviderReceipt,
@@ -43,7 +43,7 @@ impl ReconciliationProbeKindV1 {
 
 /// Exact, bounded request handed to a registered read-only reconciliation probe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectReconciliationProbeRequestV1 {
     pub schema_version: u16,
     pub reconciliation_id: String,
@@ -65,7 +65,7 @@ impl EffectReconciliationProbeRequestV1 {
 /// Durable single-owner claim for one reconciliation probe.  A claim never authorizes a replay
 /// of the original effect; it only authorizes the declared read-only observation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectReconciliationProbeStartedEntryV1 {
     pub schema_version: u16,
     pub reconciliation_id: String,
@@ -79,7 +79,7 @@ pub struct EffectReconciliationProbeStartedEntryV1 {
 /// Result returned by a registered read-only reconciliation probe before the runtime attempts
 /// the conditional terminal append.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectReconciliationProbeReceiptV1 {
     pub schema_version: u16,
     pub reconciliation_id: String,
@@ -114,7 +114,7 @@ pub trait EffectReconciliationProbe: Send + Sync {
 
 /// Durable authority requiring an exact effect to be observed before any successor is admitted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectReconciliationRequiredEntryV1 {
     pub schema_version: u16,
     pub reconciliation_id: String,
@@ -147,7 +147,7 @@ pub struct EffectReconciliationRequiredEntryV1 {
 
 /// Durable closure for one exact reconciliation request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct EffectReconciliationTerminalEntryV1 {
     pub schema_version: u16,
     pub reconciliation_id: String,

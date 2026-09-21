@@ -64,7 +64,7 @@ impl ImageInputCapability {
 /// request prefix evidence, exports, and compaction therefore retain only the content binding and
 /// controlled cache reference.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ImageAttachment {
     pub attachment_id: String,
     pub sha256: String,

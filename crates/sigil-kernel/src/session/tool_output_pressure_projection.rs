@@ -100,7 +100,7 @@ pub enum ToolOutputRetentionClassV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputPressureItemV1 {
     pub source_event_id: String,
     pub source_stream_sequence: u64,
@@ -132,7 +132,7 @@ pub struct ToolOutputPressureItemV1 {
 
 /// Minimal body-free source binding retained after an already-aged item leaves the working set.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputArchivedArtifactBindingV1 {
     pub artifact_ref: ToolArtifactRefV1,
     pub source_event_id: String,
@@ -178,7 +178,7 @@ impl ToolOutputPressureItemV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputPressureSnapshotV1 {
     pub projection_schema_version: u16,
     pub policy_version: u16,
@@ -1006,7 +1006,7 @@ pub enum ToolOutputAgingReasonV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputAgingBatchV1 {
     pub policy_version: u16,
     pub source_cursor: ProjectionCursor,
@@ -1075,7 +1075,7 @@ impl ToolOutputAgingBatchV1 {
 
 /// One deterministic provider-facing replacement activated for a historical V2 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputAgedViewV1 {
     pub source_event_id: EventId,
     pub source_stream_sequence: u64,
@@ -1130,7 +1130,7 @@ impl ToolOutputAgedViewV1 {
 
 /// Append-only activation of one cache-rotating deterministic tool-output aging batch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputAgingActivatedV1 {
     pub schema_version: u16,
     pub policy_version: u16,

@@ -32,14 +32,11 @@ fn text_request(request_id: &str, generation: u32) -> Result<UserInputRequestedV
         prompt: "I need one missing constraint before continuing.".to_owned(),
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
-            header: "Scope".to_owned(),
             question: "Which scope should I use?".to_owned(),
             description: Some("Choose the narrowest useful scope.".to_owned()),
             required: true,
-            field: UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 256,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![
             UserInputActionV1::Submit,
@@ -67,28 +64,82 @@ fn text_request_for_session(
 }
 
 #[test]
-fn request_user_input_single_select_defaults_allow_other_to_false() -> Result<()> {
+fn request_user_input_options_allow_free_form_answers() -> Result<()> {
     let question: UserInputQuestionV1 = serde_json::from_value(serde_json::json!({
         "id": "scope",
-        "header": "Scope",
         "question": "Which scope should I use?",
         "required": true,
-        "field": {
-            "kind": "single_select",
-            "options": [
-                {"id": "narrow", "label": "Narrow"},
-                {"id": "broad", "label": "Broad"}
-            ]
-        }
+        "options": [
+            {"id": "narrow", "label": "Narrow"},
+            {"id": "broad", "label": "Broad"}
+        ],
+        "multiple": false
     }))?;
-    assert!(matches!(
-        question.field,
-        UserInputFieldKindV1::SingleSelect {
-            allow_other: false,
-            ..
-        }
-    ));
+    assert!(!question.multiple);
+    assert_eq!(question.options.len(), 2);
     Ok(())
+}
+
+#[test]
+fn durable_question_contract_defaults_needed_fields_and_ignores_unknown_fields() {
+    let missing_normalized_field =
+        serde_json::from_value::<UserInputQuestionV1>(serde_json::json!({
+            "id": "scope",
+            "question": "Which scope should I use?"
+        }))
+        .expect("known fields should be enough to project a question");
+    assert!(missing_normalized_field.required);
+    assert!(missing_normalized_field.options.is_empty());
+    assert!(!missing_normalized_field.multiple);
+
+    let unknown_field = serde_json::from_value::<UserInputQuestionV1>(serde_json::json!({
+        "id": "scope",
+        "question": "Which scope should I use?",
+        "header": "Retired header",
+        "field": {"kind": "text", "multiline": false},
+        "future": true
+    }))
+    .expect("unknown and retired fields should be ignored");
+    assert_eq!(unknown_field.id, "scope");
+}
+
+#[test]
+fn user_input_nested_enums_ignore_unknown_fields_without_changing_optional_fields() {
+    let text = serde_json::from_value::<UserInputAnswerValueV1>(serde_json::json!({
+        "kind": "text",
+        "value": "kernel",
+        "future": true
+    }))
+    .expect("unknown answer fields should be ignored");
+    assert_eq!(
+        text,
+        UserInputAnswerValueV1::Text {
+            value: "kernel".to_owned()
+        }
+    );
+
+    let submitted = serde_json::from_value::<UserInputDecisionV1>(serde_json::json!({
+        "kind": "submitted",
+        "answers": [],
+        "future": true
+    }))
+    .expect("unknown decision fields should be ignored");
+    assert_eq!(
+        submitted,
+        UserInputDecisionV1::Submitted { answers: vec![] }
+    );
+
+    let single_select = serde_json::from_value::<UserInputAnswerValueV1>(serde_json::json!({
+        "kind": "single_select"
+    }))
+    .expect("optional single-select fields remain optional at decode time");
+    assert_eq!(
+        single_select,
+        UserInputAnswerValueV1::SingleSelect {
+            option_id: None,
+            other: None,
+        }
+    );
 }
 
 fn submitted_decision(request: &UserInputRequestedV1) -> Result<UserInputDecisionAcceptedV1> {
@@ -423,7 +474,10 @@ fn answer_validation_is_typed_bounded_and_complete() -> Result<()> {
         UserInputDecisionV1::Submitted {
             answers: vec![UserInputAnswerV1 {
                 question_id: "scope".to_owned(),
-                value: UserInputAnswerValueV1::Boolean { value: true },
+                value: UserInputAnswerValueV1::SingleSelect {
+                    option_id: Some("narrow".to_owned()),
+                    other: None,
+                },
             }],
         },
         20,
@@ -437,13 +491,26 @@ fn answer_validation_is_typed_bounded_and_complete() -> Result<()> {
             answers: vec![UserInputAnswerV1 {
                 question_id: "scope".to_owned(),
                 value: UserInputAnswerValueV1::Text {
-                    value: "x".repeat(257),
+                    value: "x".repeat(MAX_USER_INPUT_TEXT_CHARS as usize + 1),
                 },
             }],
         },
         20,
     );
     assert!(oversized.is_err());
+
+    let mut optional_request = request.request.clone();
+    optional_request.questions[0].required = false;
+    let optional = UserInputRequestedV1::new(optional_request)?;
+    let optional_decision = UserInputDecisionAcceptedV1::new(
+        &optional,
+        UserInputCommandId::new("optional")?,
+        UserInputDecisionV1::Submitted {
+            answers: Vec::new(),
+        },
+        20,
+    );
+    assert!(optional_decision.is_ok());
     Ok(())
 }
 
@@ -460,25 +527,22 @@ fn mcp_decision_persists_only_answer_hash_and_cannot_claim_continuation() -> Res
         prompt: "Choose a format.".to_owned(),
         questions: vec![UserInputQuestionV1 {
             id: "format".to_owned(),
-            header: "Format".to_owned(),
             question: "Which output format?".to_owned(),
             description: None,
             required: true,
-            field: UserInputFieldKindV1::SingleSelect {
-                options: vec![
-                    UserInputOptionV1 {
-                        id: "json".to_owned(),
-                        label: "JSON".to_owned(),
-                        description: None,
-                    },
-                    UserInputOptionV1 {
-                        id: "yaml".to_owned(),
-                        label: "YAML".to_owned(),
-                        description: None,
-                    },
-                ],
-                allow_other: false,
-            },
+            options: vec![
+                UserInputOptionV1 {
+                    id: "json".to_owned(),
+                    label: "JSON".to_owned(),
+                    description: None,
+                },
+                UserInputOptionV1 {
+                    id: "yaml".to_owned(),
+                    label: "YAML".to_owned(),
+                    description: None,
+                },
+            ],
+            multiple: false,
         }],
         allowed_actions: vec![UserInputActionV1::Submit, UserInputActionV1::Decline],
         requested_at_unix_ms: 10,
@@ -911,5 +975,279 @@ fn public_input_projector_retires_bodies_without_losing_generation_or_root_budge
     )?));
     assert!(compact.apply(exhausted.clone()).is_err());
     assert!(full.apply(exhausted).is_err());
+    Ok(())
+}
+
+#[test]
+fn application_continuation_reopens_with_its_own_causal_batch_without_another_answer() -> Result<()>
+{
+    use crate::{ApplicationOperationBindingV1, ApplicationOperationTargetV1};
+    let dir = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(dir.path().join("continuation.jsonl"))?;
+    let mut session = Session::new("test", "model").with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let mut assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call_1".to_owned(),
+            name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    assistant.id = "assistant_1".to_owned();
+    session.append_assistant_message(assistant)?;
+    let request = text_request_for_session(&session, "request_1", 1)?;
+    session.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(Box::new(
+        request.clone(),
+    ))])?;
+    let original = ApplicationOperationBindingV1::new(
+        session.session_scope_id().to_owned(),
+        "a".repeat(64),
+        "b".repeat(64),
+        ApplicationOperationTargetV1::UserInputDecision {
+            request_id: "request_1".to_owned(),
+            generation: 1,
+            request_hash: request.request_hash.clone(),
+            command_id: "command_1".to_owned(),
+        },
+    )?;
+    session.application_operation_owner()?.prepare(&original)?;
+    session.bind_application_operation(original.clone())?;
+    accept_user_input_decision(
+        &mut session,
+        UserInputDecisionCommandV1 {
+            identity: request.request.identity.clone(),
+            request_hash: request.request_hash.clone(),
+            command_id: UserInputCommandId::new("command_1")?,
+            decision: UserInputDecisionV1::Submitted {
+                answers: vec![UserInputAnswerV1 {
+                    question_id: "scope".to_owned(),
+                    value: UserInputAnswerValueV1::Text {
+                        value: "kernel".to_owned(),
+                    },
+                }],
+            },
+        },
+        20,
+    )?;
+    let continuation = ApplicationOperationBindingV1::new(
+        session.session_scope_id().to_owned(),
+        "c".repeat(64),
+        "d".repeat(64),
+        ApplicationOperationTargetV1::UserInputContinuation {
+            original_operation_id: original.operation_id.clone(),
+            request_id: "request_1".to_owned(),
+            generation: 1,
+            request_hash: request.request_hash.clone(),
+        },
+    )?;
+    session
+        .application_operation_owner()?
+        .prepare(&continuation)?;
+    session.bind_application_operation(continuation.clone())?;
+    store.inject_writer_fault(crate::session::SessionWriterFault::PartialSecondRecord)?;
+    let _unconfirmed = prepare_user_input_continuation(
+        &mut session,
+        &request.request.identity,
+        &request.request_hash,
+        "supervisor",
+        "physical_1",
+        30,
+    );
+    drop(session);
+    let reopened = Session::load_from_store_for_control(store)?;
+    let owner = reopened.application_operation_owner()?;
+    assert!(
+        crate::session::reconcile_application_operation(&owner.read_handle(), &original)?.is_some()
+    );
+    assert!(
+        crate::session::reconcile_application_operation(&owner.read_handle(), &continuation)?
+            .is_some()
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::UserInputContinuationStarted(_))
+            ))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn routed_application_answer_and_resume_reopen_only_the_actual_child_batch() -> Result<()> {
+    use crate::{ApplicationOperationBindingV1, ApplicationOperationTargetV1};
+    for fault in [
+        crate::session::SessionWriterFault::PartialFirstRecord,
+        crate::session::SessionWriterFault::PartialSecondRecord,
+        crate::session::SessionWriterFault::BeforeSync,
+    ] {
+        let dir = tempfile::tempdir()?;
+        let parent_store = JsonlSessionStore::new(dir.path().join("parent.jsonl"))?;
+        let mut parent = Session::new("test", "model").with_store(parent_store.clone());
+        parent.ensure_identity_entry()?;
+        let child_ref = SessionRef::new_relative("children/agents/child.jsonl")?;
+        let child_store = JsonlSessionStore::new(child_ref.resolve(dir.path()))?;
+        let mut child = Session::new("test", "model").with_store(child_store.clone());
+        child.ensure_identity_entry()?;
+        let mut assistant = ModelMessage::assistant(
+            None,
+            vec![ToolCall {
+                id: "call_1".to_owned(),
+                name: REQUEST_USER_INPUT_TOOL_NAME.to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        );
+        assistant.id = "assistant_1".to_owned();
+        child.append_assistant_message(assistant)?;
+        let request = text_request_for_session(&child, "routed_request", 1)?;
+        child.append_user_input_lifecycle(vec![UserInputLifecycleEntryV1::Requested(Box::new(
+            request.clone(),
+        ))])?;
+        let route = agent_user_input_route(&request)?;
+        parent.append_control(ControlEntry::AgentUserInputRoute(route))?;
+        let original = ApplicationOperationBindingV1::new(
+            parent.session_scope_id().to_owned(),
+            "a".repeat(64),
+            "b".repeat(64),
+            ApplicationOperationTargetV1::UserInputDecision {
+                request_id: "routed_request".to_owned(),
+                generation: 1,
+                request_hash: request.request_hash.clone(),
+                command_id: "command_1".to_owned(),
+            },
+        )?;
+        let owner = parent.application_operation_owner()?;
+        owner.prepare(&original)?;
+        parent.bind_application_operation(original.clone())?;
+        drop(child);
+        let mut child = parent
+            .application_operation_child(&child_ref)?
+            .expect("actual delegated child");
+        child_store.inject_writer_fault(fault)?;
+        let _unconfirmed = accept_user_input_decision(
+            &mut child,
+            UserInputDecisionCommandV1 {
+                identity: request.request.identity.clone(),
+                request_hash: request.request_hash.clone(),
+                command_id: UserInputCommandId::new("command_1")?,
+                decision: UserInputDecisionV1::Submitted {
+                    answers: vec![UserInputAnswerV1 {
+                        question_id: "scope".to_owned(),
+                        value: UserInputAnswerValueV1::Text {
+                            value: "kernel".to_owned(),
+                        },
+                    }],
+                },
+            },
+            20,
+        );
+        drop(child);
+        drop(parent);
+        let mut parent = Session::load_from_store_for_control(parent_store.clone())?;
+        let owner = parent.application_operation_owner()?;
+        // Reopening the actual child owner performs its explicit bundle recovery; query itself
+        // must remain observational and cannot take that ownership implicitly.
+        let _reopened_child = Session::load_from_store_for_control(child_store.clone())?;
+        let proof = owner
+            .reconcile(&original)?
+            .expect("answer causal proof after child recovery");
+        assert_eq!(
+            proof.source_session_scope_id(),
+            request.request.identity.session_scope_id.as_str()
+        );
+        assert_ne!(proof.source_session_scope_id(), parent.session_scope_id());
+        let child_records = child_store.read_event_records_writer()?;
+        let resolved = owner.bind_child_records(&child_records, &original)?;
+        let from_records =
+            crate::session::reconcile_application_operation_records(&child_records, &resolved)?
+                .expect("managed read snapshot uses same proof rules");
+        assert_eq!(from_records.event_id(), proof.event_id());
+        from_records.validate_binding(&resolved)?;
+
+        let mut drift = original.clone();
+        drift.domain_session_scope_id = Some(parent.session_scope_id().to_owned());
+        assert!(owner.prepare(&drift).is_err());
+        let continuation = ApplicationOperationBindingV1::new(
+            parent.session_scope_id().to_owned(),
+            "c".repeat(64),
+            "d".repeat(64),
+            ApplicationOperationTargetV1::UserInputContinuation {
+                original_operation_id: original.operation_id.clone(),
+                request_id: "routed_request".to_owned(),
+                generation: 1,
+                request_hash: request.request_hash.clone(),
+            },
+        )?;
+        owner.prepare(&continuation)?;
+        parent.bind_application_operation(continuation.clone())?;
+        let mut child = parent
+            .application_operation_child(&child_ref)?
+            .expect("same actual child continuation");
+        child_store.inject_writer_fault(fault)?;
+        let _unconfirmed = prepare_user_input_continuation(
+            &mut child,
+            &request.request.identity,
+            &request.request_hash,
+            "supervisor",
+            "physical_1",
+            30,
+        );
+        drop(child);
+        drop(parent);
+        let parent = Session::load_from_store_for_control(parent_store)?;
+        let _reopened_child = Session::load_from_store_for_control(child_store.clone())?;
+        assert!(
+            parent
+                .application_operation_owner()?
+                .reconcile(&continuation)?
+                .is_some()
+        );
+        assert!(!parent.entries().iter().any(|entry| matches!(
+            entry,
+            SessionLogEntry::Control(
+                ControlEntry::ApplicationOperationPreparedV1(_)
+                    | ControlEntry::ApplicationOperationCommittedV1(_)
+            )
+        )));
+        let child = Session::load_from_store_for_control(child_store)?;
+        assert_eq!(
+            child
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::UserInputDecisionAccepted(_))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            child
+                .entries()
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::UserInputContinuationStarted(_))
+                ))
+                .count(),
+            1
+        );
+    }
     Ok(())
 }

@@ -523,7 +523,7 @@ fn task_guidance_queue_routing_is_typed_and_fail_closed() -> Result<()> {
 }
 
 #[test]
-fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<()> {
+fn task_guidance_promotion_binds_exact_direct_task_and_queue_revision() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -539,15 +539,15 @@ fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<
             reason: Some("safe point".to_owned()),
         },
     )))?;
-    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskPlan(
-        TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
-            reason: None,
-        },
-    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::TaskDirectExecutionAdmittedV1(
+            crate::TaskDirectExecutionAdmittedV1::task_request(
+                task_id.clone(),
+                "finish the task safely",
+                1,
+            ),
+        ),
+    ))?;
 
     let queue_id = ConversationInputQueueId::new("queue_task_guidance_promote")?;
     let mut guidance = durable_queue_entry(queue_id.clone(), "inspect the recovery edge first");
@@ -572,7 +572,6 @@ fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<
         queue_id.clone(),
         receipt.revision,
         task_id,
-        1,
         guidance.prompt_hash,
         guidance.prompt,
     )?;
@@ -612,7 +611,7 @@ fn task_guidance_promotion_binds_exact_task_plan_and_queue_revision() -> Result<
 }
 
 #[test]
-fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() -> Result<()> {
+fn task_guidance_promotion_rejects_stale_or_plan_task_without_writing() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
@@ -621,7 +620,7 @@ fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() ->
         TaskRunEntry {
             task_id: task_id.clone(),
             parent_session_ref: SessionRef::new_relative("session.jsonl")?,
-            objective: "continue an accepted plan".to_owned(),
+            objective: "continue a legacy plan task".to_owned(),
             title: None,
 
             status: TaskRunStatus::Failed,
@@ -660,7 +659,6 @@ fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() ->
         queue_id.clone(),
         receipt.revision.clone(),
         task_id.clone(),
-        1,
         guidance.prompt_hash.clone(),
         guidance.prompt.clone(),
     )?;
@@ -685,20 +683,19 @@ fn task_guidance_promotion_rejects_stale_or_unaccepted_plan_without_writing() ->
             updated_at_ms: Some(3),
         },
     })?;
-    let wrong_plan = task_guidance_promotion_entry(
+    let plan_task = task_guidance_promotion_entry(
         &session_id,
         queue_id,
         resumed.revision,
         task_id,
-        2,
         guidance.prompt_hash,
         guidance.prompt,
     )?;
     let before_wrong_plan = fs::read(&path)?;
     let error = store
-        .append_task_guidance_promoted(wrong_plan)
-        .expect_err("an unaccepted plan version must reject task guidance promotion");
-    assert!(format!("{error:#}").contains("accepted task plan"));
+        .append_task_guidance_promoted(plan_task)
+        .expect_err("a TaskPlan-backed task must reject direct guidance promotion");
+    assert!(format!("{error:#}").contains("direct Task without a TaskPlan"));
     assert_eq!(fs::read(path)?, before_wrong_plan);
     Ok(())
 }
@@ -1029,6 +1026,7 @@ fn malformed_direct_promotion_payload_fails_closed_on_session_load() -> Result<(
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
     let queue_id = ConversationInputQueueId::new("queue_promote_3")?;
     let queued = durable_queue_entry(queue_id.clone(), "safe queued prompt");
     store.append_session_entry_event(&SessionLogEntry::Control(
@@ -1056,9 +1054,8 @@ fn malformed_direct_promotion_payload_fails_closed_on_session_load() -> Result<(
         malformed,
     )?;
 
-    let error = Session::load_from_store("mock", "model", store)
-        .expect_err("unknown promotion field must reject session reload");
-    assert!(format!("{error:#}").contains("unknown field"));
+    Session::load_from_store("mock", "model", store)
+        .expect("unknown promotion fields are ignored on session reload");
     Ok(())
 }
 
@@ -1198,7 +1195,6 @@ fn task_guidance_promotion_entry(
     queue_id: ConversationInputQueueId,
     expected_queue_revision: ConversationQueueRevision,
     task_id: crate::TaskId,
-    plan_version: u32,
     prompt_hash: String,
     guidance: String,
 ) -> Result<TaskGuidancePromotedEntry> {
@@ -1208,7 +1204,6 @@ fn task_guidance_promotion_entry(
         queue_id,
         expected_queue_revision,
         task_id,
-        plan_version,
         source_turn: crate::ConversationTurnRef::new(
             session_id,
             "task-guidance-message-1",

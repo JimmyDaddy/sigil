@@ -2,17 +2,15 @@ use anyhow::Result;
 
 use crate::session::SessionWriterFault;
 use crate::{
-    AutomaticRouteCapability, CONTINUE_EXISTING_TASK_TOOL_NAME,
-    CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME, ControlEntry, ConversationRoute,
+    AutomaticRouteCapability, CONTINUE_EXISTING_TASK_TOOL_NAME, ControlEntry, ConversationRoute,
     ConversationRouteDecisionRecordedEntry, ConversationTurnRef, JsonlSessionStore, ModelMessage,
-    Session, SessionLogEntry, SessionRef, TaskAdmissionReason, TaskAdmissionTrigger,
-    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffId, TaskHandoffProjection,
-    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, ToolCall, continue_existing_task_tool_spec,
-    continue_without_task_planning_tool_spec, conversation_route_decision_id_for_source,
-    conversation_route_routing_contract_material, keep_pending_plan_tool_spec,
-    project_conversation_prompt_for_persistence, run_pending_plan_tool_spec,
-    validate_continue_existing_task_call, validate_continue_without_task_planning_call,
+    START_TASK_TOOL_NAME, Session, SessionLogEntry, SessionRef, TaskAdmissionTrigger,
+    TaskContinuationSelectedEntry, TaskDirectExecutionAdmittedV1, TaskHandoffDecision,
+    TaskHandoffId, TaskHandoffProjection, TaskHandoffRequestedEntry, TaskHandoffResolvedEntry,
+    TaskId, TaskRoutingPolicy, TaskRunEntry, TaskRunStatus, ToolCall,
+    continue_existing_task_tool_spec, conversation_route_decision_id_for_source,
+    project_conversation_prompt_for_persistence, run_pending_plan_tool_spec, start_task_title,
+    start_task_tool_spec, validate_continue_existing_task_call,
 };
 
 fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
@@ -20,7 +18,7 @@ fn source_turn(message_id: &str) -> Result<ConversationTurnRef> {
 }
 
 #[test]
-fn legacy_task_continuation_receipt_keeps_action_unspecified() -> Result<()> {
+fn task_continuation_receipt_requires_typed_action() -> Result<()> {
     let value = serde_json::json!({
         "task_id": "task-legacy-continuation",
         "source_turn": {
@@ -38,11 +36,7 @@ fn legacy_task_continuation_receipt_keeps_action_unspecified() -> Result<()> {
         "selected_at_ms": 42
     });
 
-    let receipt: TaskContinuationSelectedEntry = serde_json::from_value(value)?;
-    assert_eq!(
-        receipt.control,
-        crate::TaskContinuationControlKind::LegacyUnspecified
-    );
+    assert!(serde_json::from_value::<TaskContinuationSelectedEntry>(value).is_err());
     Ok(())
 }
 
@@ -54,7 +48,7 @@ fn request(
         handoff_id: TaskHandoffId::new(handoff_id)?,
         source_turn,
         trigger: TaskAdmissionTrigger::ModelRequested,
-        reason_codes: vec![TaskAdmissionReason::CrossLayer],
+        title: None,
         recovery_objective: None,
         policy_snapshot_hash: "sha256:policy".to_owned(),
         requested_at_ms: 42,
@@ -76,44 +70,44 @@ fn handoff_identifiers_and_source_turns_validate_shape() {
     assert!(TaskHandoffId::new("../handoff").is_err());
     assert!(ConversationTurnRef::new("", "message", "run").is_err());
     assert!(ConversationTurnRef::new("session", "message\n", "run").is_err());
-    assert_eq!(
-        TaskAdmissionReason::ParallelResearch.as_str(),
-        "parallel_research"
+}
+
+#[test]
+fn start_task_has_only_an_optional_title_and_ignores_unknown_arguments() {
+    let spec = start_task_tool_spec();
+    assert_eq!(spec.name, START_TASK_TOOL_NAME);
+    assert!(
+        spec.input_schema["required"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
     );
-}
+    assert!(
+        spec.input_schema["properties"]
+            .get("reason_codes")
+            .is_none()
+    );
 
-#[test]
-fn task_routing_prompt_assigns_semantic_decision_to_the_model() {
-    let prompt = conversation_route_routing_contract_material();
-    assert!(prompt.contains("Classify the requested outcome by its meaning, not by keywords"));
-    assert!(prompt.contains("Call exactly one of the routing tools advertised in this request"));
-    assert!(prompt.contains("Call request_task_planning"));
-    assert!(prompt.contains("Call continue_without_task_planning"));
-    assert!(prompt.contains("Do not produce free text in this routing microturn"));
-    assert!(prompt.contains("small single-file edit"));
-    assert!(prompt.contains("one narrow read-only query about a single concern"));
-    assert!(prompt.contains("Multiple files alone do not require planning"));
-    assert!(prompt.contains("one linear call-flow trace"));
-    assert!(prompt.contains("independently useful requested outcomes"));
-    assert!(prompt.contains("comparative design review across components"));
-    assert!(prompt.contains("coordinated implementation across two or more named layers"));
-    assert!(prompt.contains("equally in every user language"));
-}
-
-#[test]
-fn direct_conversation_routing_tool_is_typed_and_bounded() {
-    let spec = continue_without_task_planning_tool_spec();
-    assert_eq!(spec.name, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME);
-    let valid = ToolCall {
-        id: "call-direct".to_owned(),
-        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-        args_json: r#"{"reason":"does_not_meet_task_planning_criteria"}"#.to_owned(),
+    let call = ToolCall {
+        id: "call-start-task".to_owned(),
+        name: START_TASK_TOOL_NAME.to_owned(),
+        args_json: r#"{"title":"Fix intake","reason_codes":["retired"],"extra":true}"#.to_owned(),
     };
-    assert!(validate_continue_without_task_planning_call(&valid).is_ok());
+    assert_eq!(
+        start_task_title(&call).expect("parse title"),
+        Some("Fix intake".to_owned())
+    );
 
-    let mut invalid = valid.clone();
-    invalid.args_json = r#"{"reason":"cross_layer"}"#.to_owned();
-    assert!(validate_continue_without_task_planning_call(&invalid).is_err());
+    let mut no_title = call.clone();
+    no_title.args_json = "{}".to_owned();
+    assert_eq!(start_task_title(&no_title).expect("optional title"), None);
+
+    let mut old_name = call.clone();
+    old_name.name = "request_task_planning".to_owned();
+    assert!(start_task_title(&old_name).is_err());
+
+    let mut empty_title = call.clone();
+    empty_title.args_json = r#"{"title":"  "}"#.to_owned();
+    assert!(start_task_title(&empty_title).is_err());
 }
 
 #[test]
@@ -132,17 +126,16 @@ fn existing_task_continuation_tool_keeps_task_identity_host_owned() {
     injected_identity.args_json =
         r#"{"reason":"continue_current_task","action":"resume_task","task_id":"task-decoy"}"#
             .to_owned();
-    assert!(validate_continue_existing_task_call(&injected_identity).is_err());
+    assert!(validate_continue_existing_task_call(&injected_identity).is_ok());
 }
 
 #[test]
 fn pending_plan_decision_tools_keep_plan_identity_host_owned() {
-    for spec in [run_pending_plan_tool_spec(), keep_pending_plan_tool_spec()] {
-        let serialized = serde_json::to_string(&spec.input_schema).expect("serialize schema");
-        assert!(!serialized.contains("plan_id"));
-        assert!(!serialized.contains("plan_hash"));
-        assert_eq!(spec.input_schema["additionalProperties"], false);
-    }
+    let spec = run_pending_plan_tool_spec();
+    let serialized = serde_json::to_string(&spec.input_schema).expect("serialize schema");
+    assert!(!serialized.contains("plan_id"));
+    assert!(!serialized.contains("plan_hash"));
+    assert!(spec.input_schema.get("additionalProperties").is_none());
 }
 
 #[test]
@@ -245,13 +238,9 @@ fn continuation_route_and_exact_selection_recover_as_one_crash_safe_bundle() -> 
         status: TaskRunStatus::Paused,
         reason: Some("waiting for follow-up".to_owned()),
     }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: Vec::new(),
-        reason: None,
-    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), "finish the durable task", 1),
+    ))?;
     let mut user = ModelMessage::user("finish it and include the new requirement");
     user.id = "continuation-source-message".to_owned();
     session.append_user_message(user)?;
@@ -276,9 +265,7 @@ fn continuation_route_and_exact_selection_recover_as_one_crash_safe_bundle() -> 
     let selected = TaskContinuationSelectedEntry {
         task_id: task_id.clone(),
         source_turn,
-        plan_version: Some(1),
         task_status: TaskRunStatus::Paused,
-        plan_status: Some(TaskPlanStatus::Accepted),
         route_contract_fingerprint: route.route_contract_fingerprint.clone(),
         control: crate::TaskContinuationControlKind::ApplyCurrentRequestAsGuidance,
         prompt_hash: prompt.prompt_hash,

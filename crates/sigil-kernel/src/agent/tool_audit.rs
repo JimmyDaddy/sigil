@@ -385,9 +385,15 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         .semantic_scope
         .clone()
         .ok_or_else(|| anyhow!("session grant requires a stable semantic scope"))?;
-    let containment_binding = plan
-        .session_grant_containment_binding()
-        .ok_or_else(|| anyhow!("session grant requires a proven execution binding"))?;
+    let network_binding = plan.session_grant_network_binding();
+    let containment_binding = if network_binding.is_some() {
+        None
+    } else {
+        Some(
+            plan.session_grant_containment_binding()
+                .ok_or_else(|| anyhow!("session grant requires a proven execution binding"))?,
+        )
+    };
     let control = ControlEntry::ToolApprovalSessionGrant(ToolApprovalSessionGrantEntry {
         schema_version: TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION,
         grant_id: uuid::Uuid::new_v4().to_string(),
@@ -401,7 +407,12 @@ pub(super) fn append_tool_approval_session_grant<H: EventHandler>(
         facets: shape.facets,
         scope: shape.scope,
         containment_binding,
-        policy_version: session_grant_policy_fingerprint(decision)?,
+        policy_version: if network_binding.is_some() {
+            identity.policy_version.clone()
+        } else {
+            session_grant_policy_fingerprint(decision)?
+        },
+        network_binding,
         expires: ToolApprovalSessionGrantExpiry::Session,
         granted_at_ms: super::unix_time_ms(),
     });
@@ -812,7 +823,10 @@ fn terminal_start_execution_profile_for_task(
         let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
             continue;
         };
-        if execution.tool_name != "terminal_start" {
+        if !matches!(
+            execution.tool_name.as_str(),
+            "exec_command" | "terminal_start"
+        ) {
             continue;
         }
         if execution.status == ToolExecutionStatus::Started
@@ -845,7 +859,8 @@ pub(super) fn execution_mutation_profile_from_details(
 pub(super) fn terminal_task_id_from_tool_metadata(metadata: &ToolResultMeta) -> Option<String> {
     metadata
         .details
-        .get("task_id")
+        .get("execution_id")
+        .or_else(|| metadata.details.get("task_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
 }

@@ -27,9 +27,7 @@ use crate::{
         AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
         AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry,
         AgentThreadResultDeliveredEntry, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
-        AgentThreadStateProjection, AgentThreadStatusChangedEntry, closed_agent_routes,
-        interrupted_agent_attempts, interrupted_agent_mailbox_messages,
-        interrupted_agent_result_continuations, interrupted_agent_threads,
+        AgentThreadStateProjection, AgentThreadStatusChangedEntry,
         stale_expired_agent_approval_routes,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
@@ -76,9 +74,8 @@ use crate::{
     },
     skill::{SkillIndexSnapshot, SkillLoadEntry, SkillStateProjection},
     task::{
-        TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskFinalAnswerCommittedEntry,
-        TaskParticipantAttemptEntry, TaskParticipantResultEntry,
-        TaskParticipantRetryScheduledEntry, TaskPlanEntry, TaskRunCancellationScopeBoundEntry,
+        TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskParticipantAttemptEntry,
+        TaskParticipantResultEntry, TaskPlanEntry, TaskRunCancellationScopeBoundEntry,
         TaskRunEntry, TaskStateProjection, TaskStepEntry, TaskSubagentApprovalRouteEntry,
         TaskSubagentElicitationRouteEntry, stale_task_approval_routes_for_restore,
     },
@@ -118,6 +115,12 @@ const UNSAFE_EXTERNAL_RECOVERY_AUDIT_REASON: &str =
     "recovery skipped unsafe external persistence control";
 
 mod active_projection;
+mod application_operation;
+pub use application_operation::{
+    ApplicationOperationCommitProofV1, SessionApplicationOperationOwner,
+    committed_application_operation, reconcile_application_operation,
+    reconcile_application_operation_records,
+};
 mod archived_facts;
 mod compaction_plan;
 mod compaction_shrink_sidecar;
@@ -365,13 +368,13 @@ pub use tool_artifact::{
     TOOL_ARTIFACT_AVAILABILITY_CHANGED_SCHEMA_VERSION, TOOL_ARTIFACT_DESCRIPTOR_SCHEMA_VERSION,
     TOOL_ARTIFACT_MAX_BYTES, TOOL_ARTIFACT_ORPHAN_GRACE_MS, TOOL_ARTIFACT_READ_BYTES_PER_TURN,
     TOOL_ARTIFACT_READ_MAX_BYTES, TOOL_ARTIFACT_READ_MAX_LINES, TOOL_ARTIFACT_READ_SCHEMA_VERSION,
-    TOOL_ARTIFACT_READS_PER_TURN, TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES,
-    TOOL_ARTIFACT_SEARCH_MAX_MATCHES, TOOL_ARTIFACT_SESSION_BUDGET_BYTES,
-    TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION, TOOL_DISPLAY_VIEW_MAX_BYTES,
-    TOOL_MODEL_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_SCHEMA_VERSION, TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES,
-    TOOL_RESULT_EVENT_TARGET_BYTES, TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES,
-    TOOL_RESULT_RECORDED_SCHEMA_VERSION, ToolArtifactAvailability,
-    ToolArtifactAvailabilityChangedV1, ToolArtifactAvailabilityReasonV1,
+    TOOL_ARTIFACT_READS_PER_TURN, TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES,
+    TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES, TOOL_ARTIFACT_SEARCH_MAX_MATCHES,
+    TOOL_ARTIFACT_SESSION_BUDGET_BYTES, TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION,
+    TOOL_DISPLAY_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_MAX_BYTES, TOOL_MODEL_VIEW_SCHEMA_VERSION,
+    TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES, TOOL_RESULT_EVENT_TARGET_BYTES,
+    TOOL_RESULT_INLINE_CAPTURE_MAX_BYTES, TOOL_RESULT_RECORDED_SCHEMA_VERSION,
+    ToolArtifactAvailability, ToolArtifactAvailabilityChangedV1, ToolArtifactAvailabilityReasonV1,
     ToolArtifactAvailabilityStateV1, ToolArtifactBindingV1, ToolArtifactBudgetedReadV1,
     ToolArtifactCaptureSink, ToolArtifactCompleteness, ToolArtifactDescriptorV1,
     ToolArtifactEncoding, ToolArtifactGcReportV1, ToolArtifactGcRootsV1, ToolArtifactId,

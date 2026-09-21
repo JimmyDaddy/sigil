@@ -123,11 +123,6 @@ fn outbox_projection_rejects_revision_attempt_hidden_in_another_event_category()
         explicit_objective: Some("Revise the plan".to_owned()),
         route_decision_id: None,
         child_session_ref: crate::plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: Some(crate::plan_review_finalizer_session_ref(
-            &review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: Some(crate::UserInputRequestId::new("request-1")?),
         attempt_ordinal: 1,
         base_plan_id: Some(crate::PlanId::new("base-1")?),

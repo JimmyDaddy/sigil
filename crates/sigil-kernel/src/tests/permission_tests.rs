@@ -9,9 +9,9 @@ use serde_json::json;
 use crate::{
     ExecutionContainmentRequest, NetworkEffect, ToolAccess, ToolAnalysisReason,
     ToolAnalysisReasonCode, ToolAnalysisStatus, ToolApprovalSessionGrantUnavailableReasonCode,
-    ToolCategory, ToolPermissionEffect, ToolPermissionPlanV2, ToolPermissionSummary,
-    ToolPreviewCapability, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope, infer_tool_operation,
+    ToolCategory, ToolPermissionEffect, ToolPermissionPlanDraft, ToolPermissionPlanV2,
+    ToolPermissionSummary, ToolPreviewCapability, ToolSemanticScope, ToolSpec, ToolSubject,
+    ToolSubjectKind, ToolSubjectScope, infer_tool_operation,
 };
 
 use super::{
@@ -77,6 +77,38 @@ fn network_spec(effect: NetworkEffect) -> ToolSpec {
     }
 }
 
+fn effect_plan(
+    tool_name: &str,
+    access: ToolAccess,
+    operation: ToolOperation,
+    effects: BTreeSet<ToolPermissionEffect>,
+    semantic_scope: Option<ToolSemanticScope>,
+) -> Result<ToolPermissionPlanV2> {
+    ToolPermissionPlanV2::bind(
+        tool_name,
+        &json!({}),
+        std::path::Path::new("."),
+        ToolPermissionPlanDraft {
+            access,
+            operation,
+            effects,
+            subjects: Vec::new(),
+            analysis: ToolAnalysisStatus::Complete,
+            containment: ExecutionContainmentRequest::default(),
+            semantic_scope,
+            tool_default_mode: None,
+            analysis_bindings: BTreeMap::new(),
+            safe_summary: ToolPermissionSummary {
+                title: tool_name.to_owned(),
+                detail: "bounded permission fixture".to_owned(),
+                step_count: 1,
+                workspace_code_steps: 0,
+            },
+            managed_file_access: None,
+        },
+    )
+}
+
 #[test]
 fn permission_policy_chain_combines_parent_role_and_profile_monotonically() -> Result<()> {
     let parent = PermissionConfig {
@@ -128,6 +160,116 @@ fn permission_policy_chain_combines_parent_role_and_profile_monotonically() -> R
 
     assert_eq!(denied.mode, ApprovalMode::Deny);
     assert_eq!(narrowed_to_ask.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn read_only_mode_admits_only_effect_proven_command_network_and_agent_reads() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::ReadOnly,
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new(&config);
+    let shell_spec = ToolSpec {
+        name: "exec_command".to_owned(),
+        access: ToolAccess::Execute,
+        category: ToolCategory::Shell,
+        ..spec(ToolAccess::Execute)
+    };
+    let read_command = effect_plan(
+        "exec_command",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteReadOnlyCommand,
+        BTreeSet::from([ToolPermissionEffect::ExecuteTrustedBinary]),
+        None,
+    )?;
+    assert_eq!(
+        policy.decide_plan(&shell_spec, &read_command)?.mode,
+        ApprovalMode::Allow
+    );
+
+    let unsafe_command = effect_plan(
+        "exec_command",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteReadOnlyCommand,
+        BTreeSet::from([ToolPermissionEffect::Unknown]),
+        None,
+    )?;
+    assert_eq!(
+        policy.decide_plan(&shell_spec, &unsafe_command)?.mode,
+        ApprovalMode::Deny
+    );
+
+    let web_spec = ToolSpec {
+        name: "websearch".to_owned(),
+        access: ToolAccess::Read,
+        network_effect: Some(NetworkEffect::Read),
+        ..spec(ToolAccess::Read)
+    };
+    let web_read = effect_plan(
+        "websearch",
+        ToolAccess::Read,
+        ToolOperation::NetworkRequest,
+        BTreeSet::from([ToolPermissionEffect::NetworkRead]),
+        None,
+    )?;
+    assert_eq!(
+        policy.decide_plan(&web_spec, &web_read)?.mode,
+        ApprovalMode::Allow
+    );
+
+    let agent_spec = ToolSpec {
+        name: "spawn_agent".to_owned(),
+        access: ToolAccess::Execute,
+        ..spec(ToolAccess::Execute)
+    };
+    let mut safe_agent_scope = ToolSemanticScope::new("agent_thread:spawn", 1);
+    safe_agent_scope
+        .qualifiers
+        .insert("safe_read_only_profile".to_owned(), "true".to_owned());
+    let read_agent = effect_plan(
+        "spawn_agent",
+        ToolAccess::Execute,
+        ToolOperation::SpawnAgent,
+        BTreeSet::from([
+            ToolPermissionEffect::AgentLifecycle,
+            ToolPermissionEffect::FileRead,
+        ]),
+        Some(safe_agent_scope),
+    )?;
+    assert_eq!(
+        policy.decide_plan(&agent_spec, &read_agent)?.mode,
+        ApprovalMode::Allow
+    );
+
+    Ok(())
+}
+
+#[test]
+fn read_only_mode_denies_mutation_even_when_the_tool_is_model_visible() -> Result<()> {
+    let config = PermissionConfig {
+        mode: PermissionMode::ReadOnly,
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new(&config);
+    let write_spec = ToolSpec {
+        name: "write_file".to_owned(),
+        access: ToolAccess::Write,
+        ..spec(ToolAccess::Write)
+    };
+    let write_plan = effect_plan(
+        "write_file",
+        ToolAccess::Write,
+        ToolOperation::EditFile,
+        BTreeSet::from([ToolPermissionEffect::FileWrite]),
+        None,
+    )?;
+
+    assert_eq!(
+        policy.decide_plan(&write_spec, &write_plan)?.mode,
+        ApprovalMode::Deny
+    );
     Ok(())
 }
 
@@ -1642,6 +1784,20 @@ fn session_grant_availability_reports_one_typed_reason_or_none() {
     network_plan.subjects = network_decision.subjects.clone();
     network_plan.analysis_bindings.clear();
     assert!(
+        !tool_approval_session_grant_availability_for_plan(&network_decision, &network_plan)
+            .is_available()
+    );
+    for key in [
+        "network_endpoint_hash",
+        "network_transport_hash",
+        "network_route_hash",
+        "network_policy_hash",
+    ] {
+        network_plan
+            .analysis_bindings
+            .insert(key.to_owned(), crate::sha256_hex(key.as_bytes()));
+    }
+    assert!(
         tool_approval_session_grant_availability_for_plan(&network_decision, &network_plan)
             .is_available()
     );
@@ -2034,7 +2190,7 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
 }
 #[test]
 fn batch_agent_spawn_uses_spawn_operation_classification() {
-    for tool_name in ["spawn_agents", "request_task_discovery"] {
+    for tool_name in ["spawn_agent", "spawn_agents"] {
         assert_eq!(
             infer_tool_operation(tool_name, ToolAccess::Execute),
             ToolOperation::SpawnAgent
@@ -2156,4 +2312,157 @@ fn family_prefix_glob_matches_like_the_allow_rule_does() {
         "cargo test",
         "cargo testfoo"
     ));
+}
+
+#[test]
+fn unified_command_tools_preserve_command_rules_and_explicit_tool_denials() -> Result<()> {
+    for tool in ["exec_command", "exec_input"] {
+        let mut config = PermissionConfig {
+            commands: CommandPermissionConfig {
+                allow: vec!["git *".to_owned()],
+                ask: vec!["git commit*".to_owned()],
+                deny: vec!["git clean*".to_owned()],
+            },
+            ..PermissionConfig::default()
+        };
+        for (command, expected) in [
+            ("git status --short", ApprovalMode::Allow),
+            ("git commit", ApprovalMode::Ask),
+            ("git clean -fd", ApprovalMode::Deny),
+        ] {
+            let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+                &spec(ToolAccess::Execute),
+                tool,
+                ToolAccess::Execute,
+                ToolOperation::ExecuteUnknownCommand,
+                vec![command_subject(command)],
+                None,
+            )?;
+            assert_eq!(decision.mode, expected, "{tool}: {command}");
+        }
+        config.tools.insert(tool.to_owned(), ApprovalMode::Deny);
+        let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+            &spec(ToolAccess::Execute),
+            tool,
+            ToolAccess::Execute,
+            ToolOperation::ExecuteUnknownCommand,
+            vec![command_subject("git status --short")],
+            None,
+        )?;
+        assert_eq!(
+            decision.mode,
+            ApprovalMode::Deny,
+            "explicit denial remains a hard ceiling"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn renamed_execution_keeps_existing_restrictions_without_inheriting_allow() -> Result<()> {
+    for (tool, retired) in [
+        ("exec_command", "bash"),
+        ("exec_command", "terminal_start"),
+        ("exec_read", "terminal_read"),
+        ("exec_wait", "terminal_wait"),
+        ("exec_input", "terminal_input"),
+        ("exec_resize", "terminal_resize"),
+        ("exec_cancel", "terminal_cancel"),
+        ("exec_cancel", "terminal_stop"),
+    ] {
+        for restriction in [ApprovalMode::Ask, ApprovalMode::Deny] {
+            let mut config = PermissionConfig::default();
+            config.tools.insert(retired.to_owned(), restriction);
+            let decide = |config: &PermissionConfig| {
+                PermissionPolicy::new(config).decide_with_operation_and_default(
+                    &spec(ToolAccess::Read),
+                    tool,
+                    ToolAccess::Read,
+                    ToolOperation::ExecuteReadOnlyCommand,
+                    vec![command_subject("git status --short")],
+                    None,
+                )
+            };
+            assert_eq!(
+                decide(&config)?.mode,
+                restriction,
+                "{retired} restriction survives {tool} rename"
+            );
+            config.tools.insert(tool.to_owned(), ApprovalMode::Allow);
+            assert_eq!(
+                decide(&config)?.mode,
+                ApprovalMode::Allow,
+                "current explicit key takes precedence"
+            );
+        }
+    }
+    let mut config = PermissionConfig::default();
+    config.tools.insert("bash".into(), ApprovalMode::Allow);
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "exec_command",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteUnknownCommand,
+        vec![command_subject("unknown-service")],
+        None,
+    )?;
+    assert_eq!(
+        decision.mode,
+        ApprovalMode::Ask,
+        "retired Allow cannot grant the expanded tool surface"
+    );
+    Ok(())
+}
+
+#[test]
+fn renamed_execution_restrictions_keep_rule_subject_boundaries() -> Result<()> {
+    let config: PermissionConfig = toml::from_str(
+        r#"
+[[rules]]
+tool_name = "terminal_*"
+subject_glob = "private/**"
+mode = "deny"
+"#,
+    )?;
+    for (subject, expected) in [
+        ("private/key", ApprovalMode::Deny),
+        ("public/readme", ApprovalMode::Allow),
+    ] {
+        let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+            &spec(ToolAccess::Read),
+            "exec_command",
+            ToolAccess::Read,
+            ToolOperation::ExecuteReadOnlyCommand,
+            vec![path_subject(subject)],
+            None,
+        )?;
+        assert_eq!(
+            decision.mode, expected,
+            "rule must retain its original subject constraint"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn renamed_execution_generic_allow_does_not_erase_a_retired_explicit_denial() -> Result<()> {
+    let config: PermissionConfig = toml::from_str(
+        r#"
+[tools]
+bash = "deny"
+[[rules]]
+tool_name = "*"
+mode = "allow"
+"#,
+    )?;
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Read),
+        "exec_command",
+        ToolAccess::Read,
+        ToolOperation::ExecuteReadOnlyCommand,
+        vec![command_subject("git status")],
+        None,
+    )?;
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
 }

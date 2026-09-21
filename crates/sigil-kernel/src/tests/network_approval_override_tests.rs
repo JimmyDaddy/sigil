@@ -330,7 +330,14 @@ impl Tool for NetworkSessionGrantProbe {
             access: ToolAccess::Read,
             operation: ToolOperation::NetworkRequest,
             effects: BTreeSet::from([crate::ToolPermissionEffect::NetworkRead]),
-            subjects: vec![ToolSubject::mcp_tool("network-session-probe")],
+            subjects: vec![ToolSubject {
+                kind: crate::ToolSubjectKind::NetworkEndpoint,
+                original: "https://network-session.test/source".to_owned(),
+                normalized: "https://network-session.test/source".to_owned(),
+                canonical_path: None,
+                scope: crate::ToolSubjectScope::External,
+                access: ToolAccess::Read,
+            }],
             analysis: crate::ToolAnalysisStatus::Complete,
             containment: Default::default(),
             semantic_scope: Some(crate::ToolSemanticScope::new(
@@ -339,11 +346,21 @@ impl Tool for NetworkSessionGrantProbe {
             )),
             tool_default_mode: None,
             analysis_bindings: BTreeMap::from([
-                ("execution_backend".to_owned(), "test-network-v1".to_owned()),
-                ("execution_profile".to_owned(), "network-read".to_owned()),
                 (
-                    "environment_binding".to_owned(),
-                    "test-restricted-v1".to_owned(),
+                    "network_endpoint_hash".to_owned(),
+                    crate::sha256_hex(b"https://network-session.test/source"),
+                ),
+                (
+                    "network_transport_hash".to_owned(),
+                    crate::sha256_hex(b"network-session-probe-transport-v1"),
+                ),
+                (
+                    "network_route_hash".to_owned(),
+                    crate::sha256_hex(b"network-session-probe-direct-route-v1"),
+                ),
+                (
+                    "network_policy_hash".to_owned(),
+                    crate::sha256_hex(b"network-session-probe-read-policy-v1"),
                 ),
             ]),
             safe_summary: crate::ToolPermissionSummary {
@@ -649,6 +666,14 @@ async fn agent_reuses_exact_network_session_grant_without_second_prompt() -> Res
             .map_err(|_| anyhow!("network session assertion lock poisoned"))?,
         vec![(NetworkPolicy::Ask, true), (NetworkPolicy::Ask, true)]
     );
+    let expected_subject = crate::ToolSubjectAudit::from(&ToolSubject {
+        kind: crate::ToolSubjectKind::NetworkEndpoint,
+        original: "https://network-session.test/source".to_owned(),
+        normalized: "https://network-session.test/source".to_owned(),
+        canonical_path: None,
+        scope: ToolSubjectScope::External,
+        access: ToolAccess::Read,
+    });
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -656,7 +681,10 @@ async fn agent_reuses_exact_network_session_grant_without_second_prompt() -> Res
                 if grant.source_call_id == "network-session-call-1"
                     && grant.facets
                         == vec![crate::ToolApprovalSessionGrantFacet::Network]
-                    && grant.scope == crate::ToolApprovalSessionGrantScope::ExactSubjects
+                    && grant.scope == crate::ToolApprovalSessionGrantScope::NetworkReadTool
+                    && grant.subjects.as_slice() == std::slice::from_ref(&expected_subject)
+                    && grant.network_binding.is_some()
+                    && grant.containment_binding.is_none()
         )
     }));
     assert!(session.entries().iter().any(|entry| {

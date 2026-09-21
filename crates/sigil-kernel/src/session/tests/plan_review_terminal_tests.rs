@@ -55,11 +55,6 @@ pub(in crate::session) fn fixture(
         explicit_objective: Some("Original plan objective".to_owned()),
         route_decision_id: None,
         child_session_ref: crate::plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: Some(crate::plan_review_finalizer_session_ref(
-            &review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: Some(UserInputRequestId::new("request-1")?),
         attempt_ordinal: 1,
         base_plan_id: Some(base.plan_id.clone()),
@@ -395,14 +390,6 @@ fn genuine_unfinished_revision_recovers_interrupted_not_child_success() -> Resul
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let (session, attempt, draft, _) = fixture(&path)?;
-    let child_path = attempt
-        .finalizer_session_ref
-        .as_ref()
-        .expect("finalizer ref")
-        .resolve(temp.path());
-    let mut child = Session::new("mock", "mock").with_store(JsonlSessionStore::new(child_path)?);
-    child.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
-    drop(child);
     drop(session);
     let mut reopened = Session::load_from_store("mock", "mock", JsonlSessionStore::new(&path)?)?;
     let terminal = reopened

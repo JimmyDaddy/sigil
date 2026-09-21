@@ -53,7 +53,13 @@ pub const TOOL_MODEL_VIEW_HIGH_VOLUME_MAX_BYTES: usize = 8 * 1024;
 pub const TOOL_DISPLAY_VIEW_MAX_BYTES: usize = 32 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_BYTES: u32 = 16 * 1024;
 pub const TOOL_ARTIFACT_READ_MAX_LINES: u32 = 200;
-pub const TOOL_ARTIFACT_SEARCH_MAX_MATCHES: u16 = 20;
+pub const TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES: u64 = 50;
+/// A page never enumerates more occurrences than its byte budget.
+pub const TOOL_ARTIFACT_SEARCH_MAX_MATCHES: u16 = TOOL_ARTIFACT_READ_MAX_BYTES as u16;
+/// Bounds matching work per page; managed storage still verifies the whole bounded artifact.
+const TOOL_ARTIFACT_SEARCH_SCAN_BYTES: usize = 256 * 1024;
+/// Independent cumulative bound for context lookup across all matches in a page.
+const TOOL_ARTIFACT_SEARCH_CONTEXT_SCAN_BYTES: usize = 256 * 1024;
 pub const TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES: u16 = 3;
 pub const TOOL_ARTIFACT_READS_PER_TURN: u16 = 8;
 pub const TOOL_ARTIFACT_READ_BYTES_PER_TURN: u64 = 64 * 1024;
@@ -72,7 +78,7 @@ pub type ToolArtifactId = String;
 
 /// Opaque, non-path reference for one session-scoped tool output artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactRefV1 {
     pub artifact_id: ToolArtifactId,
 }
@@ -106,7 +112,7 @@ pub enum ToolArtifactEncoding {
 
 /// Bounded extent retained when an output exceeds the artifact hard limit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactTruncationV1 {
     pub omitted_bytes: u64,
     pub retained_head_bytes: u64,
@@ -185,7 +191,7 @@ impl ToolArtifactBindingV1 {
 
 /// Bounded durable explanation for a result whose raw body is not retrievable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactUnavailableV1 {
     pub availability: ToolArtifactAvailability,
     pub observed_bytes: u64,
@@ -206,7 +212,7 @@ impl ToolArtifactUnavailableV1 {
 
 /// Durable, body-free identity and lifecycle metadata for one tool output artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactDescriptorV1 {
     pub schema_version: u16,
     pub artifact_ref: ToolArtifactRefV1,
@@ -306,7 +312,7 @@ fn validate_truncation(
 
 /// Stable, bounded facts that survive model-view aging.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultFactsV1 {
     pub status: String,
     pub exit_code: Option<i32>,
@@ -463,14 +469,60 @@ fn bounded_tool_specific(value: &Value) -> Value {
     let safe = safe_persistence_json_value(value.clone());
     match serde_json::to_vec(&safe) {
         Ok(encoded) if encoded.len() <= TOOL_RESULT_FACTS_MAX_BYTES / 2 => safe,
-        Ok(encoded) => json!({
-            "projection": "truncated",
-            "original_bytes": encoded.len(),
-        }),
+        Ok(encoded) => bounded_execution_display_facts(&safe, encoded.len()),
         Err(_) => json!({
             "projection": "unavailable",
         }),
     }
+}
+
+fn bounded_execution_display_facts(safe: &Value, original_bytes: usize) -> Value {
+    let mut projection = json!({"projection":"truncated", "original_bytes":original_bytes});
+    let Some(id) = safe.get("execution_id").and_then(Value::as_str) else {
+        return projection;
+    };
+    if id.is_empty() || id.len() > 256 {
+        return projection;
+    }
+    projection["execution_id"] = json!(id);
+    for field in ["status", "verdict", "output_termination_reason"] {
+        if let Some(value) = safe.get(field).and_then(Value::as_str) {
+            projection[field] = json!(bounded_utf8(value, 64));
+        }
+    }
+    for field in [
+        "generation",
+        "started_at_ms",
+        "updated_at_ms",
+        "output_total_bytes",
+    ] {
+        if let Some(value) = safe.get(field).and_then(Value::as_u64) {
+            projection[field] = json!(value);
+        }
+    }
+    if let Some(value) = safe.get("exit_code").and_then(Value::as_i64) {
+        projection["exit_code"] = json!(value);
+    }
+    if let Some(value) = safe.get("cleanup_complete").and_then(Value::as_bool) {
+        projection["cleanup_complete"] = json!(value);
+    }
+    if let Some(summary) = safe.pointer("/call/summary").and_then(Value::as_str) {
+        projection["call"] = json!({"summary":bounded_utf8(summary, 512)});
+    }
+    if let Some(output) = safe.get("output_preview").and_then(Value::as_str) {
+        projection["output_preview"] = json!(bounded_utf8(output, 512));
+    }
+    for field in ["output_preview", "call"] {
+        if serde_json::to_vec(&projection)
+            .is_ok_and(|value| value.len() > TOOL_RESULT_FACTS_MAX_BYTES / 2)
+        {
+            projection
+                .as_object_mut()
+                .expect("execution projection object")
+                .remove(field);
+        }
+    }
+    projection
 }
 
 /// Why the model preview has its current shape.
@@ -486,7 +538,7 @@ pub enum ToolPreviewKind {
 
 /// Provider-facing bounded representation for one tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolModelViewV1 {
     pub preview: String,
     pub preview_kind: ToolPreviewKind,
@@ -524,7 +576,7 @@ impl ToolModelViewV1 {
 
 /// UI-facing bounded representation, independent from provider request material.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolDisplayViewV1 {
     pub status_label: String,
     pub summary: String,
@@ -590,7 +642,7 @@ pub enum ToolResultCapturePathV1 {
 
 /// Body-free telemetry for finding adapters that still depend on inline capture.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultCaptureTelemetryV1 {
     pub capture_path: ToolResultCapturePathV1,
     pub observed_inline_bytes: u64,
@@ -636,7 +688,7 @@ pub enum ToolResultOutcomeV1 {
 
 /// RFC-0062 9.5: provider-neutral wire semantics attached to every V3 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultWireSemanticsV1 {
     pub outcome: ToolResultOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -739,7 +791,7 @@ impl ToolStorageCompletenessV1 {
 
 /// RFC-0062 9.3: immutable capture completeness frozen at tool settlement.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultCaptureCompletenessV1 {
     pub source: ToolSourceCompletenessV1,
     pub policy: ToolPolicyCompletenessV1,
@@ -749,7 +801,7 @@ pub struct ToolResultCaptureCompletenessV1 {
 /// RFC-0062 9.2: one canonical persisted output segment. Ordinary pipes persist at most one
 /// contiguous segment per stream in stdout-then-stderr storage order.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputSegmentV1 {
     pub stream: ToolOutputStreamV1,
     pub artifact_offset: u64,
@@ -788,7 +840,7 @@ pub enum ToolArtifactAvailabilityReasonV1 {
 /// RFC-0062 9.4: generation-guarded availability transition. Projections only apply events whose
 /// expected_generation matches; stale or duplicate transitions fail closed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactAvailabilityChangedV1 {
     pub schema_version: u16,
     pub artifact_ref: ToolArtifactRefV1,
@@ -846,7 +898,7 @@ pub const TOOL_ARTIFACT_TOMBSTONE_PLAN_SCHEMA_VERSION: u16 = 1;
 /// transition from this record (bound to the exact availability generation) instead of guessing
 /// from the ephemeral manifest inventory.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactTombstonePlannedV1 {
     pub schema_version: u16,
     pub artifact_ref: ToolArtifactRefV1,
@@ -870,7 +922,7 @@ impl ToolArtifactTombstonePlannedV1 {
 /// RFC-0062 9.1: session-aware capture plan frozen before spawn. Execution backends derive a
 /// process-local config from it and receive an opaque sink; they never see session authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolExecutionCapturePlanV1 {
     pub schema_version: u16,
     pub session_scope_id_hash: String,
@@ -938,7 +990,7 @@ impl ToolExecutionCapturePlanV1 {
 
 /// RFC-0062 9.1: session-free capture configuration derived by the execution backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProcessStreamCaptureConfigV1 {
     pub stream_layout: ToolOutputStreamLayoutV1,
     pub preview_limit_bytes_per_stream: u64,
@@ -962,7 +1014,7 @@ pub enum ToolOutputPersistencePolicy {
 /// RFC-0062 9.5: bounded error summary; the message cap is UTF-8 safe and bodies never copy
 /// stderr or artifact content into the message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolErrorSummaryV1 {
     pub kind: crate::ToolErrorKind,
     pub message: String,
@@ -995,7 +1047,7 @@ pub enum ToolResultFailureStageV1 {
 /// RFC-0062 10.5: bounded terminal fallback persisted when a capture stage fails; only a dead
 /// session writer escalates to the control plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultTerminalFallbackV1 {
     pub schema_version: u16,
     pub tool_call_id: String,
@@ -1042,7 +1094,7 @@ impl ToolPreviewTruncationReasonV1 {
 /// RFC-0062 9.6: provider-facing typed tool result payload; adapters pattern-match this and
 /// never parse the output JSON to guess the outcome.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderToolResultMessageV1 {
     pub call_id: String,
     pub output: String,
@@ -1066,7 +1118,7 @@ pub enum ModelMessagePayloadV1 {
 /// RFC-0062 9.7: durable V3 tool result. New executions write only V3; sessions containing V2
 /// tool-result events are rejected as unsupported schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultRecordedV3 {
     pub schema_version: u16,
     pub message_id: String,
@@ -1093,7 +1145,7 @@ pub struct ToolResultRecordedV3 {
 
 /// New durable session payload for a provider-visible tool result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolResultRecordedV2 {
     pub schema_version: u16,
     pub message_id: String,
@@ -1465,9 +1517,22 @@ impl ToolResultRecordedV3 {
         {
             bail!("tool result V3 hashes are malformed");
         }
+        // UTF-8 repair and policy redaction can expand the source. Only accept that
+        // expansion when the published policy-safe descriptor accounts for the exact ledger.
+        let policy_expansion = self.artifact.descriptor().is_some_and(|descriptor| {
+            matches!(
+                descriptor.completeness,
+                ToolArtifactCompleteness::PolicyRedacted { .. }
+            ) && self.segments.iter().try_fold(0_u64, |total, segment| {
+                total.checked_add(segment.eligible_bytes)
+            }) == Some(descriptor.policy_projected_bytes)
+                && self.segments.iter().try_fold(0_u64, |total, segment| {
+                    total.checked_add(segment.persisted_bytes)
+                }) == Some(descriptor.persisted_bytes)
+        });
         for segment in &self.segments {
             if segment.persisted_bytes > segment.eligible_bytes
-                || segment.eligible_bytes > segment.observed_bytes
+                || (segment.eligible_bytes > segment.observed_bytes && !policy_expansion)
                 || segment.preview_bytes > segment.persisted_bytes
             {
                 bail!("tool result V3 segment accounting is inconsistent");
@@ -2128,7 +2193,7 @@ struct ToolModelEnvelopeV1<'a> {
 
 /// Typed bounded selector for model/display artifact retrieval.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ToolArtifactSelectorV1 {
     ByteSlice {
         offset: u64,
@@ -2140,30 +2205,57 @@ pub enum ToolArtifactSelectorV1 {
     },
     SearchLiteral {
         query: String,
+        #[serde(default)]
         start_offset: u64,
-        max_matches: u16,
+        #[serde(default = "default_search_matches")]
+        max_matches: u64,
+        #[serde(default)]
         context_lines: u16,
     },
+}
+
+fn default_search_matches() -> u64 {
+    TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES
 }
 
 impl ToolArtifactSelectorV1 {
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::ByteSlice { limit, .. }
-                if *limit > 0 && *limit <= TOOL_ARTIFACT_READ_MAX_BYTES => {}
-            Self::LinePage { line_count, .. }
-                if *line_count > 0 && *line_count <= TOOL_ARTIFACT_READ_MAX_LINES => {}
+            Self::ByteSlice { limit, .. } => {
+                if *limit == 0 || *limit > TOOL_ARTIFACT_READ_MAX_BYTES {
+                    bail!(
+                        "byte_slice.limit must be in 1..={TOOL_ARTIFACT_READ_MAX_BYTES}; received {limit}"
+                    );
+                }
+            }
+            Self::LinePage { line_count, .. } => {
+                if *line_count == 0 || *line_count > TOOL_ARTIFACT_READ_MAX_LINES {
+                    bail!(
+                        "line_page.line_count must be in 1..={TOOL_ARTIFACT_READ_MAX_LINES}; received {line_count}"
+                    );
+                }
+            }
             Self::SearchLiteral {
                 query,
                 max_matches,
                 context_lines,
                 ..
-            } if !query.is_empty()
-                && query.len() <= 512
-                && *max_matches > 0
-                && *max_matches <= TOOL_ARTIFACT_SEARCH_MAX_MATCHES
-                && *context_lines <= TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES => {}
-            _ => bail!("tool artifact selector exceeds its bounded policy"),
+            } => {
+                if query.is_empty() || query.len() > 512 {
+                    bail!(
+                        "search_literal.query must contain 1..=512 UTF-8 bytes; received {}",
+                        query.len()
+                    );
+                }
+                if *max_matches == 0 {
+                    bail!("search_literal.max_matches must be greater than zero; received 0");
+                }
+                if *context_lines > TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES {
+                    bail!(
+                        "search_literal.context_lines must be in 0..={TOOL_ARTIFACT_SEARCH_MAX_CONTEXT_LINES}; received {context_lines}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -2189,7 +2281,7 @@ pub enum ToolArtifactPageEncoding {
 
 /// One bounded typed retrieval response. It is transient and never embedded in the read receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactPageV1 {
     pub artifact_ref: ToolArtifactRefV1,
     pub selector: ToolArtifactSelectorV1,
@@ -2380,7 +2472,7 @@ pub struct ToolArtifactBudgetedReadV1 {
 
 /// Durable body-free audit receipt for one artifact page read.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactReadRecordedV1 {
     pub schema_version: u16,
     pub call_id: String,
@@ -2448,7 +2540,7 @@ pub enum ToolArtifactAvailability {
 
 /// Manifest-only store inventory used by incremental reachability projection and GC.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactManifestEntryV1 {
     pub descriptor: ToolArtifactDescriptorV1,
     pub manifest_modified_at_unix_ms: u64,
@@ -2458,7 +2550,7 @@ pub struct ToolArtifactManifestEntryV1 {
 ///
 /// GC consumes this bounded manifest projection and never scans the session JSONL.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactGcRootsV1 {
     pub active_result_refs: BTreeSet<ToolArtifactRefV1>,
     pub context_epoch_refs: BTreeSet<ToolArtifactRefV1>,
@@ -2473,7 +2565,7 @@ pub struct ToolArtifactGcRootsV1 {
 /// This is not a delete command and contains no physical path. The runtime adapter must bind it
 /// to the authority-owned paired ArtifactStaging/ArtifactStore grants before moving anything.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactRetireFrontierV1 {
     pub selected_refs_hash: CanonicalHash,
     pub selected_count: u64,
@@ -2513,7 +2605,7 @@ impl ToolArtifactGcRootsV1 {
 
 /// Bounded outcome of one manifest-based mark-and-sweep pass.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactGcReportV1 {
     pub tombstone_id: String,
     pub scanned_manifests: usize,
@@ -2532,14 +2624,14 @@ pub struct ToolArtifactGcReportV1 {
 
 /// Outcome of unlinking artifact-GC trash after a second grace boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolArtifactTrashPruneReportV1 {
     pub removed_tombstones: usize,
     pub removed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 #[cfg(any(test, feature = "test-support"))]
 struct ToolArtifactBlobUsageLedgerV1 {
     schema_version: u16,
@@ -4958,220 +5050,120 @@ fn read_literal_search(
     path: &Path,
     query: &str,
     start_offset: u64,
-    max_matches: u16,
+    max_matches: u64,
     context_lines: u16,
 ) -> Result<SelectedArtifactBytes> {
-    let query = query.as_bytes();
-    let matcher = AhoCorasick::new([query]).context("failed to build bounded literal matcher")?;
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let artifact_bytes = file
-        .metadata()
-        .with_context(|| format!("failed to inspect {}", path.display()))?
-        .len();
-    let start = start_offset.min(artifact_bytes);
-    file.seek(SeekFrom::Start(start))
-        .with_context(|| format!("failed to seek {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut cursor = start;
-    if start > 0 {
-        let mut partial = Vec::new();
-        let skipped = reader
-            .read_until(b'\n', &mut partial)
-            .with_context(|| format!("failed to align search in {}", path.display()))?;
-        if skipped == 0 {
-            return Ok(SelectedArtifactBytes {
-                bytes: Vec::new(),
-                eof: true,
-                match_count: 0,
-                next_selector: None,
-            });
-        }
-        cursor = cursor.saturating_add(skipped as u64);
-    }
-    let mut prior = VecDeque::<Vec<u8>>::with_capacity(context_lines as usize);
-    let mut line = Vec::new();
-    let mut body = Vec::new();
-    let mut match_count = 0_u16;
-    let mut trailing_context = 0_u16;
-    let mut reached_match_limit = false;
-    let mut eof = false;
-    loop {
-        if reached_match_limit && trailing_context == 0 {
-            break;
-        }
-        line.clear();
-        let line_start = cursor;
-        let count = reader
-            .read_until(b'\n', &mut line)
-            .with_context(|| format!("failed to search {}", path.display()))?;
-        if count == 0 {
-            eof = true;
-            break;
-        }
-        cursor = cursor.saturating_add(count as u64);
-        let occurrences = if reached_match_limit {
-            0
-        } else {
-            matcher
-                .find_overlapping_iter(&line)
-                .take((max_matches - match_count) as usize)
-                .count() as u16
-        };
-        if occurrences > 0 {
-            let required = prior.iter().map(Vec::len).sum::<usize>() + line.len();
-            if body.len().saturating_add(required) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
-                return Ok(search_selection_with_next(
-                    body,
-                    match_count,
-                    false,
-                    query,
-                    line_start,
-                    max_matches,
-                    context_lines,
-                ));
-            }
-            for prior_line in prior.drain(..) {
-                body.extend_from_slice(&prior_line);
-            }
-            body.extend_from_slice(&line);
-            match_count = match_count.saturating_add(occurrences);
-            trailing_context = context_lines;
-            reached_match_limit = match_count == max_matches;
-        } else if trailing_context > 0 {
-            if body.len().saturating_add(line.len()) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
-                return Ok(search_selection_with_next(
-                    body,
-                    match_count,
-                    false,
-                    query,
-                    line_start,
-                    max_matches,
-                    context_lines,
-                ));
-            }
-            body.extend_from_slice(&line);
-            trailing_context -= 1;
-        } else if context_lines > 0 {
-            if prior.len() == context_lines as usize {
-                prior.pop_front();
-            }
-            prior.push_back(line.clone());
-        }
-    }
-    let eof = eof || cursor >= artifact_bytes;
-    Ok(search_selection_with_next(
-        body,
-        match_count,
-        eof,
-        query,
-        cursor,
-        max_matches,
-        context_lines,
-    ))
+    // The fixture follows the same selection path as authority-backed production storage.
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    read_literal_search_from_bytes(&bytes, query, start_offset, max_matches, context_lines)
 }
 
 fn read_literal_search_from_bytes(
     bytes: &[u8],
     query: &str,
     start_offset: u64,
-    max_matches: u16,
+    max_matches: u64,
     context_lines: u16,
 ) -> Result<SelectedArtifactBytes> {
-    let query_bytes = query.as_bytes();
-    let matcher = AhoCorasick::new([query_bytes])?;
-    let artifact_bytes = bytes.len() as u64;
-    let start = start_offset.min(artifact_bytes) as usize;
-    let mut cursor = start as u64;
-    if start > 0 {
-        let Some(relative_end) = bytes[start..].iter().position(|byte| *byte == b'\n') else {
-            return Ok(SelectedArtifactBytes {
-                bytes: Vec::new(),
-                eof: true,
-                match_count: 0,
-                next_selector: None,
-            });
-        };
-        cursor = cursor.saturating_add(relative_end as u64 + 1);
-    }
-    let mut prior = VecDeque::<Vec<u8>>::with_capacity(context_lines as usize);
+    let matcher = AhoCorasick::new([query.as_bytes()])?;
+    let start = start_offset.min(bytes.len() as u64) as usize;
+    let scan_end = start
+        .saturating_add(TOOL_ARTIFACT_SEARCH_SCAN_BYTES)
+        .min(bytes.len());
+    // Include the query tail so a match crossing the scan boundary is not lost.
+    let search_end = scan_end
+        .saturating_add(query.len().saturating_sub(1))
+        .min(bytes.len());
+    let limit = max_matches.min(u64::from(TOOL_ARTIFACT_SEARCH_MAX_MATCHES)) as u16;
     let mut body = Vec::new();
     let mut match_count = 0_u16;
-    let mut trailing_context = 0_u16;
-    let mut reached_match_limit = false;
-    let mut offset = cursor as usize;
-    let mut eof = true;
-    while offset < bytes.len() {
-        if reached_match_limit && trailing_context == 0 {
-            eof = false;
+    let mut displayed_end = 0;
+    let mut context_scan_remaining = TOOL_ARTIFACT_SEARCH_CONTEXT_SCAN_BYTES;
+    let mut next_offset = scan_end;
+    for found in matcher.find_overlapping_iter(&bytes[start..search_end]) {
+        let match_start = start + found.start();
+        let match_end = start + found.end();
+        if match_start >= scan_end {
             break;
         }
-        let line_start = offset;
-        let line_end = bytes[offset..]
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map_or(bytes.len(), |relative| offset + relative + 1);
-        let line = &bytes[line_start..line_end];
-        offset = line_end;
-        let occurrences = if reached_match_limit {
-            0
-        } else {
-            matcher
-                .find_overlapping_iter(line)
-                .take((max_matches - match_count) as usize)
-                .count() as u16
-        };
-        if occurrences > 0 {
-            let required = prior.iter().map(Vec::len).sum::<usize>() + line.len();
-            if body.len().saturating_add(required) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
-                return Ok(search_selection_with_next(
-                    body,
-                    match_count,
-                    false,
-                    query_bytes,
-                    line_start as u64,
-                    max_matches,
-                    context_lines,
-                ));
-            }
-            for prior_line in prior.drain(..) {
-                body.extend_from_slice(&prior_line);
-            }
-            body.extend_from_slice(line);
-            match_count = match_count.saturating_add(occurrences);
-            trailing_context = context_lines;
-            reached_match_limit = match_count == max_matches;
-        } else if trailing_context > 0 {
-            if body.len().saturating_add(line.len()) > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
-                return Ok(search_selection_with_next(
-                    body,
-                    match_count,
-                    false,
-                    query_bytes,
-                    line_start as u64,
-                    max_matches,
-                    context_lines,
-                ));
-            }
-            body.extend_from_slice(line);
-            trailing_context -= 1;
-        } else if context_lines > 0 {
-            if prior.len() == context_lines as usize {
-                prior.pop_front();
-            }
-            prior.push_back(line.to_vec());
+        if match_count == limit {
+            next_offset = match_start;
+            break;
         }
+        // Reserve enough work for both possible context ranges before inspecting them,
+        // then charge only bytes visited. Short lines can fill an ordinary 50-match page;
+        // dense newline-free data remains bounded. The first occurrence always fits.
+        let context_scan_cost = match_start.min(TOOL_ARTIFACT_READ_MAX_BYTES as usize)
+            + (bytes.len() - match_end).min(TOOL_ARTIFACT_READ_MAX_BYTES as usize);
+        if context_scan_cost > context_scan_remaining {
+            next_offset = match_start;
+            break;
+        }
+        let (window_start, window_end, context_scanned) =
+            search_context_window(bytes, match_start, match_end, context_lines);
+        context_scan_remaining -= context_scanned;
+        let append_start = window_start.max(displayed_end).min(window_end);
+        let required = window_end - append_start;
+        if body.len() + required > TOOL_ARTIFACT_READ_MAX_BYTES as usize {
+            next_offset = match_start;
+            break;
+        }
+        body.extend_from_slice(&bytes[append_start..window_end]);
+        displayed_end = window_end;
+        match_count += 1;
     }
-    eof = eof || offset >= bytes.len();
     Ok(search_selection_with_next(
         body,
         match_count,
-        eof,
-        query_bytes,
-        offset as u64,
+        next_offset == bytes.len(),
+        query.as_bytes(),
+        next_offset as u64,
         max_matches,
         context_lines,
     ))
+}
+
+/// Return line context bounded around the occurrence, including on newline-free artifacts.
+/// Cutting only at UTF-8 boundaries preserves text pages while the cursor tracks match positions,
+/// independently of how much neighboring text was displayed.
+fn search_context_window(
+    bytes: &[u8],
+    match_start: usize,
+    match_end: usize,
+    context_lines: u16,
+) -> (usize, usize, usize) {
+    let budget = TOOL_ARTIFACT_READ_MAX_BYTES as usize;
+    let lower = match_start.saturating_sub(budget);
+    let upper = match_end.saturating_add(budget).min(bytes.len());
+    let mut scanned_before = 0;
+    let mut scanned_after = 0;
+    let mut begin = bytes[lower..match_start]
+        .iter()
+        .enumerate()
+        .rev()
+        .inspect(|_| scanned_before += 1)
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(context_lines as usize)
+        .map_or(lower, |(index, _)| lower + index + 1);
+    let mut end = bytes[match_end..upper]
+        .iter()
+        .enumerate()
+        .inspect(|_| scanned_after += 1)
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(context_lines as usize)
+        .map_or(upper, |(index, _)| match_end + index + 1);
+    if end - begin > budget {
+        let prefix_budget = (budget - (match_end - match_start)) / 2;
+        begin = begin.max(match_start.saturating_sub(prefix_budget));
+        end = end.min(begin + budget);
+    }
+    while begin < match_start && bytes[begin] & 0xc0 == 0x80 {
+        begin += 1;
+    }
+    while end > match_end && end < bytes.len() && bytes[end] & 0xc0 == 0x80 {
+        end -= 1;
+    }
+    (begin, end, scanned_before + scanned_after)
 }
 
 fn search_selection_with_next(
@@ -5180,7 +5172,7 @@ fn search_selection_with_next(
     eof: bool,
     query: &[u8],
     next_offset: u64,
-    max_matches: u16,
+    max_matches: u64,
     context_lines: u16,
 ) -> SelectedArtifactBytes {
     SelectedArtifactBytes {

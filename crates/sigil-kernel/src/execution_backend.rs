@@ -515,7 +515,7 @@ impl<'de> Deserialize<'de> for ExecutionConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct ExecutionConfigWire {
     #[serde(default)]
     strategy: ExecutionStrategyMode,
@@ -588,7 +588,7 @@ impl ExecutionStrategyMode {
 
 /// Advanced sandbox backend configuration used only when `execution.strategy = "sandbox"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ExecutionSandboxStrategyConfig {
     pub backend: ExecutionBackendKind,
     #[serde(default = "default_execution_sandbox_profile")]

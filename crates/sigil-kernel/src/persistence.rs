@@ -627,11 +627,26 @@ pub fn project_tool_call_for_persistence(
                 .to_string()
             })
         }
-        Err(_) => json!({
-            "projection": "malformed_arguments",
-            "raw_bytes": exact_call.args_json.len(),
-        })
-        .to_string(),
+        Err(error) => {
+            let category = if error.is_eof() {
+                "eof"
+            } else if error.is_syntax() {
+                "syntax"
+            } else {
+                "data"
+            };
+            json!({
+                "projection": "malformed_arguments",
+                "raw_bytes": exact_call.args_json.len(),
+                "raw_sha256": format!("sha256:{}", crate::sha256_hex(exact_call.args_json.as_bytes())),
+                "json_error": {
+                    "category": category,
+                    "line": error.line(),
+                    "column": error.column(),
+                },
+            })
+            .to_string()
+        }
     };
     let durable_call = ToolCall {
         id: exact_call.id.clone(),

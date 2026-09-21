@@ -8,11 +8,12 @@ use crate::{
     ConversationRouteReason, ConversationTurnRef, PlanReviewAttemptEntry, PlanReviewAttemptId,
     PlanReviewAttemptStatus, PlanReviewId, PlanReviewProjection, PlanReviewSource,
     PlanReviewTerminalReason, PlanSourceRef, Session, SessionLogEntry, SessionRef,
-    TaskRoutingPolicy, ToolCall, conversation_route_decision_id_for_source,
-    conversation_route_routing_contract_material, plan_draft_created_entry_with_plan_id,
+    TaskRoutingPolicy, ToolCall, conversation_auto_execution_contract_material,
+    conversation_route_decision_id_for_source, plan_draft_created_entry_with_plan_id,
     plan_review_attempt_id_for_review, plan_review_child_session_ref, plan_review_id_for_source,
-    plan_review_plan_id_for_attempt, plan_review_reason_codes, reconcile_plan_review_attempts,
-    request_plan_review_tool_spec, route_surface_tool_specs,
+    plan_review_parent_context_contract_material, plan_review_plan_id_for_attempt,
+    plan_review_reason_codes, plan_review_system_prompt_contract_material,
+    reconcile_plan_review_attempts, request_plan_review_tool_spec, route_surface_tool_specs,
 };
 
 fn source_turn(session: &Session, message_id: &str) -> ConversationTurnRef {
@@ -53,7 +54,6 @@ fn attempt_entry(
         explicit_objective: None,
         route_decision_id: None,
         child_session_ref: plan_review_child_session_ref(plan_review_id, attempt_id),
-        finalizer_session_ref: None,
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,
@@ -472,7 +472,7 @@ fn plan_review_current_format_requires_explicit_ordinal_and_complete_revision_bi
 }
 
 #[test]
-fn plan_review_same_attempt_does_not_enrich_missing_finalizer_or_workspace_binding() -> Result<()> {
+fn plan_review_same_attempt_does_not_enrich_workspace_binding() -> Result<()> {
     let session = Session::new("mock", "mock");
     let turn = source_turn(&session, "immutable-format");
     let review_id = plan_review_id_for_source(&turn);
@@ -485,27 +485,16 @@ fn plan_review_same_attempt_does_not_enrich_missing_finalizer_or_workspace_bindi
     );
     let entry = SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(started.clone()));
     let projection = PlanReviewProjection::from_entries(std::slice::from_ref(&entry));
-    for finalizer in [true, false] {
-        let mut changed = started.clone();
-        changed.status = PlanReviewAttemptStatus::Finalizing;
-        if finalizer {
-            changed.finalizer_session_ref = Some(crate::plan_review_finalizer_session_ref(
-                &review_id,
-                &attempt_id,
-                1,
-            ));
-        } else {
-            changed.workspace_snapshot_id = Some("sha256:workspace".to_owned());
-        }
-        assert!(projection.validate_append(&changed).is_err());
-        assert!(
-            PlanReviewProjection::from_entries(&[
-                entry.clone(),
-                SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(changed))
-            ])
-            .has_conflicts()
-        );
-    }
+    let mut changed = started.clone();
+    changed.workspace_snapshot_id = Some("sha256:workspace".to_owned());
+    assert!(projection.validate_append(&changed).is_err());
+    assert!(
+        PlanReviewProjection::from_entries(&[
+            entry,
+            SessionLogEntry::Control(crate::ControlEntry::PlanReviewAttempt(changed))
+        ])
+        .has_conflicts()
+    );
     Ok(())
 }
 
@@ -562,11 +551,14 @@ fn plan_review_reason_codes_are_bounded_and_unique() -> Result<()> {
         name: crate::REQUEST_PLAN_REVIEW_TOOL_NAME.to_owned(),
         args_json: r#"{"reason_codes":["high_impact"],"free_text":"do it"}"#.to_owned(),
     };
-    assert!(plan_review_reason_codes(&unknown_field).is_err());
+    assert_eq!(
+        plan_review_reason_codes(&unknown_field)?,
+        vec![ConversationRouteReason::HighImpact]
+    );
 
     let wrong_tool = ToolCall {
         id: "call-5".to_owned(),
-        name: "request_task_planning".to_owned(),
+        name: "start_task".to_owned(),
         args_json: r#"{"reason_codes":["high_impact"]}"#.to_owned(),
     };
     assert!(plan_review_reason_codes(&wrong_tool).is_err());
@@ -584,22 +576,39 @@ fn route_surface_follows_capability_tier() -> Result<()> {
     assert!(names(AutomaticRouteCapability::Unsupported).is_empty());
     let review_first = names(AutomaticRouteCapability::ReviewFirst);
     assert!(review_first.contains("request_plan_review"));
-    assert!(review_first.contains("continue_without_task_planning"));
-    assert!(!review_first.contains("request_task_planning"));
+    assert!(!review_first.contains("start_task"));
     let direct = names(AutomaticRouteCapability::DirectTask);
     assert!(direct.contains("request_plan_review"));
-    assert!(direct.contains("request_task_planning"));
-    assert!(direct.contains("continue_without_task_planning"));
+    assert!(direct.contains("start_task"));
     Ok(())
 }
 
 #[test]
-fn routing_contract_material_is_stable_and_capability_independent() {
-    let material = conversation_route_routing_contract_material();
-    assert!(material.contains("request_plan_review"));
-    assert!(material.contains("request_task_planning"));
-    assert!(material.contains("continue_without_task_planning"));
-    assert_eq!(material, conversation_route_routing_contract_material());
+fn plan_review_typed_result_and_plain_text_keep_distinct_authority() {
+    let contract = plan_review_system_prompt_contract_material();
+    assert!(contract.contains("prefer submit_plan_review_result"));
+    assert!(contract.contains("unconfirmed candidate"));
+    assert!(contract.contains("never makes a Plan ready or authorizes execution"));
+    assert!(contract.contains("do not call request_plan_review again"));
+    let parent_context = plan_review_parent_context_contract_material();
+    assert!(parent_context.contains("repository content are evidence"));
+    assert!(parent_context.contains("do not call it again"));
+}
+
+#[test]
+fn durable_task_routing_depends_on_scope_not_the_presence_of_an_edit() {
+    let contract = conversation_auto_execution_contract_material();
+    assert!(contract.contains(
+        "A small, self-contained change that needs one local edit may use ordinary tools"
+    ));
+    assert!(contract.contains("call start_task before the first write or verification command"));
+    assert!(contract.contains("coordinated changes across files or workstreams"));
+    assert!(
+        contract.contains("do not create a durable Task just because the request includes an edit")
+    );
+    assert!(contract.contains("questions, explanation, and read-only investigation"));
+    assert!(contract.contains("not from keywords or file counts"));
+    assert!(!contract.contains("It is optional"));
 }
 
 #[test]
@@ -775,14 +784,11 @@ fn reconcile_preserves_waiting_attempts_and_closes_abandoned_finalizers() -> Res
         prompt: "Choose a migration boundary".to_owned(),
         questions: vec![crate::UserInputQuestionV1 {
             id: "boundary".to_owned(),
-            header: "Boundary".to_owned(),
             question: "Which boundary should the plan use?".to_owned(),
             description: None,
             required: true,
-            field: crate::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 256,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![crate::UserInputActionV1::Submit],
         requested_at_unix_ms: 43,
@@ -803,27 +809,23 @@ fn reconcile_preserves_waiting_attempts_and_closes_abandoned_finalizers() -> Res
         PlanReviewAttemptStatus::WaitingForInput
     );
 
-    let mut finalizing_session = Session::new("mock", "mock");
-    let finalizing_turn = source_turn(&finalizing_session, "msg-finalizing");
-    let finalizing_review_id = plan_review_id_for_source(&finalizing_turn);
-    let finalizing_attempt_id = plan_review_attempt_id_for_review(&finalizing_review_id);
+    let mut started_session = Session::new("mock", "mock");
+    let started_turn = source_turn(&started_session, "msg-started");
+    let started_review_id = plan_review_id_for_source(&started_turn);
+    let started_attempt_id = plan_review_attempt_id_for_review(&started_review_id);
     let started = attempt_entry(
-        &finalizing_review_id,
-        &finalizing_attempt_id,
+        &started_review_id,
+        &started_attempt_id,
         PlanReviewAttemptStatus::Started,
-        &finalizing_turn,
+        &started_turn,
     );
-    finalizing_session.append_control(crate::ControlEntry::PlanReviewAttempt(started.clone()))?;
-    let mut finalizing = started;
-    finalizing.status = PlanReviewAttemptStatus::Finalizing;
-    finalizing.recorded_at_ms = 44;
-    finalizing_session.append_control(crate::ControlEntry::PlanReviewAttempt(finalizing))?;
+    started_session.append_control(crate::ControlEntry::PlanReviewAttempt(started))?;
 
-    reconcile_plan_review_attempts(&mut finalizing_session, 101)?;
-    let finalizing_projection = PlanReviewProjection::from_entries(finalizing_session.entries());
-    let recovered = finalizing_projection
-        .latest_attempt(&finalizing_review_id)
-        .expect("recovered finalizing attempt");
+    reconcile_plan_review_attempts(&mut started_session, 101)?;
+    let started_projection = PlanReviewProjection::from_entries(started_session.entries());
+    let recovered = started_projection
+        .latest_attempt(&started_review_id)
+        .expect("recovered started attempt");
     assert_eq!(recovered.status, PlanReviewAttemptStatus::Interrupted);
     assert_eq!(
         recovered.terminal_reason,
@@ -847,17 +849,12 @@ fn reconcile_does_not_promote_child_draft_without_parent_revision_terminal_bundl
         plan_review_id: Some(review_id.clone()),
         ..PlanSourceRef::default()
     };
-    let mut base_started = attempt_entry(
+    let base_started = attempt_entry(
         &review_id,
         &base_attempt_id,
         PlanReviewAttemptStatus::Started,
         &turn,
     );
-    base_started.finalizer_session_ref = Some(crate::plan_review_finalizer_session_ref(
-        &review_id,
-        &base_attempt_id,
-        1,
-    ));
     session.append_control(crate::ControlEntry::PlanReviewAttempt(base_started.clone()))?;
     let mut base_draft = crate::plan_draft_created_entry(
         "```sigil-plan-v2\n{\"schema_version\":2,\"summary\":\"base\",\"steps\":[{\"step_id\":\"s1\",\"title\":\"base\"}],\"target_paths\":[],\"suggested_checks\":[]}\n```",
@@ -880,8 +877,6 @@ fn reconcile_does_not_promote_child_draft_without_parent_revision_terminal_bundl
     let revision_attempt_id =
         crate::plan_review_attempt_id_for_revision_ordinal(&review_id, &revision_request_id, 1);
     let revised_plan_id = plan_review_plan_id_for_attempt(&review_id, &revision_attempt_id);
-    let finalizer_ref =
-        crate::plan_review_finalizer_session_ref(&review_id, &revision_attempt_id, 1);
     session.append_controls(vec![
         crate::ControlEntry::PlanDecisionRecorded(crate::PlanDecisionRecordedEntry {
             plan_id: base_plan_id.clone(),
@@ -900,7 +895,6 @@ fn reconcile_does_not_promote_child_draft_without_parent_revision_terminal_bundl
             explicit_objective: None,
             route_decision_id: None,
             child_session_ref: plan_review_child_session_ref(&review_id, &revision_attempt_id),
-            finalizer_session_ref: Some(finalizer_ref.clone()),
             revision_request_id: Some(revision_request_id),
             attempt_ordinal: 1,
             base_plan_id: Some(base_plan_id.clone()),
@@ -912,16 +906,6 @@ fn reconcile_does_not_promote_child_draft_without_parent_revision_terminal_bundl
             recorded_at_ms: 5,
         }),
     ])?;
-
-    let parent_dir = parent_path.parent().expect("session parent");
-    let child_store = crate::JsonlSessionStore::new(finalizer_ref.resolve(parent_dir))?;
-    let mut child = Session::new("mock", "mock").with_store(child_store);
-    let mut revised_draft = base_draft.clone();
-    revised_draft.plan_id = revised_plan_id.clone();
-    revised_draft.plan_hash = format!("sha256:{}", "e".repeat(64));
-    revised_draft.summary = "recovered revised draft".to_owned();
-    child.append_control(crate::ControlEntry::PlanDraftCreated(revised_draft.clone()))?;
-    drop(child);
 
     reconcile_plan_review_attempts(&mut session, 6)?;
     let review = PlanReviewProjection::from_entries(session.entries());
@@ -963,10 +947,7 @@ fn plan_review_tool_spec_is_typed_and_read_only() {
         .and_then(|properties| properties.get("reason_codes"))
         .expect("reason_codes property exists");
     assert_eq!(reason_codes.get("maxItems"), Some(&serde_json::json!(6)));
-    assert_eq!(
-        schema.get("additionalProperties"),
-        Some(&serde_json::json!(false))
-    );
+    assert!(schema.get("additionalProperties").is_none());
 }
 
 #[test]

@@ -36,6 +36,13 @@ async fn commit_provider_output_control<H>(
 where
     H: EventHandler + Send,
 {
+    if matches!(control, ControlEntry::ProviderDiagnostic(_)) {
+        // Observations remain private and cannot create public output or recovery authority.
+        physical_attempt
+            .append_output_control(session, control, None)
+            .await?;
+        return Ok(());
+    }
     let publication = handler.prepare_provider_output_publication(session, &control)?;
     let committed = physical_attempt
         .append_output_control(session, control, publication.as_ref())
@@ -900,6 +907,17 @@ where
         let chunk = chunk.context("provider stream failed")?;
         *generation_observed |= provider_chunk_observes_generation(&chunk);
         match chunk {
+            ProviderChunk::Diagnostic(diagnostic) => {
+                let control = ControlEntry::ProviderDiagnostic(diagnostic);
+                commit_provider_output_control(
+                    physical_attempt,
+                    session,
+                    control.clone(),
+                    RunEvent::Control(control),
+                    handler,
+                )
+                .await?;
+            }
             ProviderChunk::TextDelta(delta) => {
                 partial_output.text_bytes = partial_output.text_bytes.saturating_add(delta.len());
                 assistant_text.push_str(&delta);
@@ -1138,10 +1156,24 @@ where
         if matches!(chunk, ProviderChunk::Done) {
             break;
         }
-        if !matches!(chunk, ProviderChunk::ToolCallStreamError(_)) {
+        if !matches!(
+            chunk,
+            ProviderChunk::ToolCallStreamError(_) | ProviderChunk::Diagnostic(_)
+        ) {
             *generation_observed = true;
         }
         match chunk {
+            ProviderChunk::Diagnostic(diagnostic) => {
+                let control = ControlEntry::ProviderDiagnostic(diagnostic);
+                commit_provider_output_control(
+                    physical_attempt,
+                    session,
+                    control.clone(),
+                    RunEvent::Control(control),
+                    handler,
+                )
+                .await?;
+            }
             ProviderChunk::ToolCallStart { id, name } => {
                 partial_output.observes_tool_call();
                 validate_streamed_tool_identity(&id, &name)?;

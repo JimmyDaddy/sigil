@@ -251,7 +251,7 @@ pub enum ToolConcurrencyClass {
 /// and generic network effects therefore remain non-replayable unless their implementation opts
 /// into an observation-backed contract.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolReplayClassV1 {
     /// Re-running an incomplete read cannot change world state. The current V1 runtime still
     /// records the original execution boundary before admitting a new read.
@@ -268,7 +268,7 @@ pub enum ToolReplayClassV1 {
 
 /// Versioned local contract used when recovering an interrupted tool effect.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolReplayContractV1 {
     pub schema_version: u16,
     pub class: ToolReplayClassV1,

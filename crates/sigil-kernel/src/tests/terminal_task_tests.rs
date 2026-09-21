@@ -108,6 +108,26 @@ fn terminal_task_projection_replays_latest_status_and_active_tasks() {
 }
 
 #[test]
+fn terminal_task_projection_ignores_delayed_lower_generation_snapshots() {
+    let mut exited = sample_entry(TerminalTaskStatus::Exited { exit_code: Some(0) }, 130);
+    exited.generation = 13;
+    let mut delayed_running = sample_entry(TerminalTaskStatus::Running, 90);
+    delayed_running.generation = 9;
+
+    let projection = TerminalTaskProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::TerminalTask(exited)),
+        SessionLogEntry::Control(ControlEntry::TerminalTask(delayed_running)),
+    ]);
+
+    let latest = projection.latest().expect("latest terminal task");
+    assert!(matches!(
+        latest.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    assert!(projection.active_task_ids.is_empty());
+}
+
+#[test]
 fn terminal_task_projection_keeps_multiple_active_tasks_sorted_by_id() {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::TerminalTask(sample_entry_for_id(
@@ -295,6 +315,25 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         Some(TerminalOutputTerminationReason::OutputLimitExceeded)
     );
     assert_eq!(entry.updated_at_ms, 140);
+
+    let mut unified = details.clone();
+    let fields = unified.as_object_mut().expect("terminal metadata object");
+    let identity = fields.remove("task_id").expect("historical owner identity");
+    fields.insert("execution_id".to_owned(), identity);
+    assert_eq!(
+        TerminalTaskEntry::from_tool_result_details(&unified)?,
+        Some(entry.clone()),
+        "the unified tool identity must retain the exact durable owner and receipt"
+    );
+    unified["task_id"] = json!("different-owner");
+    assert!(TerminalTaskEntry::from_tool_result_details(&unified).is_err());
+    unified["task_id"] = json!("terminal-1");
+    assert_eq!(
+        TerminalTaskEntry::from_tool_result_details(&unified)?,
+        Some(entry)
+    );
+    unified["execution_id"] = json!(false);
+    assert!(TerminalTaskEntry::from_tool_result_details(&unified).is_err());
     Ok(())
 }
 
@@ -445,7 +484,8 @@ fn durable_terminal_handle_rejects_absolute_or_legacy_machine_local_fields() -> 
         "log_path".to_owned(),
         json!("/Users/private/.sigil/output.log"),
     );
-    assert!(serde_json::from_value::<TerminalTaskEntry>(legacy).is_err());
+    let parsed = serde_json::from_value::<TerminalTaskEntry>(legacy)?;
+    parsed.validate_durable()?;
     Ok(())
 }
 

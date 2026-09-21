@@ -32,7 +32,7 @@ pub const MAX_SEMANTIC_COMPACTION_SOURCE_INDEX_ENTRIES: usize = 2_048;
 
 /// How the checkpoint is materialized for the next provider turn.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationCheckpointKind {
     None,
     ProviderNative,
@@ -44,7 +44,7 @@ pub enum ContinuationCheckpointKind {
 /// The frozen request bytes themselves remain process-local. This record carries only the
 /// process-keyed fingerprint, profile binding, and proof needed to audit the activation decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationTargetRequestFitV1 {
     pub material_fingerprint: String,
     pub binding: TokenMeasurementBinding,
@@ -103,7 +103,7 @@ impl ContinuationTargetRequestFitV1 {
 /// IDs are assigned by the deterministic source catalog; model output may select only catalog
 /// event IDs and can never synthesize a free-form durable reference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationSourceRef {
     pub session_id: crate::SessionId,
     pub stream_sequence: u64,
@@ -139,7 +139,7 @@ impl ContinuationSourceRef {
 
 /// Deterministic origin of one checkpoint item.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationItemOrigin {
     DurableUser,
     DurableAssistant,
@@ -149,7 +149,7 @@ pub enum ContinuationItemOrigin {
 
 /// Authority carried by a checkpoint item. Model-generated items can never become facts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationItemAuthority {
     UserInstruction,
     Observation,
@@ -158,7 +158,7 @@ pub enum ContinuationItemAuthority {
 
 /// Evidence status independently rendered alongside item authority.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationEvidenceStatus {
     DurableSource,
     ModelGeneratedUnverified,
@@ -166,7 +166,7 @@ pub enum ContinuationEvidenceStatus {
 
 /// Whether an item remains valid independently of the captured workspace snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationSnapshotScope {
     SnapshotIndependent,
     /// Workspace observation was unavailable; content must be rechecked against current files.
@@ -176,7 +176,7 @@ pub enum ContinuationSnapshotScope {
 
 /// How an item was redacted before it became part of a continuation checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationRedaction {
     Unmodified,
     Sanitized {
@@ -187,7 +187,7 @@ pub enum ContinuationRedaction {
 
 /// Priority used only for bounded continuation rendering; it does not grant authority.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum ContinuationItemPriority {
     Critical,
     Normal,
@@ -195,7 +195,7 @@ pub enum ContinuationItemPriority {
 
 /// One portable checkpoint item with deterministic metadata and closed-catalog provenance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationItemV1 {
     pub text: String,
     pub source_refs: Vec<ContinuationSourceRef>,
@@ -255,7 +255,7 @@ impl ContinuationItemV1 {
 /// model-owned continuity sections; durable task facts and pinned user constraints are rebuilt
 /// locally and are not writable by the model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationModelOutputV1 {
     pub in_progress: Vec<ContinuationModelOutputItemV1>,
     pub pending_actions: Vec<ContinuationModelOutputItemV1>,
@@ -265,7 +265,7 @@ pub struct ContinuationModelOutputV1 {
 
 /// One source-selected model continuation note from the strict compressor JSON response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationModelOutputItemV1 {
     pub text: String,
     pub source_event_ids: Vec<EventId>,
@@ -563,7 +563,7 @@ impl ContinuationSourceCatalog {
 /// Provider-visible continuation checkpoint derived from one TaskMemory sidecar and a closed
 /// durable source catalog. This is a continuation view, never a second durable fact store.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ContinuationCheckpointV1 {
     pub schema_version: u16,
     pub kind: ContinuationCheckpointKind,
@@ -1479,7 +1479,7 @@ fn render_unverified_item(item: &ContinuationItemV1) -> String {
 
 /// Inactive durable TaskMemory payload, activated only by a matching AppliedV2 terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskMemoryRecordedV1 {
     pub schema_version: u16,
     pub derived_through: CompactionCursor,
@@ -1531,7 +1531,7 @@ pub enum TaskMemoryInvalidationReason {
 
 /// Durable invalidation of one activated TaskMemory sidecar.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskMemoryInvalidatedEntry {
     pub task_memory_id: TaskMemoryId,
     pub reason: TaskMemoryInvalidationReason,

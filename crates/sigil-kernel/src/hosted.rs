@@ -52,7 +52,7 @@ impl HostedToolKind {
 
 /// Provider-neutral limits attached to one hosted-tool request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HostedToolLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<u32>,
@@ -78,7 +78,7 @@ impl HostedToolLimits {
 /// Providers derive their route-specific wire `type` from [`Self::kind`], while `name` and limits
 /// correspond to the declaration fields visible to the model.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HostedToolDeclarationV1 {
     pub schema_version: u16,
     pub kind: HostedToolKind,
@@ -152,7 +152,7 @@ impl HostedToolLimits {
 
 /// One authorized provider-hosted capability carried into request materialization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HostedToolRequest {
     pub authorization_id: String,
     pub request_fingerprint: String,
@@ -679,7 +679,9 @@ impl HostedTurnBuffer {
                 self.continuation_states.push(state);
                 Ok(())
             }
-            ProviderChunk::ReasoningArtifact(_) | ProviderChunk::Done => Ok(()),
+            ProviderChunk::Diagnostic(_)
+            | ProviderChunk::ReasoningArtifact(_)
+            | ProviderChunk::Done => Ok(()),
             ProviderChunk::ToolCallStart { .. }
             | ProviderChunk::ToolCallArgsDelta { .. }
             | ProviderChunk::ToolCallComplete(_)

@@ -3,23 +3,15 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sha2::Digest;
 
 use crate::{
-    AgentArtifactRef, AgentFinalAnswerRef, AgentThreadId, IntentCriterionId, IntentVersionRef,
-    TaskDirectExecutionAdmittedV1, TaskDirectExecutionAttemptV1,
-    provider::ToolCall,
+    AgentArtifactRef, AgentFinalAnswerRef, AgentThreadId,
     session::{ControlEntry, SessionLogEntry},
-    tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
 };
 
-pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
-pub const TASK_GUIDANCE_APPLY_TOOL_NAME: &str = "task_guidance_apply";
-/// Reserved internal tool used by Task runs to bind model-reported delivery to durable authority.
-pub const TASK_COMPLETION_CLAIM_TOOL_NAME: &str = "task_completion_claim";
 /// Durable schema carried by task-step execution-contract sidecars.
 pub const TASK_STEP_CONTRACT_V2_SCHEMA_VERSION: u16 = 2;
 const TASK_STEP_CONTRACT_MAX_ITEMS: usize = 64;
@@ -37,33 +29,9 @@ pub const TASK_PARTICIPANT_RESULT_VERIFICATION_REF_MAX_ITEMS: usize = 32;
 pub const TASK_PARTICIPANT_RESULT_REF_MAX_CHARS: usize = 1_024;
 /// Maximum characters retained for the short kind of an artifact reference.
 pub const TASK_PARTICIPANT_RESULT_ARTIFACT_KIND_MAX_CHARS: usize = 128;
-/// Maximum automatic provider-pressure retries for one task participant identity.
-pub const MAX_TASK_PARTICIPANT_AUTO_RETRIES: usize = 2;
-/// Maximum cumulative delay admitted for automatic retries of one participant identity.
-pub const MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS: u64 = 120_000;
-/// Repeating the same semantic call batch against the same result frontier twice requests a
-/// bounded participant finalization turn instead of allowing another analysis loop.
-pub const TASK_STEP_NO_PROGRESS_FINALIZE_THRESHOLD: u32 = 2;
-
 const TASK_PARTICIPANT_ATTEMPT_ID_DOMAIN: &str = "sigil-task-participant-attempt-v1";
-const TASK_PARTICIPANT_CHILD_ID_DOMAIN: &str = "sigil-task-participant-child-v1";
-const TASK_FINAL_MESSAGE_ID_DOMAIN: &str = "sigil-task-final-message-v1";
 const TASK_RUN_TARGET_SELECTION_DOMAIN: &str = "sigil-task-run-target-selection-v1";
-const TASK_GUIDANCE_MATERIALIZATION_DOMAIN: &str = "sigil-task-guidance-materialization-v1";
 
-/// Stable logical-run correlation for the planner attempt owned by one durable task.
-#[must_use]
-pub fn task_planner_logical_run_id(task_id: &TaskId) -> String {
-    format!("task-planner:{}", task_id.as_str())
-}
-
-/// Stable logical-run correlation for one participant physical attempt.
-#[must_use]
-pub fn task_participant_logical_run_id(attempt_id: &TaskParticipantAttemptId) -> String {
-    format!("task-participant:{}", attempt_id.as_str())
-}
-/// Small bounded replan budget for one task planning run.
-pub const DEFAULT_TASK_MAX_PLAN_VERSIONS: usize = 3;
 /// Maximum number of Unicode scalar values allowed in a user-facing task agent display name.
 pub const TASK_AGENT_DISPLAY_NAME_MAX_CHARS: usize = 32;
 
@@ -113,7 +81,7 @@ impl TaskStepId {
     }
 }
 
-/// Stable identifier for one planner, executable-step, or synthesis attempt.
+/// Stable identifier for one task-step participant attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct TaskParticipantAttemptId(String);
@@ -135,25 +103,16 @@ impl TaskParticipantAttemptId {
     }
 }
 
-/// Compatibility name used by step-specific orchestration code and RFC language.
-pub type TaskStepAttemptId = TaskParticipantAttemptId;
-
 /// Participant phase owned by one isolated transcript.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskParticipantPurpose {
-    Planner,
     Step,
-    Synthesis,
 }
 
 impl TaskParticipantPurpose {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Planner => "planner",
-            Self::Step => "step",
-            Self::Synthesis => "synthesis",
-        }
+        "step"
     }
 }
 
@@ -175,7 +134,26 @@ impl TaskParticipantAttemptStatus {
     }
 }
 
-/// Builds the stable identity for one participant retry.
+/// Lifecycle of one direct Task execution attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskExecutionAttemptStatus {
+    Started,
+    Completed,
+    Failed,
+    Blocked,
+    Cancelled,
+    Interrupted,
+}
+
+impl TaskExecutionAttemptStatus {
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        self != Self::Started
+    }
+}
+
+/// Builds the stable identity for one task participant attempt.
 ///
 /// # Errors
 ///
@@ -219,32 +197,6 @@ pub fn task_participant_session_ref(
             .join(task_id.as_str())
             .join(format!("{}.jsonl", attempt_id.as_str())),
     )
-}
-
-/// Builds the supervisor child task identity owned by one participant attempt.
-///
-/// # Errors
-///
-/// Returns an error when the resulting identifier is invalid.
-pub fn task_participant_child_task_id(
-    task_id: &TaskId,
-    attempt_id: &TaskParticipantAttemptId,
-) -> Result<TaskId> {
-    let digest = task_domain_hash(
-        TASK_PARTICIPANT_CHILD_ID_DOMAIN,
-        &[task_id.as_str(), attempt_id.as_str()],
-    );
-    TaskId::new(format!("child-{}", &digest[..24]))
-}
-
-/// Stable parent Assistant message identity for a committed synthesis attempt.
-#[must_use]
-pub fn task_final_message_id(task_id: &TaskId, attempt_id: &TaskParticipantAttemptId) -> String {
-    let digest = task_domain_hash(
-        TASK_FINAL_MESSAGE_ID_DOMAIN,
-        &[task_id.as_str(), attempt_id.as_str()],
-    );
-    format!("task-final-{}", &digest[..24])
 }
 
 /// Produces the bounded, persistence-safe result summary stored in the parent control log.
@@ -395,17 +347,12 @@ impl TaskRunStatus {
     }
 }
 
-/// Durable execution phase of a Task adopted through the single execution spine (RFC-0067).
-///
-/// `Preparing` is the initial phase of every adopted Task; admission transitions it to `Ready`,
-/// `Blocked` or `Paused`. `Blocked` is recoverable and never means the Task is gone.
+/// User-facing phase projected from the current Direct Task lifecycle.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskExecutionPhaseV1 {
-    Preparing,
     Ready,
     Running,
-    Blocked,
     Paused,
     Completed,
     Failed,
@@ -416,10 +363,8 @@ pub enum TaskExecutionPhaseV1 {
 impl TaskExecutionPhaseV1 {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Preparing => "preparing",
             Self::Ready => "ready",
             Self::Running => "running",
-            Self::Blocked => "blocked",
             Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -436,223 +381,6 @@ impl TaskExecutionPhaseV1 {
     }
 }
 
-/// One monotonic admission attempt of an adopted Task (RFC-0067 10.2).
-///
-/// Every resume or relevant environment change appends a higher ordinal; historical attempts are
-/// never overwritten.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskAdmissionAttemptV1 {
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub ordinal: u32,
-    pub candidate_hash: String,
-    pub observed_environment: TaskAdmissionObservationV1,
-    pub outcome: TaskAdmissionOutcomeV1,
-}
-
-impl TaskAdmissionAttemptV1 {
-    /// Validates the durable admission record is bounded and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a zero ordinal or plan version, an invalid candidate digest,
-    /// unbounded blocker text, or a malformed lease/evidence digest.
-    pub fn validate(&self) -> Result<()> {
-        if self.ordinal == 0 {
-            bail!("task admission ordinal must start at one");
-        }
-        if self.plan_version == 0 {
-            bail!("task admission plan version must start at one");
-        }
-        let digest = self
-            .candidate_hash
-            .strip_prefix("sha256:")
-            .unwrap_or(&self.candidate_hash);
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("task admission candidate hash is not a sha256 digest");
-        }
-        self.observed_environment.validate()?;
-        match &self.outcome {
-            TaskAdmissionOutcomeV1::Ready(lease) => {
-                if lease.lease_id.is_empty()
-                    || lease.lease_id.len() > 128
-                    || crate::safe_persistence_text(&lease.lease_id) != lease.lease_id
-                    || !lease.lease_id.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-                    })
-                {
-                    bail!("task admission lease id is not a bounded safe identity");
-                }
-            }
-            TaskAdmissionOutcomeV1::Blocked(blocker) => blocker.validate()?,
-            TaskAdmissionOutcomeV1::Paused(_) => {}
-        }
-        let size = serde_json::to_vec(self).context("failed to size task admission attempt")?;
-        if size.len() > MAX_TASK_ADMISSION_RECORD_BYTES {
-            bail!(
-                "task admission attempt exceeds maximum of {} bytes",
-                MAX_TASK_ADMISSION_RECORD_BYTES
-            );
-        }
-        Ok(())
-    }
-}
-
-/// Maximum serialized size of one durable Task admission attempt.
-pub const MAX_TASK_ADMISSION_RECORD_BYTES: usize = 64 * 1024;
-
-impl TaskAdmissionObservationV1 {
-    /// Validates the environment observation is bounded.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unbounded snapshot ids or duplicated capabilities.
-    pub fn validate(&self) -> Result<()> {
-        for (label, value) in [
-            (
-                "admission base workspace snapshot",
-                self.base_workspace_snapshot_id.as_deref(),
-            ),
-            (
-                "admission current workspace snapshot",
-                self.current_workspace_snapshot_id.as_deref(),
-            ),
-        ] {
-            if let Some(value) = value {
-                validate_admission_snapshot_id(label, value)?;
-            }
-        }
-        if self
-            .missing_capabilities
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .len()
-            != self.missing_capabilities.len()
-        {
-            bail!("task admission repeats a missing capability");
-        }
-        if self.missing_capabilities.len() > TASK_STEP_CONTRACT_MAX_ITEMS {
-            bail!("task admission missing capabilities exceed maximum count");
-        }
-        Ok(())
-    }
-}
-
-fn validate_admission_snapshot_id(label: &str, value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > 128 || crate::safe_persistence_text(value) != value {
-        bail!("{label} is not bounded safe text");
-    }
-    Ok(())
-}
-
-/// Environment facts observed by one Task admission attempt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskAdmissionObservationV1 {
-    pub base_workspace_snapshot_id: Option<String>,
-    pub current_workspace_snapshot_id: Option<String>,
-    pub workspace_state: WorkspaceAdmissionStateV1,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missing_capabilities: Vec<TaskCapabilityV2>,
-    pub provider_route_available: bool,
-    pub credential_available: bool,
-    pub permission_profile_ok: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_space_bytes: Option<u64>,
-    pub external_writer_active: bool,
-    pub verification_runner_available: bool,
-    pub observed_at_ms: u64,
-}
-
-/// Workspace relationship observed at admission time.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkspaceAdmissionStateV1 {
-    /// Current snapshot equals the candidate's base snapshot.
-    ExactMatch,
-    /// The workspace changed but every mutation is already audited against this Task.
-    AuditedSelfMutation,
-    /// The workspace changed without an audited cause for this Task.
-    ExternalDrift,
-    /// No current snapshot could be produced.
-    SnapshotUnavailable,
-}
-
-/// Typed admission outcome for one attempt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
-pub enum TaskAdmissionOutcomeV1 {
-    Ready(TaskRuntimeLeaseBindingV1),
-    Blocked(TaskBlockerV1),
-    Paused(TaskPauseReasonV1),
-}
-
-/// Lease binding returned when admission grants a Task runtime start.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskRuntimeLeaseBindingV1 {
-    pub lease_id: String,
-    pub granted_at_ms: u64,
-}
-
-/// Recoverable blocker produced by Task admission (RFC-0067 10.3).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskBlockerV1 {
-    pub reason_code: TaskBlockerReasonCodeV1,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected_step: Option<TaskStepId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected_capability: Option<TaskCapabilityV2>,
-    pub retryable: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_actions: Vec<TaskBlockerActionV1>,
-    pub evidence_digest: String,
-    pub created_at_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_at_ms: Option<u64>,
-}
-
-impl TaskBlockerV1 {
-    pub fn is_resolved(&self) -> bool {
-        self.resolved_at_ms.is_some()
-    }
-
-    /// Validates the blocker record is bounded and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unbounded text, an invalid evidence digest, or an impossible
-    /// created/resolved ordering.
-    pub fn validate(&self) -> Result<()> {
-        if self.summary.is_empty()
-            || self.summary.len() > TASK_STEP_CONTRACT_MAX_TEXT_CHARS
-            || crate::safe_persistence_text(&self.summary) != self.summary
-        {
-            bail!("task blocker summary is not bounded safe text");
-        }
-        let digest = self
-            .evidence_digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&self.evidence_digest);
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("task blocker evidence digest is not a sha256 digest");
-        }
-        if self.available_actions.len() > 8 {
-            bail!("task blocker available actions exceed maximum count");
-        }
-        if self
-            .resolved_at_ms
-            .is_some_and(|resolved| resolved < self.created_at_ms)
-        {
-            bail!("task blocker resolved before it was created");
-        }
-        Ok(())
-    }
-}
-
 /// A terminal fact that is about to replace one currently-started participant during root
 /// completion evaluation.
 ///
@@ -662,7 +390,7 @@ impl TaskBlockerV1 {
 pub enum TaskRootTerminalCandidateV1 {
     DirectExecution {
         attempt_id: String,
-        status: TaskParticipantAttemptStatus,
+        status: TaskExecutionAttemptStatus,
     },
     Participant {
         attempt_id: TaskParticipantAttemptId,
@@ -673,41 +401,40 @@ pub enum TaskRootTerminalCandidateV1 {
 /// Typed reason why a requested Task root completion cannot be accepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskRootCompletionBlockerV1 {
-    ActiveBlocker,
     FailedDependency,
     BlockedDependency,
     CancelledDependency,
     UnfinishedStep,
     UnfinishedParticipant,
     UnfinishedDirectExecution,
+    UnfinishedBackgroundAgent,
 }
 
 impl TaskRootCompletionBlockerV1 {
     #[must_use]
     pub fn reason_code(self) -> &'static str {
         match self {
-            Self::ActiveBlocker => "active_task_blocker",
             Self::FailedDependency => "failed_dependency",
             Self::BlockedDependency => "blocked_dependency",
             Self::CancelledDependency => "cancelled_dependency",
             Self::UnfinishedStep => "unfinished_task_step",
             Self::UnfinishedParticipant => "unfinished_task_participant",
             Self::UnfinishedDirectExecution => "unfinished_direct_execution",
+            Self::UnfinishedBackgroundAgent => "unfinished_direct_task_background_agent",
         }
     }
 }
 
 /// Durable-only evaluation of a proposed Task root terminal.
 ///
-/// `Completed` is accepted only when the active exact blocker is closed and the selected direct
-/// execution or DAG has no unfinished participant or step. For a cancelled root, the evaluator
+/// `Completed` is accepted only when the selected direct execution or IntentStack TaskPlan has
+/// no unfinished participant or step. For a cancelled root, the evaluator
 /// also returns the complete set of non-completed current-plan steps that must receive a
 /// cancellation terminal before the root closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRootTerminalEvaluationV1 {
     pub requested_status: TaskRunStatus,
     pub effective_status: TaskRunStatus,
-    pub active_blocker: Option<TaskBlockerV1>,
     /// Descendants of failed, blocked, or interrupted dependencies that cannot continue.
     pub blocked_dependency_steps: Vec<TaskStepId>,
     /// Descendants of a cancelled dependency that must not remain runnable.
@@ -717,6 +444,8 @@ pub struct TaskRootTerminalEvaluationV1 {
     pub unfinished_steps: Vec<TaskStepId>,
     pub unfinished_participants: Vec<TaskParticipantAttemptId>,
     pub unfinished_direct_attempts: Vec<String>,
+    /// Direct Task background agents whose exact durable grant is still active.
+    pub unfinished_direct_task_background_agents: Vec<AgentThreadId>,
     pub completion_blockers: Vec<TaskRootCompletionBlockerV1>,
 }
 
@@ -730,93 +459,6 @@ impl TaskRootTerminalEvaluationV1 {
     #[must_use]
     pub fn primary_completion_blocker(&self) -> Option<TaskRootCompletionBlockerV1> {
         self.completion_blockers.first().copied()
-    }
-}
-
-/// Stable blocker reason codes (RFC-0067 10.3).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskBlockerReasonCodeV1 {
-    WorkspaceChanged,
-    WorkspaceSnapshotUnavailable,
-    MissingRequiredCapability,
-    ProviderUnavailable,
-    CredentialUnavailable,
-    PermissionRequired,
-    WorkspaceTrustRequired,
-    ExternalWriterActive,
-    IsolationUnavailable,
-    DiskSpaceExhausted,
-    ArtifactStorageUnavailable,
-    SessionStorageDegraded,
-    VerificationRunnerUnavailable,
-    RouteRebindRequired,
-    ContractRecompileRequired,
-}
-
-impl TaskBlockerReasonCodeV1 {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::WorkspaceChanged => "workspace_changed",
-            Self::WorkspaceSnapshotUnavailable => "workspace_snapshot_unavailable",
-            Self::MissingRequiredCapability => "missing_required_capability",
-            Self::ProviderUnavailable => "provider_unavailable",
-            Self::CredentialUnavailable => "credential_unavailable",
-            Self::PermissionRequired => "permission_required",
-            Self::WorkspaceTrustRequired => "workspace_trust_required",
-            Self::ExternalWriterActive => "external_writer_active",
-            Self::IsolationUnavailable => "isolation_unavailable",
-            Self::DiskSpaceExhausted => "disk_space_exhausted",
-            Self::ArtifactStorageUnavailable => "artifact_storage_unavailable",
-            Self::SessionStorageDegraded => "session_storage_degraded",
-            Self::VerificationRunnerUnavailable => "verification_runner_unavailable",
-            Self::RouteRebindRequired => "route_rebind_required",
-            Self::ContractRecompileRequired => "contract_recompile_required",
-        }
-    }
-}
-
-/// Typed action a user may take on an active blocker.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskBlockerActionV1 {
-    RetryAdmission,
-    Replan,
-    Cancel,
-    RebindRoute,
-    GrantPermission,
-    Resume,
-}
-
-impl TaskBlockerActionV1 {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::RetryAdmission => "retry_admission",
-            Self::Replan => "replan",
-            Self::Cancel => "cancel",
-            Self::RebindRoute => "rebind_route",
-            Self::GrantPermission => "grant_permission",
-            Self::Resume => "resume",
-        }
-    }
-}
-
-/// Durable reason a Task is paused (RFC-0067 10.1).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPauseReasonV1 {
-    UserRequested,
-    CreatePaused,
-    AdmissionHeld,
-}
-
-impl TaskPauseReasonV1 {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::UserRequested => "user_requested",
-            Self::CreatePaused => "create_paused",
-            Self::AdmissionHeld => "admission_held",
-        }
     }
 }
 
@@ -957,6 +599,7 @@ impl TaskStepStatus {
 pub enum TaskChildSessionStatus {
     Started,
     Completed,
+    Blocked,
     Failed,
     Cancelled,
     Interrupted,
@@ -1010,133 +653,6 @@ pub struct TaskExecutionSegmentV1 {
     pub role: AgentRole,
     pub mode: TaskStepMode,
     pub isolation: TaskIsolationMode,
-}
-
-/// Continuation boundary attached to one materialized execution segment.
-///
-/// A segment only joins a direct dependency chain. It never turns parallel work into a shared
-/// transcript and never expands the authority granted to an individual step.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ContinuationContractV1 {
-    ExactLinearSameAuthority,
-}
-
-/// Checkpoint cadence required before a segment may continue after interruption.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SegmentCheckpointPolicyV1 {
-    EveryProviderTurn,
-}
-
-/// RFC-0069 durable execution-segment receipt carried by Task materialization.
-///
-/// Individual steps retain their own lifecycle and completion proof. This record only proves
-/// which exact linear steps may reuse a participant/provider continuity boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct ExecutionSegmentV1 {
-    pub segment_id: String,
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub ordered_step_ids: Vec<TaskStepId>,
-    pub role: AgentRole,
-    pub authority_fingerprint: String,
-    pub isolation: TaskIsolationMode,
-    pub continuation_contract: ContinuationContractV1,
-    pub checkpoint_policy: SegmentCheckpointPolicyV1,
-}
-
-/// Materializes the exact segment receipts for an executable candidate.
-///
-/// The authority fingerprint covers role, effective mode, isolation and the resolved V2
-/// capability set. This makes a candidate produced under a different task contract unable to
-/// silently reuse an earlier participant transcript.
-#[must_use]
-pub fn materialize_execution_segments(
-    candidate: &crate::ExecutablePlanCandidateV1,
-) -> Vec<ExecutionSegmentV1> {
-    let mut segments = Vec::<ExecutionSegmentV1>::new();
-    for step in &candidate.task_plan.steps {
-        let mode = step.effective_mode();
-        let isolation = step.effective_isolation();
-        let authority_fingerprint = execution_segment_authority_fingerprint(candidate, step);
-        let joins_previous = segments.last().is_some_and(|segment| {
-            let Some(previous) = segment.ordered_step_ids.last() else {
-                return false;
-            };
-            step.depends_on.as_slice() == std::slice::from_ref(previous)
-                && segment.role == step.role
-                && segment.isolation == isolation
-                && segment.authority_fingerprint == authority_fingerprint
-        });
-        if joins_previous {
-            if let Some(segment) = segments.last_mut() {
-                segment.ordered_step_ids.push(step.step_id.clone());
-            }
-            continue;
-        }
-        let plan_version = candidate.task_plan.plan_version.to_string();
-        let segment_id = format!(
-            "segment-{}",
-            &task_domain_hash(
-                "sigil-execution-segment-v1",
-                &[
-                    candidate.task_id.as_str(),
-                    &plan_version,
-                    step.step_id.as_str(),
-                    step.role.as_str(),
-                    mode.as_str(),
-                    isolation.as_str(),
-                    &authority_fingerprint,
-                ],
-            )[..24]
-        );
-        segments.push(ExecutionSegmentV1 {
-            segment_id,
-            task_id: candidate.task_id.clone(),
-            plan_version: candidate.task_plan.plan_version,
-            ordered_step_ids: vec![step.step_id.clone()],
-            role: step.role,
-            authority_fingerprint,
-            isolation,
-            continuation_contract: ContinuationContractV1::ExactLinearSameAuthority,
-            checkpoint_policy: SegmentCheckpointPolicyV1::EveryProviderTurn,
-        });
-    }
-    segments
-}
-
-fn execution_segment_authority_fingerprint(
-    candidate: &crate::ExecutablePlanCandidateV1,
-    step: &TaskStepSpec,
-) -> String {
-    let mut capabilities = candidate
-        .step_contracts
-        .iter()
-        .find(|binding| binding.step_id == step.step_id)
-        .map(|binding| {
-            binding
-                .contract
-                .required_capabilities
-                .iter()
-                .map(|capability| capability.as_str())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    capabilities.sort_unstable();
-    format!(
-        "sha256:{}",
-        task_domain_hash(
-            "sigil-execution-segment-authority-v1",
-            &[
-                step.role.as_str(),
-                step.effective_mode().as_str(),
-                step.effective_isolation().as_str(),
-                &capabilities.join(","),
-            ],
-        )
-    )
 }
 
 /// Groups only exact linear neighbours with identical execution contracts.
@@ -1224,7 +740,7 @@ impl TaskCapabilityV2 {
 /// payloads therefore retain their exact meaning and replay with an empty contract, while V2
 /// planners can preserve scope, deliverables, acceptance criteria, and capability requirements.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskStepContractV2 {
     pub schema_version: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1295,7 +811,7 @@ impl TaskStepContractV2 {
 
 /// Binds a V2 execution contract to one immutable task-plan incarnation and step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskStepContractBoundEntryV2 {
     pub task_id: TaskId,
     pub plan_version: u32,
@@ -1306,7 +822,7 @@ pub struct TaskStepContractBoundEntryV2 {
 /// Terminal marker proving that one accepted plan and its complete V2 sidecar set were committed
 /// as a single recovery unit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskPlanContractSetCommittedV2 {
     pub schema_version: u16,
     pub task_id: TaskId,
@@ -1471,696 +987,6 @@ impl TaskStepSpec {
     }
 }
 
-/// Host-proven availability of private worktree execution for one planner run.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPlannerWorktreeAvailability {
-    AvailableWithInteractiveReview,
-    UnavailableHeadless,
-    UnavailableWorkspace,
-    #[default]
-    UnavailableRunner,
-}
-
-impl TaskPlannerWorktreeAvailability {
-    #[must_use]
-    pub fn is_available(self) -> bool {
-        self == Self::AvailableWithInteractiveReview
-    }
-
-    #[must_use]
-    pub fn planner_material(self) -> &'static str {
-        match self {
-            Self::AvailableWithInteractiveReview => {
-                "available: this workspace supports private Git worktrees and this interactive run can present the required integration review and promotion. Use worktree only when parallel physical isolation materially benefits the objective."
-            }
-            Self::UnavailableHeadless => {
-                "unavailable: this headless run cannot complete the required integration review and promotion. Use executor with sequential_workspace_write for implementation changes."
-            }
-            Self::UnavailableWorkspace => {
-                "unavailable: the host did not prove this workspace can materialize private Git worktrees. Use executor with sequential_workspace_write for implementation changes."
-            }
-            Self::UnavailableRunner => {
-                "unavailable: this runtime cannot materialize and integrate private worktrees. Use executor with sequential_workspace_write for implementation changes."
-            }
-        }
-    }
-}
-
-/// Bound task context for the internal planner tool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct TaskPlanUpdateContext {
-    pub task_id: TaskId,
-    pub max_plan_steps: usize,
-    pub max_plan_versions: usize,
-    #[serde(default)]
-    pub worktree_availability: TaskPlannerWorktreeAvailability,
-}
-
-/// Host-owned facts exposed to one model-driven task-guidance review.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct TaskGuidanceAssessmentContext {
-    pub queue_id: crate::ConversationInputQueueId,
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub dispatch_run_id: String,
-    pub accepted_plan: TaskPlanEntry,
-    pub eligible_pending_step_ids: Vec<TaskStepId>,
-}
-
-impl TaskGuidanceAssessmentContext {
-    /// Validates that the review context is bound to one current accepted plan.
-    pub fn validate_shape(&self) -> Result<()> {
-        if self.plan_version == 0 {
-            bail!("task guidance assessment plan version must be non-zero");
-        }
-        validate_stable_id(
-            "task guidance assessment dispatch run id",
-            &self.dispatch_run_id,
-        )?;
-        if self.accepted_plan.task_id != self.task_id
-            || self.accepted_plan.plan_version != self.plan_version
-            || self.accepted_plan.status != TaskPlanStatus::Accepted
-        {
-            bail!("task guidance assessment accepted plan does not match its task binding");
-        }
-        validate_task_plan_graph_steps(&self.accepted_plan.steps)?;
-        let plan_step_ids = self
-            .accepted_plan
-            .steps
-            .iter()
-            .map(|step| &step.step_id)
-            .collect::<BTreeSet<_>>();
-        let mut seen = BTreeSet::new();
-        for step_id in &self.eligible_pending_step_ids {
-            if !plan_step_ids.contains(step_id) {
-                bail!(
-                    "task guidance assessment eligible step {} is absent from the accepted plan",
-                    step_id.as_str()
-                );
-            }
-            if !seen.insert(step_id) {
-                bail!(
-                    "task guidance assessment repeats eligible step {}",
-                    step_id.as_str()
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Bounded model-owned reason for applying guidance without changing the accepted plan.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskGuidanceApplyReason {
-    ClarifiesExistingStep,
-    PrioritizesPendingStep,
-    AddsExecutionConstraint,
-}
-
-/// Durable model decision that guidance can be materialized only into not-yet-started steps.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskGuidanceAppliedEntry {
-    pub queue_id: crate::ConversationInputQueueId,
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub dispatch_run_id: String,
-    pub reason: TaskGuidanceApplyReason,
-    pub target_step_ids: Vec<TaskStepId>,
-}
-
-impl TaskGuidanceAppliedEntry {
-    pub fn validate_against(&self, context: &TaskGuidanceAssessmentContext) -> Result<()> {
-        context.validate_shape()?;
-        if self.queue_id != context.queue_id
-            || self.task_id != context.task_id
-            || self.plan_version != context.plan_version
-            || self.dispatch_run_id != context.dispatch_run_id
-        {
-            bail!("task guidance applied entry does not match its host assessment binding");
-        }
-        if self.target_step_ids.is_empty() {
-            bail!("task guidance apply decision requires at least one target step");
-        }
-        let eligible = context
-            .eligible_pending_step_ids
-            .iter()
-            .collect::<BTreeSet<_>>();
-        let mut seen = BTreeSet::new();
-        for step_id in &self.target_step_ids {
-            if !eligible.contains(step_id) {
-                bail!(
-                    "task guidance apply target {} is not an eligible pending step",
-                    step_id.as_str()
-                );
-            }
-            if !seen.insert(step_id) {
-                bail!(
-                    "task guidance apply decision repeats target step {}",
-                    step_id.as_str()
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Recovery-critical safe materialization of one accepted guidance supplement.
-///
-/// This record is appended atomically with the parent `TaskGuidanceApplied` decision after the
-/// planner attempt is durably terminal. Non-sensitive guidance can therefore resume without
-/// rerunning the planner. Sensitive guidance records only its safe projection and is explicitly
-/// stale after process loss because the exact prompt is intentionally not persisted.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskGuidanceMaterializedEntry {
-    pub materialization_id: String,
-    pub queue_id: crate::ConversationInputQueueId,
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub dispatch_run_id: String,
-    pub prompt_hash: String,
-    pub exact_prompt_required: bool,
-    pub guidance: String,
-    pub target_step_ids: Vec<TaskStepId>,
-}
-
-impl TaskGuidanceMaterializedEntry {
-    pub fn new(
-        applied: &TaskGuidanceAppliedEntry,
-        prompt_hash: String,
-        exact_prompt_required: bool,
-        guidance: String,
-    ) -> Result<Self> {
-        let materialization_id = task_guidance_materialization_id(
-            &applied.queue_id,
-            &applied.task_id,
-            applied.plan_version,
-            &applied.dispatch_run_id,
-        );
-        let entry = Self {
-            materialization_id,
-            queue_id: applied.queue_id.clone(),
-            task_id: applied.task_id.clone(),
-            plan_version: applied.plan_version,
-            dispatch_run_id: applied.dispatch_run_id.clone(),
-            prompt_hash,
-            exact_prompt_required,
-            guidance,
-            target_step_ids: applied.target_step_ids.clone(),
-        };
-        entry.validate_against(applied)?;
-        Ok(entry)
-    }
-
-    pub fn validate_shape(&self) -> Result<()> {
-        TaskId::new(self.task_id.as_str())?;
-        if self.plan_version == 0 || self.dispatch_run_id.trim().is_empty() {
-            bail!("task guidance materialization binding is incomplete");
-        }
-        if self.materialization_id
-            != task_guidance_materialization_id(
-                &self.queue_id,
-                &self.task_id,
-                self.plan_version,
-                &self.dispatch_run_id,
-            )
-        {
-            bail!("task guidance materialization identity does not match its binding");
-        }
-        if self.target_step_ids.is_empty() {
-            bail!("task guidance materialization has no target steps");
-        }
-        let mut targets = BTreeSet::new();
-        if self
-            .target_step_ids
-            .iter()
-            .any(|step_id| !targets.insert(step_id))
-        {
-            bail!("task guidance materialization repeats a target step");
-        }
-        let projected = crate::project_conversation_prompt_for_persistence(&self.guidance);
-        if projected.exact_prompt_required || projected.safe_prompt != self.guidance {
-            bail!("task guidance materialization is not a safe durable projection");
-        }
-        let safe_hash = projected
-            .prompt_hash
-            .strip_prefix("safe:")
-            .ok_or_else(|| anyhow!("task guidance materialization hash projection is invalid"))?;
-        let expected_prompt_hash = if self.exact_prompt_required {
-            format!(
-                "{}{}",
-                crate::CONVERSATION_EXACT_PROMPT_REQUIRED_HASH_PREFIX,
-                safe_hash
-            )
-        } else {
-            format!("safe:{safe_hash}")
-        };
-        if self.prompt_hash != expected_prompt_hash {
-            bail!("task guidance materialization does not match its prompt hash");
-        }
-        Ok(())
-    }
-
-    pub fn validate_against(&self, applied: &TaskGuidanceAppliedEntry) -> Result<()> {
-        self.validate_shape()?;
-        if self.queue_id != applied.queue_id
-            || self.task_id != applied.task_id
-            || self.plan_version != applied.plan_version
-            || self.dispatch_run_id != applied.dispatch_run_id
-            || self.target_step_ids != applied.target_step_ids
-        {
-            bail!("task guidance materialization does not match its applied decision");
-        }
-        Ok(())
-    }
-}
-
-fn task_guidance_materialization_id(
-    queue_id: &crate::ConversationInputQueueId,
-    task_id: &TaskId,
-    plan_version: u32,
-    dispatch_run_id: &str,
-) -> String {
-    crate::stable_event_uuid(
-        TASK_GUIDANCE_MATERIALIZATION_DOMAIN,
-        &format!(
-            "{}\n{}\n{plan_version}\n{dispatch_run_id}",
-            queue_id.as_str(),
-            task_id.as_str()
-        ),
-    )
-}
-
-/// Model-visible tool for guidance that does not require a plan or scope change.
-pub fn task_guidance_apply_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: TASK_GUIDANCE_APPLY_TOOL_NAME.to_owned(),
-        description: "Apply the user's guidance only when it clarifies, prioritizes, or constrains work already represented by not-yet-started steps in the accepted plan. If the guidance changes scope, accepted intent, dependencies, roles, isolation, or required steps, call task_plan_update with the next plan version instead."
-            .to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": [
-                        "clarifies_existing_step",
-                        "prioritizes_pending_step",
-                        "adds_execution_constraint"
-                    ]
-                },
-                "target_step_ids": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "string",
-                        "minLength": 1
-                    }
-                }
-            },
-            "required": ["reason", "target_step_ids"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawTaskGuidanceApplyArgs {
-    reason: TaskGuidanceApplyReason,
-    target_step_ids: Vec<TaskStepId>,
-}
-
-/// Parses one model decision to supplement the current accepted plan.
-pub fn task_guidance_applied_entry(
-    context: &TaskGuidanceAssessmentContext,
-    call: &ToolCall,
-) -> Result<TaskGuidanceAppliedEntry> {
-    context.validate_shape()?;
-    if call.name != TASK_GUIDANCE_APPLY_TOOL_NAME {
-        bail!("unexpected internal task guidance tool {}", call.name);
-    }
-    let args: RawTaskGuidanceApplyArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid task guidance apply arguments: {error}"))?;
-    let entry = TaskGuidanceAppliedEntry {
-        queue_id: context.queue_id.clone(),
-        task_id: context.task_id.clone(),
-        plan_version: context.plan_version,
-        dispatch_run_id: context.dispatch_run_id.clone(),
-        reason: args.reason,
-        target_step_ids: args.target_step_ids,
-    };
-    entry.validate_against(context)?;
-    Ok(entry)
-}
-
-/// Bounded model-visible acknowledgement for an accepted supplement decision.
-pub fn task_guidance_apply_result_content(entry: &TaskGuidanceAppliedEntry) -> String {
-    json!({
-        "task_id": entry.task_id.as_str(),
-        "plan_version": entry.plan_version,
-        "decision": "supplement_pending_steps",
-        "target_steps": entry.target_step_ids.len(),
-        "next_action": "stop; the system orchestrator will materialize the guidance into pending step inputs"
-    })
-    .to_string()
-}
-
-/// Model-visible schema for the internal planner plan-update tool.
-pub fn task_plan_update_tool_spec() -> ToolSpec {
-    task_plan_update_tool_spec_for_worktree(
-        TaskPlannerWorktreeAvailability::AvailableWithInteractiveReview,
-    )
-}
-
-pub(crate) fn task_plan_update_tool_spec_for_worktree(
-    worktree_availability: TaskPlannerWorktreeAvailability,
-) -> ToolSpec {
-    let mut isolation_modes = vec![
-        "shared_read_only",
-        "sequential_workspace_write",
-        "changeset_only",
-    ];
-    if worktree_availability.is_available() {
-        isolation_modes.push("worktree");
-    }
-    ToolSpec {
-        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description: format!(
-            "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools. Repository targets must be grounded in explicit objective paths or completed planner discovery; never guess files or report artifacts. Paths in step details must be relative to the bound workspace root and must not begin with a slash. Normalize a presentation-only leading slash from discovery prose, but never use an absolute host path. Use executor for ordinary main-session reads and edits. Use subagent_read only for delegated read-only investigation or advisory review. Verification checks are system-owned and must not be represented as participant steps. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree isolation only when the host capability allows it. Worktree planning capability: {}",
-            worktree_availability.planner_material()
-        ),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "plan_version": {
-                    "type": "integer",
-                    "minimum": 1
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["proposed", "accepted"]
-                },
-                "steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step_id": {
-                                "type": "string",
-                                "description": "Stable id using only letters, digits, dash, or underscore."
-                            },
-                            "title": {"type": "string"},
-                            "display_name": {
-                                "type": "string",
-                                "description": "Optional short presentation-only name for a child agent spawned from this step. Prefer explicit configured agent or nickname names; do not use this as an identifier."
-                            },
-                            "detail": {
-                                "type": "string",
-                                "description": "Bounded execution instructions. Any repository path must be workspace-relative and must not begin with a slash."
-                            },
-                            "target_paths": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Concrete workspace-relative files or directories this step may inspect or change."
-                            },
-                            "required_capabilities": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "enum": ["workspace_read", "workspace_write", "vcs_read", "process_execute", "network_read", "artifact_read"]
-                                },
-                                "description": "Semantic participant capabilities required before the step may launch. Use vcs_read for git status/diff inspection instead of assuming shell access. Trusted verification is host-owned and must be expressed through check_spec_refs, not verification_run."
-                            },
-                            "deliverables": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Concrete outputs this step must return to its dependents."
-                            },
-                            "acceptance_criteria": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Observable completion criteria for this step."
-                            },
-                            "check_spec_refs": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Trusted verification check identifiers consumed by the host verifier."
-                            },
-                            "risk": {"type": "string"},
-                            "notes": {
-                                "type": "array",
-                                "items": {"type": "string"}
-                            },
-                            "role": {
-                                "type": "string",
-                                "enum": ["planner", "executor", "subagent_read", "subagent_write"],
-                                "description": "Use executor for ordinary main-session work, including sequential_workspace_write edits. Use subagent_read for delegated read-only investigation or advisory review. changeset_only is proposal-only and pauses for manual merge review. Use subagent_write with worktree for a physically isolated writer that must implement and integrate changes."
-                            },
-                            "depends_on": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "description": "Step id that must complete before this step is ready."
-                                },
-                                "description": "Explicit DAG dependencies. Omit or use [] for an independent step."
-                            },
-                            "mode": {
-                                "type": "string",
-                                "enum": ["read", "write", "review"],
-                                "description": "Optional participant intent. Omit when the role default is enough. Reviewer output is advisory; system verification is not a participant step."
-                            },
-                            "isolation": {
-                                "type": "string",
-                                "enum": isolation_modes,
-                                "description": format!("Optional workspace isolation contract. Omit unless a non-default is required. Write steps default to sequential_workspace_write for executor. subagent_write requires an advertised child-write isolation. changeset_only produces a proposal and pauses for manual merge review. Read/review steps always use shared_read_only. Worktree planning capability: {}", worktree_availability.planner_material())
-                            }
-                        },
-                        "required": ["step_id", "title", "role"],
-                        "additionalProperties": false
-                    }
-                },
-                "reason": {"type": "string"}
-            },
-            "required": ["plan_version", "status", "steps"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-/// Parses one internal `task_plan_update` call into a durable task plan entry.
-///
-/// # Errors
-///
-/// Returns an error when JSON arguments are invalid, exceed limits, or contain unsupported ids.
-pub fn task_plan_update_entry(
-    context: &TaskPlanUpdateContext,
-    call: &ToolCall,
-) -> Result<TaskPlanEntry> {
-    Ok(task_plan_update_commit_v2(context, call)?.plan)
-}
-
-/// Parsed task plan plus its lossless V2 execution-contract sidecars.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskPlanUpdateCommitV2 {
-    pub plan: TaskPlanEntry,
-    pub step_contracts: Vec<TaskStepContractBoundEntryV2>,
-}
-
-/// Parses one internal `task_plan_update` call without dropping step execution metadata.
-///
-/// # Errors
-///
-/// Returns an error when the plan or any V2 sidecar is invalid.
-pub fn task_plan_update_commit_v2(
-    context: &TaskPlanUpdateContext,
-    call: &ToolCall,
-) -> Result<TaskPlanUpdateCommitV2> {
-    if call.name != TASK_PLAN_UPDATE_TOOL_NAME {
-        bail!("unexpected internal task tool {}", call.name);
-    }
-    let args: RawTaskPlanUpdateArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid task plan update arguments: {error}"))?;
-    if args.plan_version == 0 {
-        bail!("task plan version must be at least 1");
-    }
-    if usize::try_from(args.plan_version).unwrap_or(usize::MAX) > context.max_plan_versions {
-        bail!(
-            "task plan version {} exceeds maximum {}",
-            args.plan_version,
-            context.max_plan_versions
-        );
-    }
-    if args.steps.is_empty() {
-        bail!("task plan must contain at least one step");
-    }
-    if args.steps.len() > context.max_plan_steps {
-        bail!(
-            "task plan contains {} steps, maximum is {}",
-            args.steps.len(),
-            context.max_plan_steps
-        );
-    }
-    let plan_version = args.plan_version;
-    let status = args.status;
-    let reason = args.reason;
-    let mut steps = Vec::with_capacity(args.steps.len());
-    let mut step_contracts = Vec::with_capacity(args.steps.len());
-    for step in args.steps {
-        let raw_step_id = step.step_id.clone();
-        let display_name = match step.display_name.as_deref() {
-            Some(display_name) => {
-                let normalized =
-                    normalize_task_agent_display_name(display_name).map_err(|error| {
-                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
-                    })?;
-                Some(
-                    normalize_task_agent_display_name(&crate::safe_persistence_text(&normalized))
-                        .map_err(|error| {
-                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
-                    })?,
-                )
-            }
-            None => None,
-        };
-        let mode = step
-            .mode
-            .unwrap_or_else(|| TaskStepMode::default_for_role(step.role));
-        let isolation = canonical_task_plan_update_isolation(mode, step.isolation);
-        let step_id = TaskStepId::new(step.step_id)?;
-        let task_step = TaskStepSpec {
-            step_id: step_id.clone(),
-            title: crate::safe_persistence_text(&step.title),
-            display_name,
-            detail: step.detail.as_deref().map(crate::safe_persistence_text),
-            role: step.role,
-            depends_on: step
-                .depends_on
-                .into_iter()
-                .map(TaskStepId::new)
-                .collect::<Result<Vec<_>>>()?,
-            intent_refs: Vec::new(),
-            mode: Some(mode),
-            isolation: Some(isolation),
-        };
-        if step
-            .required_capabilities
-            .contains(&TaskCapabilityV2::VerificationRun)
-        {
-            bail!(
-                "task planner cannot delegate verification_run for step {raw_step_id}; use check_spec_refs for host-owned verification"
-            );
-        }
-        let mut required_capabilities = default_task_step_capabilities(mode, isolation)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        required_capabilities.extend(step.required_capabilities);
-        let contract = TaskStepContractV2 {
-            schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
-            target_paths: step.target_paths,
-            required_capabilities: required_capabilities.into_iter().collect(),
-            deliverables: step.deliverables,
-            acceptance_criteria: step.acceptance_criteria,
-            check_spec_refs: step.check_spec_refs,
-            risk: step.risk,
-            notes: step.notes,
-        };
-        contract.validate().map_err(|error| {
-            anyhow!("invalid execution contract for step {raw_step_id}: {error}")
-        })?;
-        steps.push(task_step);
-        step_contracts.push(TaskStepContractBoundEntryV2 {
-            task_id: context.task_id.clone(),
-            plan_version,
-            step_id,
-            contract,
-        });
-    }
-    validate_task_plan_graph_steps(&steps)?;
-    if steps
-        .iter()
-        .any(|step| step.effective_mode() == TaskStepMode::Verify)
-    {
-        bail!(
-            "task planner cannot create verify participant steps; trusted verification is system-owned"
-        );
-    }
-    if !context.worktree_availability.is_available()
-        && steps
-            .iter()
-            .any(|step| step.effective_isolation() == TaskIsolationMode::Worktree)
-    {
-        bail!(
-            "worktree isolation is unavailable for this planning run; use executor with sequential_workspace_write"
-        );
-    }
-    Ok(TaskPlanUpdateCommitV2 {
-        plan: TaskPlanEntry {
-            task_id: context.task_id.clone(),
-            plan_version,
-            status,
-            steps,
-            reason: reason.as_deref().map(crate::safe_persistence_text),
-        },
-        step_contracts,
-    })
-}
-
-fn default_task_step_capabilities(
-    mode: TaskStepMode,
-    isolation: TaskIsolationMode,
-) -> Vec<TaskCapabilityV2> {
-    match mode {
-        TaskStepMode::Write if isolation == TaskIsolationMode::ChangesetOnly => {
-            vec![TaskCapabilityV2::WorkspaceRead]
-        }
-        TaskStepMode::Write => vec![
-            TaskCapabilityV2::WorkspaceRead,
-            TaskCapabilityV2::WorkspaceWrite,
-        ],
-        TaskStepMode::Read | TaskStepMode::Review => vec![TaskCapabilityV2::WorkspaceRead],
-        TaskStepMode::Verify => vec![TaskCapabilityV2::VerificationRun],
-    }
-}
-
-fn canonical_task_plan_update_isolation(
-    mode: TaskStepMode,
-    isolation: Option<TaskIsolationMode>,
-) -> TaskIsolationMode {
-    match mode {
-        TaskStepMode::Write => isolation
-            .filter(|isolation| isolation.is_write_isolation())
-            .unwrap_or(TaskIsolationMode::SequentialWorkspaceWrite),
-        TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify => {
-            TaskIsolationMode::SharedReadOnly
-        }
-    }
-}
-
-/// Bounded model-visible response content for `task_plan_update`.
-pub fn task_plan_update_result_content(entry: &TaskPlanEntry) -> String {
-    json!({
-        "task_id": entry.task_id.as_str(),
-        "plan_version": entry.plan_version,
-        "status": entry.status,
-        "steps": entry.steps.len(),
-        "next_action": "stop; the system orchestrator will run accepted plan steps"
-    })
-    .to_string()
-}
-
 /// Validates DAG metadata carried by task plan steps.
 ///
 /// # Errors
@@ -2303,65 +1129,6 @@ fn visit_task_step(
     Ok(())
 }
 
-fn deserialize_task_plan_status<'de, D>(
-    deserializer: D,
-) -> std::result::Result<TaskPlanStatus, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    match value.as_str() {
-        "proposed" => Ok(TaskPlanStatus::Proposed),
-        "accepted" => Ok(TaskPlanStatus::Accepted),
-        other => Err(serde::de::Error::custom(format!(
-            "unsupported task plan status {other}"
-        ))),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawTaskPlanUpdateArgs {
-    pub plan_version: u32,
-    #[serde(deserialize_with = "deserialize_task_plan_status")]
-    pub status: TaskPlanStatus,
-    pub steps: Vec<RawTaskStepSpec>,
-    #[serde(default)]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawTaskStepSpec {
-    pub step_id: String,
-    pub title: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub detail: Option<String>,
-    #[serde(default)]
-    pub target_paths: Vec<String>,
-    #[serde(default)]
-    pub required_capabilities: Vec<TaskCapabilityV2>,
-    #[serde(default)]
-    pub deliverables: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub check_spec_refs: Vec<String>,
-    #[serde(default)]
-    pub risk: Option<String>,
-    #[serde(default)]
-    pub notes: Vec<String>,
-    pub role: AgentRole,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub mode: Option<TaskStepMode>,
-    #[serde(default)]
-    pub isolation: Option<TaskIsolationMode>,
-}
-
 /// Append-only task run lifecycle entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2395,7 +1162,7 @@ pub struct TaskRunCancellationScopeBoundEntry {
 /// continuation to the root cancellation scope plus the exact pre-dispatch Task/plan facts, so a
 /// replay can restore focus without treating a late `TaskRun(Running)` as user intent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskRunTargetSelectedEntry {
     pub selection_id: String,
     pub task_id: TaskId,
@@ -2470,10 +1237,8 @@ fn task_run_target_selection_id(task_id: &TaskId, run_scope_id: &str) -> String 
 
 /// Exact execution authority rendered with a Task pause action.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TaskExecutionBindingV1 {
-    /// One accepted multi-step TaskPlan generation.
-    Plan { plan_version: u32 },
     /// One first-class direct-execution admission.
     Direct { admission_id: String },
 }
@@ -2481,7 +1246,6 @@ pub enum TaskExecutionBindingV1 {
 impl TaskExecutionBindingV1 {
     fn validate(&self) -> bool {
         match self {
-            Self::Plan { plan_version } => *plan_version > 0,
             Self::Direct { admission_id } => {
                 !admission_id.is_empty()
                     && admission_id.len() <= 256
@@ -2493,7 +1257,7 @@ impl TaskExecutionBindingV1 {
 
 /// Exact user action that pauses one admitted Task execution incarnation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskPauseRequest {
     pub request_id: String,
     pub task_id: TaskId,
@@ -2501,17 +1265,6 @@ pub struct TaskPauseRequest {
 }
 
 impl TaskPauseRequest {
-    #[must_use]
-    pub fn new(task_id: TaskId, plan_version: u32) -> Self {
-        let mut request = Self {
-            request_id: String::new(),
-            task_id,
-            execution: TaskExecutionBindingV1::Plan { plan_version },
-        };
-        request.request_id = request.expected_request_id();
-        request
-    }
-
     /// Creates a pause request bound to first-class direct-execution authority.
     #[must_use]
     pub fn direct(task_id: TaskId, admission_id: impl Into<String>) -> Self {
@@ -2601,33 +1354,13 @@ impl TaskParticipantAttemptEntry {
     ///
     /// # Errors
     ///
-    /// Returns an error when planner, step, or synthesis facts are inconsistent.
+    /// Returns an error when step facts are inconsistent.
     pub fn validate_shape(&self) -> Result<()> {
         if self.ordinal == 0 {
             bail!("task participant attempt ordinal must start at one");
         }
-        match self.purpose {
-            TaskParticipantPurpose::Planner => {
-                if self.plan_version.is_some()
-                    || self.step_id.is_some()
-                    || self.role != AgentRole::Planner
-                {
-                    bail!("planner participant attempt has invalid plan or role facts");
-                }
-            }
-            TaskParticipantPurpose::Step => {
-                if self.plan_version.is_none() || self.step_id.is_none() {
-                    bail!("step participant attempt is missing plan or step identity");
-                }
-            }
-            TaskParticipantPurpose::Synthesis => {
-                if self.plan_version.is_none()
-                    || self.step_id.is_some()
-                    || self.role != AgentRole::Planner
-                {
-                    bail!("synthesis participant attempt has invalid plan or role facts");
-                }
-            }
+        if self.plan_version.is_none() || self.step_id.is_none() {
+            bail!("step participant attempt is missing plan or step identity");
         }
         let expected = task_participant_attempt_id(
             &self.task_id,
@@ -2640,7 +1373,7 @@ impl TaskParticipantAttemptEntry {
             bail!("task participant attempt id conflicts with its durable identity facts");
         }
         let expected_ref = task_participant_session_ref(&self.task_id, &self.attempt_id)?;
-        if self.purpose != TaskParticipantPurpose::Step && self.child_session_ref != expected_ref {
+        if self.child_session_ref != expected_ref {
             bail!("task participant attempt child session ref is not deterministic");
         }
         Ok(())
@@ -2659,31 +1392,14 @@ pub(crate) fn execution_segment_continuation_session_ref(
     step: &TaskStepSpec,
 ) -> Option<SessionRef> {
     let plan = task.plans.get(&plan_version)?;
-    let predecessor_id = if let Some(segments) = task.execution_segments.get(&plan_version) {
-        let segment = segments
-            .iter()
-            .find(|segment| segment.ordered_step_ids.contains(&step.step_id))?;
-        let position = segment
-            .ordered_step_ids
-            .iter()
-            .position(|step_id| step_id == &step.step_id)?;
-        segment
-            .ordered_step_ids
-            .get(position.checked_sub(1)?)?
-            .clone()
-    } else {
-        // Legacy materialization records did not carry an execution-segment receipt. Their
-        // existing deterministic plan projection remains readable, but new records always take
-        // the authoritative branch above.
-        let segment = derive_task_execution_segments(&plan.steps)
-            .into_iter()
-            .find(|segment| segment.step_ids.contains(&step.step_id))?;
-        let position = segment
-            .step_ids
-            .iter()
-            .position(|step_id| step_id == &step.step_id)?;
-        segment.step_ids.get(position.checked_sub(1)?)?.clone()
-    };
+    let segment = derive_task_execution_segments(&plan.steps)
+        .into_iter()
+        .find(|segment| segment.step_ids.contains(&step.step_id))?;
+    let position = segment
+        .step_ids
+        .iter()
+        .position(|step_id| step_id == &step.step_id)?;
+    let predecessor_id = segment.step_ids.get(position.checked_sub(1)?)?.clone();
     let predecessor = plan
         .steps
         .iter()
@@ -2734,166 +1450,7 @@ fn same_segment_invocation_authority(
     predecessor.required_capabilities == successor.required_capabilities
 }
 
-/// Durable proof that a bounded participant retry is safe for its declared recovery class.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum TaskParticipantRetryProof {
-    /// A child-session physical attempt reached a synced no-consumption terminal.
-    ProviderConfirmedNoConsumption {
-        physical_attempt_id: String,
-        request_material_fingerprint: String,
-        zero_output: bool,
-        zero_tool: bool,
-        zero_effect: bool,
-    },
-    /// Runtime admission rejected the child before any provider dispatch or child start.
-    AdmissionRejectedBeforeDispatch {
-        zero_output: bool,
-        zero_tool: bool,
-        zero_effect: bool,
-    },
-    /// A read-only participant's latest physical attempt ended after provider output was
-    /// observed, but the attempt produced no external side effect. The replacement is a new
-    /// durable participant attempt using the exact same task input; it is not a transparent
-    /// replay of the failed physical request.
-    ProviderProtocolRejectedAfterOutput {
-        physical_attempt_id: String,
-        request_material_fingerprint: String,
-        read_only_step: bool,
-        zero_effect: bool,
-    },
-}
-
-impl TaskParticipantRetryProof {
-    /// Validates the explicit safety facts for the selected recovery class and the referenced
-    /// provider evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required safety fact is false or an evidence fingerprint is
-    /// invalid.
-    pub fn validate_shape(&self) -> Result<()> {
-        let (zero_output, zero_tool, zero_effect) = match self {
-            Self::ProviderConfirmedNoConsumption {
-                physical_attempt_id,
-                request_material_fingerprint,
-                zero_output,
-                zero_tool,
-                zero_effect,
-            } => {
-                validate_stable_id("provider physical attempt id", physical_attempt_id)?;
-                validate_prefixed_sha256(
-                    "provider request material fingerprint",
-                    request_material_fingerprint,
-                    "hmac-sha256:",
-                )?;
-                (*zero_output, *zero_tool, *zero_effect)
-            }
-            Self::AdmissionRejectedBeforeDispatch {
-                zero_output,
-                zero_tool,
-                zero_effect,
-            } => (*zero_output, *zero_tool, *zero_effect),
-            Self::ProviderProtocolRejectedAfterOutput {
-                physical_attempt_id,
-                request_material_fingerprint,
-                read_only_step,
-                zero_effect,
-            } => {
-                validate_stable_id("provider physical attempt id", physical_attempt_id)?;
-                validate_prefixed_sha256(
-                    "provider request material fingerprint",
-                    request_material_fingerprint,
-                    "hmac-sha256:",
-                )?;
-                if !read_only_step || !zero_effect {
-                    bail!(
-                        "provider protocol recovery proof must establish a read-only step and zero effect"
-                    );
-                }
-                return Ok(());
-            }
-        };
-        if !zero_output || !zero_tool || !zero_effect {
-            bail!("task participant retry proof must establish zero output, tool, and effect");
-        }
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn recovery_label(&self) -> &'static str {
-        match self {
-            Self::ProviderConfirmedNoConsumption { .. }
-            | Self::AdmissionRejectedBeforeDispatch { .. } => "provider pressure",
-            Self::ProviderProtocolRejectedAfterOutput { .. } => "provider protocol recovery",
-        }
-    }
-}
-
-/// Durable retry admission written after one failed attempt and before its replacement starts.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct TaskParticipantRetryScheduledEntry {
-    pub task_id: TaskId,
-    pub failed_attempt_id: TaskParticipantAttemptId,
-    pub retry_attempt_id: TaskParticipantAttemptId,
-    pub purpose: TaskParticipantPurpose,
-    pub retry_ordinal: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_version: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_id: Option<TaskStepId>,
-    pub route_fingerprint: String,
-    pub input_hash: String,
-    pub scheduled_at_unix_ms: u64,
-    pub not_before_unix_ms: u64,
-    pub retry_after_ms: u64,
-    pub proof: TaskParticipantRetryProof,
-}
-
-impl TaskParticipantRetryScheduledEntry {
-    /// Validates deterministic retry identity, bounded timing, and zero-effect evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when identity, timing, route, input, or proof facts are inconsistent.
-    pub fn validate_shape(&self) -> Result<()> {
-        if self.retry_ordinal < 2 {
-            bail!("task participant retry ordinal must be greater than one");
-        }
-        let expected = task_participant_attempt_id(
-            &self.task_id,
-            self.purpose,
-            self.plan_version,
-            self.step_id.as_ref(),
-            self.retry_ordinal,
-        )?;
-        if self.retry_attempt_id != expected {
-            bail!("task participant retry id conflicts with its durable identity facts");
-        }
-        if self.retry_after_ms == 0 || self.retry_after_ms > MAX_TASK_PARTICIPANT_AUTO_RETRY_WAIT_MS
-        {
-            bail!("task participant retry delay is outside the bounded automatic retry budget");
-        }
-        if self.scheduled_at_unix_ms == 0
-            || self.not_before_unix_ms
-                != self
-                    .scheduled_at_unix_ms
-                    .saturating_add(self.retry_after_ms)
-        {
-            bail!("task participant retry timing is inconsistent");
-        }
-        validate_sha256_fingerprint("provider route fingerprint", &self.route_fingerprint)?;
-        validate_hex_sha256("task participant input hash", &self.input_hash)?;
-        self.proof.validate_shape()
-    }
-}
-
 /// Bounded result committed from a participant-owned transcript into the parent task log.
-///
-/// A participant result may carry a [`TaskCompletionClaimV1`] when the model explicitly reported
-/// which immutable requirements it fulfilled. The claim is advisory evidence for Task settlement;
-/// it never changes the referenced Task/Intent contract or the canonical verification projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TaskParticipantResultEntry {
@@ -2914,615 +1471,6 @@ pub struct TaskParticipantResultEntry {
     pub changed_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verification_refs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_claim: Option<TaskCompletionClaimV1>,
-}
-
-/// Current durable schema for a model-reported Task completion claim.
-pub const TASK_COMPLETION_CLAIM_SCHEMA_VERSION: u16 = 1;
-const TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS: usize = 128;
-const TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS: usize = 32;
-const TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS: usize = 2_000;
-const TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS: usize = 128;
-
-/// The immutable execution authority to which a completion claim is bound.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
-pub enum TaskCompletionClaimSubjectV1 {
-    Task {
-        task_id: TaskId,
-        plan_version: u32,
-    },
-    Step {
-        task_id: TaskId,
-        plan_version: u32,
-        step_id: TaskStepId,
-    },
-    Direct {
-        task_id: TaskId,
-        admission_id: String,
-    },
-}
-
-impl TaskCompletionClaimSubjectV1 {
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Task {
-                task_id,
-                plan_version,
-            } => {
-                if *plan_version == 0 {
-                    bail!("task completion claim plan version must be non-zero");
-                }
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-            }
-            Self::Step {
-                task_id,
-                plan_version,
-                step_id,
-            } => {
-                if *plan_version == 0 {
-                    bail!("task completion claim plan version must be non-zero");
-                }
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-                validate_stable_task_claim_token(
-                    "task completion claim step id",
-                    step_id.as_str(),
-                )?;
-            }
-            Self::Direct {
-                task_id,
-                admission_id,
-            } => {
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-                validate_stable_task_claim_token(
-                    "task completion claim admission id",
-                    admission_id,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn task_id(&self) -> &TaskId {
-        match self {
-            Self::Task { task_id, .. }
-            | Self::Step { task_id, .. }
-            | Self::Direct { task_id, .. } => task_id,
-        }
-    }
-}
-
-/// An immutable source location for one requirement in the accepted Task/Intent authority.
-///
-/// The claim stores only identity and the source contract digest. Requirement text and required
-/// status remain owned by the source record and are never copied into this protocol.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
-pub enum TaskCompletionRequirementSourceV1 {
-    IntentCriterion {
-        intent_ref: IntentVersionRef,
-        criterion_id: IntentCriterionId,
-    },
-    TaskStepContract {
-        task_id: TaskId,
-        plan_version: u32,
-        step_id: TaskStepId,
-        field: TaskCompletionRequirementFieldV1,
-        index: u32,
-        contract_set_sha256: String,
-    },
-    /// Step-level delivery identity used when an accepted plan carries no finer-grained
-    /// deliverable or acceptance-criterion contract. The host still checks the step's durable
-    /// outcome, effect settlement, and readiness before accepting completion.
-    TaskStepOutcome {
-        task_id: TaskId,
-        plan_version: u32,
-        step_id: TaskStepId,
-    },
-    /// Plan-level delivery identity used by the final synthesis participant.
-    TaskPlanOutcome { task_id: TaskId, plan_version: u32 },
-    DirectObjective {
-        admission_id: String,
-        objective_hash: String,
-    },
-}
-
-/// Which source contract array supplied a Task-step requirement.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskCompletionRequirementFieldV1 {
-    Deliverable,
-    AcceptanceCriterion,
-}
-
-impl TaskCompletionRequirementSourceV1 {
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::IntentCriterion {
-                intent_ref,
-                criterion_id,
-            } => {
-                intent_ref.validate()?;
-                validate_stable_task_claim_token(
-                    "task completion claim criterion id",
-                    criterion_id.as_str(),
-                )?;
-            }
-            Self::TaskStepContract {
-                task_id,
-                plan_version,
-                step_id,
-                index,
-                contract_set_sha256,
-                ..
-            } => {
-                if *plan_version == 0 {
-                    bail!("task completion claim plan version must be non-zero");
-                }
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-                validate_stable_task_claim_token(
-                    "task completion claim step id",
-                    step_id.as_str(),
-                )?;
-                if *index > 1_000_000 {
-                    bail!("task completion claim requirement index is out of bounds");
-                }
-                validate_sha256_fingerprint(
-                    "task completion claim contract-set hash",
-                    contract_set_sha256,
-                )?;
-            }
-            Self::TaskStepOutcome {
-                task_id,
-                plan_version,
-                step_id,
-            } => {
-                if *plan_version == 0 {
-                    bail!("task completion claim plan version must be non-zero");
-                }
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-                validate_stable_task_claim_token(
-                    "task completion claim step id",
-                    step_id.as_str(),
-                )?;
-            }
-            Self::TaskPlanOutcome {
-                task_id,
-                plan_version,
-            } => {
-                if *plan_version == 0 {
-                    bail!("task completion claim plan version must be non-zero");
-                }
-                validate_stable_task_claim_token(
-                    "task completion claim task id",
-                    task_id.as_str(),
-                )?;
-            }
-            Self::DirectObjective {
-                admission_id,
-                objective_hash,
-            } => {
-                validate_stable_task_claim_token(
-                    "task completion claim admission id",
-                    admission_id,
-                )?;
-                validate_sha256_fingerprint(
-                    "task completion claim objective hash",
-                    objective_hash,
-                )?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Model-reported state for one immutable requirement.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskCompletionRequirementOutcomeV1 {
-    Fulfilled,
-    Unfulfilled,
-    NotApplicable,
-}
-
-/// One bounded model report for an immutable requirement and its supporting evidence references.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskCompletionRequirementClaimV1 {
-    pub source: TaskCompletionRequirementSourceV1,
-    pub required: bool,
-    pub outcome: TaskCompletionRequirementOutcomeV1,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentArtifactRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub event_refs: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub explanation: String,
-}
-
-/// Typed, bounded model declaration of which requirements were delivered by one attempt.
-///
-/// This is a claim, not a second goal store. It can only reference existing source identities;
-/// the host still checks source versions, evidence ownership, effect settlement, and canonical
-/// readiness before accepting a completed Task.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskCompletionClaimV1 {
-    pub schema_version: u16,
-    pub subject: TaskCompletionClaimSubjectV1,
-    pub attempt_id: String,
-    pub evidence_frontier: String,
-    pub status: TaskCompletionClaimStatusV1,
-    pub requirements: Vec<TaskCompletionRequirementClaimV1>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<AgentArtifactRef>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub explanation: String,
-}
-
-/// Coarse semantic delivery state reported by the model.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskCompletionClaimStatusV1 {
-    Completed,
-    Partial,
-    Blocked,
-}
-
-impl TaskCompletionClaimV1 {
-    /// Validates claim shape without consulting mutable Task, Intent, or verification state.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the claim is malformed, oversized, internally inconsistent, or
-    /// attempts to report a completed claim while leaving a required source requirement unfulfilled.
-    pub fn validate_shape(&self) -> Result<()> {
-        if self.schema_version != TASK_COMPLETION_CLAIM_SCHEMA_VERSION {
-            bail!("unsupported task completion claim schema version");
-        }
-        self.subject.validate()?;
-        validate_stable_task_claim_token("task completion claim attempt id", &self.attempt_id)?;
-        validate_sha256_fingerprint(
-            "task completion claim evidence frontier",
-            &self.evidence_frontier,
-        )?;
-        if self.requirements.is_empty() {
-            bail!("task completion claim must report at least one requirement");
-        }
-        if self.requirements.len() > TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS {
-            bail!("task completion claim has too many requirements");
-        }
-        if self.artifact_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
-            bail!("task completion claim has too many artifact refs");
-        }
-        validate_task_completion_claim_artifacts(&self.artifact_refs)?;
-        validate_task_completion_claim_explanation(&self.explanation)?;
-
-        let mut source_keys = BTreeSet::new();
-        let mut fulfilled = 0usize;
-        let mut unfulfilled_required = 0usize;
-        for requirement in &self.requirements {
-            requirement.source.validate()?;
-            if !source_keys.insert(serde_json::to_string(&requirement.source)?) {
-                bail!("task completion claim repeats a requirement source");
-            }
-            if requirement.artifact_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
-                bail!("task completion requirement has too many artifact refs");
-            }
-            validate_task_completion_claim_artifacts(&requirement.artifact_refs)?;
-            if requirement.event_refs.len() > TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS {
-                bail!("task completion requirement has too many event refs");
-            }
-            for event_ref in &requirement.event_refs {
-                validate_bounded_task_claim_text(
-                    "task completion event ref",
-                    event_ref,
-                    TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS,
-                )?;
-            }
-            validate_task_completion_claim_explanation(&requirement.explanation)?;
-            match requirement.outcome {
-                TaskCompletionRequirementOutcomeV1::Fulfilled => fulfilled += 1,
-                TaskCompletionRequirementOutcomeV1::Unfulfilled if requirement.required => {
-                    unfulfilled_required += 1;
-                }
-                TaskCompletionRequirementOutcomeV1::Unfulfilled
-                | TaskCompletionRequirementOutcomeV1::NotApplicable => {}
-            }
-        }
-        match self.status {
-            TaskCompletionClaimStatusV1::Completed if unfulfilled_required > 0 => {
-                bail!("completed task claim leaves required requirements unfulfilled");
-            }
-            TaskCompletionClaimStatusV1::Partial if fulfilled == self.requirements.len() => {
-                bail!("partial task claim reports every requirement fulfilled");
-            }
-            TaskCompletionClaimStatusV1::Blocked if unfulfilled_required == 0 => {
-                bail!("blocked task claim has no unfulfilled required requirement");
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Returns whether the model declaration itself is eligible for a completed settlement.
-    ///
-    /// This does not prove the Task is complete; callers must still validate source identities,
-    /// readiness, active blockers, and effect settlement.
-    #[must_use]
-    pub fn declares_completed_delivery(&self) -> bool {
-        self.status == TaskCompletionClaimStatusV1::Completed
-            && self.requirements.iter().all(|requirement| {
-                !requirement.required
-                    || requirement.outcome == TaskCompletionRequirementOutcomeV1::Fulfilled
-            })
-    }
-
-    /// Validates that this claim is attached to one exact participant attempt identity.
-    ///
-    /// The source contract and verification projection are intentionally outside this method;
-    /// callers must validate those against the current durable projection before settlement.
-    pub fn validate_for_participant_attempt(
-        &self,
-        attempt: &TaskParticipantAttemptEntry,
-    ) -> Result<()> {
-        self.validate_shape()?;
-        if self.attempt_id != attempt.attempt_id.as_str()
-            || self.subject.task_id() != &attempt.task_id
-        {
-            bail!("task completion claim is bound to another participant attempt");
-        }
-        match (
-            &self.subject,
-            attempt.purpose,
-            attempt.plan_version,
-            attempt.step_id.as_ref(),
-        ) {
-            (
-                TaskCompletionClaimSubjectV1::Task { plan_version, .. },
-                TaskParticipantPurpose::Synthesis,
-                Some(attempt_plan_version),
-                None,
-            ) if *plan_version == attempt_plan_version => {}
-            (
-                TaskCompletionClaimSubjectV1::Step {
-                    plan_version,
-                    step_id,
-                    ..
-                },
-                TaskParticipantPurpose::Step,
-                Some(attempt_plan_version),
-                Some(attempt_step_id),
-            ) if *plan_version == attempt_plan_version && step_id == attempt_step_id => {}
-            _ => bail!("task completion claim subject does not match participant purpose"),
-        }
-        Ok(())
-    }
-
-    /// Validates that this claim is attached to one exact direct-execution attempt and admission.
-    pub fn validate_for_direct_attempt(
-        &self,
-        attempt: &TaskDirectExecutionAttemptV1,
-        admission: &TaskDirectExecutionAdmittedV1,
-    ) -> Result<()> {
-        self.validate_shape()?;
-        if self.attempt_id != attempt.attempt_id
-            || attempt.task_id != admission.task_id
-            || attempt.admission_id != admission.admission_id
-        {
-            bail!("task completion claim is bound to another direct execution attempt");
-        }
-        match &self.subject {
-            TaskCompletionClaimSubjectV1::Direct {
-                task_id,
-                admission_id,
-            } if task_id == &admission.task_id && admission_id == &admission.admission_id => Ok(()),
-            _ => bail!("task completion claim subject is not the admitted direct execution"),
-        }
-    }
-}
-
-/// Returns the provider-neutral schema for the Task completion claim tool.
-#[must_use]
-pub fn task_completion_claim_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
-        description: "Report which immutable Task requirements were fulfilled. This claim is required before the host can settle a Task as completed; it must reference only the bound Task/step authority and evidence already produced by the run.".to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["schema_version", "subject", "attempt_id", "evidence_frontier", "status", "requirements"],
-            "properties": {
-                "schema_version": {"type": "integer", "const": TASK_COMPLETION_CLAIM_SCHEMA_VERSION},
-                "subject": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["kind"],
-                    "properties": {
-                        "kind": {"type": "string", "enum": ["task", "step", "direct"]},
-                        "task_id": {"type": "string", "minLength": 1},
-                        "plan_version": {"type": "integer", "minimum": 1},
-                        "step_id": {"type": "string", "minLength": 1},
-                        "admission_id": {"type": "string", "minLength": 1}
-                    }
-                },
-                "attempt_id": {"type": "string", "minLength": 1},
-                "evidence_frontier": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
-                "status": {"type": "string", "enum": ["completed", "partial", "blocked"]},
-                "requirements": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": TASK_COMPLETION_CLAIM_MAX_REQUIREMENTS,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["source", "required", "outcome"],
-                        "properties": {
-                            "source": {"type": "object"},
-                            "required": {"type": "boolean"},
-                            "outcome": {"type": "string", "enum": ["fulfilled", "unfulfilled", "not_applicable"]},
-                            "artifact_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS},
-                            "event_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS, "items": {"type": "string", "minLength": 1, "maxLength": TASK_COMPLETION_CLAIM_MAX_EVENT_REF_CHARS}},
-                            "explanation": {"type": "string", "maxLength": TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS}
-                        }
-                    }
-                },
-                "artifact_refs": {"type": "array", "maxItems": TASK_COMPLETION_CLAIM_MAX_EVIDENCE_REFS},
-                "explanation": {"type": "string", "maxLength": TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS}
-            }
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-/// Parses and binds one model completion claim to the host-selected subject and attempt.
-pub fn task_completion_claim_from_call(
-    call: &ToolCall,
-    expected_subject: &TaskCompletionClaimSubjectV1,
-    expected_attempt_id: &str,
-) -> Result<TaskCompletionClaimV1> {
-    if call.name != TASK_COMPLETION_CLAIM_TOOL_NAME {
-        bail!(
-            "unexpected internal task completion claim tool {}",
-            call.name
-        );
-    }
-    let claim: TaskCompletionClaimV1 = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid task completion claim arguments: {error}"))?;
-    claim.validate_shape()?;
-    if &claim.subject != expected_subject || claim.attempt_id != expected_attempt_id {
-        bail!("task completion claim is bound to another Task subject or attempt");
-    }
-    Ok(claim)
-}
-
-/// Bounded model-visible acknowledgement for an accepted completion claim.
-pub fn task_completion_claim_result_content(claim: &TaskCompletionClaimV1) -> String {
-    json!({
-        "subject": claim.subject,
-        "attempt_id": claim.attempt_id,
-        "status": claim.status,
-        "requirements": claim.requirements.len(),
-        "next_action": "return the concise final result; the host will verify evidence and settle completion"
-    })
-    .to_string()
-}
-
-fn validate_stable_task_claim_token(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > 256
-        || crate::safe_persistence_text(value) != value
-        || value.chars().any(char::is_whitespace)
-    {
-        bail!("{label} is not a bounded stable token");
-    }
-    Ok(())
-}
-
-fn validate_bounded_task_claim_text(label: &str, value: &str, max_chars: usize) -> Result<()> {
-    if value.is_empty()
-        || value.chars().count() > max_chars
-        || crate::safe_persistence_text(value) != value
-    {
-        bail!("{label} is not bounded safe text");
-    }
-    Ok(())
-}
-
-fn validate_task_completion_claim_explanation(value: &str) -> Result<()> {
-    if value.chars().count() > TASK_COMPLETION_CLAIM_MAX_EXPLANATION_CHARS
-        || crate::safe_persistence_text(value) != value
-    {
-        bail!("task completion claim explanation is not bounded safe text");
-    }
-    Ok(())
-}
-
-fn validate_task_completion_claim_artifacts(artifacts: &[AgentArtifactRef]) -> Result<()> {
-    for artifact in artifacts {
-        validate_bounded_task_claim_text("task completion artifact kind", &artifact.kind, 128)?;
-        validate_bounded_task_claim_text("task completion artifact path", &artifact.path, 512)?;
-        if let Some(hash) = artifact.hash.as_deref() {
-            validate_bounded_task_claim_text("task completion artifact hash", hash, 128)?;
-        }
-    }
-    Ok(())
-}
-
-/// Durable, hash-only checkpoint for one task-participant model turn.
-///
-/// The entry intentionally stores neither tool arguments nor tool output. It lets recovery and
-/// the live agent loop distinguish useful frontier movement from an exact repeated analysis batch
-/// without copying potentially sensitive child-session content into control state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskStepCheckpointV2 {
-    pub schema_version: u16,
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub step_id: TaskStepId,
-    pub attempt_id: TaskParticipantAttemptId,
-    pub model_turn: u32,
-    pub semantic_call_hash: String,
-    pub result_frontier_hash: String,
-    pub no_progress_count: u32,
-}
-
-impl TaskStepCheckpointV2 {
-    /// Validates the bounded checkpoint identity and hash-only frontier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the schema, task binding, turn, or digest is invalid.
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != TASK_STEP_CONTRACT_V2_SCHEMA_VERSION {
-            bail!(
-                "unsupported task step checkpoint schema version {}",
-                self.schema_version
-            );
-        }
-        if self.plan_version == 0 || self.model_turn == 0 {
-            bail!("task step checkpoint is missing its plan or model-turn identity");
-        }
-        TaskId::new(self.task_id.as_str())?;
-        TaskStepId::new(self.step_id.as_str())?;
-        TaskParticipantAttemptId::new(self.attempt_id.as_str())?;
-        validate_sha256_fingerprint("task semantic call hash", &self.semantic_call_hash)?;
-        validate_sha256_fingerprint("task result frontier hash", &self.result_frontier_hash)?;
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn repeated_frontier(&self, previous: Option<&Self>) -> bool {
-        previous.is_some_and(|previous| {
-            previous.task_id == self.task_id
-                && previous.plan_version == self.plan_version
-                && previous.step_id == self.step_id
-                && previous.attempt_id == self.attempt_id
-                && previous.semantic_call_hash == self.semantic_call_hash
-                && previous.result_frontier_hash == self.result_frontier_hash
-        })
-    }
 }
 
 impl TaskParticipantResultEntry {
@@ -3594,15 +1542,6 @@ impl TaskParticipantResultEntry {
                 TASK_PARTICIPANT_RESULT_REF_MAX_CHARS,
             )?;
         }
-        if let Some(claim) = self.completion_claim.as_ref() {
-            claim.validate_shape()?;
-            if claim.subject.task_id() != &self.task_id {
-                bail!("task completion claim subject does not match participant result task");
-            }
-            if claim.attempt_id != self.attempt_id.as_str() {
-                bail!("task completion claim attempt does not match participant result");
-            }
-        }
         Ok(())
     }
 }
@@ -3619,17 +1558,6 @@ fn validate_bounded_participant_result_field(
         bail!("task participant result {field} is not safely bounded");
     }
     Ok(())
-}
-
-/// Parent commit proving that exactly one synthesis result became the task's visible final answer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct TaskFinalAnswerCommittedEntry {
-    pub task_id: TaskId,
-    pub plan_version: u32,
-    pub synthesis_attempt_id: TaskParticipantAttemptId,
-    pub message_id: String,
-    pub content_hash: String,
 }
 
 /// Append-only parent-to-child session link.
@@ -3717,10 +1645,13 @@ pub struct TaskStateProjection {
     pub focus_conflicts: usize,
     focus_explicitly_selected: bool,
     task_run_scopes: BTreeMap<TaskId, String>,
-    /// Monotonic RFC-0067 admission attempts per Task.
-    pub admission_attempts: BTreeMap<TaskId, Vec<TaskAdmissionAttemptV1>>,
-    /// Latest unresolved RFC-0067 blocker per Task.
-    pub active_blockers: BTreeMap<TaskId, TaskBlockerV1>,
+    /// Exact Direct Task owners for background agent invocations admitted from this session.
+    direct_task_background_owners: BTreeMap<AgentThreadId, TaskId>,
+    /// Latest durable lifecycle status for each agent thread observed during replay.
+    agent_thread_statuses: BTreeMap<AgentThreadId, crate::AgentThreadStatus>,
+    /// Child result records may follow the thread's completed status by a short commit window.
+    /// A Direct Task must not treat that status as collected until its result is durable.
+    agent_thread_results: BTreeSet<AgentThreadId>,
 }
 
 impl TaskStateProjection {
@@ -3795,23 +1726,8 @@ impl TaskStateProjection {
                     self.select_current_task(task_id);
                 }
             }
-            ControlEntry::TaskCreatedFromPlan(entry) if entry.stale_reason.is_none() => {
+            ControlEntry::TaskCreatedFromPlan(entry) => {
                 self.select_current_task(&entry.task_id);
-            }
-            ControlEntry::PlanExecutionAdoptedV1(adoption) => {
-                self.apply_adoption(adoption);
-            }
-            ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => {
-                self.apply_materialization_attempt(attempt);
-            }
-            ControlEntry::TaskMaterializationPreparedV1(materialization) => {
-                self.apply_materialization(materialization);
-            }
-            ControlEntry::TaskMaterializationBlockedV1(blocked) => {
-                self.apply_materialization_blocked(blocked);
-            }
-            ControlEntry::TaskAdmissionAttemptedV1(attempt) => {
-                self.apply_admission_attempt(attempt);
             }
             ControlEntry::TaskContinuationSelected(entry) => {
                 self.apply_continuation_focus(entry);
@@ -3833,6 +1749,57 @@ impl TaskStateProjection {
             ControlEntry::TaskDirectExecutionAttemptV1(entry) => {
                 self.apply_direct_execution_attempt(entry)
             }
+            ControlEntry::AgentDelegationAdmitted(entry) => {
+                self.apply_direct_task_background_admission(entry)
+            }
+            ControlEntry::AgentThreadStarted(entry) => {
+                self.agent_thread_statuses
+                    .insert(entry.thread_id.clone(), crate::AgentThreadStatus::Started);
+            }
+            ControlEntry::AgentThreadStatusChanged(entry) => {
+                self.agent_thread_statuses
+                    .insert(entry.thread_id.clone(), entry.status);
+            }
+            ControlEntry::AgentRunInterrupted(entry) => {
+                let status = self
+                    .agent_thread_statuses
+                    .entry(entry.thread_id.clone())
+                    .or_insert(crate::AgentThreadStatus::Interrupted);
+                if !status.is_terminal() {
+                    *status = crate::AgentThreadStatus::Interrupted;
+                }
+            }
+            ControlEntry::AgentThreadResultRecorded(entry) => {
+                self.agent_thread_results
+                    .insert(entry.result.thread_id.clone());
+                self.agent_thread_statuses.insert(
+                    entry.result.thread_id.clone(),
+                    match entry.result.status {
+                        crate::AgentThreadTerminalStatus::Completed => {
+                            crate::AgentThreadStatus::Completed
+                        }
+                        crate::AgentThreadTerminalStatus::Blocked => {
+                            crate::AgentThreadStatus::Blocked
+                        }
+                        crate::AgentThreadTerminalStatus::Failed => {
+                            crate::AgentThreadStatus::Failed
+                        }
+                        crate::AgentThreadTerminalStatus::Cancelled => {
+                            crate::AgentThreadStatus::Cancelled
+                        }
+                        crate::AgentThreadTerminalStatus::Interrupted => {
+                            crate::AgentThreadStatus::Interrupted
+                        }
+                        crate::AgentThreadTerminalStatus::Unknown => {
+                            crate::AgentThreadStatus::Unknown
+                        }
+                    },
+                );
+            }
+            ControlEntry::AgentThreadClosed(entry) => {
+                self.agent_thread_statuses
+                    .insert(entry.thread_id.clone(), crate::AgentThreadStatus::Closed);
+            }
             ControlEntry::TaskChecklistUpdatedV1(entry) => self.apply_checklist(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStepContractBoundV2(entry) => self.apply_step_contract(entry),
@@ -3841,11 +1808,7 @@ impl TaskStateProjection {
             }
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
             ControlEntry::TaskParticipantAttempt(entry) => self.apply_participant_attempt(entry),
-            ControlEntry::TaskParticipantRetryScheduled(entry) => {
-                self.apply_participant_retry_scheduled(entry)
-            }
             ControlEntry::TaskParticipantResult(entry) => self.apply_participant_result(entry),
-            ControlEntry::TaskFinalAnswerCommitted(entry) => self.apply_final_answer(entry),
             ControlEntry::TaskChildSession(entry) => self.apply_child_session(entry),
             ControlEntry::TaskChildSessionDisplayName(entry) => {
                 self.apply_child_display_name(entry)
@@ -3867,13 +1830,7 @@ impl TaskStateProjection {
             self.focus_conflicts = self.focus_conflicts.saturating_add(1);
             return;
         };
-        let plan_status = entry
-            .plan_version
-            .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-        if task.status != entry.task_status
-            || task.latest_plan_version != entry.plan_version
-            || plan_status != entry.plan_status
-        {
+        if task.status != entry.task_status || task.latest_plan_version.is_some() {
             self.focus_conflicts = self.focus_conflicts.saturating_add(1);
             return;
         }
@@ -3892,10 +1849,13 @@ impl TaskStateProjection {
         if matches!(
             task.status,
             TaskRunStatus::Completed | TaskRunStatus::Cancelled
-        ) || task
-            .plans
-            .get(&entry.plan_version)
-            .is_none_or(|plan| plan.status != TaskPlanStatus::Accepted)
+        ) || task.latest_plan_version.is_some()
+            || task
+                .direct_execution_admission
+                .as_ref()
+                .is_none_or(|admission| {
+                    admission.validate().is_err() || !admission.matches_objective(&task.objective)
+                })
         {
             self.focus_conflicts = self.focus_conflicts.saturating_add(1);
             return;
@@ -3997,11 +1957,9 @@ impl TaskStateProjection {
                 supersede_plan_steps(task, version, entry.plan_version);
             }
         }
-        let graph_result = TaskGraphProjection::from_plan_entry(entry);
-        let (graph, graph_validation_error) = match graph_result {
-            Ok(graph) => (Some(graph), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
+        let graph_validation_error = validate_task_plan_graph_steps(&entry.steps)
+            .err()
+            .map(|error| error.to_string());
         task.plans.insert(
             entry.plan_version,
             TaskPlanProjection {
@@ -4010,7 +1968,6 @@ impl TaskStateProjection {
                 steps: entry.steps.clone(),
                 step_contracts: BTreeMap::new(),
                 contract_set_committed_v2: false,
-                graph,
                 graph_validation_error,
                 reason: entry.reason.clone(),
             },
@@ -4138,130 +2095,50 @@ impl TaskStateProjection {
         }
     }
 
-    /// Derives the RFC-0067 Task state from the single adoption authority.
-    ///
-    /// No separate TaskRun/TaskPlan/contract records are required; every existing view is
-    /// synthesized from the adopted candidate so the Task identity exists atomically with the
-    /// accepted plan, step contracts and intent lineage.
-    fn apply_adoption(&mut self, adoption: &crate::PlanExecutionAdoptedV1Entry) {
-        self.apply_materialized_candidate(adoption, true);
-    }
-
-    /// Applies RFC-0069 post-approval materialization to an already durable Task shell.
-    fn apply_materialization(&mut self, materialization: &crate::PlanExecutionAdoptedV1Entry) {
-        self.apply_materialized_candidate(materialization, false);
-        self.active_blockers.remove(&materialization.task_id);
-    }
-
-    fn apply_materialization_attempt(
-        &mut self,
-        attempt: &crate::TaskMaterializationAttemptStartedV1,
-    ) {
-        if attempt.validate().is_err() || !self.tasks.contains_key(&attempt.task_id) {
-            return;
-        }
-        self.record_task_replay(&attempt.task_id, false);
-    }
-
-    fn apply_materialization_blocked(&mut self, blocked: &crate::TaskMaterializationBlockedV1) {
-        if blocked.validate().is_err() || !self.tasks.contains_key(&blocked.task_id) {
-            return;
-        }
-        self.record_task_replay(&blocked.task_id, false);
-        self.active_blockers
-            .insert(blocked.task_id.clone(), blocked.blocker.clone());
-    }
-
-    fn apply_materialized_candidate(
-        &mut self,
-        adoption: &crate::PlanExecutionAdoptedV1Entry,
-        allow_create_shell: bool,
-    ) {
-        let candidate = &adoption.adopted_candidate;
-        let desired_status = if adoption.start_mode == crate::PlanTaskStartMode::CreatePaused {
-            TaskRunStatus::Paused
-        } else {
-            TaskRunStatus::Started
-        };
-        if allow_create_shell && !self.tasks.contains_key(&candidate.task_id) {
-            self.apply_run(&TaskRunEntry {
-                task_id: candidate.task_id.clone(),
-                parent_session_ref: adoption.parent_session_ref.clone(),
-                objective: candidate.safe_objective.clone(),
-                title: Some(candidate.semantic_title.clone()),
-                status: desired_status,
-                reason: Some(format!("adopted from plan {}", adoption.plan_id.as_str())),
-            });
-        }
-        if !self.tasks.contains_key(&candidate.task_id) {
-            // A new materialization record may never manufacture a Task shell. Keep replay
-            // fail-closed; the durable approval bundle is the only shell authority.
-            return;
-        }
-        if self
-            .tasks
-            .get(&candidate.task_id)
-            .and_then(|task| task.plans.get(&candidate.task_plan.plan_version))
-            .is_none()
-        {
-            self.apply_plan(&candidate.task_plan.clone());
-            for contract in &candidate.step_contracts {
-                self.apply_step_contract(contract);
-            }
-            self.apply_contract_set_commit(&TaskPlanContractSetCommittedV2 {
-                schema_version: TASK_STEP_CONTRACT_V2_SCHEMA_VERSION,
-                task_id: candidate.task_id.clone(),
-                plan_version: candidate.task_plan.plan_version,
-                contract_count: candidate.step_contracts.len(),
-                contract_set_sha256: candidate.contract_set_digest.clone(),
-            });
-        }
-        if self.tasks.contains_key(&candidate.task_id) {
-            if let Some(segments) = adoption.execution_segments.as_ref() {
-                self.tasks
-                    .entry(candidate.task_id.clone())
-                    .or_insert_with(|| TaskRunProjection::placeholder(candidate.task_id.clone()))
-                    .execution_segments
-                    .insert(candidate.task_plan.plan_version, segments.clone());
-            }
-            self.select_current_task(&candidate.task_id);
-        }
-    }
-
-    fn apply_admission_attempt(&mut self, attempt: &TaskAdmissionAttemptV1) {
-        self.admission_attempts
-            .entry(attempt.task_id.clone())
-            .or_default()
-            .push(attempt.clone());
-        match &attempt.outcome {
-            TaskAdmissionOutcomeV1::Blocked(blocker) => {
-                self.active_blockers
-                    .insert(attempt.task_id.clone(), blocker.clone());
-            }
-            TaskAdmissionOutcomeV1::Ready(_) | TaskAdmissionOutcomeV1::Paused(_) => {
-                self.active_blockers.remove(&attempt.task_id);
-            }
-        }
-    }
-
-    /// Returns the latest RFC-0067 admission attempt for one Task, if any.
-    pub fn latest_admission_attempt(&self, task_id: &TaskId) -> Option<&TaskAdmissionAttemptV1> {
-        self.admission_attempts
-            .get(task_id)
-            .and_then(|attempts| attempts.last())
-    }
-
-    /// Returns the next monotonic admission ordinal for one Task.
+    /// Returns the exact Direct Task that authorized one background agent, when one exists.
     #[must_use]
-    pub fn next_admission_ordinal(&self, task_id: &TaskId) -> u32 {
-        self.latest_admission_attempt(task_id)
-            .map_or(0, |attempt| attempt.ordinal)
-            .saturating_add(1)
+    pub fn direct_task_for_background_agent(&self, thread_id: &AgentThreadId) -> Option<&TaskId> {
+        self.direct_task_background_owners.get(thread_id)
     }
 
-    /// Returns the latest unresolved blocker for one Task, if any.
-    pub fn active_blocker(&self, task_id: &TaskId) -> Option<&TaskBlockerV1> {
-        self.active_blockers.get(task_id)
+    /// Returns every background agent admitted under this Direct Task's exact grant.
+    #[must_use]
+    pub fn direct_task_background_agents(&self, task_id: &TaskId) -> Vec<AgentThreadId> {
+        self.direct_task_background_owners
+            .iter()
+            .filter_map(|(thread_id, owner_task_id)| {
+                (owner_task_id == task_id).then_some(thread_id.clone())
+            })
+            .collect()
+    }
+
+    /// Returns the latest durable status observed for an agent thread in this Task projection.
+    #[must_use]
+    pub fn agent_thread_status(
+        &self,
+        thread_id: &AgentThreadId,
+    ) -> Option<crate::AgentThreadStatus> {
+        self.agent_thread_statuses.get(thread_id).copied()
+    }
+
+    /// Returns nonterminal background agents admitted under this Direct Task's exact grant.
+    #[must_use]
+    pub fn unfinished_direct_task_background_agents(&self, task_id: &TaskId) -> Vec<AgentThreadId> {
+        self.direct_task_background_agents(task_id)
+            .into_iter()
+            .filter(|thread_id| {
+                let status = self
+                    .agent_thread_statuses
+                    .get(thread_id)
+                    .copied()
+                    .unwrap_or(crate::AgentThreadStatus::Started);
+                if status == crate::AgentThreadStatus::Completed {
+                    !self.agent_thread_results.contains(thread_id)
+                } else {
+                    !status.is_terminal()
+                }
+            })
+            .collect()
     }
 
     /// Evaluates a root terminal against the current durable projection.
@@ -4273,35 +2150,89 @@ impl TaskStateProjection {
         candidate: Option<&TaskRootTerminalCandidateV1>,
     ) -> Option<TaskRootTerminalEvaluationV1> {
         self.tasks.get(task_id).map(|task| {
-            task.evaluate_root_terminal(
-                self.active_blockers.get(task_id),
-                requested_status,
-                candidate,
-            )
+            let mut evaluation = task.evaluate_root_terminal(requested_status, candidate);
+            if requested_status == TaskRunStatus::Completed
+                && task.direct_execution_admission.is_some()
+            {
+                evaluation.unfinished_direct_task_background_agents =
+                    self.unfinished_direct_task_background_agents(task_id);
+                if !evaluation
+                    .unfinished_direct_task_background_agents
+                    .is_empty()
+                {
+                    evaluation
+                        .completion_blockers
+                        .push(TaskRootCompletionBlockerV1::UnfinishedBackgroundAgent);
+                    evaluation
+                        .completion_blockers
+                        .sort_by_key(|blocker| blocker.reason_code());
+                    evaluation.completion_blockers.dedup();
+                    evaluation.effective_status = TaskRunStatus::Paused;
+                }
+            }
+            evaluation
         })
     }
 
-    /// Derives the RFC-0067 execution phase from durable facts only.
+    fn apply_direct_task_background_admission(
+        &mut self,
+        entry: &crate::AgentDelegationAdmissionEntry,
+    ) {
+        if entry.invocation_mode != crate::AgentInvocationMode::Background
+            || entry.invocation_source != crate::AgentInvocationSource::Task
+        {
+            return;
+        }
+        let (
+            crate::DelegationAuthorityRecord::DirectTask {
+                task_id: authority_task_id,
+            },
+            Some(grant),
+        ) = (&entry.authority, entry.invocation_grant.as_ref())
+        else {
+            return;
+        };
+        let (
+            crate::AgentInvocationGrantSource::DirectTask {
+                task_id: source_task_id,
+            },
+            crate::DelegationAuthorityRecord::DirectTask {
+                task_id: grant_task_id,
+            },
+        ) = (&grant.source, &grant.authority)
+        else {
+            return;
+        };
+        if authority_task_id != source_task_id
+            || authority_task_id != grant_task_id
+            || entry.profile_id != grant.profile_id
+            || entry.tool_contract_fingerprint != grant.tool_contract_fingerprint
+            || self
+                .tasks
+                .get(authority_task_id)
+                .is_none_or(|task| task.direct_execution_admission.is_none())
+        {
+            return;
+        }
+        self.direct_task_background_owners
+            .insert(entry.thread_id.clone(), authority_task_id.clone());
+        self.agent_thread_statuses
+            .entry(entry.thread_id.clone())
+            .or_insert(crate::AgentThreadStatus::Started);
+    }
+
+    /// Projects current Task lifecycle status for product surfaces.
     pub fn execution_phase(&self, task_id: &TaskId) -> Option<TaskExecutionPhaseV1> {
         let task = self.tasks.get(task_id)?;
-        let phase = match task.status {
+        Some(match task.status {
             TaskRunStatus::Completed => TaskExecutionPhaseV1::Completed,
             TaskRunStatus::Failed => TaskExecutionPhaseV1::Failed,
             TaskRunStatus::Cancelled => TaskExecutionPhaseV1::Cancelled,
             TaskRunStatus::Interrupted => TaskExecutionPhaseV1::Interrupted,
             TaskRunStatus::Paused => TaskExecutionPhaseV1::Paused,
             TaskRunStatus::Running => TaskExecutionPhaseV1::Running,
-            TaskRunStatus::Started => match self.latest_admission_attempt(task_id) {
-                Some(attempt) => match &attempt.outcome {
-                    TaskAdmissionOutcomeV1::Ready(_) => TaskExecutionPhaseV1::Ready,
-                    TaskAdmissionOutcomeV1::Blocked(_) => TaskExecutionPhaseV1::Blocked,
-                    TaskAdmissionOutcomeV1::Paused(_) => TaskExecutionPhaseV1::Paused,
-                },
-                None if task.direct_execution_admission.is_some() => TaskExecutionPhaseV1::Ready,
-                None => TaskExecutionPhaseV1::Preparing,
-            },
-        };
-        Some(phase)
+            TaskRunStatus::Started => TaskExecutionPhaseV1::Ready,
+        })
     }
 
     fn apply_step(&mut self, entry: &TaskStepEntry) {
@@ -4382,42 +2313,6 @@ impl TaskStateProjection {
         *attempt = entry.clone();
     }
 
-    fn apply_participant_retry_scheduled(&mut self, entry: &TaskParticipantRetryScheduledEntry) {
-        self.record_task_replay(&entry.task_id, false);
-        let task = self.ensure_task(&entry.task_id);
-        let failed = task.participant_attempts.get(&entry.failed_attempt_id);
-        if entry.validate_shape().is_err()
-            || failed.is_none_or(|attempt| {
-                attempt.task_id != entry.task_id
-                    || attempt.purpose != entry.purpose
-                    || attempt.plan_version != entry.plan_version
-                    || attempt.step_id != entry.step_id
-                    || attempt.ordinal.saturating_add(1) != entry.retry_ordinal
-                    || attempt.status != TaskParticipantAttemptStatus::Failed
-            })
-            || task
-                .participant_attempts
-                .get(&entry.retry_attempt_id)
-                .is_some_and(|attempt| attempt.ordinal != entry.retry_ordinal)
-        {
-            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
-            return;
-        }
-        match task
-            .participant_retry_schedules
-            .get(&entry.retry_attempt_id)
-        {
-            Some(existing) if existing != entry => {
-                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
-            }
-            Some(_) => {}
-            None => {
-                task.participant_retry_schedules
-                    .insert(entry.retry_attempt_id.clone(), entry.clone());
-            }
-        }
-    }
-
     fn apply_participant_result(&mut self, entry: &TaskParticipantResultEntry) {
         self.record_task_replay(&entry.task_id, false);
         let task = self.ensure_task(&entry.task_id);
@@ -4447,36 +2342,6 @@ impl TaskStateProjection {
                 task.participant_results
                     .insert(entry.attempt_id.clone(), entry.clone());
             }
-        }
-    }
-
-    fn apply_final_answer(&mut self, entry: &TaskFinalAnswerCommittedEntry) {
-        self.record_task_replay(&entry.task_id, false);
-        let task = self.ensure_task(&entry.task_id);
-        if task
-            .participant_attempts
-            .get(&entry.synthesis_attempt_id)
-            .is_none_or(|attempt| {
-                attempt.purpose != TaskParticipantPurpose::Synthesis
-                    || attempt.plan_version != Some(entry.plan_version)
-                    || attempt.status != TaskParticipantAttemptStatus::Completed
-            })
-            || task
-                .participant_results
-                .get(&entry.synthesis_attempt_id)
-                .is_none_or(|result| result.output_hash != entry.content_hash)
-            || entry.message_id
-                != task_final_message_id(&entry.task_id, &entry.synthesis_attempt_id)
-        {
-            task.participant_conflicts = task.participant_conflicts.saturating_add(1);
-            return;
-        }
-        match &task.final_answer {
-            Some(existing) if existing != entry => {
-                task.participant_conflicts = task.participant_conflicts.saturating_add(1);
-            }
-            Some(_) => {}
-            None => task.final_answer = Some(entry.clone()),
         }
     }
 
@@ -4606,12 +2471,7 @@ pub struct TaskRunProjection {
     /// Compatibility view populated only when exactly one task step is active.
     pub current_step: Option<(u32, TaskStepId)>,
     pub participant_attempts: BTreeMap<TaskParticipantAttemptId, TaskParticipantAttemptEntry>,
-    pub participant_retry_schedules:
-        BTreeMap<TaskParticipantAttemptId, TaskParticipantRetryScheduledEntry>,
     pub participant_results: BTreeMap<TaskParticipantAttemptId, TaskParticipantResultEntry>,
-    /// Authoritative RFC-0069 continuity receipts keyed by their accepted task-plan version.
-    pub execution_segments: BTreeMap<u32, Vec<ExecutionSegmentV1>>,
-    pub final_answer: Option<TaskFinalAnswerCommittedEntry>,
     pub child_sessions: BTreeMap<(u32, TaskStepId, TaskId), TaskChildSessionEntry>,
     pub child_display_names: BTreeMap<(u32, TaskStepId, TaskId), String>,
     pub approval_routes: BTreeMap<TaskRouteId, TaskSubagentApprovalRouteEntry>,
@@ -4642,10 +2502,7 @@ impl TaskRunProjection {
             active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
-            participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
-            execution_segments: BTreeMap::new(),
-            final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
@@ -4678,10 +2535,7 @@ impl TaskRunProjection {
             active_steps: BTreeSet::new(),
             current_step: None,
             participant_attempts: BTreeMap::new(),
-            participant_retry_schedules: BTreeMap::new(),
             participant_results: BTreeMap::new(),
-            execution_segments: BTreeMap::new(),
-            final_answer: None,
             child_sessions: BTreeMap::new(),
             child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
@@ -4714,7 +2568,7 @@ impl TaskRunProjection {
         attempts
     }
 
-    /// Returns the next retry ordinal for one participant identity.
+    /// Returns the next attempt ordinal for one participant identity.
     #[must_use]
     pub fn next_participant_ordinal(
         &self,
@@ -4728,45 +2582,6 @@ impl TaskRunProjection {
             .max()
             .unwrap_or(0)
             .saturating_add(1)
-    }
-
-    /// Returns the durable schedule that authorizes the next not-yet-started retry.
-    pub fn pending_participant_retry(
-        &self,
-        purpose: TaskParticipantPurpose,
-        plan_version: Option<u32>,
-        step_id: Option<&TaskStepId>,
-    ) -> Option<&TaskParticipantRetryScheduledEntry> {
-        self.participant_retry_schedules
-            .values()
-            .filter(|schedule| {
-                schedule.purpose == purpose
-                    && schedule.plan_version == plan_version
-                    && schedule.step_id.as_ref() == step_id
-                    && !self
-                        .participant_attempts
-                        .contains_key(&schedule.retry_attempt_id)
-            })
-            .max_by_key(|schedule| schedule.retry_ordinal)
-    }
-
-    /// Returns the cumulative durable retry delay for one participant identity.
-    pub fn participant_retry_wait_ms(
-        &self,
-        purpose: TaskParticipantPurpose,
-        plan_version: Option<u32>,
-        step_id: Option<&TaskStepId>,
-    ) -> u64 {
-        self.participant_retry_schedules
-            .values()
-            .filter(|schedule| {
-                schedule.purpose == purpose
-                    && schedule.plan_version == plan_version
-                    && schedule.step_id.as_ref() == step_id
-            })
-            .fold(0_u64, |total, schedule| {
-                total.saturating_add(schedule.retry_after_ms)
-            })
     }
 
     /// Returns the latest persisted display name for a child session, if one was recorded.
@@ -4788,13 +2603,9 @@ impl TaskRunProjection {
     #[must_use]
     pub fn evaluate_root_terminal(
         &self,
-        active_blocker: Option<&TaskBlockerV1>,
         requested_status: TaskRunStatus,
         candidate: Option<&TaskRootTerminalCandidateV1>,
     ) -> TaskRootTerminalEvaluationV1 {
-        let active_blocker = active_blocker
-            .filter(|blocker| !blocker.is_resolved())
-            .cloned();
         let mut blocked_dependency_steps = BTreeSet::new();
         let mut cancelled_dependency_steps = BTreeSet::new();
         let mut cancellation_closure = BTreeSet::new();
@@ -4803,18 +2614,12 @@ impl TaskRunProjection {
         let mut unfinished_direct_attempts = BTreeSet::new();
         let mut completion_blockers = Vec::new();
 
+        let has_direct_authority = self.direct_execution_admission.is_some();
         let selected_plan = self
             .latest_plan_version
             .and_then(|version| self.plans.get(&version))
             .filter(|plan| plan.status == TaskPlanStatus::Accepted);
-        let has_direct_authority = self.direct_execution_admission.is_some();
         let has_dag_authority = selected_plan.is_some();
-
-        if let Some(blocker) = active_blocker.as_ref()
-            && !blocker.is_resolved()
-        {
-            completion_blockers.push(TaskRootCompletionBlockerV1::ActiveBlocker);
-        }
 
         if has_direct_authority {
             let latest_attempt = self
@@ -4823,7 +2628,7 @@ impl TaskRunProjection {
                 .max_by_key(|attempt| attempt.ordinal);
             let latest_status = latest_attempt
                 .map(|attempt| direct_attempt_status_with_candidate(attempt, candidate));
-            if latest_status != Some(TaskParticipantAttemptStatus::Completed) {
+            if latest_status != Some(TaskExecutionAttemptStatus::Completed) {
                 if let Some(attempt) = latest_attempt {
                     unfinished_direct_attempts.insert(attempt.attempt_id.clone());
                 } else {
@@ -4832,7 +2637,7 @@ impl TaskRunProjection {
             }
             for attempt in self.direct_execution_attempts.values() {
                 if direct_attempt_status_with_candidate(attempt, candidate)
-                    == TaskParticipantAttemptStatus::Started
+                    == TaskExecutionAttemptStatus::Started
                 {
                     unfinished_direct_attempts.insert(attempt.attempt_id.clone());
                 }
@@ -4941,13 +2746,13 @@ impl TaskRunProjection {
         TaskRootTerminalEvaluationV1 {
             requested_status,
             effective_status,
-            active_blocker,
             blocked_dependency_steps: blocked_dependency_steps.into_iter().collect(),
             cancelled_dependency_steps: cancelled_dependency_steps.into_iter().collect(),
             cancellation_closure: cancellation_closure.into_iter().collect(),
             unfinished_steps: unfinished_steps.into_iter().collect(),
             unfinished_participants: unfinished_participants.into_iter().collect(),
             unfinished_direct_attempts: unfinished_direct_attempts.into_iter().collect(),
+            unfinished_direct_task_background_agents: Vec::new(),
             completion_blockers,
         }
     }
@@ -4956,7 +2761,7 @@ impl TaskRunProjection {
 fn direct_attempt_status_with_candidate(
     attempt: &crate::TaskDirectExecutionAttemptV1,
     candidate: Option<&TaskRootTerminalCandidateV1>,
-) -> TaskParticipantAttemptStatus {
+) -> TaskExecutionAttemptStatus {
     match candidate {
         Some(TaskRootTerminalCandidateV1::DirectExecution { attempt_id, status })
             if attempt.attempt_id == *attempt_id =>
@@ -5074,387 +2879,8 @@ pub struct TaskPlanProjection {
     pub step_contracts: BTreeMap<TaskStepId, TaskStepContractV2>,
     /// True only after the exact complete V2 set commit marker replays successfully.
     pub contract_set_committed_v2: bool,
-    pub graph: Option<TaskGraphProjection>,
     pub graph_validation_error: Option<String>,
     pub reason: Option<String>,
-}
-
-/// Durable DAG view reconstructed from a task plan entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskGraphProjection {
-    pub task_id: TaskId,
-    pub graph_version: u32,
-    pub steps: Vec<TaskGraphStepProjection>,
-}
-
-impl TaskGraphProjection {
-    /// Builds a graph projection from one accepted or proposed task plan.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the plan carries invalid DAG metadata.
-    pub fn from_plan_entry(entry: &TaskPlanEntry) -> Result<Self> {
-        validate_task_plan_graph_steps(&entry.steps)?;
-        Ok(Self {
-            task_id: entry.task_id.clone(),
-            graph_version: entry.plan_version,
-            steps: entry
-                .steps
-                .iter()
-                .map(TaskGraphStepProjection::from_step_spec)
-                .collect(),
-        })
-    }
-
-    pub fn ready_steps<'a>(
-        &'a self,
-        statuses: &'a BTreeMap<(u32, TaskStepId), TaskStepProjection>,
-    ) -> Vec<&'a TaskGraphStepProjection> {
-        self.steps
-            .iter()
-            .filter(|step| {
-                let step_key = (self.graph_version, step.step_id.clone());
-                let not_started = statuses.get(&step_key).is_none_or(|status| {
-                    matches!(
-                        status.status,
-                        // A continuation is also the recovery lane for a step whose previous
-                        // attempt ended in a recoverable block.  Keeping these states in the
-                        // ready set lets the dependency graph re-evaluate downstream steps
-                        // after the prerequisite succeeds, instead of requiring a new plan.
-                        TaskStepStatus::Pending
-                            | TaskStepStatus::Failed
-                            | TaskStepStatus::Blocked
-                            | TaskStepStatus::Cancelled
-                            | TaskStepStatus::Interrupted
-                    )
-                });
-                not_started
-                    && step.depends_on.iter().all(|dependency| {
-                        statuses
-                            .get(&(self.graph_version, dependency.clone()))
-                            .is_some_and(|status| status.status == TaskStepStatus::Completed)
-                    })
-            })
-            .collect()
-    }
-
-    #[must_use]
-    pub fn ready_queue(
-        &self,
-        statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
-        options: TaskReadyQueueOptions,
-    ) -> TaskReadyQueue {
-        self.ready_queue_with_active_write_lease(statuses, options, false)
-    }
-
-    #[must_use]
-    pub fn ready_queue_with_active_write_lease(
-        &self,
-        statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
-        options: TaskReadyQueueOptions,
-        active_write_lease: bool,
-    ) -> TaskReadyQueue {
-        let ready_steps = self.ready_steps(statuses);
-        if active_write_lease {
-            return TaskReadyQueue {
-                read_only_batch: Vec::new(),
-                changeset_only_batch: Vec::new(),
-                worktree_batch: Vec::new(),
-                sequential_step: None,
-                deferred: ready_steps
-                    .into_iter()
-                    .map(|step| TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::ActiveWriteLease,
-                    })
-                    .collect(),
-            };
-        }
-        let running_steps = self.running_steps(statuses);
-        let running_exclusive_write = running_steps.iter().any(|step| {
-            !step.is_parallel_read_only()
-                && !step.is_parallel_changeset_only()
-                && !step.is_parallel_worktree()
-        });
-        if running_exclusive_write {
-            return TaskReadyQueue {
-                read_only_batch: Vec::new(),
-                changeset_only_batch: Vec::new(),
-                worktree_batch: Vec::new(),
-                sequential_step: None,
-                deferred: ready_steps
-                    .into_iter()
-                    .map(|step| TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::RunningWrite,
-                    })
-                    .collect(),
-            };
-        }
-
-        let running_read_only = running_steps
-            .iter()
-            .filter(|step| step.is_parallel_read_only())
-            .count();
-        let running_changeset_only = running_steps
-            .iter()
-            .filter(|step| step.is_parallel_changeset_only())
-            .count();
-        let running_worktree = running_steps
-            .iter()
-            .filter(|step| step.is_parallel_worktree())
-            .count();
-        let read_only_capacity = options
-            .max_concurrent_read_only
-            .saturating_sub(running_read_only);
-        let changeset_only_capacity = options
-            .max_concurrent_changeset_only
-            .saturating_sub(running_changeset_only);
-        let worktree_capacity = options
-            .max_concurrent_changeset_only
-            .saturating_sub(running_worktree);
-        let mut ready_read_only = Vec::new();
-        let mut ready_changeset_only = Vec::new();
-        let mut ready_worktree = Vec::new();
-        let mut ready_write_steps = Vec::new();
-
-        for step in ready_steps {
-            if step.is_parallel_read_only() {
-                ready_read_only.push(step);
-            } else if step.is_parallel_changeset_only() {
-                ready_changeset_only.push(step);
-            } else if step.is_parallel_worktree() {
-                ready_worktree.push(step);
-            } else {
-                ready_write_steps.push(step);
-            }
-        }
-
-        let mut deferred = Vec::new();
-        let mut read_only_batch = Vec::new();
-        if running_changeset_only == 0 && running_worktree == 0 {
-            for step in ready_read_only {
-                if read_only_batch.len() < read_only_capacity {
-                    read_only_batch.push(step.clone());
-                } else {
-                    deferred.push(TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::ConcurrencyBudget,
-                    });
-                }
-            }
-        } else {
-            deferred.extend(
-                ready_read_only
-                    .into_iter()
-                    .map(|step| TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: if running_changeset_only > 0 {
-                            TaskReadyDeferredReason::RunningChangesetOnly
-                        } else {
-                            TaskReadyDeferredReason::RunningWorktree
-                        },
-                    }),
-            );
-        }
-
-        let may_start_changeset =
-            read_only_batch.is_empty() && running_read_only == 0 && running_worktree == 0;
-        let mut changeset_only_batch = Vec::new();
-        if may_start_changeset {
-            for step in ready_changeset_only {
-                if changeset_only_batch.len() < changeset_only_capacity {
-                    changeset_only_batch.push(step.clone());
-                } else {
-                    deferred.push(TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::ConcurrencyBudget,
-                    });
-                }
-            }
-        } else {
-            deferred.extend(
-                ready_changeset_only
-                    .into_iter()
-                    .map(|step| TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::RunningReadOnly,
-                    }),
-            );
-        }
-
-        let may_start_worktree = read_only_batch.is_empty()
-            && changeset_only_batch.is_empty()
-            && running_read_only == 0
-            && running_changeset_only == 0;
-        let mut worktree_batch = Vec::new();
-        if may_start_worktree {
-            for step in ready_worktree {
-                if worktree_batch.len() < worktree_capacity {
-                    worktree_batch.push(step.clone());
-                } else {
-                    deferred.push(TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: TaskReadyDeferredReason::ConcurrencyBudget,
-                    });
-                }
-            }
-        } else {
-            deferred.extend(
-                ready_worktree
-                    .into_iter()
-                    .map(|step| TaskReadyDeferredStep {
-                        step_id: step.step_id.clone(),
-                        reason: if running_changeset_only > 0 || !changeset_only_batch.is_empty() {
-                            TaskReadyDeferredReason::RunningChangesetOnly
-                        } else {
-                            TaskReadyDeferredReason::RunningReadOnly
-                        },
-                    }),
-            );
-        }
-
-        let may_start_write = read_only_batch.is_empty()
-            && changeset_only_batch.is_empty()
-            && worktree_batch.is_empty()
-            && running_read_only == 0
-            && running_changeset_only == 0
-            && running_worktree == 0;
-        let mut sequential_step = None;
-        if may_start_write {
-            sequential_step = ready_write_steps.first().map(|step| (*step).clone());
-        }
-        for (index, step) in ready_write_steps.into_iter().enumerate() {
-            if may_start_write && index == 0 {
-                continue;
-            }
-            deferred.push(TaskReadyDeferredStep {
-                step_id: step.step_id.clone(),
-                reason: if running_read_only > 0 {
-                    TaskReadyDeferredReason::RunningReadOnly
-                } else if running_changeset_only > 0 || !changeset_only_batch.is_empty() {
-                    TaskReadyDeferredReason::RunningChangesetOnly
-                } else if running_worktree > 0 || !worktree_batch.is_empty() {
-                    TaskReadyDeferredReason::RunningWorktree
-                } else {
-                    TaskReadyDeferredReason::SequentialWrite
-                },
-            });
-        }
-
-        TaskReadyQueue {
-            read_only_batch,
-            changeset_only_batch,
-            worktree_batch,
-            sequential_step,
-            deferred,
-        }
-    }
-
-    fn running_steps<'a>(
-        &'a self,
-        statuses: &'a BTreeMap<(u32, TaskStepId), TaskStepProjection>,
-    ) -> Vec<&'a TaskGraphStepProjection> {
-        self.steps
-            .iter()
-            .filter(|step| {
-                statuses
-                    .get(&(self.graph_version, step.step_id.clone()))
-                    .is_some_and(|status| status.status == TaskStepStatus::Running)
-            })
-            .collect()
-    }
-}
-
-/// One task graph step as materialized for scheduling and TUI summaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskGraphStepProjection {
-    pub step_id: TaskStepId,
-    pub title: String,
-    pub mode: TaskStepMode,
-    pub depends_on: Vec<TaskStepId>,
-    pub isolation: TaskIsolationMode,
-}
-
-impl TaskGraphStepProjection {
-    fn from_step_spec(step: &TaskStepSpec) -> Self {
-        Self {
-            step_id: step.step_id.clone(),
-            title: step.title.clone(),
-            mode: step.effective_mode(),
-            depends_on: step.depends_on.clone(),
-            isolation: step.effective_isolation(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_parallel_read_only(&self) -> bool {
-        matches!(
-            self.mode,
-            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
-        ) && self.isolation == TaskIsolationMode::SharedReadOnly
-    }
-
-    #[must_use]
-    pub fn is_parallel_changeset_only(&self) -> bool {
-        self.mode == TaskStepMode::Write && self.isolation == TaskIsolationMode::ChangesetOnly
-    }
-
-    #[must_use]
-    pub fn is_parallel_worktree(&self) -> bool {
-        self.mode == TaskStepMode::Write && self.isolation == TaskIsolationMode::Worktree
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TaskReadyQueueOptions {
-    pub max_concurrent_read_only: usize,
-    pub max_concurrent_changeset_only: usize,
-}
-
-impl TaskReadyQueueOptions {
-    #[must_use]
-    pub fn new(max_concurrent_read_only: usize) -> Self {
-        Self {
-            max_concurrent_read_only,
-            max_concurrent_changeset_only: 1,
-        }
-    }
-
-    #[must_use]
-    pub fn with_max_concurrent_changeset_only(
-        mut self,
-        max_concurrent_changeset_only: usize,
-    ) -> Self {
-        self.max_concurrent_changeset_only = max_concurrent_changeset_only;
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskReadyQueue {
-    pub read_only_batch: Vec<TaskGraphStepProjection>,
-    pub changeset_only_batch: Vec<TaskGraphStepProjection>,
-    pub worktree_batch: Vec<TaskGraphStepProjection>,
-    pub sequential_step: Option<TaskGraphStepProjection>,
-    pub deferred: Vec<TaskReadyDeferredStep>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskReadyDeferredStep {
-    pub step_id: TaskStepId,
-    pub reason: TaskReadyDeferredReason,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskReadyDeferredReason {
-    ActiveWriteLease,
-    ConcurrencyBudget,
-    RunningReadOnly,
-    RunningChangesetOnly,
-    RunningWorktree,
-    RunningWrite,
-    SequentialWrite,
 }
 
 /// Projection for one task step.
@@ -5497,24 +2923,6 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         bail!("{label} contains unsupported characters");
-    }
-    Ok(())
-}
-
-fn validate_sha256_fingerprint(label: &str, value: &str) -> Result<()> {
-    validate_prefixed_sha256(label, value, "sha256:")
-}
-
-fn validate_prefixed_sha256(label: &str, value: &str, prefix: &str) -> Result<()> {
-    let Some(digest) = value.strip_prefix(prefix) else {
-        bail!("{label} must use a {prefix} fingerprint");
-    };
-    validate_hex_sha256(label, digest)
-}
-
-fn validate_hex_sha256(label: &str, value: &str) -> Result<()> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("{label} must contain a 64-character hexadecimal sha256 digest");
     }
     Ok(())
 }

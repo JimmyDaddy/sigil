@@ -30,7 +30,7 @@ pub fn canonicalize_cache_stable_json(value: &serde_json::Value) -> Result<serde
 /// when this value is [`Self::Identical`] or [`Self::ConversationTailAppended`]; TTL expiry,
 /// eviction and provider-side routing remain unproven in that case.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheLayoutMutationKind {
     FirstObservation,
     Identical,
@@ -61,7 +61,7 @@ impl CacheLayoutMutationKind {
 
 /// Comparison evidence between two consecutive request cache layouts.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheLayoutMutationProofV1 {
     pub kind: CacheLayoutMutationKind,
     /// Number of earlier conversation messages proven byte-identical at the logical layer.
@@ -75,7 +75,7 @@ pub struct CacheLayoutMutationProofV1 {
 /// Hashes use deterministic, domain-separated SHA-256 so they remain comparable after restart.
 /// Raw messages, tool schemas, paths, continuation payloads and partition keys are never stored.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheLayoutProofV1 {
     pub schema_version: u16,
     pub layout_hash: String,
@@ -224,7 +224,7 @@ impl CacheLayoutProofV1 {
 /// participate in the tool-schema identity because providers never receive them as declaration
 /// fields. The legacy proof remains readable so existing sessions can replay without migration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheLayoutProofV2 {
     pub schema_version: u16,
     pub layout_hash: String,

@@ -142,10 +142,11 @@ where
         &request.policy.verification_scope,
         0,
     )?;
-    let mutates_verification_scope = check.effect.may_mutate_workspace()
-        || before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id
-        || before_snapshot.workspace_knowledge.is_unknown_dirty()
-        || after_snapshot.workspace_knowledge.is_unknown_dirty();
+    let snapshot_unavailable = before_snapshot.workspace_snapshot_id.is_none()
+        || after_snapshot.workspace_snapshot_id.is_none();
+    let observed_change = !snapshot_unavailable
+        && before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id;
+    let mutates_verification_scope = check.effect.may_mutate_workspace() || observed_change;
     let mutation_event = if mutates_verification_scope {
         append_check_workspace_mutation_detected_event(
             session,
@@ -159,7 +160,10 @@ where
     } else {
         None
     };
-    let check_status = check_receipt_status(&command_output, mutates_verification_scope);
+    let check_status = check_receipt_status(
+        &command_output,
+        mutates_verification_scope || snapshot_unavailable,
+    );
     let failure_reason = check_failure_reason(&command_output, request.policy.timeout_ms);
     let check_event = append_check_finished_event(
         session,
@@ -294,10 +298,11 @@ pub fn record_plugin_verification_hook_receipt(
         0,
     )?;
     let mutates_verification_scope = request.started.declared_effect.may_mutate_workspace()
-        || request.workspace_mutation_event_id.is_some()
-        || snapshot.workspace_knowledge.is_unknown_dirty();
-    let check_status =
-        plugin_hook_receipt_status(request.finished.status, mutates_verification_scope);
+        || request.workspace_mutation_event_id.is_some();
+    let check_status = plugin_hook_receipt_status(
+        request.finished.status,
+        mutates_verification_scope || snapshot.workspace_snapshot_id.is_none(),
+    );
     let failure_reason = plugin_hook_failure_reason(&request.finished);
     let check_event = append_plugin_check_finished_event(
         session,
@@ -604,11 +609,10 @@ fn append_check_workspace_mutation_detected_event(
     before_snapshot: &WorkspaceSnapshotBuild,
     after_snapshot: &WorkspaceSnapshotBuild,
 ) -> Result<Option<StoredEvent>> {
-    let (reason, unknown_dirty) = if before_snapshot.workspace_knowledge.is_unknown_dirty() {
-        ("snapshot_incomplete_before", true)
-    } else if after_snapshot.workspace_knowledge.is_unknown_dirty() {
-        ("snapshot_incomplete_after", true)
-    } else if before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id {
+    let (reason, unknown_dirty) = if before_snapshot.workspace_snapshot_id.is_some()
+        && after_snapshot.workspace_snapshot_id.is_some()
+        && before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id
+    {
         ("snapshot_changed", false)
     } else {
         ("declared_write_effect", true)

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ControlEntry, IntegrationPlan, PlanReviewAttemptStatus, PublicRunEventKind,
     TaskChecklistItemV1, TaskParticipantAttemptEntry, TaskParticipantAttemptId,
-    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry, TaskPlanStatus,
-    TaskRunStatus, TaskStepSpec,
+    TaskParticipantAttemptStatus, TaskParticipantPurpose, TaskPlanEntry, TaskRunStatus,
+    TaskStepSpec,
 };
 
 /// Stable public task phase shared by TUI, HTTP, and desktop adapters.
@@ -17,7 +17,6 @@ pub enum PublicTaskPhase {
     Planning,
     Execution,
     Integration,
-    Synthesis,
     Terminal,
 }
 
@@ -75,7 +74,6 @@ impl From<crate::ConversationRoute> for PublicConversationRoute {
 pub enum PublicPlanReviewStatus {
     Started,
     WaitingForInput,
-    Finalizing,
     DraftReady,
     CompileFailed,
     CompletedWithoutDraft,
@@ -91,7 +89,6 @@ impl From<PlanReviewAttemptStatus> for PublicPlanReviewStatus {
         match status {
             PlanReviewAttemptStatus::Started => Self::Started,
             PlanReviewAttemptStatus::WaitingForInput => Self::WaitingForInput,
-            PlanReviewAttemptStatus::Finalizing => Self::Finalizing,
             PlanReviewAttemptStatus::DraftReady => Self::DraftReady,
             PlanReviewAttemptStatus::CompileFailed => Self::CompileFailed,
             PlanReviewAttemptStatus::CompletedWithoutDraft => Self::CompletedWithoutDraft,
@@ -133,7 +130,7 @@ impl PublicPlanAction {
 /// result.  The candidate is review evidence only; adopting it still requires an explicit user
 /// action before a Plan draft is created.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicPlanReviewCandidateV1 {
     pub content_hash: String,
     pub content: String,
@@ -193,7 +190,7 @@ pub struct PublicPlanReview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PublicPlanRevisionSummaryV1 {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,7 +210,6 @@ pub enum PublicPlanRevisionStatusV1 {
     Queued,
     Researching,
     WaitingForInput,
-    Finalizing,
     Failed,
     Cancelled,
     Succeeded,
@@ -367,19 +363,7 @@ impl PublicTaskEventProjector {
                 phase: task_run_phase(entry.status),
                 status: entry.status.as_str().to_owned(),
             }],
-            ControlEntry::TaskPlan(entry) => {
-                let mut events = Vec::with_capacity(2);
-                if entry.status == TaskPlanStatus::Accepted {
-                    events.push(PublicRunEventKind::TaskExecutionAdmitted {
-                        task_id: entry.task_id.as_str().to_owned(),
-                        execution: crate::TaskExecutionBindingV1::Plan {
-                            plan_version: entry.plan_version,
-                        },
-                    });
-                }
-                events.push(public_task_plan_updated(entry));
-                events
-            }
+            ControlEntry::TaskPlan(entry) => vec![public_task_plan_updated(entry)],
             ControlEntry::TaskDirectExecutionAdmittedV1(entry) => {
                 vec![PublicRunEventKind::TaskExecutionAdmitted {
                     task_id: entry.task_id.as_str().to_owned(),
@@ -403,7 +387,7 @@ impl PublicTaskEventProjector {
                 vec![PublicRunEventKind::TaskPhaseChanged {
                     task_id: Some(entry.task_id.as_str().to_owned()),
                     phase: PublicTaskPhase::Execution,
-                    status: task_participant_status_label(entry.status).to_owned(),
+                    status: task_execution_status_label(entry.status).to_owned(),
                 }]
             }
             ControlEntry::TaskStep(entry) => {
@@ -459,9 +443,7 @@ impl PublicTaskEventProjector {
     ) -> Vec<PublicRunEventKind> {
         let task_id = entry.task_id.as_str().to_owned();
         let phase = match entry.purpose {
-            TaskParticipantPurpose::Planner => PublicTaskPhase::Planning,
             TaskParticipantPurpose::Step => PublicTaskPhase::Execution,
-            TaskParticipantPurpose::Synthesis => PublicTaskPhase::Synthesis,
         };
         let status = task_participant_status_label(entry.status).to_owned();
         let mut events = vec![PublicRunEventKind::TaskPhaseChanged {
@@ -582,6 +564,17 @@ fn task_participant_status_label(status: TaskParticipantAttemptStatus) -> &'stat
         TaskParticipantAttemptStatus::Blocked => "blocked",
         TaskParticipantAttemptStatus::Cancelled => "cancelled",
         TaskParticipantAttemptStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_execution_status_label(status: crate::TaskExecutionAttemptStatus) -> &'static str {
+    match status {
+        crate::TaskExecutionAttemptStatus::Started => "started",
+        crate::TaskExecutionAttemptStatus::Completed => "completed",
+        crate::TaskExecutionAttemptStatus::Failed => "failed",
+        crate::TaskExecutionAttemptStatus::Blocked => "blocked",
+        crate::TaskExecutionAttemptStatus::Cancelled => "cancelled",
+        crate::TaskExecutionAttemptStatus::Interrupted => "interrupted",
     }
 }
 

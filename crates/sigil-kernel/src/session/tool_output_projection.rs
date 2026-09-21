@@ -15,7 +15,7 @@ pub const MAX_TOOL_OUTPUT_PROJECTION_SHRINKS: usize = 128;
 
 /// Bounded head/tail policy for an already-completed historical tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputProjectionPolicy {
     /// Maximum bytes for the rendered tool-result `content` field, including the marker.
     pub max_projected_content_bytes: usize,
@@ -49,7 +49,7 @@ impl ToolOutputProjectionPolicy {
 
 /// Source event plus the real opaque artifact capability for a projected V2 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ToolOutputProjectionSourceRef {
     PublishedArtifact {
         source_event_id: crate::EventId,
@@ -66,7 +66,7 @@ pub enum ToolOutputShrinkReasonV1 {
 
 /// Session-owned durable reference used to retrieve a projected V2 tool result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ToolOutputArtifactRefV1 {
     PublishedArtifact {
         artifact_ref: ToolArtifactRefV1,
@@ -76,7 +76,7 @@ pub enum ToolOutputArtifactRefV1 {
 
 /// Metadata proving how one completed historical tool result was projection-shrunk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ToolOutputProjectionShrink {
     pub schema_version: u16,
     pub source_event: CompactionEventRef,

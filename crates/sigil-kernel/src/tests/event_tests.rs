@@ -1206,6 +1206,7 @@ fn public_run_event_projects_approval_requested_details() {
         "run-1",
         9,
         RunEvent::ToolApprovalRequested {
+            display_call_id: None,
             approval_identity: ToolApprovalEntry::test_fixture(
                 ToolApprovalAuditAction::Requested,
                 "call-2",
@@ -1275,6 +1276,7 @@ fn public_run_event_projects_all_internal_run_event_variants() {
         ),
         (
             RunEvent::ToolApprovalResolved {
+                display_call_id: None,
                 call_id: "call-approval".to_owned(),
                 approval_request_id: "approval-call-approval".to_owned(),
                 approved: true,

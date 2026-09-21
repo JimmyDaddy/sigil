@@ -1260,6 +1260,121 @@ fn load_from_store_marks_orphan_agent_attempt_as_interrupted() -> Result<()> {
 }
 
 #[test]
+fn load_from_store_preserves_background_thread_owned_by_live_attachment() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    crate::session::append_current_test_session_identity(&store)?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+            snapshot: sample_snapshot()?,
+        }),
+    ))?;
+    let mut started = sample_started_entry()?;
+    started.invocation_mode = AgentInvocationMode::Background;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+        started,
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentRunAttemptStarted(AgentRunAttemptStartedEntry {
+            thread_id: thread_id("thread_1")?,
+            attempt_id: attempt_id("attempt_1")?,
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            background: true,
+            provider_background_handle_ref: None,
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+            thread_id: thread_id("thread_1")?,
+            status: AgentThreadStatus::Running,
+            reason: None,
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread_id("thread_1")?,
+            status: AgentResultContinuationStatus::Pending,
+            reason: Some("waiting for live child result".to_owned()),
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+        AgentApprovalRouteEntry {
+            route_id: route_id("route_live")?,
+            source_thread_id: thread_id("thread_1")?,
+            target_thread_id: None,
+            call_id: "call_live".to_owned(),
+            tool_name: "write_file".to_owned(),
+            binding: None,
+            status: AgentRouteStatus::Requested,
+        },
+    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentMailboxMessage(AgentMailboxMessageEntry {
+            route_id: route_id("mailbox_live")?,
+            source_thread_id: thread_id("thread_parent")?,
+            target_thread_id: thread_id("thread_1")?,
+            prompt_hash: "sha256:message".to_owned(),
+            prompt: Some("continue".to_owned()),
+            status: AgentMailboxStatus::Queued,
+            reason: None,
+            updated_at_ms: Some(1),
+        }),
+    ))?;
+
+    let live_store =
+        store
+            .clone()
+            .with_live_background_agent_threads(std::collections::BTreeSet::from([thread_id(
+                "thread_1",
+            )?]));
+    let session = Session::load_from_store("deepseek", "deepseek-v4-pro", live_store)?;
+
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id("thread_1")?)
+            .map(|thread| thread.status),
+        Some(AgentThreadStatus::Running)
+    );
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interrupted))
+                if interrupted.thread_id.as_str() == "thread_1"
+        )
+    }));
+    assert_eq!(
+        session
+            .agent_result_continuation_projection()
+            .statuses
+            .get(&thread_id("thread_1")?),
+        Some(&AgentResultContinuationStatus::Pending)
+    );
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .approval_routes
+            .get(&route_id("route_live")?)
+            .map(|route| route.status),
+        Some(AgentRouteStatus::Requested)
+    );
+    assert_eq!(
+        session
+            .agent_thread_state_projection()
+            .mailbox_messages
+            .get(&route_id("mailbox_live")?)
+            .map(|message| message.status),
+        Some(AgentMailboxStatus::Queued)
+    );
+    Ok(())
+}
+
+#[test]
 fn load_from_store_reconciles_agent_batch_without_replaying_missing_live_handles() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");

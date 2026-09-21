@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -6,16 +6,13 @@ use serde_json::json;
 
 use crate::{
     AutomaticRouteCapability, ControlEntry, SecretString, SessionLogEntry, SessionRef, TaskId,
-    TaskPlanStatus, TaskRunStatus, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
-    ToolSpec,
+    TaskRunStatus, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
-pub const REQUEST_TASK_PLANNING_TOOL_NAME: &str = "request_task_planning";
+pub const START_TASK_TOOL_NAME: &str = "start_task";
 pub const CONTINUE_EXISTING_TASK_TOOL_NAME: &str = "continue_existing_task";
-pub const CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME: &str = "continue_without_task_planning";
 pub const RUN_PENDING_PLAN_TOOL_NAME: &str = "run_pending_plan";
-pub const KEEP_PENDING_PLAN_TOOL_NAME: &str = "keep_pending_plan";
-pub const MAX_TASK_ADMISSION_REASON_CODES: usize = 5;
+pub const MAX_TASK_TITLE_CHARS: usize = 120;
 
 /// Stable identity for one conversation-to-task handoff.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -72,7 +69,7 @@ impl ConversationTurnRef {
     }
 }
 
-/// Host-owned source that admitted durable task planning.
+/// Host-owned source that admitted a durable Task.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskAdmissionTrigger {
@@ -80,29 +77,6 @@ pub enum TaskAdmissionTrigger {
     ModelRequested,
     ApprovedPlan,
     ExplicitUserDelegation,
-}
-
-/// Bounded model-provided reason for escalating one conversation to a durable task.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskAdmissionReason {
-    CrossLayer,
-    ParallelResearch,
-    MultiStageChange,
-    LongVerification,
-    HighRisk,
-}
-
-impl TaskAdmissionReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::CrossLayer => "cross_layer",
-            Self::ParallelResearch => "parallel_research",
-            Self::MultiStageChange => "multi_stage_change",
-            Self::LongVerification => "long_verification",
-            Self::HighRisk => "high_risk",
-        }
-    }
 }
 
 /// Durable host decision for one handoff request.
@@ -113,14 +87,16 @@ pub enum TaskHandoffDecision {
     Rejected,
 }
 
-/// Recovery-critical record proving that a typed task handoff was requested.
+/// Recovery-critical record proving that the current conversation turn started a durable Task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TaskHandoffRequestedEntry {
     pub handoff_id: TaskHandoffId,
     pub source_turn: ConversationTurnRef,
     pub trigger: TaskAdmissionTrigger,
-    pub reason_codes: Vec<TaskAdmissionReason>,
+    /// Optional model-suggested display title; the source turn remains the Task objective.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Safe source objective retained only when this single recovery-critical fact must be able to
     /// reconstruct a not-yet-written explicit `/task` User entry after a crash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,7 +121,7 @@ pub struct TaskHandoffResolvedEntry {
 /// The model only supplies bounded reason codes. Identity, objective, policy, parent session, and
 /// timestamps are all bound before provider dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskPlanningHandoffBinding {
+pub struct TaskStartHandoffBinding {
     pub handoff_id: TaskHandoffId,
     pub task_id: TaskId,
     pub source_turn: ConversationTurnRef,
@@ -168,14 +144,12 @@ pub struct TaskPlanningHandoffBinding {
 pub struct TaskContinuationHandoffBinding {
     pub task_id: TaskId,
     pub source_turn: ConversationTurnRef,
-    pub plan_version: Option<u32>,
     pub task_status: TaskRunStatus,
-    pub plan_status: Option<TaskPlanStatus>,
     pub effective_capability: AutomaticRouteCapability,
     pub policy_snapshot_hash: String,
     pub route_contract_fingerprint: String,
     pub decided_at_ms: u64,
-    /// Exact source prompt retained in process memory only for planner guidance review.
+    /// Exact source prompt retained in process memory only for direct guidance review.
     pub exact_guidance: SecretString,
     pub prompt_hash: String,
     pub exact_prompt_required: bool,
@@ -184,20 +158,13 @@ pub struct TaskContinuationHandoffBinding {
 
 /// Recovery-critical receipt selecting one exact existing Task as the current run target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TaskContinuationSelectedEntry {
     pub task_id: TaskId,
     pub source_turn: ConversationTurnRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_version: Option<u32>,
     pub task_status: TaskRunStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plan_status: Option<TaskPlanStatus>,
     pub route_contract_fingerprint: String,
-    /// Typed semantic choice returned by the routing model. Older records remain explicitly
-    /// unspecified; a later typed routing call may upgrade that process-local action without
-    /// guessing from localized prompt text.
-    #[serde(default)]
+    /// Typed operation selected for this exact Task.
     pub control: TaskContinuationControlKind,
     pub prompt_hash: String,
     pub exact_prompt_required: bool,
@@ -206,14 +173,11 @@ pub struct TaskContinuationSelectedEntry {
 }
 
 /// Durable, secret-free semantic kind for one existing-Task continuation.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskContinuationControlKind {
     ResumeTask,
     ApplyCurrentRequestAsGuidance,
-    /// Compatibility state for receipts written before the typed action field existed.
-    #[default]
-    LegacyUnspecified,
 }
 
 impl TaskContinuationSelectedEntry {
@@ -229,9 +193,6 @@ impl TaskContinuationSelectedEntry {
             self.source_turn.message_id.clone(),
             self.source_turn.logical_run_id.clone(),
         )?;
-        if self.plan_version.is_some_and(|version| version == 0) {
-            bail!("task continuation plan version must be non-zero");
-        }
         if !matches!(
             self.task_status,
             TaskRunStatus::Started
@@ -240,15 +201,6 @@ impl TaskContinuationSelectedEntry {
                 | TaskRunStatus::Interrupted
         ) {
             bail!("task continuation status is not resumable");
-        }
-        if self.plan_version.is_none() != self.plan_status.is_none() {
-            bail!("task continuation plan version and status must be present together");
-        }
-        if self
-            .plan_status
-            .is_some_and(|status| status != TaskPlanStatus::Accepted)
-        {
-            bail!("task continuation plan must be accepted");
         }
         if self.route_contract_fingerprint.trim().is_empty() {
             bail!("task continuation route contract fingerprint is empty");
@@ -289,28 +241,23 @@ impl TaskContinuationSelectedEntry {
     }
 }
 
-/// Model-visible typed decision for continuing the host-selected current Task.
+/// Model-visible operation for the host-selected current Task.
 #[must_use]
 pub fn continue_existing_task_tool_spec() -> ToolSpec {
     ToolSpec {
         name: CONTINUE_EXISTING_TASK_TOOL_NAME.to_owned(),
-        description: "Continue the exact current resumable durable Task selected by the host when the user's request semantically resumes, finishes, adjusts, or follows up on that Task. A question about that Task's status, progress, interruption, or next step is a follow-up; use apply_current_request_as_guidance so the same executor can address it without losing Task progress. The host owns the task id, current status, optional plan version, permissions, and execution authority; do not use this for an unrelated request or to create a new Task."
+        description: "Operate on the exact current resumable durable Task selected by the host. Choose resume_task to continue its existing objective, or apply_current_request_as_guidance to apply the user's current request to that Task. A status question can be answered directly without calling this tool. The host owns the task id, current status, optional plan version, permissions, and execution authority; do not use this for an unrelated request or to create a new Task."
             .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": ["continue_current_task"]
-                },
                 "action": {
                     "type": "string",
                     "enum": ["resume_task", "apply_current_request_as_guidance"]
                 }
             },
-            "required": ["reason", "action"],
-            "additionalProperties": false
-        }),
+            "required": ["action"],
+            }),
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
         network_effect: None,
@@ -318,61 +265,24 @@ pub fn continue_existing_task_tool_spec() -> ToolSpec {
     }
 }
 
-/// Model-visible schema for the internal conversation-to-task handoff tool.
+/// Model-visible contract for starting a direct Task from the current user turn.
 #[must_use]
-pub fn request_task_planning_tool_spec() -> ToolSpec {
+pub fn start_task_tool_spec() -> ToolSpec {
     ToolSpec {
-        name: REQUEST_TASK_PLANNING_TOOL_NAME.to_owned(),
-        description: "Request durable task planning for the current user turn only when the goal requires coordinated cross-file or cross-layer changes, dependent stages, long verification, high-risk execution, or two or more independently useful work streams whose results must be combined. Do not infer complexity from file count alone: one bounded explanation, linear trace, or summary of connected code remains an ordinary conversation. The host owns the objective, task identity, permissions, and plan."
+        name: START_TASK_TOOL_NAME.to_owned(),
+        description: "Start direct durable execution of the current user request when it should continue independently of this conversation turn. This does not create a plan or invoke another planner. The host binds the exact current request, task identity, permissions, and execution authority. A short title is optional and only labels the Task in the interface."
             .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "reason_codes": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": MAX_TASK_ADMISSION_REASON_CODES,
-                    "uniqueItems": true,
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "cross_layer",
-                            "parallel_research",
-                            "multi_stage_change",
-                            "long_verification",
-                            "high_risk"
-                        ]
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_TASK_TITLE_CHARS,
+                    "description": "Optional short display title. The Task objective is always the current user request."
                     }
                 }
-            },
-            "required": ["reason_codes"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-/// Model-visible negative decision for the routing-only microturn.
-#[must_use]
-pub fn continue_without_task_planning_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME.to_owned(),
-        description: "Continue with an ordinary conversation turn only when the current goal has one bounded outcome, such as an explanation, one symbol lookup, one linear trace or summary of connected code, one narrow read-only query about a single concern, or a small single-file edit. Reading multiple files as evidence for that one result is still ordinary. Do not use this when separate investigations or independently useful requested results must later be compared, synthesized, or integrated, or when the goal otherwise requires coordinated stages, long verification, or high-risk execution."
-            .to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": ["does_not_meet_task_planning_criteria"]
-                }
-            },
-            "required": ["reason"],
-            "additionalProperties": false
-        }),
+            }),
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
         network_effect: None,
@@ -393,15 +303,8 @@ pub fn run_pending_plan_tool_spec() -> ToolSpec {
             .to_owned(),
         input_schema: json!({
             "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": ["execute_current_pending_plan"]
-                }
-            },
-            "required": ["reason"],
-            "additionalProperties": false
-        }),
+            "properties": {},
+            }),
         category: ToolCategory::Custom,
         access: ToolAccess::Read,
         network_effect: None,
@@ -409,78 +312,36 @@ pub fn run_pending_plan_tool_spec() -> ToolSpec {
     }
 }
 
-/// Model-visible negative decision for a turn that does not authorize pending Plan execution.
-#[must_use]
-pub fn keep_pending_plan_tool_spec() -> ToolSpec {
-    ToolSpec {
-        name: KEEP_PENDING_PLAN_TOOL_NAME.to_owned(),
-        description: "Keep the exact host-selected pending Plan unchanged when the user's current request does not clearly authorize executing it. This prevents an unrelated, ambiguous, revision, save, or rejection request from being treated as execution."
-            .to_owned(),
-        input_schema: json!({
-            "type": "object",
-            "properties": {
-                "reason": {
-                    "type": "string",
-                    "enum": ["execution_not_authorized"]
-                }
-            },
-            "required": ["reason"],
-            "additionalProperties": false
-        }),
-        category: ToolCategory::Custom,
-        access: ToolAccess::Read,
-        network_effect: None,
-        preview: ToolPreviewCapability::None,
-    }
-}
-
-/// Parses the bounded model-owned portion of a task handoff request.
+/// Parses the optional display title for the direct Task start action.
 ///
 /// # Errors
 ///
-/// Returns an error for unknown fields/reasons, empty or oversized arrays, or duplicates.
-pub fn task_planning_reason_codes(call: &ToolCall) -> Result<Vec<TaskAdmissionReason>> {
-    if call.name != REQUEST_TASK_PLANNING_TOOL_NAME {
+/// Returns an error for a malformed title. Unknown fields are ignored.
+pub fn start_task_title(call: &ToolCall) -> Result<Option<String>> {
+    if call.name != START_TASK_TOOL_NAME {
         bail!("unexpected internal task handoff tool {}", call.name);
     }
-    let args: RawTaskPlanningArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid task planning request arguments: {error}"))?;
-    if args.reason_codes.is_empty() {
-        bail!("task planning request requires at least one reason code");
-    }
-    if args.reason_codes.len() > MAX_TASK_ADMISSION_REASON_CODES {
-        bail!("task planning request exceeds {MAX_TASK_ADMISSION_REASON_CODES} reason codes");
-    }
-    let unique = args.reason_codes.iter().copied().collect::<BTreeSet<_>>();
-    if unique.len() != args.reason_codes.len() {
-        bail!("task planning request contains duplicate reason codes");
-    }
-    Ok(args.reason_codes)
-}
-
-/// Validates the model-owned negative decision for a routing-only microturn.
-///
-/// # Errors
-///
-/// Returns an error when the call uses another tool, has unknown fields, or does not carry the
-/// single bounded negative-decision reason.
-pub fn validate_continue_without_task_planning_call(call: &ToolCall) -> Result<()> {
-    if call.name != CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME {
-        bail!("unexpected internal task routing tool {}", call.name);
-    }
-    let args: RawContinueWithoutTaskPlanningArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid direct conversation routing arguments: {error}"))?;
-    if args.reason != DirectConversationReason::DoesNotMeetTaskPlanningCriteria {
-        bail!("direct conversation routing reason is unsupported");
-    }
-    Ok(())
+    let args: RawStartTaskArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid start_task arguments: {error}"))?;
+    args.title
+        .map(|title| {
+            let title = title.trim().to_owned();
+            if title.is_empty() {
+                bail!("start_task title must not be empty");
+            }
+            if title.chars().count() > MAX_TASK_TITLE_CHARS {
+                bail!("start_task title exceeds {MAX_TASK_TITLE_CHARS} characters");
+            }
+            Ok(title)
+        })
+        .transpose()
 }
 
 /// Validates the model-owned decision to continue the host-frozen current Task.
 ///
 /// # Errors
 ///
-/// Returns an error when the call uses another tool, includes unknown fields, or carries an
+/// Returns an error when the call uses another tool, has malformed known fields, or carries an
 /// unsupported reason. Task identity is deliberately absent from model arguments.
 pub fn validate_continue_existing_task_call(call: &ToolCall) -> Result<()> {
     continue_existing_task_control_kind(call).map(|_| ())
@@ -492,93 +353,35 @@ pub fn continue_existing_task_control_kind(call: &ToolCall) -> Result<TaskContin
         bail!("unexpected internal task continuation tool {}", call.name);
     }
     let args: RawContinueExistingTaskArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid task continuation routing arguments: {error}"))?;
-    if args.reason != ExistingTaskContinuationReason::ContinueCurrentTask {
-        bail!("task continuation routing reason is unsupported");
-    }
+        .map_err(|error| anyhow!("invalid task continuation arguments: {error}"))?;
     Ok(args.action)
 }
 
 /// Validates the model-owned execution decision for the host-selected pending Plan.
 pub fn validate_run_pending_plan_call(call: &ToolCall) -> Result<()> {
-    validate_pending_plan_decision_call(
-        call,
-        RUN_PENDING_PLAN_TOOL_NAME,
-        PendingPlanDecisionReason::ExecuteCurrentPendingPlan,
-    )
-}
-
-/// Validates the model-owned negative decision for the host-selected pending Plan.
-pub fn validate_keep_pending_plan_call(call: &ToolCall) -> Result<()> {
-    validate_pending_plan_decision_call(
-        call,
-        KEEP_PENDING_PLAN_TOOL_NAME,
-        PendingPlanDecisionReason::ExecutionNotAuthorized,
-    )
-}
-
-fn validate_pending_plan_decision_call(
-    call: &ToolCall,
-    expected_name: &str,
-    expected_reason: PendingPlanDecisionReason,
-) -> Result<()> {
-    if call.name != expected_name {
-        bail!(
-            "unexpected internal pending plan decision tool {}",
-            call.name
-        );
+    if call.name != RUN_PENDING_PLAN_TOOL_NAME {
+        bail!("unexpected internal pending plan tool {}", call.name);
     }
-    let args: RawPendingPlanDecisionArgs = serde_json::from_str(&call.args_json)
-        .map_err(|error| anyhow!("invalid pending plan decision arguments: {error}"))?;
-    if args.reason != expected_reason {
-        bail!("pending plan decision reason is unsupported");
-    }
+    let _: RawRunPendingPlanArgs = serde_json::from_str(&call.args_json)
+        .map_err(|error| anyhow!("invalid pending plan arguments: {error}"))?;
     Ok(())
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawTaskPlanningArgs {
-    reason_codes: Vec<TaskAdmissionReason>,
+#[serde(rename_all = "snake_case")]
+struct RawStartTaskArgs {
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawContinueWithoutTaskPlanningArgs {
-    reason: DirectConversationReason,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct RawContinueExistingTaskArgs {
-    reason: ExistingTaskContinuationReason,
     action: TaskContinuationControlKind,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-struct RawPendingPlanDecisionArgs {
-    reason: PendingPlanDecisionReason,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum DirectConversationReason {
-    DoesNotMeetTaskPlanningCriteria,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ExistingTaskContinuationReason {
-    ContinueCurrentTask,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum PendingPlanDecisionReason {
-    ExecuteCurrentPendingPlan,
-    ExecutionNotAuthorized,
-}
+struct RawRunPendingPlanArgs {}
 
 /// Latest durable state for one handoff identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

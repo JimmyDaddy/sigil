@@ -88,11 +88,6 @@ fn seed_parent(path: &Path) -> Result<(Session, PlanReviewAttemptEntry)> {
         explicit_objective: Some("Preserve completed Plan reviews on restart".to_owned()),
         route_decision_id: None,
         child_session_ref: plan_review_child_session_ref(&plan_review_id, &attempt_id),
-        finalizer_session_ref: Some(plan_review_finalizer_session_ref(
-            &plan_review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,
@@ -135,8 +130,7 @@ async fn complete_child(path: &Path, attempt: &PlanReviewAttemptEntry) -> Result
         plan_id: attempt.plan_id.clone(),
         source: draft_source(attempt),
         workspace_snapshot_id: attempt.workspace_snapshot_id.clone(),
-    })
-    .with_plan_review_submit_only();
+    });
     let output = Agent::new(DraftProvider, ToolRegistry::new())
         .run_with_input(
             &mut child,
@@ -173,20 +167,19 @@ fn latest_status(parent: &Session, attempt: &PlanReviewAttemptEntry) -> PlanRevi
 }
 
 #[tokio::test]
-async fn plan_review_recovery_promotes_complete_same_child_once_after_parent_commit_gap()
--> Result<()> {
-    for finalizing in [false, true] {
+async fn kernel_reopen_does_not_recover_managed_plan_without_authority() -> Result<()> {
+    {
         let temp = tempfile::tempdir()?;
         let parent_path = temp.path().join("session.jsonl");
-        let (mut parent, mut attempt) = seed_parent(&parent_path)?;
-        if finalizing {
-            attempt.status = PlanReviewAttemptStatus::Finalizing;
-            attempt.recorded_at_ms = 2;
-            parent.append_control(ControlEntry::PlanReviewAttempt(attempt.clone()))?;
-        }
+        let (parent, attempt) = seed_parent(&parent_path)?;
         let child_path = attempt.child_session_ref.resolve(temp.path());
         let child = complete_child(&child_path, &attempt).await?;
-        let expected = child.plan_artifact_projection().plans[&attempt.plan_id].clone();
+        assert!(
+            child
+                .plan_artifact_projection()
+                .plans
+                .contains_key(&attempt.plan_id)
+        );
         let child_before = std::fs::read(&child_path)?;
         assert!(parent.plan_artifact_projection().plans.is_empty());
         drop(child);
@@ -196,11 +189,14 @@ async fn plan_review_recovery_promotes_complete_same_child_once_after_parent_com
             Session::load_from_store("mock", "model", JsonlSessionStore::new(&parent_path)?)?;
         assert_eq!(
             latest_status(&recovered, &attempt),
-            PlanReviewAttemptStatus::DraftReady
+            PlanReviewAttemptStatus::Interrupted
         );
-        assert_eq!(
-            recovered.plan_artifact_projection().plans[&attempt.plan_id],
-            expected
+        assert!(
+            !recovered
+                .plan_artifact_projection()
+                .plans
+                .contains_key(&attempt.plan_id),
+            "kernel session reopen must not read a managed child by its persisted path"
         );
         let parent_after = std::fs::read(&parent_path)?;
         drop(recovered);
@@ -208,7 +204,7 @@ async fn plan_review_recovery_promotes_complete_same_child_once_after_parent_com
             Session::load_from_store("mock", "model", JsonlSessionStore::new(&parent_path)?)?;
         assert_eq!(
             latest_status(&replayed, &attempt),
-            PlanReviewAttemptStatus::DraftReady
+            PlanReviewAttemptStatus::Interrupted
         );
         assert_eq!(std::fs::read(&parent_path)?, parent_after);
         assert_eq!(std::fs::read(&child_path)?, child_before);
@@ -282,8 +278,7 @@ async fn plan_review_recovery_rejects_child_failed_or_cancelled_after_draft() ->
 }
 
 #[tokio::test]
-async fn plan_review_recovery_requires_full_typed_settlement_and_blocks_stale_finalizer_fallback()
--> Result<()> {
+async fn plan_review_recovery_requires_full_typed_settlement() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let parent_path = temp.path().join("session.jsonl");
     let (parent, attempt) = seed_parent(&parent_path)?;
@@ -322,15 +317,7 @@ async fn plan_review_recovery_requires_full_typed_settlement_and_blocks_stale_fi
         .collect::<Result<Vec<_>>>()?
         .concat();
     std::fs::write(&child_path, prefix)?;
-    let old_path = attempt
-        .finalizer_session_ref
-        .as_ref()
-        .context("legacy reference")?
-        .resolve(temp.path());
-    let mut old_child =
-        Session::load_from_store("mock", "model", JsonlSessionStore::new(old_path)?)?;
-    old_child.append_control(ControlEntry::PlanDraftCreated(draft))?;
-    drop(old_child);
+    let _ = draft;
     drop(parent);
     let recovered =
         Session::load_from_store("mock", "model", JsonlSessionStore::new(parent_path)?)?;
@@ -367,46 +354,6 @@ async fn plan_review_recovery_rejects_mismatched_source_lineage() -> Result<()> 
         workspace_mismatch,
     ] {
         assert!(recover_plan_review_draft_from_child_records(&mismatched, &records).is_err());
-    }
-    Ok(())
-}
-
-#[test]
-fn plan_review_recovery_preserves_both_historical_finalizer_references() -> Result<()> {
-    for ordinal in [1, 2] {
-        let temp = tempfile::tempdir()?;
-        let parent_path = temp.path().join("session.jsonl");
-        let (parent, attempt) = seed_parent(&parent_path)?;
-        let child_ref = plan_review_finalizer_session_ref(
-            &attempt.plan_review_id,
-            &attempt.attempt_id,
-            ordinal,
-        );
-        let mut child = Session::load_from_store(
-            "mock",
-            "model",
-            JsonlSessionStore::new(child_ref.resolve(temp.path()))?,
-        )?;
-        let draft = crate::plan_draft_created_entry_with_plan_id(
-            attempt.plan_id.clone(),
-            "```sigil-plan-v2\n{\"schema_version\":2,\"summary\":\"historical plan\",\"steps\":[{\"title\":\"preserve recovery\"}],\"target_paths\":[],\"suggested_checks\":[]}\n```",
-            draft_source(&attempt),
-            2,
-            attempt.workspace_snapshot_id.clone(),
-        )?.context("historical structured draft")?;
-        child.append_control(ControlEntry::PlanDraftCreated(draft.clone()))?;
-        drop(child);
-        drop(parent);
-        let recovered =
-            Session::load_from_store("mock", "model", JsonlSessionStore::new(parent_path)?)?;
-        assert_eq!(
-            latest_status(&recovered, &attempt),
-            PlanReviewAttemptStatus::DraftReady
-        );
-        assert_eq!(
-            recovered.plan_artifact_projection().plans[&attempt.plan_id],
-            draft
-        );
     }
     Ok(())
 }

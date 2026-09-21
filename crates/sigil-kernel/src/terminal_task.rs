@@ -51,7 +51,7 @@ impl<'de> Deserialize<'de> for TerminalTaskId {
 
 /// Durable handle for one Sigil-owned terminal task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TerminalTaskHandle {
     pub task_id: TerminalTaskId,
     pub command_sha256: String,
@@ -293,7 +293,7 @@ impl TerminalTaskStatus {
 
 /// Append-only control entry for one terminal task lifecycle update.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TerminalTaskEntry {
     /// Current durable terminal lifecycle schema.
     pub schema_version: u32,
@@ -401,7 +401,18 @@ impl TerminalTaskEntry {
             return Ok(None);
         }
 
-        let task_id = TerminalTaskId::new(required_string(details, "task_id")?.to_owned())?;
+        // The model-facing execution ID names the same owner as the durable task handle.
+        // Historical tool metadata retains task_id; conflicting aliases cannot select an owner.
+        let execution_id = if object.contains_key("execution_id") {
+            let id = required_string(details, "execution_id")?;
+            if object.contains_key("task_id") && required_string(details, "task_id")? != id {
+                bail!("terminal task metadata contains conflicting execution identities");
+            }
+            id
+        } else {
+            required_string(details, "task_id")?
+        };
+        let task_id = TerminalTaskId::new(execution_id.to_owned())?;
         let status = serde_json::from_value::<TerminalTaskStatus>(
             required_value(details, "status_detail")?.clone(),
         )
@@ -667,11 +678,8 @@ impl TerminalTaskProjection {
 
     fn apply_entry(&mut self, entry: &TerminalTaskEntry) {
         let id = entry.handle.task_id.clone();
-        if self
-            .tasks
-            .get(&id)
-            .is_some_and(|current| current.generation >= entry.generation)
-        {
+        let current_generation = self.tasks.get(&id).map(|current| current.generation);
+        if !terminal_task_generation_is_newer(current_generation, entry.generation) {
             return;
         }
         self.replay_order.push(id.clone());
@@ -686,6 +694,18 @@ impl TerminalTaskProjection {
             .filter_map(|(id, summary)| summary.status.is_active().then_some(id.clone()))
             .collect();
     }
+}
+
+/// Applies one deterministic generation rule to every terminal-state consumer.
+///
+/// A higher generation supersedes a lower one. A duplicate or conflicting record with the same
+/// generation is ignored using first durable record wins, so replay order cannot make one
+/// consumer revive a task that another consumer already considers terminal.
+pub(crate) fn terminal_task_generation_is_newer(
+    current_generation: Option<u64>,
+    next_generation: u64,
+) -> bool {
+    current_generation.is_none_or(|current| next_generation > current)
 }
 
 /// Latest projected state for one terminal task id.

@@ -3,8 +3,7 @@ use anyhow::{Context, Result};
 use super::*;
 use crate::{
     ConversationInputPromotedEntry, ConversationQueueDurableProjection, EventId,
-    TaskGuidancePromotedEntry, TaskPlanStatus, TaskRunStatus, TaskStateProjection,
-    stable_event_uuid,
+    TaskGuidancePromotedEntry, TaskRunStatus, TaskStateProjection, stable_event_uuid,
 };
 
 impl JsonlSessionStore {
@@ -48,10 +47,10 @@ impl JsonlSessionStore {
         event.context("conversation input promotion frontier is stale")
     }
 
-    /// Atomically binds one queued task-guidance item to an accepted task plan version.
+    /// Atomically binds one queued guidance item to an admitted direct Task.
     ///
-    /// Queue ownership and task-plan eligibility are checked together under the JSONL
-    /// single-writer lease. A stale queue revision, terminal task, superseded plan, or duplicate
+    /// Queue ownership and direct Task eligibility are checked together under the JSONL
+    /// single-writer lease. A stale queue revision, terminal or Plan-backed Task, or duplicate
     /// promotion leaves the stream unchanged.
     pub fn append_task_guidance_promoted(
         &self,
@@ -62,7 +61,7 @@ impl JsonlSessionStore {
         self.append_task_guidance_promoted_at(entry, &frontier)
     }
 
-    /// Appends task guidance only if `expected_frontier` and task-plan eligibility remain current.
+    /// Appends task guidance only if `expected_frontier` and direct Task eligibility remain current.
     pub fn append_task_guidance_promoted_at(
         &self,
         entry: TaskGuidancePromotedEntry,
@@ -91,7 +90,7 @@ impl JsonlSessionStore {
                 |records| {
                     let queue = ConversationQueueDurableProjection::from_records(records)?;
                     queue.validate_task_guidance_promotion(&entry)?;
-                    validate_task_guidance_plan(records, &entry)?;
+                    validate_direct_task_guidance_admission(records, &entry)?;
                     Ok(true)
                 },
             )?
@@ -144,7 +143,7 @@ fn task_guidance_promotion_event_id(
     )
 }
 
-fn validate_task_guidance_plan(
+fn validate_direct_task_guidance_admission(
     records: &[SessionStreamRecord],
     entry: &TaskGuidancePromotedEntry,
 ) -> Result<()> {
@@ -163,13 +162,13 @@ fn validate_task_guidance_plan(
     ) {
         anyhow::bail!("task guidance promotion cannot target a completed or cancelled task");
     }
-    if task.latest_plan_version != Some(entry.plan_version)
-        || !task
-            .plans
-            .get(&entry.plan_version)
-            .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-    {
-        anyhow::bail!("task guidance promotion plan version is not the accepted task plan");
+    let admission = task
+        .direct_execution_admission
+        .as_ref()
+        .context("task guidance promotion requires direct Task execution authority")?;
+    admission.validate()?;
+    if task.latest_plan_version.is_some() || !admission.matches_objective(&task.objective) {
+        anyhow::bail!("task guidance promotion requires a current direct Task without a TaskPlan");
     }
     Ok(())
 }

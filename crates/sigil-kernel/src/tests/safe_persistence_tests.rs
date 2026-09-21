@@ -308,6 +308,29 @@ fn safe_persistence_one_shot_tool_call_complete_is_capped() {
 }
 
 #[test]
+fn malformed_tool_arguments_persist_only_bounded_diagnostics() -> Result<()> {
+    let raw = r#"{"api_key":"secret-value""#;
+    let projection = project_tool_call_for_persistence(ToolCall {
+        id: "call-malformed".to_owned(),
+        name: "request_user_input".to_owned(),
+        args_json: raw.to_owned(),
+    })?;
+    let safe: Value = serde_json::from_str(&projection.durable_call.args_json)?;
+    assert_eq!(safe["projection"], "malformed_arguments");
+    assert_eq!(safe["raw_bytes"], raw.len());
+    assert_eq!(safe["json_error"]["category"], "eof");
+    assert!(safe["json_error"]["line"].is_number());
+    assert!(safe["json_error"]["column"].is_number());
+    assert!(
+        safe["raw_sha256"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:"))
+    );
+    assert!(!projection.durable_call.args_json.contains("secret-value"));
+    Ok(())
+}
+
+#[test]
 fn safe_persistence_rejects_secret_bearing_tool_id_and_name_before_projection() {
     for call in [
         ToolCall {

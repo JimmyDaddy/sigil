@@ -2,18 +2,15 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::json;
 
 use crate::{
-    CONTINUE_EXISTING_TASK_TOOL_NAME, CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
-    ContinueDurableTaskAction, ControlEntry, EventHandler, KEEP_PENDING_PLAN_TOOL_NAME,
-    PendingPlanDecisionRequiredAction, PlanReviewAttemptStatus, PlanReviewHandoffBinding,
-    REQUEST_TASK_PLANNING_TOOL_NAME, RUN_PENDING_PLAN_TOOL_NAME,
-    RecoverableTaskGuidanceReviewAuthority, RunPendingPlanAction, Session, SessionLogEntry,
-    StartDurableTaskAction, TaskAdmissionTrigger, TaskContinuationHandoffBinding,
-    TaskContinuationSelectedEntry, TaskHandoffDecision, TaskHandoffRequestedEntry,
-    TaskHandoffResolvedEntry, TaskPlanningHandoffBinding, TaskRunCancellationScopeBoundEntry,
-    TaskRunEntry, TaskRunStatus, TaskRunTargetSelectedEntry, ToolCall, ToolErrorKind,
-    ToolExecutionStatus, ToolResult, ToolResultMeta, task_planning_reason_codes,
-    validate_continue_existing_task_call, validate_continue_without_task_planning_call,
-    validate_keep_pending_plan_call, validate_run_pending_plan_call,
+    CONTINUE_EXISTING_TASK_TOOL_NAME, ContinueDurableTaskAction, ControlEntry, EventHandler,
+    PlanReviewAttemptStatus, PlanReviewHandoffBinding, RUN_PENDING_PLAN_TOOL_NAME,
+    RunPendingPlanAction, START_TASK_TOOL_NAME, Session, SessionLogEntry, StartDurableTaskAction,
+    TaskAdmissionTrigger, TaskContinuationHandoffBinding, TaskContinuationSelectedEntry,
+    TaskDirectExecutionAdmittedV1, TaskDirectExecutionSourceV1, TaskHandoffDecision,
+    TaskHandoffRequestedEntry, TaskHandoffResolvedEntry, TaskRunCancellationScopeBoundEntry,
+    TaskRunEntry, TaskRunStatus, TaskStartHandoffBinding, ToolCall, ToolErrorKind,
+    ToolExecutionStatus, ToolResult, ToolResultMeta, start_task_title,
+    validate_continue_existing_task_call, validate_run_pending_plan_call,
 };
 
 use super::{
@@ -22,13 +19,8 @@ use super::{
     tool_results::record_tool_result_to_batch,
 };
 
-pub(super) fn task_planning_request_call_is_accepted(call: &ToolCall) -> bool {
-    call.name == REQUEST_TASK_PLANNING_TOOL_NAME && task_planning_reason_codes(call).is_ok()
-}
-
-pub(super) fn continue_without_task_planning_call_is_accepted(call: &ToolCall) -> bool {
-    call.name == CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-        && validate_continue_without_task_planning_call(call).is_ok()
+pub(super) fn start_task_call_is_accepted(call: &ToolCall) -> bool {
+    call.name == START_TASK_TOOL_NAME && start_task_title(call).is_ok()
 }
 
 pub(super) fn continue_existing_task_call_is_accepted(call: &ToolCall) -> bool {
@@ -38,10 +30,6 @@ pub(super) fn continue_existing_task_call_is_accepted(call: &ToolCall) -> bool {
 
 pub(super) fn run_pending_plan_call_is_accepted(call: &ToolCall) -> bool {
     call.name == RUN_PENDING_PLAN_TOOL_NAME && validate_run_pending_plan_call(call).is_ok()
-}
-
-pub(super) fn keep_pending_plan_call_is_accepted(call: &ToolCall) -> bool {
-    call.name == KEEP_PENDING_PLAN_TOOL_NAME && validate_keep_pending_plan_call(call).is_ok()
 }
 
 pub(super) fn handle_run_pending_plan_call(
@@ -84,47 +72,6 @@ pub(super) fn handle_run_pending_plan_call(
         plan_id: pending.plan_id.clone(),
         plan_hash: pending.plan_hash.clone(),
         source_turn: binding.source_turn.clone(),
-    }))
-}
-
-pub(super) fn handle_keep_pending_plan_call(
-    session: &mut Session,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-    binding: &PlanReviewHandoffBinding,
-    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
-) -> Result<Option<PendingPlanDecisionRequiredAction>> {
-    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
-    if let Err(error) = validate_keep_pending_plan_call(call) {
-        return reject_pending_plan_decision(
-            session,
-            outcome,
-            call,
-            assistant_batch_results,
-            &error.to_string(),
-        );
-    }
-    let pending = validate_pending_plan_binding(session, binding)?;
-    let result = ToolResult::ok(
-        call.id.clone(),
-        call.name.clone(),
-        "pending plan preserved; explicit execution authorization is still required",
-        ToolResultMeta {
-            details: json!({"status": "pending"}),
-            ..ToolResultMeta::default()
-        },
-    );
-    append_tool_execution_audit(
-        session,
-        call,
-        &[],
-        ToolExecutionStatus::Completed,
-        None,
-        Some(&result),
-    )?;
-    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-    Ok(Some(PendingPlanDecisionRequiredAction {
-        plan_id: pending.plan_id.clone(),
     }))
 }
 
@@ -204,7 +151,7 @@ pub(super) fn handle_continue_existing_task_call<H>(
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
     binding: &TaskContinuationHandoffBinding,
-    run_scope_id: Option<&str>,
+    _run_scope_id: Option<&str>,
     assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<Option<ContinueDurableTaskAction>>
 where
@@ -231,7 +178,7 @@ where
         return Ok(None);
     }
 
-    let execution = validate_task_continuation_binding(session, binding)?;
+    validate_task_continuation_binding(session, binding)?;
     let guidance_projection =
         crate::project_conversation_prompt_for_persistence(binding.exact_guidance.expose_secret());
     if guidance_projection.prompt_hash != binding.prompt_hash
@@ -242,96 +189,19 @@ where
     }
     let continuation_kind = crate::continue_existing_task_control_kind(call)?;
     let is_resume = continuation_kind == crate::TaskContinuationControlKind::ResumeTask;
-    let recoverable_guidance = match &execution {
-        crate::TaskExecutionBindingV1::Direct { .. } => Ok(None),
-        crate::TaskExecutionBindingV1::Plan { .. } => crate::recoverable_task_guidance(
-            session,
-            &binding.task_id,
-            (!is_resume).then_some(binding.exact_guidance.expose_secret()),
-        ),
+    let action_guidance = binding.exact_guidance.expose_secret().to_owned();
+    let selected = TaskContinuationSelectedEntry {
+        task_id: binding.task_id.clone(),
+        source_turn: binding.source_turn.clone(),
+        task_status: binding.task_status,
+        route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
+        control: continuation_kind,
+        prompt_hash: binding.prompt_hash.clone(),
+        exact_prompt_required: binding.exact_prompt_required,
+        guidance: binding.safe_guidance.clone(),
+        selected_at_ms: binding.decided_at_ms,
     };
-    match recoverable_guidance {
-        Ok(Some(_)) if !is_resume => {
-            return reject_task_continuation_recovery(
-                session,
-                outcome,
-                call,
-                assistant_batch_results,
-                "accepted Task guidance is awaiting recovery; use `/task continue <exact original guidance>` before routing another continuation",
-            );
-        }
-        Ok(None) => {}
-        Ok(Some(_)) => {}
-        Err(error) => {
-            return reject_task_continuation_recovery(
-                session,
-                outcome,
-                call,
-                assistant_batch_results,
-                &format!(
-                    "accepted Task guidance must be recovered first; use `/task continue <exact original guidance>`: {error:#}"
-                ),
-            );
-        }
-    }
-    let recoverable_review = match &execution {
-        crate::TaskExecutionBindingV1::Direct { .. } => Ok(None),
-        crate::TaskExecutionBindingV1::Plan { .. } => crate::recoverable_task_guidance_review(
-            session,
-            &binding.task_id,
-            (!is_resume).then_some(binding.exact_guidance.expose_secret()),
-        ),
-    };
-    let recovered_selection = match recoverable_review {
-        Ok(Some(review)) => match review.authority {
-            RecoverableTaskGuidanceReviewAuthority::ContinuationSelected(selected) => {
-                Some((*selected, review.guidance))
-            }
-            RecoverableTaskGuidanceReviewAuthority::Promoted(_) => {
-                return reject_task_continuation_recovery(
-                    session,
-                    outcome,
-                    call,
-                    assistant_batch_results,
-                    "an unfinished queued Task guidance review already exists; recover it with `/task continue <exact original guidance>` before routing another continuation",
-                );
-            }
-        },
-        Ok(None) => None,
-        Err(error) => {
-            return reject_task_continuation_recovery(
-                session,
-                outcome,
-                call,
-                assistant_batch_results,
-                &format!(
-                    "an unfinished Task guidance review must be recovered first; use `/task continue <exact original guidance>`: {error:#}"
-                ),
-            );
-        }
-    };
-    let recovered_selection_reused = recovered_selection.is_some();
-    let (selected, action_guidance) = recovered_selection.unwrap_or_else(|| {
-        (
-            TaskContinuationSelectedEntry {
-                task_id: binding.task_id.clone(),
-                source_turn: binding.source_turn.clone(),
-                plan_version: binding.plan_version,
-                task_status: binding.task_status,
-                plan_status: binding.plan_status,
-                route_contract_fingerprint: binding.route_contract_fingerprint.clone(),
-                control: continuation_kind,
-                prompt_hash: binding.prompt_hash.clone(),
-                exact_prompt_required: binding.exact_prompt_required,
-                guidance: binding.safe_guidance.clone(),
-                selected_at_ms: binding.decided_at_ms,
-            },
-            binding.exact_guidance.expose_secret().to_owned(),
-        )
-    });
-    if selected.control != continuation_kind
-        && selected.control != crate::TaskContinuationControlKind::LegacyUnspecified
-    {
+    if selected.control != continuation_kind {
         return reject_task_continuation_recovery(
             session,
             outcome,
@@ -363,51 +233,6 @@ where
     if selection_missing {
         continuation_controls.push(ControlEntry::TaskContinuationSelected(selected.clone()));
     }
-    if recovered_selection_reused {
-        let run_scope_id = run_scope_id.ok_or_else(|| {
-            anyhow!("recovered Task continuation requires a root cancellation scope")
-        })?;
-        let latest_bound_scope = session
-            .entries()
-            .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(binding))
-                    if binding.task_id == selected.task_id =>
-                {
-                    Some(binding.run_scope_id.as_str())
-                }
-                _ => None,
-            });
-        if latest_bound_scope != Some(run_scope_id) {
-            continuation_controls.push(ControlEntry::TaskRunCancellationScopeBound(
-                TaskRunCancellationScopeBoundEntry {
-                    task_id: selected.task_id.clone(),
-                    run_scope_id: run_scope_id.to_owned(),
-                },
-            ));
-        }
-        let focus = TaskRunTargetSelectedEntry::new(
-            selected.task_id.clone(),
-            run_scope_id,
-            binding.task_status,
-            binding.plan_version,
-            binding.plan_status,
-        );
-        let existing_focus = session.entries().iter().find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::TaskRunTargetSelected(existing))
-                if existing.selection_id == focus.selection_id =>
-            {
-                Some(existing)
-            }
-            _ => None,
-        });
-        match existing_focus {
-            Some(existing) if existing == &focus => {}
-            Some(_) => bail!("recovered Task continuation focus has conflicting durable facts"),
-            None => continuation_controls.push(ControlEntry::TaskRunTargetSelected(focus)),
-        }
-    }
     if !continuation_controls.is_empty() {
         append_control_batch(session, handler, continuation_controls)?;
     }
@@ -419,9 +244,7 @@ where
         ToolResultMeta {
             details: json!({
                 "task_id": binding.task_id.as_str(),
-                "plan_version": binding.plan_version,
                 "task_status": binding.task_status,
-                "plan_status": binding.plan_status,
                 "status": "accepted",
             }),
             ..ToolResultMeta::default()
@@ -436,21 +259,10 @@ where
         Some(&result),
     )?;
     record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-    let mut guidance_receipt = selected.clone();
-    if is_resume
-        && guidance_receipt.control == crate::TaskContinuationControlKind::LegacyUnspecified
-    {
-        // Legacy durable receipts predate the typed action. The current model call supplies the
-        // missing enum; keep the durable receipt immutable and carry the typed upgrade only in
-        // this host-validated process-local action.
-        guidance_receipt.control = crate::TaskContinuationControlKind::ResumeTask;
-    }
     Ok(Some(ContinueDurableTaskAction {
         task_id: selected.task_id.clone(),
         source_turn: selected.source_turn.clone(),
-        plan_version: selected.plan_version,
         task_status: selected.task_status,
-        plan_status: selected.plan_status,
         route_contract_fingerprint: selected.route_contract_fingerprint.clone(),
         control: if is_resume {
             crate::TaskContinuationControl::ResumeTask
@@ -458,7 +270,7 @@ where
             crate::TaskContinuationControl::ApplyTaskGuidance(action_guidance.clone())
         },
         guidance: crate::SecretString::new(action_guidance),
-        guidance_receipt,
+        guidance_receipt: selected,
     }))
 }
 
@@ -488,80 +300,12 @@ fn reject_task_continuation_recovery(
     Ok(None)
 }
 
-pub(super) fn handle_continue_without_task_planning_call(
-    session: &mut Session,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-    ordinary_conversation_allowed: bool,
-    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
-) -> Result<bool> {
-    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
-    if let Err(error) = validate_continue_without_task_planning_call(call) {
-        let mut result = ToolResult::error(
-            call.id.clone(),
-            call.name.clone(),
-            ToolErrorKind::InvalidInput,
-            error.to_string(),
-        );
-        attach_tool_call_context(&mut result, call, &[]);
-        append_tool_execution_audit(
-            session,
-            call,
-            &[],
-            ToolExecutionStatus::Failed,
-            None,
-            Some(&result),
-        )?;
-        record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-        return Ok(false);
-    }
-    if !ordinary_conversation_allowed {
-        let mut result = ToolResult::error(
-            call.id.clone(),
-            call.name.clone(),
-            ToolErrorKind::InvalidInput,
-            "a pending plan requires an explicit run, revise, save, or reject decision before ordinary conversation can continue",
-        );
-        attach_tool_call_context(&mut result, call, &[]);
-        append_tool_execution_audit(
-            session,
-            call,
-            &[],
-            ToolExecutionStatus::Failed,
-            None,
-            Some(&result),
-        )?;
-        record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-        return Ok(false);
-    }
-
-    let result = ToolResult::ok(
-        call.id.clone(),
-        call.name.clone(),
-        "ordinary conversation routing accepted; continue with the user's request",
-        ToolResultMeta {
-            details: json!({"status": "accepted"}),
-            ..ToolResultMeta::default()
-        },
-    );
-    append_tool_execution_audit(
-        session,
-        call,
-        &[],
-        ToolExecutionStatus::Completed,
-        None,
-        Some(&result),
-    )?;
-    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-    Ok(true)
-}
-
-pub(super) fn handle_task_planning_request_call<H>(
+pub(super) fn handle_start_task_call<H>(
     session: &mut Session,
     handler: &mut H,
     outcome: &mut AgentRunOutcome,
     call: &ToolCall,
-    binding: &TaskPlanningHandoffBinding,
+    binding: &TaskStartHandoffBinding,
     run_scope_id: &str,
     assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
 ) -> Result<Option<StartDurableTaskAction>>
@@ -569,8 +313,8 @@ where
     H: EventHandler + Send,
 {
     append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
-    let reason_codes = match task_planning_reason_codes(call) {
-        Ok(reason_codes) => reason_codes,
+    let title = match start_task_title(call) {
+        Ok(title) => title,
         Err(error) => {
             let mut result = ToolResult::error(
                 call.id.clone(),
@@ -647,13 +391,18 @@ where
                 handoff_id: binding.handoff_id.clone(),
                 source_turn: binding.source_turn.clone(),
                 trigger: TaskAdmissionTrigger::ModelRequested,
-                reason_codes,
+                title: title.clone(),
                 recovery_objective: None,
                 policy_snapshot_hash: binding.policy_snapshot_hash.clone(),
                 requested_at_ms: binding.requested_at_ms,
             }),
         )?,
     }
+
+    let task_title = existing
+        .and_then(|state| state.request.as_ref())
+        .and_then(|request| request.title.clone())
+        .or(title);
 
     match existing.and_then(|state| state.resolution.as_ref()) {
         Some(resolution)
@@ -675,7 +424,7 @@ where
         )?,
     }
 
-    ensure_task_started(session, handler, binding)?;
+    ensure_task_started(session, handler, binding, task_title.as_deref())?;
 
     let metadata = ToolResultMeta {
         details: json!({
@@ -688,7 +437,7 @@ where
     let result = ToolResult::ok(
         call.id.clone(),
         call.name.clone(),
-        "durable task planning accepted; the conversation coordinator will continue the root run",
+        "direct Task started for the current user request",
         metadata,
     );
     append_tool_execution_audit(
@@ -710,7 +459,7 @@ where
 fn append_task_route_decision<H>(
     session: &mut Session,
     handler: &mut H,
-    binding: &TaskPlanningHandoffBinding,
+    binding: &TaskStartHandoffBinding,
 ) -> Result<()>
 where
     H: EventHandler + Send,
@@ -823,59 +572,9 @@ pub(super) fn append_tool_ignored_after_task_handoff(
     Ok(())
 }
 
-pub(super) fn append_tool_ignored_after_routing_decision(
-    session: &mut Session,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
-) -> Result<()> {
-    let mut result = ToolResult::error(
-        call.id.clone(),
-        call.name.clone(),
-        ToolErrorKind::Unsupported,
-        "a typed task-routing decision was accepted; additional tool calls in this routing microturn were ignored",
-    );
-    attach_tool_call_context(&mut result, call, &[]);
-    append_tool_execution_audit(
-        session,
-        call,
-        &[],
-        ToolExecutionStatus::Cancelled,
-        None,
-        Some(&result),
-    )?;
-    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-    Ok(())
-}
-
-pub(super) fn append_tool_rejected_during_task_routing(
-    session: &mut Session,
-    outcome: &mut AgentRunOutcome,
-    call: &ToolCall,
-    assistant_batch_results: &mut Vec<(crate::ToolCall, ToolResult)>,
-) -> Result<()> {
-    let mut result = ToolResult::error(
-        call.id.clone(),
-        call.name.clone(),
-        ToolErrorKind::Unsupported,
-        "ordinary tools are not available during the typed task-routing microturn",
-    );
-    attach_tool_call_context(&mut result, call, &[]);
-    append_tool_execution_audit(
-        session,
-        call,
-        &[],
-        ToolExecutionStatus::Failed,
-        None,
-        Some(&result),
-    )?;
-    record_tool_result_to_batch(outcome, call, result, assistant_batch_results);
-    Ok(())
-}
-
 fn validate_binding_against_session(
     session: &Session,
-    binding: &TaskPlanningHandoffBinding,
+    binding: &TaskStartHandoffBinding,
 ) -> Result<()> {
     if binding.source_turn.session_scope_id != session.session_scope_id() {
         bail!("task handoff source belongs to a different session");
@@ -933,22 +632,8 @@ fn validate_task_continuation_binding(
         .tasks
         .get(&binding.task_id)
         .ok_or_else(|| anyhow!("task continuation target is no longer present"))?;
-    let plan_status = binding
-        .plan_version
-        .and_then(|version| task.plans.get(&version).map(|plan| plan.status));
-    if task.status != binding.task_status
-        || task.latest_plan_version != binding.plan_version
-        || plan_status != binding.plan_status
-    {
+    if task.status != binding.task_status || task.latest_plan_version.is_some() {
         bail!("task continuation target changed after routing was frozen");
-    }
-    if let Some(version) = binding.plan_version {
-        if plan_status != Some(crate::TaskPlanStatus::Accepted) {
-            bail!("task continuation requires the accepted plan generation");
-        }
-        return Ok(crate::TaskExecutionBindingV1::Plan {
-            plan_version: version,
-        });
     }
     let admission = task
         .direct_execution_admission
@@ -966,7 +651,8 @@ fn validate_task_continuation_binding(
 fn ensure_task_started<H>(
     session: &mut Session,
     handler: &mut H,
-    binding: &TaskPlanningHandoffBinding,
+    binding: &TaskStartHandoffBinding,
+    suggested_title: Option<&str>,
 ) -> Result<()>
 where
     H: EventHandler + Send,
@@ -977,19 +663,41 @@ where
         {
             bail!("task handoff target already exists with conflicting facts");
         }
+        let admission = task
+            .direct_execution_admission
+            .as_ref()
+            .ok_or_else(|| anyhow!("task handoff target has no direct execution admission"))?;
+        admission.validate()?;
+        if !admission.matches_objective(&task.objective)
+            || admission.source != TaskDirectExecutionSourceV1::TaskRequest
+        {
+            bail!("task handoff target has conflicting direct execution authority");
+        }
         return Ok(());
     }
-    append_control(
+    append_control_batch(
         session,
         handler,
-        ControlEntry::TaskRun(TaskRunEntry {
-            task_id: binding.task_id.clone(),
-            parent_session_ref: binding.parent_session_ref.clone(),
-            objective: binding.objective.clone(),
-            title: Some(crate::task_semantic_title(&binding.objective)),
-            status: TaskRunStatus::Started,
-            reason: Some("admitted from conversation handoff".to_owned()),
-        }),
+        vec![
+            ControlEntry::TaskRun(TaskRunEntry {
+                task_id: binding.task_id.clone(),
+                parent_session_ref: binding.parent_session_ref.clone(),
+                objective: binding.objective.clone(),
+                title: Some(suggested_title.map_or_else(
+                    || crate::task_semantic_title(&binding.objective),
+                    str::to_owned,
+                )),
+                status: TaskRunStatus::Started,
+                reason: Some("admitted from conversation handoff".to_owned()),
+            }),
+            ControlEntry::TaskDirectExecutionAdmittedV1(
+                TaskDirectExecutionAdmittedV1::task_request(
+                    binding.task_id.clone(),
+                    &binding.objective,
+                    binding.decided_at_ms,
+                ),
+            ),
+        ],
     )
 }
 

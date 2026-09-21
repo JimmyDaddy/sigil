@@ -36,7 +36,7 @@ pub enum CompactionForecastSourceV1 {
 
 /// Bounded forecast of how many real requests remain in the active objective.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ExpectedRemainingTurnsV1 {
     pub turns: u32,
     pub source: CompactionForecastSourceV1,
@@ -90,7 +90,7 @@ pub enum CompactionPressureStateV1 {
 
 /// Input to the provider-neutral fit forecast.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionFitForecastInputV1 {
     pub context_window_tokens: u64,
     pub current_input_tokens: u64,
@@ -106,7 +106,7 @@ pub struct CompactionFitForecastInputV1 {
 
 /// Durable, integer-only evidence for fit and trigger-state decisions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionFitForecastV1 {
     pub schema_version: u16,
     pub input: CompactionFitForecastInputV1,
@@ -197,7 +197,7 @@ impl CompactionFitForecastV1 {
 
 /// Integer price evidence derived from a trusted provider/model snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct TrustedCompactionPricingV1 {
     pub schema_version: u16,
     pub snapshot_id: String,
@@ -258,7 +258,7 @@ impl TrustedCompactionPricingV1 {
 
 /// Initial RFC-0057 cost/admission policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionEconomicsPolicyV1 {
     pub horizon_turns: u32,
     pub minimum_savings_ratio_ppm: u32,
@@ -296,7 +296,7 @@ impl CompactionEconomicsPolicyV1 {
 /// without a request-interval forecast. `None` means no expiry is assumed inside the bounded
 /// horizon; `Some(0)` means the cache is already expired.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCacheScenarioV1 {
     pub current_epoch_hit_ratio_ppm: u32,
     pub rotated_epoch_hit_ratio_ppm: u32,
@@ -347,7 +347,7 @@ impl CompactionCacheScenarioV1 {
 
 /// Token-shape inputs for comparing keep-current-epoch and rotate-now costs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCostModelInputV1 {
     pub current_cache_read_tokens: u64,
     pub current_uncached_input_tokens: u64,
@@ -362,7 +362,7 @@ pub struct CompactionCostModelInputV1 {
 
 /// Replay-stable, cache-aware cost projection over a bounded number of real requests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionCostProjectionV1 {
     pub schema_version: u16,
     pub pricing: TrustedCompactionPricingV1,
@@ -589,7 +589,7 @@ pub enum CompactionAdmissionReasonV2 {
 
 /// Durable V3 admission decision and its rollout guards.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionAdmissionV2 {
     pub decision: CompactionAdmissionDecisionV2,
     pub reason: CompactionAdmissionReasonV2,
@@ -602,7 +602,7 @@ pub struct CompactionAdmissionV2 {
 
 /// V2 extension carried by the existing portable economics proof.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionEconomicsV2 {
     pub schema_version: u16,
     pub policy: CompactionEconomicsPolicyV1,

@@ -9,7 +9,7 @@ use crate::{
     AgentResultContinuationStatus, ConversationInputKind, ConversationInputQueueId,
     ConversationInputStatus, ConversationInputTarget, ConversationQueueMutation,
     ConversationQueueMutationCommand, ConversationQueueRevision, ConversationTurnRef, SessionRef,
-    TaskGuidancePromotedEntry, TaskRunTargetSelectedEntry,
+    TaskDirectExecutionAdmittedV1, TaskGuidancePromotedEntry, TaskRunTargetSelectedEntry,
 };
 
 #[derive(Default)]
@@ -351,15 +351,13 @@ fn normal_queue_and_task_guidance_authority_appends_do_not_rescan_history() -> R
             reason: None,
         },
     )))?;
-    store.append(&SessionLogEntry::Control(ControlEntry::TaskPlan(
-        TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
-            reason: None,
-        },
-    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::TaskDirectExecutionAdmittedV1(TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "exercise active authority CAS",
+            1,
+        )),
+    ))?;
     let queue_id = ConversationInputQueueId::new("authority_cas_queue")?;
     let prompt = crate::project_conversation_prompt_for_persistence("apply active CAS");
     let receipt = store.append_conversation_queue_mutation(ConversationQueueMutationCommand {
@@ -384,11 +382,10 @@ fn normal_queue_and_task_guidance_authority_appends_do_not_rescan_history() -> R
             queue_id: queue_id.clone(),
             expected_queue_revision: receipt.revision,
             task_id,
-            plan_version: 1,
             source_turn: ConversationTurnRef::new(
                 frontier.session_id(),
                 "authority-cas-message",
-                "authority-cas-run",
+                "authority-cas-dispatch",
             )?,
             prompt_hash: prompt.prompt_hash,
             exact_prompt_required: prompt.exact_prompt_required,
@@ -683,15 +680,13 @@ fn active_projection_long_session_evidence() -> Result<()> {
             reason: None,
         },
     )))?;
-    store.append(&SessionLogEntry::Control(ControlEntry::TaskPlan(
-        TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
-            reason: None,
-        },
-    )))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::TaskDirectExecutionAdmittedV1(TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "exercise mixed active projection reducers",
+            1,
+        )),
+    ))?;
     for ordinal in 0..QUEUE_CYCLES {
         let queue_id = ConversationInputQueueId::new(format!("evidence-guidance-{ordinal}"))?;
         let prompt = crate::project_conversation_prompt_for_persistence(&format!(
@@ -723,11 +718,10 @@ fn active_projection_long_session_evidence() -> Result<()> {
                 queue_id: queue_id.clone(),
                 expected_queue_revision: receipt.revision,
                 task_id: task_id.clone(),
-                plan_version: 1,
                 source_turn: ConversationTurnRef::new(
                     frontier.session_id(),
                     format!("evidence-message-{ordinal}"),
-                    format!("evidence-run-{ordinal}"),
+                    format!("evidence-dispatch-{ordinal}"),
                 )?,
                 prompt_hash: prompt.prompt_hash,
                 exact_prompt_required: prompt.exact_prompt_required,
@@ -937,7 +931,7 @@ fn latest_session_copy_active_projection_smoke() -> Result<()> {
 }
 
 #[test]
-fn task_guidance_snapshot_exposes_minimal_plan_state() -> Result<()> {
+fn task_guidance_snapshot_exposes_direct_execution_admission() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let mut session = Session::new("mock", "model").with_store(store);
@@ -950,13 +944,9 @@ fn task_guidance_snapshot_exposes_minimal_plan_state() -> Result<()> {
         status: TaskRunStatus::Paused,
         reason: None,
     }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 7,
-        status: TaskPlanStatus::Accepted,
-        steps: Vec::new(),
-        reason: None,
-    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), "bounded task state", 1),
+    ))?;
 
     let snapshot = session
         .active_projection_snapshot()?
@@ -965,8 +955,8 @@ fn task_guidance_snapshot_exposes_minimal_plan_state() -> Result<()> {
         .task_guidance_state(&task_id)
         .expect("task guidance state is projected");
     assert_eq!(task.status(), TaskRunStatus::Paused);
-    assert_eq!(task.latest_plan_version(), Some(7));
-    assert_eq!(task.accepted_plan_version(), Some(7));
+    assert_eq!(task.latest_plan_version(), None);
+    assert!(task.direct_execution_admitted());
     Ok(())
 }
 
@@ -1403,12 +1393,6 @@ fn active_task_plan_decision_matches_canonical_projection() -> Result<()> {
             .tasks
             .get(&task_id)
             .expect("canonical task projection retains the task");
-        let canonical_accepted = canonical_task.latest_plan_version.filter(|plan_version| {
-            canonical_task
-                .plans
-                .get(plan_version)
-                .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-        });
         let incremental_task = incremental
             .task_guidance
             .get(&task_id)
@@ -1418,8 +1402,10 @@ fn active_task_plan_decision_matches_canonical_projection() -> Result<()> {
             .get(&task_id)
             .expect("rebuilt active projection retains the task hint");
 
-        assert_eq!(canonical_accepted, None);
-        assert_eq!(incremental_task.accepted_plan_version(), canonical_accepted);
+        assert_eq!(
+            incremental_task.latest_plan_version(),
+            canonical_task.latest_plan_version
+        );
         assert_eq!(incremental_task, rebuilt_task);
     }
     Ok(())
@@ -1537,7 +1523,7 @@ fn final_task_guidance_cas_rejects_reopen_after_terminal_hint_eviction() -> Resu
         .task_guidance_state(&stale_task_id)
         .expect("bounded active hint may treat an evicted task id as live");
     assert_eq!(active_task.status(), TaskRunStatus::Running);
-    assert_eq!(active_task.accepted_plan_version(), Some(1));
+    assert_eq!(active_task.latest_plan_version(), Some(1));
 
     let prompt =
         crate::project_conversation_prompt_for_persistence("do not revive the completed task");
@@ -1563,7 +1549,6 @@ fn final_task_guidance_cas_rejects_reopen_after_terminal_hint_eviction() -> Resu
         queue_id,
         expected_queue_revision: receipt.revision,
         task_id: stale_task_id,
-        plan_version: 1,
         source_turn: ConversationTurnRef::new(
             frontier.session_id(),
             "evicted-terminal-message",

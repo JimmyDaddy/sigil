@@ -563,21 +563,19 @@ fn compaction_v2_typed_decode_uses_direct_payload_schema() -> Result<()> {
 }
 
 #[test]
-fn compaction_v2_direct_payload_schema_rejects_unknown_fields() -> Result<()> {
+fn compaction_v2_direct_payload_schema_ignores_unknown_fields() -> Result<()> {
     let mut payload = serde_json::to_value(started("attempt-1", CompactionFallbackParent::Root))?;
     payload["future_compatibility_field"] = json!(true);
 
-    let error = decode_typed_stored_event(lifecycle_event(
+    let decoded = decode_typed_stored_event(lifecycle_event(
         DurableEventType::CompactionStarted,
         "event-start",
         1,
         payload,
         Some("event-start"),
         None,
-    ))
-    .expect_err("strict compaction payloads must reject unknown fields");
-
-    assert!(format!("{error:#}").contains("unknown field"));
+    ))?;
+    assert!(matches!(decoded, TypedStoredEventDecode::Known(_)));
 
     let mut payload = serde_json::to_value(started(
         "attempt-1",
@@ -586,16 +584,15 @@ fn compaction_v2_direct_payload_schema_rejects_unknown_fields() -> Result<()> {
         },
     ))?;
     payload["fallback_parent"]["unexpected_nested_field"] = json!(true);
-    let error = decode_typed_stored_event(lifecycle_event(
+    let decoded = decode_typed_stored_event(lifecycle_event(
         DurableEventType::CompactionStarted,
         "event-start",
         1,
         payload,
         Some("event-start"),
         None,
-    ))
-    .expect_err("strict compaction payloads must reject nested unknown fields");
-    assert!(format!("{error:#}").contains("unknown field"));
+    ))?;
+    assert!(matches!(decoded, TypedStoredEventDecode::Known(_)));
     Ok(())
 }
 

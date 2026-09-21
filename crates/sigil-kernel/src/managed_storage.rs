@@ -348,6 +348,48 @@ pub struct ManagedStorageStorageReceiptV1 {
     pub physical_frontier_hash: Option<CanonicalHash>,
 }
 
+/// Stable user-reviewed request for one control-log generation recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryRequestV1 {
+    pub logical_journal_id: CanonicalHash,
+    pub operation_id: String,
+    pub from_generation: u64,
+    pub successor_generation: u64,
+    pub header_digest: CanonicalHash,
+    /// Opaque semantic-owner context; RA binds its digest without interpreting command state.
+    pub owner_context_digest: CanonicalHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryPreviewV1 {
+    pub request: ControlLogRecoveryRequestV1,
+    pub old_namespace_hash: CanonicalHash,
+    pub successor_namespace_hash: CanonicalHash,
+    pub old_byte_length: u64,
+    pub old_content_digest: CanonicalHash,
+    pub old_file_identity: Option<CanonicalHash>,
+    pub preview_digest: CanonicalHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlLogRecoveryPhaseV1 {
+    Prepared,
+    Sealed,
+    HeaderInitialized,
+    Activated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlLogRecoveryStateV1 {
+    pub preview: ControlLogRecoveryPreviewV1,
+    pub phase: ControlLogRecoveryPhaseV1,
+    pub previous_phase_digest: CanonicalHash,
+    pub phase_digest: CanonicalHash,
+}
+
+/// Pathless guard retaining the physical namespace lock until the dispatch boundary returns.
+pub trait ManagedStorageForwardGuardV1: Send {}
+
 /// Consumer facing pathless managed storage service (authority implementation).
 pub trait ManagedStorageServiceV1: Send + Sync {
     fn admit_namespace(
@@ -382,6 +424,41 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageErrorV1>;
 
+    fn acquire_forward_guard(
+        &self,
+        _handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<Box<dyn ManagedStorageForwardGuardV1>, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn preview_control_log_recovery(
+        &self,
+        _recovery: &ManagedStorageNamespaceHandleV1,
+        _old: &ManagedStorageNamespaceHandleV1,
+        _successor: &ManagedStorageNamespaceHandleV1,
+        _request: ControlLogRecoveryRequestV1,
+    ) -> Result<ControlLogRecoveryPreviewV1, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn advance_control_log_recovery(
+        &self,
+        _recovery: &ManagedStorageNamespaceHandleV1,
+        _old: &ManagedStorageNamespaceHandleV1,
+        _successor: &ManagedStorageNamespaceHandleV1,
+        _preview: &ControlLogRecoveryPreviewV1,
+        _header: &[u8],
+    ) -> Result<ControlLogRecoveryStateV1, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    fn query_control_log_recovery(
+        &self,
+        _recovery: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<Option<ControlLogRecoveryStateV1>, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
     /// Reconciles measured bytes/entries for a live storage namespace without exposing the
     /// authority's quota book or physical path. Artifact adapters use this only while holding
     /// their paired staging/store leases; the authority remains the sole quota owner.
@@ -413,6 +490,14 @@ pub trait ManagedStorageServiceV1: Send + Sync {
         _preferred_bytes: u64,
         _entries: u64,
     ) -> Result<u64, ManagedStorageErrorV1> {
+        Err(ManagedStorageErrorV1::AuthorityUnavailable)
+    }
+
+    /// Releases only the live holder; retained capacity is not proof that bytes were deleted.
+    fn detach_namespace(
+        &self,
+        _handle: ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
         Err(ManagedStorageErrorV1::AuthorityUnavailable)
     }
 
@@ -474,4 +559,78 @@ pub struct ArtifactStoreReferenceV1 {
     pub artifact_id: OpaqueArtifactId,
     pub object_key_hash: CanonicalHash,
     pub publish_receipt_hash: CanonicalHash,
+}
+
+/// Reads the physical frontier of a JSONL source with fixed memory usage. This only
+/// measures complete record framing; each semantic owner validates the record payloads.
+///
+/// # Errors
+/// Returns an I/O error for an unreadable source, counter overflow, or a missing final
+/// record separator. An incomplete source must be preserved for explicit recovery.
+pub fn read_jsonl_physical_frontier(
+    mut source: impl std::io::Read,
+) -> std::io::Result<(u64, u64, CanonicalHash)> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes = 0_u64;
+    let mut records = 0_u64;
+    let mut line_has_bytes = false;
+    loop {
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("managed source byte length overflow"))?;
+        hash.update(&buffer[..count]);
+        for byte in &buffer[..count] {
+            if *byte == b'\n' {
+                if line_has_bytes {
+                    records = records.checked_add(1).ok_or_else(|| {
+                        std::io::Error::other("managed source record count overflow")
+                    })?;
+                }
+                line_has_bytes = false;
+            } else {
+                line_has_bytes = true;
+            }
+        }
+    }
+    if line_has_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "managed record object ends with an incomplete JSONL separator",
+        ));
+    }
+    Ok((
+        bytes,
+        records,
+        CanonicalHash::from_bytes(hash.finalize().into()),
+    ))
+}
+
+/// Hashes a physical stream with constant memory, including incomplete journal tails.
+///
+/// # Errors
+/// Returns source I/O errors or an overflowing byte count.
+pub fn read_physical_digest(
+    mut source: impl std::io::Read,
+) -> std::io::Result<(u64, CanonicalHash)> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    let mut length = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        length = length
+            .checked_add(read as u64)
+            .ok_or_else(|| std::io::Error::other("physical stream byte count overflow"))?;
+        digest.update(&buffer[..read]);
+    }
+    Ok((length, CanonicalHash::from_bytes(digest.finalize().into())))
 }

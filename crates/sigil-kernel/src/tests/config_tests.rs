@@ -221,7 +221,7 @@ fn web_policy_cap_only_tightens_the_root_policy() {
 }
 
 #[test]
-fn compaction_window_rejects_legacy_context_window_key() {
+fn compaction_window_ignores_retired_context_window_key() {
     let raw = r#"
 config_version = 2
 
@@ -233,8 +233,8 @@ model = "deepseek-v4-pro"
 context_window_tokens = 128000
 "#;
 
-    let error = toml::from_str::<RootConfig>(raw).expect_err("legacy key should be rejected");
-    assert!(error.to_string().contains("context_window_tokens"));
+    let config = toml::from_str::<RootConfig>(raw).expect("retired key should be ignored");
+    assert_eq!(config.compaction.context_window_tokens, None);
 }
 
 fn assert_root_config_rejects(raw: &str, expected: &str) {
@@ -244,6 +244,10 @@ fn assert_root_config_rejects(raw: &str, expected: &str) {
         message.contains(expected),
         "expected error to contain {expected:?}, got {message:?}"
     );
+}
+
+fn assert_root_config_accepts(raw: &str, _retired_field: &str) {
+    toml::from_str::<RootConfig>(raw).expect("unknown configuration fields should be ignored");
 }
 
 #[test]
@@ -295,8 +299,8 @@ compatibility_sources = ["opencode"]
 }
 
 #[test]
-fn removed_project_asset_config_keys_are_rejected() {
-    assert_root_config_rejects(
+fn removed_project_asset_config_keys_are_ignored() {
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -309,7 +313,7 @@ project_assets_root = "project-assets"
 "#,
         "project_assets_root",
     );
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -322,7 +326,7 @@ workspace_dir = "skills"
 "#,
         "workspace_dir",
     );
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -338,8 +342,8 @@ workspace_agents_dir = "agents"
 }
 
 #[test]
-fn removed_permission_config_keys_are_rejected() {
-    assert_root_config_rejects(
+fn removed_permission_config_keys_are_ignored() {
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -352,7 +356,7 @@ preset = "balanced"
 "#,
         "preset",
     );
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -365,7 +369,7 @@ default_mode = "ask"
 "#,
         "default_mode",
     );
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 config_version = 2
 
@@ -1502,10 +1506,7 @@ model = "deepseek-v4-pro"
 
 [task]
 routing_policy = "auto"
-max_plan_steps = 8
-max_parallel_read_steps = 2
-max_parallel_changeset_steps = 3
-max_planning_research_agents = 4
+max_concurrent_provider_routes = 6
 multi_agent_mode = "proactive"
 
 [task.planner]
@@ -1525,12 +1526,8 @@ prefixes = ["code_intel_"]
     );
     assert_eq!(config.task.routing_policy, TaskRoutingPolicy::Auto);
     assert_eq!(config.task.multi_agent_mode, MultiAgentMode::Proactive);
-    assert_eq!(config.task.max_plan_steps, 8);
-    assert_eq!(TaskConfig::default().max_parallel_read_steps, 4);
-    assert_eq!(config.task.max_parallel_read_steps, 2);
-    assert_eq!(TaskConfig::default().max_parallel_changeset_steps, 2);
-    assert_eq!(config.task.max_parallel_changeset_steps, 3);
-    assert_eq!(config.task.max_planning_research_agents, 4);
+    assert_eq!(TaskConfig::default().max_concurrent_provider_routes, 4);
+    assert_eq!(config.task.max_concurrent_provider_routes, 6);
     assert_eq!(
         config.task.planner.model.as_deref(),
         Some("deepseek-reasoner")
@@ -1540,7 +1537,27 @@ prefixes = ["code_intel_"]
 }
 
 #[test]
-fn task_config_rejects_legacy_budget_fields() {
+fn retired_task_scheduler_fields_are_ignored_as_unknown_configuration() {
+    let raw = r#"
+config_version = 2
+
+[agent]
+connection = "deepseek"
+model = "deepseek-v4-flash"
+
+[task]
+max_plan_steps = 1
+max_replans = 9
+max_parallel_read_steps = 1
+max_parallel_changeset_steps = 1
+max_planning_research_agents = 1
+"#;
+    let config: RootConfig = toml::from_str(raw).expect("unknown retired fields are ignored");
+    assert_eq!(config.task.max_concurrent_provider_routes, 4);
+}
+
+#[test]
+fn task_config_ignores_legacy_budget_fields() {
     for legacy_field in [
         "max_child_sessions",
         "allow_parallel_readonly_subagents",
@@ -1563,12 +1580,7 @@ model = "deepseek-v4-pro"
 "#
         );
 
-        let error = toml::from_str::<RootConfig>(&raw)
-            .expect_err("legacy task budget field should be rejected");
-        assert!(
-            error.to_string().contains(legacy_field),
-            "expected error to mention {legacy_field}, got {error}"
-        );
+        toml::from_str::<RootConfig>(&raw).expect("retired task budget field should be ignored");
     }
 }
 
@@ -1978,7 +1990,7 @@ scopes = ["mcp:tools", "mcp:resources"]
 }
 
 #[test]
-fn root_mcp_flat_transport_rejects_missing_unknown_and_cross_variant_fields() {
+fn root_mcp_flat_transport_ignores_cross_variant_fields_but_validates_known_values() {
     for (case, body, expected) in [
         (
             "missing transport",
@@ -1989,16 +2001,6 @@ fn root_mcp_flat_transport_rejects_missing_unknown_and_cross_variant_fields() {
             "unknown transport",
             "name = \"unknown\"\ntransport = \"sse\"\nurl = \"https://mcp.example.test/mcp\"",
             "unknown variant",
-        ),
-        (
-            "stdio remote field",
-            "name = \"cross\"\ntransport = \"stdio\"\ncommand = \"node\"\nurl = \"https://mcp.example.test/mcp\"",
-            "unknown field `url`",
-        ),
-        (
-            "remote stdio field",
-            "name = \"cross\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\ncommand = \"node\"",
-            "unknown field `command`",
         ),
     ] {
         let raw = format!(
@@ -2011,6 +2013,15 @@ fn root_mcp_flat_transport_rejects_missing_unknown_and_cross_variant_fields() {
             error.to_string().contains(expected),
             "{case}: expected {expected:?}, got {error}"
         );
+    }
+    for body in [
+        "name = \"cross\"\ntransport = \"stdio\"\ncommand = \"node\"\nurl = \"https://mcp.example.test/mcp\"",
+        "name = \"cross\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.test/mcp\"\ncommand = \"node\"",
+    ] {
+        let raw = format!(
+            "config_version = 2\n\n[agent]\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n\n[[mcp_servers]]\n{body}\n"
+        );
+        toml::from_str::<RootConfig>(&raw).expect("cross-variant fields should be ignored");
     }
 }
 
@@ -2196,8 +2207,8 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
-fn root_config_rejects_legacy_code_intelligence_keys() {
-    assert_root_config_rejects(
+fn root_config_ignores_legacy_code_intelligence_keys() {
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2211,7 +2222,7 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
         "feature",
     );
 
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2226,7 +2237,7 @@ fn root_config_rejects_legacy_code_intelligence_keys() {
         "startup",
     );
 
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2331,8 +2342,8 @@ effect = "read_only"
 }
 
 #[test]
-fn root_config_rejects_legacy_verification_scope_keys() {
-    assert_root_config_rejects(
+fn root_config_ignores_legacy_verification_scope_keys() {
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2346,7 +2357,7 @@ fn root_config_rejects_legacy_verification_scope_keys() {
         "scope_profile",
     );
 
-    assert_root_config_rejects(
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2594,8 +2605,8 @@ model = "deepseek-v4-flash"
 }
 
 #[test]
-fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
-    assert_root_config_rejects(
+fn root_config_ignores_legacy_and_validates_execution_strategy_config() {
+    assert_root_config_accepts(
         r#"
 	config_version = 2
 
@@ -2612,16 +2623,16 @@ fn root_config_rejects_legacy_and_illegal_execution_strategy_config() {
 
     assert_root_config_rejects(
         r#"
-	config_version = 2
+config_version = 2
 
 [agent]
-	provider = "deepseek"
-	model = "deepseek-v4-flash"
+    provider = "deepseek"
+    model = "deepseek-v4-flash"
 
-	[execution]
-	strategy = "sandbox"
-	"#,
-        "[execution.sandbox]",
+    [execution]
+    strategy = "sandbox"
+    "#,
+        "requires an [execution.sandbox] table",
     );
 
     assert_root_config_rejects(

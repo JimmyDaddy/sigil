@@ -67,10 +67,11 @@ fn ready_core_manifest() -> CutoverManifestV1 {
 fn core_manifest_requires_authority_and_recovery_without_unselected_adapters() {
     let manifest = ready_core_manifest();
     validate_cutover_manifest(&manifest).expect("core readiness");
-    assert_eq!(manifest.mandatory_readiness.len(), 13);
+    assert_eq!(manifest.mandatory_readiness.len(), 14);
     assert!(CutoverSurfaceStatusV1::from_manifest(&manifest).is_ready());
     for required in [
         MandatoryAdapterKindV1::ExecutionOneShot,
+        MandatoryAdapterKindV1::ExecutionTerminal,
         MandatoryAdapterKindV1::FileAccessInProcess,
         MandatoryAdapterKindV1::StorageSessionLog,
         MandatoryAdapterKindV1::StorageArtifact,
@@ -94,10 +95,6 @@ fn core_manifest_requires_authority_and_recovery_without_unselected_adapters() {
 #[test]
 fn selected_capability_cannot_omit_its_adapter_probe() {
     for (capability, adapter) in [
-        (
-            OptionalCapability::Terminal,
-            MandatoryAdapterKindV1::ExecutionTerminal,
-        ),
         (
             OptionalCapability::Mcp,
             MandatoryAdapterKindV1::ExecutionExtension,

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use super::writer::PendingStoredEvent;
 use super::*;
 use crate::{
     ConversationInputTerminalCommand, ConversationInputTerminalExpectation,
@@ -20,6 +21,14 @@ impl JsonlSessionStore {
     pub fn append_conversation_queue_mutation(
         &self,
         command: ConversationQueueMutationCommand,
+    ) -> Result<ConversationQueueMutationReceipt> {
+        self.append_conversation_queue_mutation_bound(command, None)
+    }
+
+    pub(super) fn append_conversation_queue_mutation_bound(
+        &self,
+        command: ConversationQueueMutationCommand,
+        binding: Option<&crate::ApplicationOperationBindingV1>,
     ) -> Result<ConversationQueueMutationReceipt> {
         let control = command.mutation.control_entry();
         let entry = SessionLogEntry::Control(control);
@@ -48,18 +57,31 @@ impl JsonlSessionStore {
             &format!("{session_id}:{identity_digest}"),
         );
 
-        let event = self.append_event_if_active_projection(
-            event_type,
-            payload,
-            event_id.clone(),
-            Some(event_id),
-            None,
-            None,
-            |projection| {
-                projection.queue().validate_mutation(&command)?;
-                Ok(true)
-            },
-        );
+        let event = if let Some(binding) = binding {
+            let mut pending = vec![PendingStoredEvent {
+                event_type,
+                event_class: store::session_entry_event_class(event_type),
+                payload,
+                event_id: Some(event_id.clone()),
+                correlation_id: Some(event_id),
+                causation_id: None,
+            }];
+            super::application_operation::add_operation_marker(binding, &mut pending)?;
+            self.append_application_queue_events(pending, &command)
+        } else {
+            self.append_event_if_active_projection(
+                event_type,
+                payload,
+                event_id.clone(),
+                Some(event_id),
+                None,
+                None,
+                |projection| {
+                    projection.queue().validate_mutation(&command)?;
+                    Ok(true)
+                },
+            )
+        };
         let event = match event {
             Ok(event) => event,
             Err(error)

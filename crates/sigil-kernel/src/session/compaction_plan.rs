@@ -26,7 +26,7 @@ const TURN_MESSAGE_TOKEN_OVERHEAD: u64 = 16;
 
 /// Stable reference to one raw durable event without copying its payload into a plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionEventRef {
     pub stream_sequence: u64,
     pub event_id: EventId,
@@ -37,7 +37,7 @@ pub struct CompactionEventRef {
 /// Floating-point policy values are persisted as parts per million so replay and stale-plan
 /// validation produce byte-identical decisions on every supported platform.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct AdaptiveTailPolicyV3 {
     pub tail_min_complete_turns: usize,
     pub tail_target_min_tokens: u64,
@@ -86,7 +86,7 @@ pub enum TailTurnStateV3 {
 
 /// Stable evidence for one complete or active turn retained as an atomic raw group.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RetainedTurnGroupV3 {
     pub first_event: CompactionEventRef,
     pub last_event: CompactionEventRef,
@@ -98,7 +98,7 @@ pub struct RetainedTurnGroupV3 {
 
 /// Self-contained proof of one V3 whole-turn raw-tail decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct AdaptiveTailSelectionV3 {
     pub schema_version: u16,
     pub policy: AdaptiveTailPolicyV3,
@@ -123,7 +123,7 @@ pub struct AdaptiveTailSelectionV3 {
 
 /// Why a durable event cannot be folded from the provider-visible raw history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum CompactionFoldProtectionReason {
     /// This message is already represented by the active V2 checkpoint boundary and must not be
     /// folded into a later checkpoint a second time.
@@ -148,7 +148,7 @@ pub enum CompactionFoldProtectionReason {
 
 /// One protected raw event and the reason it remains outside the fold range.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProtectedCompactionEventRef {
     pub event: CompactionEventRef,
     pub reason: CompactionFoldProtectionReason,
@@ -161,7 +161,7 @@ pub struct ProtectedCompactionEventRef {
 /// `base_stream_cursor`, the exact folded ids, and the exact retained ids make later apply-time
 /// stale-plan checks possible without putting raw message contents in the plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CompactionFoldPlan {
     pub schema_version: u16,
     /// Session scope shared by every event reference in this plan.

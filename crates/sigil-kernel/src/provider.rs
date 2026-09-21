@@ -115,7 +115,7 @@ impl ProviderCapabilities {
 /// Adapter implementations must return [`Self::Unknown`] for unverified compatible endpoints.
 /// In particular, a model name alone is never sufficient evidence for a vendor cache contract.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheMode {
     #[default]
     Unknown,
@@ -141,7 +141,7 @@ impl CacheMode {
 
 /// One provider-selectable cache lifetime.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheTtl {
     pub seconds: u32,
     /// Whether omitting a wire-level TTL selects this lifetime.
@@ -150,7 +150,7 @@ pub struct CacheTtl {
 
 /// Cache counters that a configured adapter can map into [`CacheUsageV1`].
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheUsageCapabilities {
     pub read_tokens: bool,
     pub write_tokens: bool,
@@ -159,7 +159,7 @@ pub struct CacheUsageCapabilities {
 
 /// Provider-neutral constraints on a server-retained conversation handle.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct StatefulContinuationCapability {
     /// Whether using the handle requires the connection to permit provider-side retention.
     pub requires_provider_retention: bool,
@@ -169,7 +169,7 @@ pub struct StatefulContinuationCapability {
 
 /// Provider-neutral constraints on an adapter-owned native compaction operation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct NativeCompactionCapability {
     /// Whether activation is restricted to an exact connection/model/protocol binding.
     pub requires_exact_route_binding: bool,
@@ -179,7 +179,7 @@ pub struct NativeCompactionCapability {
 
 /// How far an opaque native carrier may move without revalidation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum NativeCarrierPortability {
     #[default]
     Unavailable,
@@ -192,7 +192,7 @@ pub enum NativeCarrierPortability {
 /// This contract deliberately contains no vendor field names. Provider adapters retain
 /// ownership of wire-specific keys, beta headers and opaque carrier formats.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderContextCapabilities {
     pub cache_mode: CacheMode,
     pub explicit_breakpoint_limit: Option<u8>,
@@ -207,7 +207,7 @@ pub struct ProviderContextCapabilities {
 /// route. The identifiers are opaque, bounded machine labels; endpoint URLs, credentials, and
 /// provider-private protocol details must never enter durable recovery state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ProviderTransportFallbackCandidateV1 {
     pub fallback_transport_id: String,
     pub source_transport_fingerprint: String,
@@ -310,6 +310,7 @@ impl ProviderContextCapabilities {
 /// Incremental stream events emitted by a provider while serving a request.
 #[derive(Clone)]
 pub enum ProviderChunk {
+    Diagnostic(crate::ProviderDiagnosticV1),
     TextDelta(String),
     ReasoningDelta(String),
     ReasoningSummaryDelta(String),
@@ -391,6 +392,7 @@ impl fmt::Debug for ProviderChunk {
                     &format_args!("[redacted; {} bytes]", call.args_json.len()),
                 )
                 .finish(),
+            Self::Diagnostic(value) => formatter.debug_tuple("Diagnostic").field(value).finish(),
             Self::Usage(value) => formatter.debug_tuple("Usage").field(value).finish(),
             Self::BackgroundTaskAccepted(value) => formatter
                 .debug_tuple("BackgroundTaskAccepted")
@@ -843,7 +845,7 @@ impl Default for UsageStats {
 
 /// Origin of one normalized provider cache token count.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheTokenCountProvenance {
     /// The provider response exposed this exact cache category.
     ProviderReported,
@@ -853,7 +855,7 @@ pub enum CacheTokenCountProvenance {
 
 /// One cache token count plus evidence describing how it was obtained.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheTokenCountV1 {
     pub tokens: u64,
     pub provenance: CacheTokenCountProvenance,
@@ -882,7 +884,7 @@ impl CacheTokenCountV1 {
 /// Missing fields are unknown, not zero. This shape preserves the provider-report provenance
 /// needed by economics admission.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CacheUsageV1 {
     pub schema_version: u16,
     pub read: Option<CacheTokenCountV1>,
@@ -955,7 +957,7 @@ impl CacheUsageV1 {
 /// separately billable write category in this snapshot; it must not be interpreted as zero when a
 /// provider reports write tokens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelPricingSnapshotV1 {
     pub schema_version: u16,
     pub snapshot_id: String,

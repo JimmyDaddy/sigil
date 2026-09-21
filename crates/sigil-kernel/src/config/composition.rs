@@ -55,7 +55,7 @@ impl OptionalCapability {
 /// Deferred module payloads belong only to root-config roundtripping and are never serialized or
 /// included in debug output for this selection contract. Use `selection_only` at audit boundaries.
 #[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct RuntimeCompositionConfig {
     #[serde(default)]
     pub profile: RuntimeCompositionProfile,

@@ -289,11 +289,6 @@ fn control_publication_does_not_treat_an_ordinary_review_as_a_revision_run() -> 
         explicit_objective: Some("Prepare a plan".to_owned()),
         route_decision_id: None,
         child_session_ref: crate::plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: Some(crate::plan_review_finalizer_session_ref(
-            &review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,
@@ -584,9 +579,8 @@ fn control_publication_groups_multiple_dtos_under_one_domain_envelope() -> Resul
     });
     let (domain, public) = session.append_controls_with_public_outbox(vec![control], "run-1", 1)?;
     assert_eq!(domain.len(), 1);
-    assert_eq!(public.len(), 2);
+    assert_eq!(public.len(), 1);
     assert_eq!(public[0].sequence, 1);
-    assert_eq!(public[1].sequence, 2);
     assert!(
         public
             .iter()
@@ -595,7 +589,6 @@ fn control_publication_groups_multiple_dtos_under_one_domain_envelope() -> Resul
     assert!(!serde_json::to_string(&public)?.contains("private planner instructions"));
     let records = store.read_event_records_writer()?;
     PublicEventOutboxProjectionV1::from_records(&records)?;
-    assert!(PublicEventOutboxProjectionV1::from_records(&records[..3]).is_err());
     Ok(())
 }
 

@@ -442,7 +442,11 @@ impl SharedSessionCoordinator {
             if !should_append(&projection)? {
                 return Ok(None);
             }
-            let (events, _) = writer.append_events(pending, force_sync)?;
+            let (events, _) = if pending.len() > 1 {
+                writer.append_crash_safe_bundle(pending)?
+            } else {
+                writer.append_events(pending, force_sync)?
+            };
             let notice = self.commit_delta_locked(&mut writer, &events);
             (events, notice)
         };
@@ -1008,9 +1012,6 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::TaskDirectExecutionAdmittedV1(_)
             | ControlEntry::TaskDirectExecutionAttemptV1(_)
             | ControlEntry::TaskChecklistUpdatedV1(_)
-            | ControlEntry::TaskMaterializationAttemptStartedV1(_)
-            | ControlEntry::TaskMaterializationPreparedV1(_)
-            | ControlEntry::TaskMaterializationBlockedV1(_)
             | ControlEntry::TaskContinuationSelected(_)
             | ControlEntry::TaskRunCancellationScopeBound(_)
             | ControlEntry::TaskRunTargetSelected(_)
@@ -1018,13 +1019,9 @@ fn active_projection_families(events: &[StoredEvent]) -> BTreeSet<ActiveProjecti
             | ControlEntry::TaskPlan(_)
             | ControlEntry::TaskStepContractBoundV2(_)
             | ControlEntry::TaskPlanContractSetCommittedV2(_)
-            | ControlEntry::TaskGuidanceMaterialized(_)
             | ControlEntry::TaskStep(_)
             | ControlEntry::TaskParticipantAttempt(_)
-            | ControlEntry::TaskParticipantRetryScheduled(_)
             | ControlEntry::TaskParticipantResult(_)
-            | ControlEntry::TaskStepCheckpointV2(_)
-            | ControlEntry::TaskFinalAnswerCommitted(_)
             | ControlEntry::TaskChildSession(_)
             | ControlEntry::TaskChildSessionDisplayName(_)
             | ControlEntry::TaskSubagentApprovalRoute(_)

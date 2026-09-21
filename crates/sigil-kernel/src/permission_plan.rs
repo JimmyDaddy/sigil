@@ -152,12 +152,23 @@ pub struct ExecutionContainmentRequest {
 
 /// Exact, policy-safe execution boundary used when revalidating durable session authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct ExecutionContainmentBindingV2 {
     pub requested: ExecutionContainmentRequest,
     pub backend_identity_hash: String,
     pub backend_profile_hash: String,
     pub environment_binding_hash: String,
+}
+
+/// Network transport authority, independent of local process containment.
+/// Values are hashes of the exact endpoint, selected route, transport and current network policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct NetworkSessionGrantBindingV1 {
+    pub endpoint_hash: String,
+    pub transport_hash: String,
+    pub route_hash: String,
+    pub policy_hash: String,
 }
 
 /// Stable semantic identity used by policy and bounded session grants.
@@ -321,6 +332,25 @@ impl ToolPermissionPlanV2 {
             backend_identity_hash: crate::stable_event_hash(backend_identity.as_bytes()),
             backend_profile_hash: crate::stable_event_hash(backend_profile.as_bytes()),
             environment_binding_hash: crate::stable_event_hash(environment_binding.as_bytes()),
+        })
+    }
+
+    /// Network plans must carry actual transport evidence; shell metadata is never substituted.
+    #[must_use]
+    pub fn session_grant_network_binding(&self) -> Option<NetworkSessionGrantBindingV1> {
+        if self.effects != BTreeSet::from([ToolPermissionEffect::NetworkRead]) {
+            return None;
+        }
+        let binding = |key: &str| {
+            let value = self.analysis_bindings.get(key)?;
+            (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| value.clone())
+        };
+        Some(NetworkSessionGrantBindingV1 {
+            endpoint_hash: binding("network_endpoint_hash")?,
+            transport_hash: binding("network_transport_hash")?,
+            route_hash: binding("network_route_hash")?,
+            policy_hash: binding("network_policy_hash")?,
         })
     }
 

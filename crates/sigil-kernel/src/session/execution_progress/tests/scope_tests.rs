@@ -1,35 +1,15 @@
 use super::*;
 
-fn record_step_run(
-    progress: &mut ExecutionProgress,
-    task: &str,
-    step: &str,
-    ordinal: u32,
-) -> Result<String> {
+fn record_direct_run(progress: &mut ExecutionProgress, task: &str, ordinal: u32) -> Result<String> {
     let task_id = TaskId::new(task)?;
-    let step_id = crate::TaskStepId::new(step)?;
-    let attempt_id = crate::task_participant_attempt_id(
-        &task_id,
-        TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        ordinal,
-    )?;
-    let run_id = crate::task_participant_logical_run_id(&attempt_id);
-    progress.apply_control(&ControlEntry::TaskParticipantAttempt(
-        crate::TaskParticipantAttemptEntry {
-            child_session_ref: crate::task_participant_session_ref(&task_id, &attempt_id)?,
-            attempt_id,
-            task_id,
-            purpose: TaskParticipantPurpose::Step,
-            ordinal,
-            plan_version: Some(1),
-            step_id: Some(step_id),
-            role: crate::AgentRole::Executor,
-            status: crate::TaskParticipantAttemptStatus::Started,
-            reason: None,
-        },
-    ))?;
+    let admission = crate::TaskDirectExecutionAdmittedV1::task_request(
+        task_id,
+        "complete the durable Task objective",
+        1,
+    );
+    let attempt = crate::TaskDirectExecutionAttemptV1::started(&admission, ordinal);
+    let run_id = crate::task_direct_execution_logical_run_id(&attempt.attempt_id);
+    progress.apply_control(&ControlEntry::TaskDirectExecutionAttemptV1(attempt))?;
     Ok(run_id)
 }
 
@@ -53,12 +33,12 @@ fn continuation(root: &str, run: &str) -> Result<crate::UserInputContinuationSta
 }
 
 #[test]
-fn recorded_evidence_groups_task_steps_and_retries_without_foreign_tasks() -> Result<()> {
+fn recorded_evidence_groups_direct_attempts_without_foreign_tasks() -> Result<()> {
     let mut progress = ExecutionProgress::default();
-    let first = record_step_run(&mut progress, "task", "first", 1)?;
-    let retry = record_step_run(&mut progress, "task", "first", 2)?;
-    let second = record_step_run(&mut progress, "task", "second", 1)?;
-    let foreign = record_step_run(&mut progress, "other-task", "first", 1)?;
+    let first = record_direct_run(&mut progress, "task", 1)?;
+    let retry = record_direct_run(&mut progress, "task", 2)?;
+    let second = record_direct_run(&mut progress, "task", 3)?;
+    let foreign = record_direct_run(&mut progress, "other-task", 1)?;
     let task_runs = BTreeSet::from([first.clone(), retry.clone(), second.clone()]);
     for run in [&first, &retry, &second] {
         assert_eq!(progress.recorded_evidence_run_ids(run), task_runs);
@@ -77,17 +57,16 @@ fn recorded_evidence_groups_task_steps_and_retries_without_foreign_tasks() -> Re
 #[test]
 fn recorded_evidence_groups_direct_attempts_by_bound_task() -> Result<()> {
     let mut progress = ExecutionProgress::default();
-    let admission = crate::TaskDirectExecutionAdmittedV1::planner_fallback(
+    let admission = crate::TaskDirectExecutionAdmittedV1::task_request(
         TaskId::new("direct-task")?,
         "finish the accepted work",
-        "planner-attempt",
         1,
     );
     let first = crate::TaskDirectExecutionAttemptV1::started(&admission, 1);
     let retry = crate::TaskDirectExecutionAttemptV1::started(&admission, 2);
     progress.apply_control(&ControlEntry::TaskDirectExecutionAttemptV1(first.clone()))?;
     progress.apply_control(&ControlEntry::TaskDirectExecutionAttemptV1(retry.clone()))?;
-    let foreign = record_step_run(&mut progress, "other-task", "first", 1)?;
+    let foreign = record_direct_run(&mut progress, "other-task", 1)?;
     let first_run = crate::task_direct_execution_logical_run_id(&first.attempt_id);
     let retry_run = crate::task_direct_execution_logical_run_id(&retry.attempt_id);
     assert_eq!(
@@ -104,8 +83,8 @@ fn recorded_evidence_groups_direct_attempts_by_bound_task() -> Result<()> {
 #[test]
 fn recorded_evidence_follows_durable_input_continuations_without_rebinding_roots() -> Result<()> {
     let mut progress = ExecutionProgress::default();
-    let root = record_step_run(&mut progress, "task", "first", 1)?;
-    let sibling = record_step_run(&mut progress, "task", "second", 1)?;
+    let root = record_direct_run(&mut progress, "task", 1)?;
+    let sibling = record_direct_run(&mut progress, "task", 2)?;
     let started = continuation(&root, "answer-run")?;
     progress.apply_control(&ControlEntry::UserInputContinuationStarted(started.clone()))?;
     progress.apply_control(&ControlEntry::UserInputContinuationStarted(started))?;

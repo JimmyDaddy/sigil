@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    ControlEntry, PlanApprovalExpiry, PlanApprovalScope, PlanPermissionGrantedEntry, Session,
-    SessionLogEntry, TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
+    ControlEntry, PlanApprovalExpiry, PlanPermissionGrantedEntry, Session, SessionLogEntry,
+    TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION, ToolApprovalSessionGrantEntry,
     ToolApprovalSessionGrantExpiry, ToolPermissionPlanV2, ToolSubjectAudit,
     permission::{
         ApprovalMode, InteractionMode, PermissionDecision, PermissionDecisionReason,
@@ -125,8 +125,17 @@ pub(super) fn session_grant_covers_decision(
     let Some(shape) = tool_approval_session_grant_shape(decision) else {
         return false;
     };
-    let Some(containment_binding) = plan.session_grant_containment_binding() else {
-        return false;
+    let binding_matches = if plan.network_effect().is_some() {
+        grant.containment_binding.is_none()
+            && plan
+                .session_grant_network_binding()
+                .is_some_and(|binding| grant.network_binding.as_ref() == Some(&binding))
+            && grant.policy_version == policy_version
+    } else {
+        grant.network_binding.is_none()
+            && plan
+                .session_grant_containment_binding()
+                .is_some_and(|binding| grant.containment_binding.as_ref() == Some(&binding))
     };
     grant.schema_version == TOOL_APPROVAL_SESSION_GRANT_SCHEMA_VERSION
         && grant.expires == ToolApprovalSessionGrantExpiry::Session
@@ -138,7 +147,7 @@ pub(super) fn session_grant_covers_decision(
         && decision.risk <= grant.risk_ceiling
         && grant.facets == shape.facets
         && grant.scope == shape.scope
-        && grant.containment_binding == containment_binding
+        && binding_matches
         && (grant.policy_version == policy_version
             || session_grant_policy_fingerprint(decision)
                 .is_ok_and(|fingerprint| fingerprint == grant.policy_version))
@@ -147,15 +156,7 @@ pub(super) fn session_grant_covers_decision(
                 grant_subjects_match_decision(&grant.subjects, &decision.subjects)
             }
             ToolApprovalSessionGrantScope::NetworkReadTool => {
-                !grant.subjects.is_empty()
-                    && grant.subjects.iter().all(|subject| {
-                        subject.kind == ToolSubjectKind::NetworkEndpoint
-                            && !subject.identity_sha256.trim().is_empty()
-                    })
-                    && decision.subjects.iter().all(|subject| {
-                        subject.kind == ToolSubjectKind::NetworkEndpoint
-                            && !subject.normalized.trim().is_empty()
-                    })
+                grant_subjects_match_decision(&grant.subjects, &decision.subjects)
             }
             ToolApprovalSessionGrantScope::CommandFamily { prefix } => decision
                 .subjects
@@ -270,61 +271,6 @@ fn active_plan_permission_grant(session: &Session) -> Option<PlanPermissionGrant
         .find_map(|(index, entry)| match entry {
             SessionLogEntry::Control(ControlEntry::PlanPermissionGranted(grant)) => {
                 Some((index, grant.clone()))
-            }
-            // RFC-0067: the adoption authority carries the plan-scoped grant.
-            SessionLogEntry::Control(ControlEntry::PlanExecutionAdoptedV1(adoption))
-                if adoption.permission_grant.is_some() =>
-            {
-                let candidate = &adoption.adopted_candidate;
-                let scope = candidate.permission_scope_candidate.as_ref()?;
-                Some((
-                    index,
-                    PlanPermissionGrantedEntry {
-                        plan_id: adoption.plan_id.clone(),
-                        plan_hash: adoption.plan_hash.clone(),
-                        task_id: adoption.task_id.clone(),
-                        workspace_snapshot_id: candidate
-                            .compile_binding
-                            .base_workspace_snapshot_id
-                            .clone(),
-                        permission: adoption.permission_grant?,
-                        scope: PlanApprovalScope {
-                            summary: scope.summary.clone(),
-                            workspace_paths: scope.workspace_paths.clone(),
-                        },
-                        expires: PlanApprovalExpiry::Session,
-                        granted_at_ms: adoption.adopted_at_ms,
-                    },
-                ))
-            }
-            // RFC-0069 materializes the same candidate envelope after the approval/task-shell
-            // bundle. Its scoped-edit choice is therefore the live plan authority for new
-            // writers, including isolated child workspaces whose subjects retain plan-relative
-            // paths.
-            SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(
-                materialization,
-            )) if materialization.permission_grant.is_some() => {
-                let candidate = &materialization.adopted_candidate;
-                let scope = candidate.permission_scope_candidate.as_ref()?;
-                Some((
-                    index,
-                    PlanPermissionGrantedEntry {
-                        plan_id: materialization.plan_id.clone(),
-                        plan_hash: materialization.plan_hash.clone(),
-                        task_id: materialization.task_id.clone(),
-                        workspace_snapshot_id: candidate
-                            .compile_binding
-                            .base_workspace_snapshot_id
-                            .clone(),
-                        permission: materialization.permission_grant?,
-                        scope: PlanApprovalScope {
-                            summary: scope.summary.clone(),
-                            workspace_paths: scope.workspace_paths.clone(),
-                        },
-                        expires: PlanApprovalExpiry::Session,
-                        granted_at_ms: materialization.adopted_at_ms,
-                    },
-                ))
             }
             _ => None,
         })?;

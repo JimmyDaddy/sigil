@@ -15,7 +15,7 @@ mod predecessor;
 
 pub use predecessor::{
     CutoverPredecessorErrorV1, ValidatedCutoverPredecessorV1,
-    validate_bootstrap_cutover_predecessor_v1,
+    validate_bootstrap_cutover_predecessor_v1, validate_optional_terminal_cutover_predecessor_v2,
 };
 
 pub const CUTOVER_MANIFEST_SCHEMA_VERSION: u32 = 2;
@@ -157,7 +157,7 @@ pub enum CutoverBlockerCodeV1 {
 
 /// One bounded current-schema blocker projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CutoverBlockerV1 {
     pub code: CutoverBlockerCodeV1,
     pub adapter: Option<MandatoryAdapterKindV1>,
@@ -166,7 +166,7 @@ pub struct CutoverBlockerV1 {
 /// Shared epoch/authority/blocker DTO. CLI, TUI, HTTP and Desktop must project this value
 /// without recomputing a second readiness state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct CutoverSurfaceStatusV1 {
     pub schema_version: u16,
     pub epoch: CutoverSurfaceEpochV1,
@@ -308,9 +308,6 @@ pub fn required_adapter_kinds_v1(
         .iter()
         .copied()
         .filter(|adapter| match adapter {
-            MandatoryAdapterKindV1::ExecutionTerminal => {
-                composition.allows(OptionalCapability::Terminal)
-            }
             MandatoryAdapterKindV1::ExecutionExtension => {
                 composition.allows(OptionalCapability::Mcp)
                     || composition.allows(OptionalCapability::Skills)

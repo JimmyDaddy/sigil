@@ -87,14 +87,11 @@ fn append_suspended_user_input(
         prompt: "Choose one migration mode".to_owned(),
         questions: vec![crate::UserInputQuestionV1 {
             id: "mode".to_owned(),
-            header: "Mode".to_owned(),
             question: "Which migration mode should be used?".to_owned(),
             description: None,
             required: true,
-            field: crate::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 128,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![crate::UserInputActionV1::Submit],
         requested_at_unix_ms: 10,
@@ -414,14 +411,11 @@ fn adaptive_tail_pins_a_suspended_user_input_tool_turn() -> Result<()> {
         prompt: "Choose one migration mode".to_owned(),
         questions: vec![crate::UserInputQuestionV1 {
             id: "mode".to_owned(),
-            header: "Mode".to_owned(),
             question: "Which migration mode should be used?".to_owned(),
             description: None,
             required: true,
-            field: crate::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 128,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![crate::UserInputActionV1::Submit],
         requested_at_unix_ms: 10,

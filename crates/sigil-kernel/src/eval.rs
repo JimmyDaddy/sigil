@@ -650,7 +650,7 @@ pub struct OrchestrationEvalRouteIdentityV1 {
     pub canonical_model_version: String,
     pub route_fingerprint: String,
     pub routing_prompt_digest: String,
-    pub planner_prompt_digest: String,
+    pub direct_task_prompt_digest: String,
     pub system_prompt_digest: String,
     pub tool_profile_contract_digest: String,
     pub task_config_digest: String,
@@ -679,7 +679,10 @@ impl OrchestrationEvalRouteIdentityV1 {
             ),
             ("route_fingerprint", self.route_fingerprint.as_str()),
             ("routing_prompt_digest", self.routing_prompt_digest.as_str()),
-            ("planner_prompt_digest", self.planner_prompt_digest.as_str()),
+            (
+                "direct_task_prompt_digest",
+                self.direct_task_prompt_digest.as_str(),
+            ),
             ("system_prompt_digest", self.system_prompt_digest.as_str()),
             (
                 "tool_profile_contract_digest",
@@ -732,7 +735,6 @@ pub struct OrchestrationEvalObservationV1 {
     pub duplicate_spawns: u32,
     pub duplicate_continuations: u32,
     pub duplicate_merges: u32,
-    pub duplicate_parent_child_finals: u32,
     pub permission_monotonicity_violations: u32,
     pub unknown_effect_replays: u32,
     pub model_polling_turns: u32,
@@ -744,7 +746,6 @@ impl OrchestrationEvalObservationV1 {
             + u64::from(self.duplicate_spawns)
             + u64::from(self.duplicate_continuations)
             + u64::from(self.duplicate_merges)
-            + u64::from(self.duplicate_parent_child_finals)
             + u64::from(self.permission_monotonicity_violations)
             + u64::from(self.unknown_effect_replays)
             + u64::from(self.model_polling_turns)

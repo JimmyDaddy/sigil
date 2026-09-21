@@ -10,13 +10,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     ConversationRouteDecisionId, ConversationTurnRef, IntentPlanProposalV1, IntentProposalUnitV1,
-    PlanReviewId, PlanReviewProjection, TaskStepIntentAliasBindingV1,
+    PlanReviewId, PlanReviewProjection,
     session::{ControlEntry, SessionLogEntry},
-    task::{
-        AgentRole, TaskBlockerV1, TaskCapabilityV2, TaskExecutionPhaseV1, TaskId,
-        TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskStepContractBoundEntryV2, TaskStepId,
-        TaskStepMode, task_contract_set_sha256,
-    },
+    task::{AgentRole, TaskCapabilityV2, TaskId, TaskIsolationMode, TaskStepMode},
     tool::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec},
     verification::{CheckCommand, ToolEffect},
 };
@@ -220,7 +216,7 @@ pub enum PlanReviewResolutionActorV1 {
 /// `receipt_id` is a host-owned model result receipt or user command identity; it is never parsed
 /// as an instruction or used as execution authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewResolutionRecordedV1 {
     pub schema_version: u16,
     pub plan_review_id: PlanReviewId,
@@ -265,7 +261,7 @@ impl PlanReviewResolutionRecordedV1 {
 /// Small bodies are retained inline. Larger bodies carry a bounded display preview plus a
 /// same-scope managed artifact descriptor; the durable hash always binds the complete body.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewCandidateRecordedV1 {
     pub schema_version: u16,
     pub plan_review_id: PlanReviewId,
@@ -380,7 +376,7 @@ impl PlanReviewResult {
 /// it is exposed to a caller. This lets runtime build corrective model input without making raw
 /// malformed payloads or secret-shaped text part of the feedback channel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewValidationIssue {
     pub code: String,
     pub field_path: String,
@@ -391,7 +387,7 @@ pub struct PlanReviewValidationIssue {
 
 /// Error raised when a typed Plan review result cannot be safely accepted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewResultValidationError {
     pub issue: PlanReviewValidationIssue,
 }
@@ -449,7 +445,7 @@ fn plan_review_result_validation_error(
 
 /// Complete immutable detail for one structured plan-review step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewStepDetailV1 {
     pub step_id: String,
     pub title: String,
@@ -476,7 +472,7 @@ pub struct PlanReviewStepDetailV1 {
 
 /// Immutable lineage required to audit the plan-review attempt that produced a detail artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanLineageV1 {
     pub source: PlanSourceRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,7 +484,7 @@ pub struct PlanLineageV1 {
 
 /// Complete immutable plan detail shared by TUI, Desktop, and HTTP adapters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewDetailV1 {
     pub plan_id: PlanId,
     pub plan_hash: String,
@@ -505,21 +501,6 @@ pub struct PlanReviewDetailV1 {
     pub lineage: PlanLineageV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_markdown: Option<String>,
-    /// Legacy/advisory executable-candidate facts. They never gate Plan review or direct Run.
-    pub compile: PlanCompileDetailV1,
-}
-
-/// RFC-0067 compile facts exposed to product surfaces.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanCompileDetailV1 {
-    pub state: PlanReadyStateV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compiler_version: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<PlanCompileFailureV1>,
 }
 
 /// Converts one exact durable plan artifact into its complete immutable review detail.
@@ -581,21 +562,6 @@ pub fn plan_review_detail_from_entries(
     }) {
         bail!("plan detail is not bound to a DraftReady or CompileFailed attempt");
     }
-    let compile_state = artifacts.plan_ready_state(plan_id);
-    let compile = PlanCompileDetailV1 {
-        state: compile_state,
-        candidate_hash: artifacts
-            .latest_candidate(plan_id)
-            .map(|candidate| candidate.candidate_hash.clone()),
-        compiler_version: artifacts
-            .latest_candidate(plan_id)
-            .map(|candidate| candidate.compiler_version),
-        failure: artifacts
-            .compile_failures
-            .get(plan_id)
-            .and_then(|failures| failures.last())
-            .cloned(),
-    };
     let steps = draft
         .steps
         .iter()
@@ -640,7 +606,6 @@ pub fn plan_review_detail_from_entries(
             .is_empty()
             .then(|| draft.inline_text.clone())
             .flatten(),
-        compile,
     })
 }
 
@@ -721,15 +686,6 @@ pub struct PlanPermissionGrantedEntry {
     pub granted_at_ms: u64,
 }
 
-/// Mapping from parsed plan steps to durable task steps.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub struct PlanToTaskStepMapping {
-    pub plan_step_id: String,
-    pub task_step_id: TaskStepId,
-    pub title: String,
-}
-
 /// Append-only record linking one plan artifact to the task created from it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -737,441 +693,20 @@ pub struct TaskCreatedFromPlanEntry {
     pub plan_id: PlanId,
     pub plan_hash: String,
     pub task_id: TaskId,
-    pub task_plan_version: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub step_mapping: Vec<PlanToTaskStepMapping>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_reason: Option<String>,
     pub created_at_ms: u64,
-}
-
-/// Durable schema carried by RFC-0067 executable plan candidates.
-pub const EXECUTABLE_PLAN_CANDIDATE_SCHEMA_VERSION: u16 = 1;
-/// Durable schema carried by RFC-0067 plan compile bindings.
-pub const PLAN_COMPILE_BINDING_SCHEMA_VERSION: u16 = 1;
-/// Historical compiler version retained in persisted candidate records.
-pub const PLAN_COMPILER_VERSION: u16 = 1;
-/// Maximum serialized size of one executable plan candidate.
-pub const MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES: usize = 256 * 1024;
-
-/// Provenance binding proving which contract generation compiled a candidate (RFC-0067 7.2).
-///
-/// These fields are evidence, not runtime permission: they bind the candidate to the exact
-/// planner schema, task-contract schema, intent schema and task configuration that produced it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanCompileBindingV1 {
-    pub schema_version: u16,
-    pub source_attempt_id: String,
-    pub source_turn_id: String,
-    pub task_config_contract_hash: String,
-    pub planner_schema_hash: String,
-    pub task_contract_schema_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_schema_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_workspace_snapshot_id: Option<String>,
-}
-
-/// Historical typed compile failure retained for RFC-0067 replay (not a current Run gate).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanCompileFailureV1 {
-    pub plan_id: PlanId,
-    pub plan_hash: String,
-    pub reason_code: String,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub affected_step: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compile_binding: Option<PlanCompileBindingV1>,
-    pub failed_at_ms: u64,
-}
-
-impl PlanCompileFailureV1 {
-    /// Validates the compile failure record is bounded and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unbounded text, a malformed plan hash, or an invalid binding.
-    pub fn validate(&self) -> Result<()> {
-        for (label, value) in [
-            (
-                "plan compile failure reason code",
-                self.reason_code.as_str(),
-            ),
-            ("plan compile failure reason", self.reason.as_str()),
-        ] {
-            if value.is_empty()
-                || value.len() > PLAN_COMPILE_FAILURE_TEXT_MAX_BYTES
-                || crate::safe_persistence_text(value) != value
-            {
-                bail!("{label} is not bounded safe text");
-            }
-        }
-        if let Some(step) = self.affected_step.as_deref() {
-            validate_plan_stable_id("plan compile failure affected step", step)?;
-        }
-        if self
-            .compile_binding
-            .as_ref()
-            .is_some_and(|binding| binding.schema_version != PLAN_COMPILE_BINDING_SCHEMA_VERSION)
-        {
-            bail!("unsupported plan compile binding schema version");
-        }
-        if self.failed_at_ms == 0 {
-            bail!("plan compile failure timestamp must be non-zero");
-        }
-        Ok(())
-    }
-}
-
-/// Maximum bytes for one plan compile failure text field.
-pub const PLAN_COMPILE_FAILURE_TEXT_MAX_BYTES: usize = 2 * 1024;
-
-/// Prepared, validated, content-addressed Intent admission carried by a candidate (RFC-0067 7.4).
-///
-/// These fields preserve the exact old admission evidence for replay. Current Plan generation
-/// and approval do not construct or activate this legacy candidate payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PreparedIntentAdmissionV1 {
-    pub stack_id: String,
-    pub stack_version: u64,
-    pub workspace_id: String,
-    pub source_session_id: String,
-    pub proposal_digest: String,
-    pub source_turn_id: String,
-    pub authority_event_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub alias_bindings: Vec<TaskStepIntentAliasBindingV1>,
-    /// Canonical digest of the fully materialized admission (proposal + context + authority).
-    pub admission_digest: String,
-}
-
-/// Proof that a candidate's paths qualify for a plan-scoped edit grant (RFC-0067 7.5).
-///
-/// The candidate proves eligibility only; the grant is created by adoption and can still not
-/// override sandbox, protected path, network, MCP, external directory, secret egress, merge or
-/// publish policy.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanPermissionScopeCandidateV1 {
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_paths: Vec<String>,
-    pub scope_digest: String,
-}
-
-/// Historical normalized, content-addressed Plan candidate retained for RFC-0067 replay.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct ExecutablePlanCandidateV1 {
-    pub schema_version: u16,
-    pub compiler_version: u16,
-    pub plan_id: PlanId,
-    pub plan_hash: String,
-    pub candidate_hash: String,
-    pub task_id: TaskId,
-    pub semantic_title: String,
-    pub safe_objective: String,
-    pub task_plan: TaskPlanEntry,
-    pub step_contracts: Vec<TaskStepContractBoundEntryV2>,
-    pub contract_set_digest: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub step_mapping: Vec<PlanToTaskStepMapping>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prepared_intent_admission: Option<PreparedIntentAdmissionV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_scope_candidate: Option<PlanPermissionScopeCandidateV1>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_capabilities: Vec<TaskCapabilityV2>,
-    pub compile_binding: PlanCompileBindingV1,
-}
-
-impl ExecutablePlanCandidateV1 {
-    /// Validates the candidate is bounded, deterministic and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unsupported schemas, unbounded payloads, or facts that cannot be
-    /// re-materialized from the candidate itself.
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != EXECUTABLE_PLAN_CANDIDATE_SCHEMA_VERSION {
-            bail!("unsupported executable plan candidate schema version");
-        }
-        if self.compile_binding.schema_version != PLAN_COMPILE_BINDING_SCHEMA_VERSION {
-            bail!("unsupported plan compile binding schema version");
-        }
-        if self.task_plan.plan_version == 0
-            || self.task_plan.status != TaskPlanStatus::Accepted
-            || self.task_plan.task_id != self.task_id
-        {
-            bail!("candidate task plan is not an accepted plan for the candidate task");
-        }
-        if self.step_contracts.len() != self.task_plan.steps.len() {
-            bail!("candidate step contract set is incomplete");
-        }
-        for binding in &self.step_contracts {
-            binding.validate()?;
-            if binding.task_id != self.task_id
-                || binding.plan_version != self.task_plan.plan_version
-                || !self
-                    .task_plan
-                    .steps
-                    .iter()
-                    .any(|step| step.step_id == binding.step_id)
-            {
-                bail!("candidate step contract does not belong to the candidate task plan");
-            }
-        }
-        let expected_digest = task_contract_set_sha256(&self.step_contracts)?;
-        if expected_digest != self.contract_set_digest {
-            bail!("candidate contract-set digest does not match its step contracts");
-        }
-        let expected_hash = candidate_canonical_hash(self)?;
-        if expected_hash != self.candidate_hash {
-            bail!("candidate hash does not match its canonical payload");
-        }
-        let size = serde_json::to_vec(self).context("failed to size executable plan candidate")?;
-        if size.len() > MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES {
-            bail!(
-                "executable plan candidate exceeds maximum of {} bytes",
-                MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES
-            );
-        }
-        Ok(())
-    }
-}
-
-/// Derived plan readiness state for one durable plan artifact (RFC-0067 6.1, 15).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanReadyStateV1 {
-    /// No candidate exists yet; the plan review is still open.
-    NotReady,
-    /// Compile failed with a durable typed reason; the plan needs changes.
-    CompileFailed,
-    /// Candidate is durable but the final ready marker is missing (crash window).
-    CandidatePrepared,
-    /// A readable Plan artifact is durable and may be reviewed or directly executed.
-    Ready,
-    /// Legacy serialized value retained for replay compatibility.
-    LegacyPlanNeedsRecompile,
-}
-
-impl PlanReadyStateV1 {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotReady => "not_ready",
-            Self::CompileFailed => "compile_failed",
-            Self::CandidatePrepared => "candidate_prepared",
-            Self::Ready => "ready",
-            Self::LegacyPlanNeedsRecompile => "legacy_plan_needs_recompile",
-        }
-    }
-}
-
-/// Durable final marker proving a candidate is adoptable (RFC-0067 8).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanReadyCommittedV1Entry {
-    pub plan_id: PlanId,
-    pub plan_hash: String,
-    pub candidate_hash: String,
-    pub attempt_id: String,
-    pub committed_at_ms: u64,
-}
-
-impl PlanReadyCommittedV1Entry {
-    /// Validates the ready marker is bounded and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unbounded identities, a malformed plan/candidate digest, or a
-    /// zero commit timestamp.
-    pub fn validate(&self) -> Result<()> {
-        let plan_digest = self
-            .plan_hash
-            .strip_prefix(PLAN_HASH_PREFIX)
-            .unwrap_or(&self.plan_hash);
-        if plan_digest.len() != 64 || !plan_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("plan ready marker plan hash is not a sha256 digest");
-        }
-        let candidate_digest = self
-            .candidate_hash
-            .strip_prefix(PLAN_HASH_PREFIX)
-            .unwrap_or(&self.candidate_hash);
-        if candidate_digest.len() != 64
-            || !candidate_digest
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        {
-            bail!("plan ready marker candidate hash is not a sha256 digest");
-        }
-        validate_plan_stable_id("plan ready attempt id", &self.attempt_id)?;
-        if self.committed_at_ms == 0 {
-            bail!("plan ready marker commit timestamp must be non-zero");
-        }
-        Ok(())
-    }
-}
-
-/// The single durable authority of one Run action (RFC-0067 9.2).
-///
-/// This event is the only commit authority for Task identity, accepted plan, step contracts,
-/// intent activation, plan decision and the handoff link. Projectors derive every existing public
-/// projection from it; no subsequent multi-record promotion is required.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanExecutionAdoptedV1Entry {
-    pub command_id: String,
-    pub plan_id: PlanId,
-    pub plan_hash: String,
-    pub candidate_hash: String,
-    pub task_id: TaskId,
-    pub task_title: String,
-    pub parent_session_ref: crate::SessionRef,
-    pub start_mode: PlanTaskStartMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_grant: Option<PlanApprovalPermission>,
-    pub adopted_candidate: Box<ExecutablePlanCandidateV1>,
-    /// RFC-0069 materializer-owned participant continuity receipts. Legacy RFC-0067 adoptions
-    /// omit this field and remain replayable through the deterministic compatibility path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_segments: Option<Vec<crate::ExecutionSegmentV1>>,
-    pub initial_phase: TaskExecutionPhaseV1,
-    pub adopted_at_ms: u64,
-}
-
-impl PlanExecutionAdoptedV1Entry {
-    /// Validates the adoption event is bounded and self-consistent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when identities are unbounded, the candidate is invalid, or the event
-    /// exceeds the durable record ceiling.
-    pub fn validate(&self) -> Result<()> {
-        if self.command_id.is_empty()
-            || self.command_id.len() > 128
-            || crate::safe_persistence_text(&self.command_id) != self.command_id
-            || !self.command_id.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
-            })
-        {
-            bail!("plan execution command id is not a bounded safe identity");
-        }
-        if self.plan_id != self.adopted_candidate.plan_id
-            || self.plan_hash != self.adopted_candidate.plan_hash
-            || self.candidate_hash != self.adopted_candidate.candidate_hash
-            || self.task_id != self.adopted_candidate.task_id
-            || self.task_title != self.adopted_candidate.semantic_title
-        {
-            bail!("plan execution adoption event is inconsistent with its candidate");
-        }
-        if self.initial_phase != TaskExecutionPhaseV1::Preparing {
-            bail!("plan execution adoption must start in the Preparing phase");
-        }
-        if self.permission_grant.is_some()
-            && self.adopted_candidate.permission_scope_candidate.is_none()
-        {
-            bail!(
-                "plan execution adoption grants scoped edits without a permission scope candidate"
-            );
-        }
-        self.adopted_candidate.validate()?;
-        if let Some(segments) = &self.execution_segments
-            && *segments != crate::materialize_execution_segments(&self.adopted_candidate)
-        {
-            bail!("plan execution segments do not match the materialized candidate authority");
-        }
-        let size =
-            serde_json::to_vec(self).context("failed to size plan execution adoption event")?;
-        if size.len() > MAX_EXECUTABLE_PLAN_CANDIDATE_BYTES.saturating_mul(2) {
-            bail!("plan execution adoption event exceeds the durable record ceiling");
-        }
-        Ok(())
-    }
-}
-
-/// Durable start of one post-approval Task materialization generation (RFC-0069 8.4).
-///
-/// The stable Task shell exists before this record. A later prepared or blocked outcome must bind
-/// this exact generation, so restart recovery never creates a second Task for the same approval.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskMaterializationAttemptStartedV1 {
-    pub task_id: TaskId,
-    pub generation: u32,
-    pub plan_hash: String,
-    pub compiler_contract_fingerprint: String,
-    pub started_at_ms: u64,
-}
-
-impl TaskMaterializationAttemptStartedV1 {
-    /// Validates the bounded, durable materialization attempt identity.
-    pub fn validate(&self) -> Result<()> {
-        if self.generation == 0 {
-            bail!("task materialization generation must be non-zero");
-        }
-        validate_sha256_digest("task materialization plan hash", &self.plan_hash)?;
-        validate_sha256_digest(
-            "task materialization compiler contract fingerprint",
-            &self.compiler_contract_fingerprint,
-        )?;
-        if self.started_at_ms == 0 {
-            bail!("task materialization start timestamp must be non-zero");
-        }
-        Ok(())
-    }
-}
-
-/// Durable blocked outcome for one exact materialization attempt (RFC-0069 8.4).
-///
-/// This is intentionally Task-local. It never revokes the approved Plan or the stable Task
-/// identity; a later generation may safely retry after a revision or environment repair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct TaskMaterializationBlockedV1 {
-    pub task_id: TaskId,
-    pub generation: u32,
-    pub plan_hash: String,
-    pub blocker_id: String,
-    pub blocker: TaskBlockerV1,
-    pub blocked_at_ms: u64,
-}
-
-impl TaskMaterializationBlockedV1 {
-    /// Validates that the blocked outcome binds one exact started materialization generation.
-    pub fn validate(&self) -> Result<()> {
-        if self.generation == 0 {
-            bail!("task materialization blocker generation must be non-zero");
-        }
-        validate_sha256_digest("task materialization blocker plan hash", &self.plan_hash)?;
-        validate_plan_stable_id("task materialization blocker id", &self.blocker_id)?;
-        self.blocker.validate()?;
-        if self.blocked_at_ms < self.blocker.created_at_ms || self.blocked_at_ms == 0 {
-            bail!("task materialization blocker timestamp is invalid");
-        }
-        Ok(())
-    }
 }
 
 /// Typed Run command shared by every product surface (RFC-0067 9.1).
 ///
 /// `source` is audit-only and never changes domain behavior. `expected_durable_frontier` is the
-/// compare-and-swap position the approval append must still observe. `expected_candidate_hash`
-/// is retained for RFC-0067 replay compatibility only: RFC-0069 approval binds the readable
-/// Plan hash and creates a Task shell before authoritative materialization, so new writers must
-/// leave it empty and must not use it to authorize approval.
+/// compare-and-swap position the approval append must still observe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanRunCommandV1 {
     pub command_id: String,
     pub session_id: String,
     pub plan_id: PlanId,
     pub expected_plan_hash: String,
-    pub expected_candidate_hash: String,
     pub expected_durable_frontier: u64,
     pub start_mode: PlanTaskStartMode,
     pub permission: PlanRunPermissionChoiceV1,
@@ -1211,32 +746,14 @@ pub enum PlanRunPermissionChoiceV1 {
     GrantScopedEditsOnce,
 }
 
-/// Durable receipt returned after one Run command (RFC-0067 9.2).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct PlanRunReceiptV1 {
-    pub command_id: String,
-    pub receipt_id: String,
-    pub plan_id: PlanId,
-    pub plan_hash: String,
-    pub candidate_hash: String,
-    pub task_id: TaskId,
-    pub task_title: String,
-    pub initial_phase: TaskExecutionPhaseV1,
-    pub accepted_at_ms: u64,
-    pub already_adopted: bool,
-}
-
 /// Typed rejection of one Run command; the plan stays actionable (RFC-0067 9.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum PlanRunRejectionV1 {
     PlanMissing,
     PlanHashStale { expected: String, current: String },
-    PlanNotReady { plan_state: PlanReadyStateV1 },
+    PlanNotReady,
     PlanRejected,
-    CandidateMissing,
-    CandidateHashMismatch { expected: String, current: String },
     FrontierStale { expected: u64, current: u64 },
     CommandIdentityConflict,
     PermissionChoiceUnavailable { reason: String },
@@ -1248,10 +765,8 @@ impl PlanRunRejectionV1 {
         match self {
             Self::PlanMissing => "plan_missing",
             Self::PlanHashStale { .. } => "plan_hash_stale",
-            Self::PlanNotReady { .. } => "plan_not_ready",
+            Self::PlanNotReady => "plan_not_ready",
             Self::PlanRejected => "plan_rejected",
-            Self::CandidateMissing => "candidate_missing",
-            Self::CandidateHashMismatch { .. } => "candidate_hash_mismatch",
             Self::FrontierStale { .. } => "frontier_stale",
             Self::CommandIdentityConflict => "command_identity_conflict",
             Self::PermissionChoiceUnavailable { .. } => "permission_choice_unavailable",
@@ -1260,32 +775,12 @@ impl PlanRunRejectionV1 {
     }
 }
 
-/// Computes the canonical, provider-neutral hash of an executable plan candidate (RFC-0067 7.1).
-///
-/// The hash excludes timestamps, command/request UUIDs, process-local grants, current provider
-/// credentials, registry instance identity, volatile workspace availability and UI selection.
-///
-/// # Errors
-///
-/// Returns an error when the candidate cannot be serialized canonically.
-pub fn candidate_canonical_hash(candidate: &ExecutablePlanCandidateV1) -> Result<String> {
-    let mut value =
-        serde_json::to_value(candidate).context("failed to serialize executable plan candidate")?;
-    let object = value
-        .as_object_mut()
-        .context("executable plan candidate must serialize as an object")?;
-    object.remove("candidate_hash");
-    let canonical = crate::event::canonical_json_bytes(&value)
-        .context("failed to encode executable plan candidate canonically")?;
-    Ok(format!("sha256:{}", crate::sha256_hex(&canonical)))
-}
-
-/// Outcome of one atomic adoption append (RFC-0067 9.2).
+/// Outcome of one atomic Plan approval append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanExecutionAdoptionCommit {
-    /// The adoption event (and its intent activation) was appended and synced.
+pub enum PlanApprovalCommit {
+    /// The approval and direct Task authority were appended and synced.
     Appended,
-    /// The frontier moved or the same command/candidate was already adopted; nothing changed.
+    /// The frontier moved or the same approval was already committed; nothing changed.
     CasSkipped,
 }
 
@@ -1309,7 +804,7 @@ pub fn append_plan_approval_task_shell_at_frontier(
     checklist: Option<&crate::TaskChecklistUpdatedV1>,
     permission_grant: Option<&PlanPermissionGrantedEntry>,
     expected_frontier: u64,
-) -> Result<PlanExecutionAdoptionCommit> {
+) -> Result<PlanApprovalCommit> {
     if decision.decision != PlanDecision::Accepted || decision.decided_by != PlanDecisionActor::User
     {
         bail!("plan approval shell requires an explicit user Accepted decision");
@@ -1331,9 +826,6 @@ pub fn append_plan_approval_task_shell_at_frontier(
         || task_link.plan_id != decision.plan_id
         || task_link.plan_hash != decision.plan_hash
         || task_link.task_id != task_run.task_id
-        || task_link.task_plan_version != 0
-        || !task_link.step_mapping.is_empty()
-        || task_link.stale_reason.is_some()
         || direct_execution.task_id != task_run.task_id
         || !direct_execution.matches_objective(&task_run.objective)
         || !matches!(
@@ -1437,7 +929,6 @@ pub fn append_plan_approval_task_shell_at_frontier(
                     && existing_task.objective == predicate_task.objective
                     && existing_link.plan_hash == predicate_link.plan_hash
                     && existing_link.task_id == predicate_link.task_id
-                    && existing_link.task_plan_version == 0
                     && existing_direct == &predicate_direct
                     && existing_checklist == predicate_checklist.as_ref()
                     && existing_grant == predicate_grant.as_ref() =>
@@ -1467,9 +958,9 @@ pub fn append_plan_approval_task_shell_at_frontier(
                 grant.clone(),
             ));
         }
-        Ok(PlanExecutionAdoptionCommit::Appended)
+        Ok(PlanApprovalCommit::Appended)
     } else {
-        Ok(PlanExecutionAdoptionCommit::CasSkipped)
+        Ok(PlanApprovalCommit::CasSkipped)
     }
 }
 
@@ -1523,23 +1014,6 @@ pub struct PlanArtifactProjection {
     pub permission_grants: BTreeMap<PlanId, Vec<PlanPermissionGrantedEntry>>,
     pub tasks_created: BTreeMap<PlanId, Vec<TaskCreatedFromPlanEntry>>,
     pub latest_plan_id: Option<PlanId>,
-    /// Latest durable executable candidate per plan (RFC-0067).
-    pub candidates: BTreeMap<PlanId, ExecutablePlanCandidateV1>,
-    /// Final ready markers per plan (RFC-0067 8.1).
-    pub ready_markers: BTreeMap<PlanId, PlanReadyCommittedV1Entry>,
-    /// Typed compile failures per plan (RFC-0067 6.1).
-    pub compile_failures: BTreeMap<PlanId, Vec<PlanCompileFailureV1>>,
-    /// Adoptions per plan in commit order (RFC-0067 9.2).
-    pub adoptions: BTreeMap<PlanId, Vec<PlanExecutionAdoptedV1Entry>>,
-    /// Adoption receipts keyed by command id for idempotent read-back.
-    pub adoption_receipts: BTreeMap<String, PlanExecutionAdoptedV1Entry>,
-    /// RFC-0069 materialization receipts keyed by Task identity. New writers append these only
-    /// after the Plan approval and stable Task shell are durable.
-    pub materializations: BTreeMap<TaskId, PlanExecutionAdoptedV1Entry>,
-    /// Materialization attempts by Task, retained so retries increment their durable generation.
-    pub materialization_attempts: BTreeMap<TaskId, Vec<TaskMaterializationAttemptStartedV1>>,
-    /// Latest unresolved materialization blocker per Task. A prepared receipt clears it.
-    pub materialization_blockers: BTreeMap<TaskId, TaskMaterializationBlockedV1>,
 }
 
 impl PlanArtifactProjection {
@@ -1560,181 +1034,13 @@ impl PlanArtifactProjection {
             ControlEntry::PlanDecisionRecorded(entry) => self.apply_decision(entry),
             ControlEntry::PlanPermissionGranted(entry) => self.apply_permission_grant(entry),
             ControlEntry::TaskCreatedFromPlan(entry) => self.apply_task_created(entry),
-            ControlEntry::ExecutablePlanCandidatePreparedV1(candidate) => {
-                self.candidates
-                    .insert(candidate.plan_id.clone(), (**candidate).clone());
-            }
-            ControlEntry::PlanReadyCommittedV1(marker) => {
-                self.ready_markers
-                    .insert(marker.plan_id.clone(), marker.clone());
-            }
-            ControlEntry::PlanCompileFailedV1(failure) => {
-                self.compile_failures
-                    .entry(failure.plan_id.clone())
-                    .or_default()
-                    .push(failure.clone());
-            }
-            ControlEntry::PlanExecutionAdoptedV1(adoption) => {
-                self.apply_adoption(adoption);
-            }
-            ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => {
-                self.apply_materialization_attempt(attempt);
-            }
-            ControlEntry::TaskMaterializationPreparedV1(materialization) => {
-                self.apply_materialization(materialization);
-            }
-            ControlEntry::TaskMaterializationBlockedV1(blocked) => {
-                self.apply_materialization_blocked(blocked);
-            }
             _ => {}
         }
     }
 
-    fn apply_adoption(&mut self, adoption: &PlanExecutionAdoptedV1Entry) {
-        self.adoptions
-            .entry(adoption.plan_id.clone())
-            .or_default()
-            .push(adoption.clone());
-        self.adoption_receipts
-            .insert(adoption.command_id.clone(), adoption.clone());
-        // The adoption event is the single authority for the Accepted decision and the
-        // Task-created link; existing projections derive both from it without extra records.
-        self.decisions
-            .entry(adoption.plan_id.clone())
-            .or_default()
-            .push(PlanDecisionRecordedEntry {
-                plan_id: adoption.plan_id.clone(),
-                plan_hash: adoption.plan_hash.clone(),
-                decision: PlanDecision::Accepted,
-                decided_by: PlanDecisionActor::User,
-                decided_at_ms: adoption.adopted_at_ms,
-                reason: Some("adopted through the single execution spine".to_owned()),
-            });
-        self.tasks_created
-            .entry(adoption.plan_id.clone())
-            .or_default()
-            .push(TaskCreatedFromPlanEntry {
-                plan_id: adoption.plan_id.clone(),
-                plan_hash: adoption.plan_hash.clone(),
-                task_id: adoption.task_id.clone(),
-                task_plan_version: adoption.adopted_candidate.task_plan.plan_version,
-                step_mapping: adoption.adopted_candidate.step_mapping.clone(),
-                stale_reason: None,
-                created_at_ms: adoption.adopted_at_ms,
-            });
-    }
-
-    fn apply_materialization(&mut self, materialization: &PlanExecutionAdoptedV1Entry) {
-        self.materializations
-            .insert(materialization.task_id.clone(), materialization.clone());
-        self.materialization_blockers
-            .remove(&materialization.task_id);
-    }
-
-    fn apply_materialization_attempt(&mut self, attempt: &TaskMaterializationAttemptStartedV1) {
-        if attempt.validate().is_err() {
-            return;
-        }
-        let attempts = self
-            .materialization_attempts
-            .entry(attempt.task_id.clone())
-            .or_default();
-        if attempts
-            .iter()
-            .any(|existing| existing.generation == attempt.generation)
-        {
-            return;
-        }
-        attempts.push(attempt.clone());
-    }
-
-    fn apply_materialization_blocked(&mut self, blocked: &TaskMaterializationBlockedV1) {
-        if blocked.validate().is_err() {
-            return;
-        }
-        let Some(attempt) = self
-            .materialization_attempts
-            .get(&blocked.task_id)
-            .and_then(|attempts| {
-                attempts
-                    .iter()
-                    .find(|attempt| attempt.generation == blocked.generation)
-            })
-        else {
-            return;
-        };
-        if attempt.plan_hash != blocked.plan_hash {
-            return;
-        }
-        self.materialization_blockers
-            .insert(blocked.task_id.clone(), blocked.clone());
-    }
-
-    /// Returns the latest candidate for one plan, if durable.
-    pub fn latest_candidate(&self, plan_id: &PlanId) -> Option<&ExecutablePlanCandidateV1> {
-        self.candidates.get(plan_id)
-    }
-
-    /// Returns the adoption receipt for one exact command id.
-    pub fn adoption_for_command(&self, command_id: &str) -> Option<&PlanExecutionAdoptedV1Entry> {
-        self.adoption_receipts.get(command_id)
-    }
-
-    /// Returns the adoption that created one Task, if any.
-    pub fn adoption_for_task(&self, task_id: &TaskId) -> Option<&PlanExecutionAdoptedV1Entry> {
-        self.adoptions
-            .values()
-            .flatten()
-            .find(|adoption| &adoption.task_id == task_id)
-    }
-
-    /// Returns the post-approval materialization receipt for one stable Task shell.
-    #[must_use]
-    pub fn materialization_for_task(
-        &self,
-        task_id: &TaskId,
-    ) -> Option<&PlanExecutionAdoptedV1Entry> {
-        self.materializations.get(task_id)
-    }
-
-    /// Returns the next durable materialization generation for an approved Task shell.
-    #[must_use]
-    pub fn next_materialization_generation(&self, task_id: &TaskId) -> u32 {
-        self.materialization_attempts
-            .get(task_id)
-            .and_then(|attempts| attempts.iter().map(|attempt| attempt.generation).max())
-            .unwrap_or(0)
-            .saturating_add(1)
-    }
-
-    /// Returns the latest unresolved materialization blocker for one Task.
-    #[must_use]
-    pub fn materialization_blocker_for_task(
-        &self,
-        task_id: &TaskId,
-    ) -> Option<&TaskMaterializationBlockedV1> {
-        self.materialization_blockers.get(task_id)
-    }
-
-    /// Derives the review readiness state of one Plan from durable facts only.
-    pub fn plan_ready_state(&self, plan_id: &PlanId) -> PlanReadyStateV1 {
-        // RFC-0069: a readable durable Plan is reviewable and directly executable. Candidate,
-        // compiler, intent, and DAG facts are legacy advisory evidence only.
-        if self.plans.contains_key(plan_id) {
-            return PlanReadyStateV1::Ready;
-        }
-        if self.ready_markers.contains_key(plan_id) || self.candidates.contains_key(plan_id) {
-            return PlanReadyStateV1::CandidatePrepared;
-        }
-        if self.compile_failures.contains_key(plan_id) {
-            return PlanReadyStateV1::CompileFailed;
-        }
-        PlanReadyStateV1::NotReady
-    }
-
     /// True when the exact readable Plan artifact is durable and reviewable.
     pub fn plan_is_ready(&self, plan_id: &PlanId) -> bool {
-        matches!(self.plan_ready_state(plan_id), PlanReadyStateV1::Ready)
+        self.plans.contains_key(plan_id)
     }
 
     pub fn latest_plan(&self) -> Option<&PlanDraftCreatedEntry> {
@@ -2018,7 +1324,7 @@ fn plan_draft_entry_from_structured(
 /// small means a provider only has to choose the result type and provide the complete text; the
 /// host can add display-only projections later without making them acceptance or authority fields.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct PlanReviewResultEnvelope {
     pub schema_version: u32,
     pub outcome: PlanReviewResultOutcome,
@@ -2034,9 +1340,9 @@ pub fn decode_plan_review_result(args_json: &str) -> Result<PlanReviewResultEnve
         plan_review_result_validation_error(
             "invalid_result_envelope",
             "$",
-            "schema_version, outcome, and content only",
+            "schema_version, outcome, and content",
             error.to_string(),
-            "return exactly one schema_version, outcome, and content field",
+            "return schema_version, outcome, and content fields",
         )
     })?;
     if args.schema_version != PLAN_REVIEW_RESULT_SCHEMA_VERSION {
@@ -2063,7 +1369,7 @@ pub fn decode_plan_review_result(args_json: &str) -> Result<PlanReviewResultEnve
 /// # Errors
 ///
 /// Returns a [`PlanReviewResultValidationError`] wrapped in `anyhow::Error` for malformed JSON,
-/// unknown fields, an unsupported schema/outcome, empty content, or content beyond the durable
+/// missing or invalid known fields, an unsupported schema/outcome, empty content, or content beyond the durable
 /// inline bound. Callers can downcast the error to retain typed corrective feedback.
 pub fn submit_plan_review_result(
     args_json: &str,
@@ -3020,14 +2326,6 @@ fn validate_plan_stable_id(label: &str, value: &str) -> Result<()> {
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         bail!("{label} contains unsupported characters");
-    }
-    Ok(())
-}
-
-fn validate_sha256_digest(label: &str, value: &str) -> Result<()> {
-    let digest = value.strip_prefix(PLAN_HASH_PREFIX).unwrap_or(value);
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("{label} is not a sha256 digest");
     }
     Ok(())
 }

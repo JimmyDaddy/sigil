@@ -1057,7 +1057,7 @@ fn promotion_preview_requires_ready_lanes_and_rejects_executable_intent_ref_targ
         ready
             .latest()
             .expect("ready lanes")
-            .synthesis_ready_attempt()
+            .parent_verification_ready_attempt()
             .is_none()
     );
     let preview = build_task_promotion_preview(ready.latest().expect("ready plan"), input.clone())?;
@@ -1368,7 +1368,7 @@ fn promotion_protocol_replays_single_target_effect_and_parent_verification() -> 
             .map(|verification| verification.verdict),
         Some(VerificationVerdict::Passed)
     );
-    assert_eq!(state.synthesis_ready_attempt(), Some(&attempt_id));
+    assert_eq!(state.parent_verification_ready_attempt(), Some(&attempt_id));
     Ok(())
 }
 

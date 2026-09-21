@@ -5,8 +5,7 @@ use crate::{
     PlanReviewAttemptStatus, PlanReviewProjection, PlanReviewSource, RunCancellationRequestedEntry,
     RunCancellationTarget, Session, SessionLogEntry, ToolExecutionEntry, ToolExecutionStatus,
     ToolResultMeta, append_run_cancellation_requested, plan_review_attempt_id_for_review,
-    plan_review_child_session_ref, plan_review_finalizer_session_ref, plan_review_id_for_source,
-    plan_review_plan_id_for_attempt,
+    plan_review_child_session_ref, plan_review_id_for_source, plan_review_plan_id_for_attempt,
 };
 
 #[test]
@@ -32,11 +31,6 @@ fn control_loader_preserves_active_owners_while_startup_loader_recovers_them() -
         explicit_objective: Some("Inspect the current workspace".to_owned()),
         route_decision_id: None,
         child_session_ref: plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: Some(plan_review_finalizer_session_ref(
-            &review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,
