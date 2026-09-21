@@ -159,8 +159,7 @@ impl Tool for VcsInspectTool {
                     }
                 },
                 "required": ["operation"],
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Search,
             access: ToolAccess::Read,
             network_effect: None,

@@ -69,12 +69,10 @@ fn r71_descendant_symlink_is_reported_as_leaf_and_not_followed() -> Result<()> {
     Ok(())
 }
 
-/// Causal edge: the blast radius is workspace-wide. A poisoning namespace in one session causes
-/// the *provisioning* of an unrelated sibling session to fail too, because
-/// measure_scratch_usage walks every session namespace under the shared scratch root.
+/// Observation failures remain visible without blocking an unrelated session's provisioning.
 #[cfg(unix)]
 #[test]
-fn r71_poisoned_sibling_blocks_unrelated_session_provisioning() -> Result<()> {
+fn r71_poisoned_sibling_does_not_block_unrelated_session_provisioning() -> Result<()> {
     let (_temp, scratch_root) = isolated_scratch_root("r71-sibling-blast")?;
     let poisoner = "r71-poisoner-0000-0000-0000-000000000002";
     let victim = "r71-victim-0000-0000-0000-000000000003";
@@ -86,9 +84,9 @@ fn r71_poisoned_sibling_blocks_unrelated_session_provisioning() -> Result<()> {
     fs::create_dir_all(&external)?;
     symlink(&external, namespace.join("poison"))?;
 
-    // The victim session has no fixture of its own but provisioning still fails.
-    let error = ensure_session_scratch(&scratch_root, Some(victim), &ScratchQuota::default())
-        .expect_err("unrelated sibling provisioning must fail (current blast radius)");
+    ensure_session_scratch(&scratch_root, Some(victim), &ScratchQuota::default())?;
+    let error = measure_scratch_usage(&scratch_root, &session_scratch_key(Some(poisoner)))
+        .expect_err("invalid observation remains visible");
     let text = format!("{error:#}");
     assert!(
         text.contains("symlink"),
@@ -159,12 +157,10 @@ fn r71_same_session_double_lease_keeps_namespace_until_last_release() -> Result<
     Ok(())
 }
 
-/// Causal edge: repeated provisioning failures across distinct new tool calls. Each call id hits
-/// the same provision failure as an independent attempt; there is no durable active-blocker
-/// admission gate, so retryable=false does not stop the next call from being attempted.
+/// A local measurement failure does not prevent subsequent lightweight or cleanup commands.
 #[cfg(unix)]
 #[test]
-fn r71_repeated_new_call_hits_same_provision_failure_without_blocker_gate() -> Result<()> {
+fn r71_repeated_new_call_can_provision_despite_local_measurement_failure() -> Result<()> {
     let (_temp, scratch_root) = isolated_scratch_root("r71-repeat-provision")?;
     let session = "r71-repeat-0000-0000-0000-000000000006";
     ensure_session_scratch(&scratch_root, Some(session), &ScratchQuota::default())?;
@@ -173,18 +169,12 @@ fn r71_repeated_new_call_hits_same_provision_failure_without_blocker_gate() -> R
     fs::create_dir_all(&external)?;
     symlink(&external, namespace.join("poison"))?;
 
-    // Call id 100 (first new tool call after poisoning).
-    let first_error =
-        ensure_session_scratch(&scratch_root, Some(session), &ScratchQuota::default())
-            .expect_err("first new call must fail provisioning");
-    let first_text = format!("{first_error:#}");
-    // Call id 200 (another new tool call). Same failure class, no active blocker admission gate.
-    let second_error =
-        ensure_session_scratch(&scratch_root, Some(session), &ScratchQuota::default())
-            .expect_err("second new call must hit the same provision failure");
-    let second_text = format!("{second_error:#}");
-    assert_eq!(first_text, second_text, "failure class must be identical");
-    assert!(second_text.contains("symlink"));
+    for _ in 0..2 {
+        ensure_session_scratch(&scratch_root, Some(session), &ScratchQuota::default())?;
+        let error = measure_scratch_usage(&scratch_root, &session_scratch_key(Some(session)))
+            .expect_err("measurement still reports the unsafe leaf");
+        assert!(format!("{error:#}").contains("symlink"));
+    }
     Ok(())
 }
 

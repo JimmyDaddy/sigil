@@ -369,6 +369,8 @@ fn local_pty_execution(
 /// Request used by the non-PTY terminal process backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TerminalStartRequest {
+    /// Optional runtime deadline enforced by the managed execution owner.
+    pub max_runtime_secs: Option<u64>,
     pub task_id: Option<TerminalTaskId>,
     pub command: String,
     pub cwd: Option<PathBuf>,
@@ -425,6 +427,10 @@ impl TerminalReadinessCondition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TerminalTaskSnapshot {
+    /// Host observation immediately after the owned process was successfully spawned.
+    pub started_at_ms: u64,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
     pub entry: TerminalTaskEntry,
     pub generation: u64,
     pub readiness: TerminalReadinessStatus,

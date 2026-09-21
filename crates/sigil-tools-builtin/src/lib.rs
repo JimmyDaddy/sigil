@@ -124,3 +124,11 @@ pub(crate) use tool_artifact_tool::*;
 #[cfg(test)]
 #[path = "tests/lib_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/exec_tools_tests.rs"]
+mod exec_tools_tests;
+
+#[cfg(all(test, unix))]
+#[path = "tests/exec_agent_receipt_tests.rs"]
+mod exec_agent_receipt_tests;

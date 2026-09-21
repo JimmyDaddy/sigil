@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use sigil_kernel::session::TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES;
 use sigil_kernel::{
     ControlEntry, ModelMessage, TOOL_ARTIFACT_READ_SCHEMA_VERSION, Tool, ToolAccess,
     ToolArtifactReadOutcome, ToolArtifactReadRecordedV1, ToolArtifactRefV1,
@@ -16,7 +17,7 @@ impl Tool for ReadToolArtifactTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_tool_artifact".to_owned(),
-            description: "Read a bounded page or literal-search window from a prior tool result by opaque artifact_ref. Paths are not accepted."
+            description: "Read a bounded page or literal-search window from a prior tool result by opaque artifact_ref. Literal search defaults to 50 matches; request more if needed. Pages are bounded by returned bytes and search work. When truncated, continue with the returned next_selector unchanged. Paths are not accepted."
                 .to_owned(),
             input_schema: json!({
                 "type": "object",
@@ -27,54 +28,46 @@ impl Tool for ReadToolArtifactTool {
                             "artifact_id": { "type": "string", "pattern": "^ta1_[0-9a-fA-F]{32}$" }
                         },
                         "required": ["artifact_id"],
-                        "additionalProperties": false
-                    },
+                        },
                     "selector": {
-                        "oneOf": [
+                        "anyOf": [
                             {
                                 "type": "object",
                                 "properties": {
-                                    "kind": { "const": "byte_slice" },
+                                    "kind": { "type": "string", "enum": ["byte_slice"] },
                                     "offset": { "type": "integer", "minimum": 0 },
                                     "limit": { "type": "integer", "minimum": 1, "maximum": 16384 }
                                 },
                                 "required": ["kind", "offset", "limit"],
-                                "additionalProperties": false
-                            },
+                                },
                             {
                                 "type": "object",
                                 "properties": {
-                                    "kind": { "const": "line_page" },
+                                    "kind": { "type": "string", "enum": ["line_page"] },
                                     "start_line": { "type": "integer", "minimum": 0 },
                                     "line_count": { "type": "integer", "minimum": 1, "maximum": 200 }
                                 },
                                 "required": ["kind", "start_line", "line_count"],
-                                "additionalProperties": false
-                            },
+                                },
                             {
                                 "type": "object",
                                 "properties": {
-                                    "kind": { "const": "search_literal" },
-                                    "query": { "type": "string", "minLength": 1, "maxLength": 512 },
-                                    "start_offset": { "type": "integer", "minimum": 0 },
-                                    "max_matches": { "type": "integer", "minimum": 1, "maximum": 20 },
-                                    "context_lines": { "type": "integer", "minimum": 0, "maximum": 3 }
+                                    "kind": { "type": "string", "enum": ["search_literal"] },
+                                    "query": { "type": "string", "minLength": 1, "maxLength": 512, "description": "Nonempty literal query, at most 512 UTF-8 bytes." },
+                                    "start_offset": { "type": "integer", "minimum": 0, "default": 0 },
+                                    "max_matches": { "type": "integer", "minimum": 1, "default": TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES, "description": "Desired matches, default 50. A smaller page may be returned with next_selector when its byte or scan budget is reached." },
+                                    "context_lines": { "type": "integer", "minimum": 0, "maximum": 3, "default": 0 }
                                 },
                                 "required": [
                                     "kind",
-                                    "query",
-                                    "start_offset",
-                                    "max_matches",
-                                    "context_lines"
+                                    "query"
                                 ],
-                                "additionalProperties": false
-                            }
+                                }
                         ]
                     }
                 },
                 "required": ["artifact_ref", "selector"],
-                "additionalProperties": false
-            }),
+                }),
             category: ToolCategory::Custom,
             access: ToolAccess::Read,
             network_effect: None,
@@ -99,34 +92,26 @@ impl Tool for ReadToolArtifactTool {
         {
             Ok(value) => value,
             Err(error) => {
-                return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+                return Ok(invalid_artifact_input_result(call_id, format!("{error:#}")));
             }
         };
         let selector: ToolArtifactSelectorV1 = match args
             .get("selector")
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("selector is required"))
-            .and_then(|value| serde_json::from_value(value).context("selector is malformed"))
+            .and_then(parse_artifact_selector)
         {
             Ok(value) => value,
             Err(error) => {
-                return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+                return Ok(invalid_artifact_input_result(call_id, format!("{error:#}")));
             }
         };
         if let Err(error) = artifact_ref.validate() {
-            return Ok(invalid_artifact_input_result(call_id, error.to_string()));
+            return Ok(invalid_artifact_input_result(call_id, format!("{error:#}")));
         }
         if let Err(error) = selector.validate() {
-            let message = match &selector {
-                ToolArtifactSelectorV1::LinePage { line_count, .. } if *line_count > 200 => {
-                    format!(
-                        "line_page line_count {line_count} exceeds the allowed range 1..=200; reduce line_count and retry"
-                    )
-                }
-                _ => format!(
-                    "invalid artifact selector: {error}; use a bounded byte slice, line page (1..=200 lines), or literal search"
-                ),
-            };
+            let message =
+                format!("invalid artifact selector: {error}; correct this field and retry");
             return Ok(invalid_artifact_input_result(call_id, message));
         }
         let Some(store) = ctx.tool_artifact_store() else {
@@ -232,6 +217,7 @@ impl Tool for ReadToolArtifactTool {
             "eof": page.eof,
             "match_count": page.match_count,
             "next_selector": page.next_selector,
+            "truncated": page.next_selector.is_some(),
             "deduplicated_from_call_id": deduplicated_from_call_id,
             "note": "page body is supplied as transient context and is not durable"
         })
@@ -269,6 +255,36 @@ impl Tool for ReadToolArtifactTool {
     }
 }
 
+fn parse_artifact_selector(mut value: Value) -> Result<ToolArtifactSelectorV1> {
+    if value.get("kind").and_then(Value::as_str) == Some("search_literal") {
+        if value.get("query").and_then(Value::as_str).is_none() {
+            anyhow::bail!("search_literal.query must be a string");
+        }
+        // Strict provider schemas encode omitted optional arguments as null.
+        for field in ["start_offset", "max_matches", "context_lines"] {
+            if value.get(field).is_some_and(Value::is_null) {
+                value
+                    .as_object_mut()
+                    .expect("tagged selector object")
+                    .remove(field);
+            } else if value
+                .get(field)
+                .is_some_and(|value| value.as_u64().is_none())
+            {
+                anyhow::bail!("search_literal.{field} must be an unsigned integer");
+            }
+        }
+        if value
+            .get("context_lines")
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value > 3)
+        {
+            anyhow::bail!("search_literal.context_lines must be between 0 and 3");
+        }
+    }
+    serde_json::from_value(value).context("selector is malformed")
+}
+
 fn invalid_artifact_input_result(call_id: String, message: String) -> ToolResult {
     ToolResult::error(
         call_id,
@@ -280,8 +296,93 @@ fn invalid_artifact_input_result(call_id: String, message: String) -> ToolResult
         true,
         json!({
             "retryable": true,
-            "allowed_line_count": {"min": 1, "max": 200},
-            "hint": "reduce the selector bounds and retry"
+            "hint": "correct the field identified in the error and retry"
         }),
     )
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_search_defaults_accept_missing_null_and_unknown_fields() -> Result<()> {
+        let expected = ToolArtifactSelectorV1::SearchLiteral {
+            query: "needle".into(),
+            start_offset: 0,
+            max_matches: TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES,
+            context_lines: 0,
+        };
+        for input in [
+            json!({"kind":"search_literal", "query":"needle"}),
+            json!({"kind":"search_literal", "query":"needle", "max_matches":null, "context_lines":null, "start_offset":null, "retired_field":true}),
+        ] {
+            assert_eq!(parse_artifact_selector(input)?, expected);
+        }
+        let schema = ReadToolArtifactTool.spec().input_schema;
+        let search = &schema["properties"]["selector"]["anyOf"][2];
+        assert_eq!(search["required"], json!(["kind", "query"]));
+        assert_eq!(search["properties"]["max_matches"]["default"], 50);
+        assert!(search["properties"]["max_matches"].get("maximum").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_selector_schema_has_disjoint_typed_variants() -> Result<()> {
+        let schema = ReadToolArtifactTool.spec().input_schema;
+        let selector_schema = &schema["properties"]["selector"];
+        assert!(selector_schema.get("oneOf").is_none());
+        let variants = selector_schema["anyOf"]
+            .as_array()
+            .expect("selector alternatives");
+        let selectors = [
+            json!({"kind":"byte_slice", "offset":0, "limit":100}),
+            json!({"kind":"line_page", "start_line":0, "line_count":100}),
+            json!({"kind":"search_literal", "query":"needle", "start_offset":0, "max_matches":1, "context_lines":0}),
+        ];
+        assert_eq!(variants.len(), selectors.len());
+        for selector in selectors {
+            let typed: ToolArtifactSelectorV1 = serde_json::from_value(selector.clone())?;
+            typed.validate()?;
+            let serialized = serde_json::to_value(typed)?;
+            let variant = variants
+                .iter()
+                .find(|variant| variant["properties"]["kind"]["enum"][0] == serialized["kind"])
+                .expect("matching typed selector");
+            assert_eq!(variant["properties"]["kind"]["type"], "string");
+            assert_eq!(
+                variant["properties"]["kind"]["enum"]
+                    .as_array()
+                    .expect("tag")
+                    .len(),
+                1
+            );
+            assert!(variant.get("additionalProperties").is_none());
+            let properties = variant["properties"]
+                .as_object()
+                .expect("variant properties");
+            assert_eq!(
+                properties.len(),
+                serialized.as_object().expect("selector object").len()
+            );
+            for field in serialized.as_object().expect("selector object").keys() {
+                assert!(properties.contains_key(field));
+                let required = variant["required"]
+                    .as_array()
+                    .expect("required fields")
+                    .contains(&json!(field));
+                let mut missing = serialized.clone();
+                missing
+                    .as_object_mut()
+                    .expect("selector object")
+                    .remove(field);
+                assert_eq!(
+                    serde_json::from_value::<ToolArtifactSelectorV1>(missing).is_err(),
+                    required,
+                    "required status for {field}"
+                );
+            }
+        }
+        Ok(())
+    }
 }

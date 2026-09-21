@@ -14,7 +14,6 @@ use crate::{
     },
     managed_execution::ManagedCommandExecutionPortV1,
     scratch_namespace::ScratchNamespaceControl,
-    shell::BashTool,
     shell_runtime::ResolvedShell,
     terminal_process::{self, TerminalExecutionConfig},
     terminal_tools::{
@@ -39,33 +38,25 @@ pub struct BuiltinToolHandles {
 /// Optional built-in capabilities selected before their runtime owners are constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinToolSelection {
-    /// Persistent terminal tasks and their lifecycle owner.
-    pub terminal: bool,
     /// Multi-file changeset application.
     pub changesets: bool,
 }
 
 impl BuiltinToolSelection {
-    /// File, artifact, VCS and one-shot command tools without optional runtime owners.
+    /// File, artifact, VCS and managed command tools with their required runtime owners.
     #[must_use]
     pub const fn core() -> Self {
-        Self {
-            terminal: false,
-            changesets: false,
-        }
+        Self { changesets: false }
     }
 
     /// All built-in capabilities.
     #[must_use]
     pub const fn standard() -> Self {
-        Self {
-            terminal: true,
-            changesets: true,
-        }
+        Self { changesets: true }
     }
 }
 
-/// Authority-owned terminal inputs prepared only when terminal tasks are selected.
+/// Authority-owned execution inputs required by the baseline command tools.
 pub struct BuiltinTerminalOptions {
     /// Selected execution and confinement policy for persistent tasks.
     pub execution_config: TerminalExecutionConfig,
@@ -378,7 +369,7 @@ fn register_builtin_tools_with_legacy_terminal(
 fn register_builtin_tools_with_selection_impl(
     registry: &mut ToolRegistry,
     paths: BuiltinToolPaths,
-    managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
+    _managed_executor: Arc<dyn ManagedCommandExecutionPortV1>,
     selection: BuiltinToolSelection,
     external_scratch_control: Option<ScratchNamespaceControl>,
     terminal: impl FnOnce() -> (
@@ -413,27 +404,17 @@ fn register_builtin_tools_with_selection_impl(
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
     registry.register(Arc::new(VcsInspectTool));
-    registry.register(Arc::new(BashTool {
-        scratch_label: paths.scratch_label.clone(),
-        scratch_quota: paths.scratch_quota,
-        scratch_control: scratch_control.clone(),
-        scratch_namespaces: Arc::clone(&scratch_control.namespaces),
-        executor: managed_executor,
-        shell: default_shell.clone(),
-    }));
-    let terminal_control = selection.terminal.then(|| {
-        let (execution_config, lifecycle_route, owner) = terminal();
-        register_terminal_tools(
-            registry,
-            paths,
-            &scratch_control,
-            execution_config.with_default_shell(default_shell),
-            lifecycle_route,
-            owner,
-        )
-    });
+    let (execution_config, lifecycle_route, owner) = terminal();
+    let terminal_control = register_terminal_tools(
+        registry,
+        paths,
+        &scratch_control,
+        execution_config.with_default_shell(default_shell),
+        lifecycle_route,
+        owner,
+    );
     BuiltinToolHandles {
-        terminal: terminal_control,
+        terminal: Some(terminal_control),
         scratch: scratch_control,
     }
 }

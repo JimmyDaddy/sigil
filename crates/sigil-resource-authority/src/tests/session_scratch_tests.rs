@@ -1,174 +1,109 @@
 use super::*;
-use sigil_kernel::resource::{ScratchQuotaExceededError, ScratchQuotaScope};
-
 #[test]
-fn authority_owns_session_namespace_and_quota() {
-    let temp = tempfile::tempdir().expect("temp");
-    let authority = SessionScratchAuthorityV1::new(temp.path().join("scratch"));
-    let provision = authority
-        .ensure(Some("session-a"), 10, 20)
-        .expect("provision");
-    std::fs::write(provision.directory.join("data"), b"12345678901").expect("write");
-    let error = authority
-        .ensure(Some("session-a"), 10, 20)
-        .expect_err("quota");
-    assert_eq!(
-        error,
-        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Session,
-            usage_bytes: 11,
-            quota_bytes: 10,
-        })
-    );
-}
-
-#[test]
-fn quota_adapter_preserves_byte_totals_and_keeps_entry_counts_out_of_byte_payloads() {
-    assert_eq!(
-        quota_error(QuotaErrorV1::ReservationExceeded {
-            class: "session_scratch",
-            reserved: 17,
-            max: 16,
-        }),
-        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
-            usage_bytes: 17,
-            quota_bytes: 16,
-        })
-    );
-    assert_eq!(
-        quota_error(QuotaErrorV1::WorkspaceOvercommit {
-            used: 11,
-            incoming: 7,
-            cap: 16,
-        }),
-        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
-            usage_bytes: 18,
-            quota_bytes: 16,
-        })
-    );
-    assert_eq!(
-        quota_error(QuotaErrorV1::WorkspaceOvercommit {
-            used: u64::MAX - 1,
-            incoming: 2,
-            cap: u64::MAX,
-        }),
-        SessionScratchErrorV1::QuotaExceeded(ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
-            usage_bytes: u64::MAX,
-            quota_bytes: u64::MAX,
-        })
-    );
-    assert_eq!(
-        quota_error(QuotaErrorV1::EntryExceeded {
-            class: "session_scratch",
-            reserved: 7,
-            max: 6,
-        }),
-        SessionScratchErrorV1::EntryLimitExceeded {
-            limit: 6,
-            observed: 7,
-        }
-    );
-}
-
-#[cfg(target_pointer_width = "64")]
-#[test]
-fn quota_adapter_does_not_truncate_platform_sized_entry_counts() {
-    assert_eq!(
-        quota_error(QuotaErrorV1::EntryExceeded {
-            class: "session_scratch",
-            reserved: u64::MAX,
-            max: u64::MAX - 1,
-        }),
-        SessionScratchErrorV1::EntryLimitExceeded {
-            limit: usize::MAX - 1,
-            observed: usize::MAX,
-        }
-    );
-}
-
-#[cfg(target_pointer_width = "32")]
-#[test]
-fn quota_adapter_does_not_truncate_entry_counts_that_exceed_platform_range() {
-    let error = quota_error(QuotaErrorV1::EntryExceeded {
-        class: "session_scratch",
-        reserved: u64::MAX,
-        max: u64::MAX - 1,
-    });
-    let SessionScratchErrorV1::Filesystem(message) = error else {
-        panic!("out-of-range entry counts must not be truncated into a byte quota");
-    };
-    assert!(message.contains(&u64::MAX.to_string()));
-    assert!(message.contains(&(u64::MAX - 1).to_string()));
-}
-
-#[test]
-fn durable_scratch_quota_replays_across_authority_restart() {
+fn scratch_thresholds_do_not_deny_current_or_sibling_namespace() {
     let temp = tempfile::tempdir().expect("temp");
     let root = temp.path().join("scratch");
-    {
-        let authority = SessionScratchAuthorityV1::new(&root);
-        let provision = authority
-            .ensure(Some("session-a"), 100, 1000)
-            .expect("provision");
-        std::fs::write(provision.directory.join("data"), b"durable").expect("write");
-        authority
-            .ensure(Some("session-a"), 100, 1000)
-            .expect("record measured usage");
-    }
-
-    let restarted = SessionScratchAuthorityV1::new(&root);
-    restarted
-        .ensure(Some("session-a"), 100, 1000)
-        .expect("replay and reconcile active owner");
+    let authority = SessionScratchAuthorityV1::new(&root);
+    let first = authority.ensure(Some("a"), 1, 1).expect("namespace");
+    fs::write(first.directory.join("data"), b"larger than both thresholds").expect("write");
+    authority
+        .ensure(Some("a"), 1, 1)
+        .expect("reuse over threshold");
+    authority
+        .ensure(Some("b"), 1, 1)
+        .expect("independent sibling");
+    // Retired historical charges are not read, overwritten or treated as current capacity.
+    let journal = root.join(".authority-quota/session-scratch.json");
+    fs::create_dir_all(journal.parent().expect("parent")).expect("parent dir");
+    fs::write(&journal, b"historical or corrupt journal").expect("journal");
+    SessionScratchAuthorityV1::new(&root)
+        .ensure(Some("b"), 1, 1)
+        .expect("restart");
     assert_eq!(
-        restarted.delete(Some("session-a")).expect("delete"),
-        SessionScratchDeleteOutcomeV1::Deleted
+        fs::read(&journal).expect("retained journal"),
+        b"historical or corrupt journal"
     );
-    let reopened = SessionScratchAuthorityV1::new(&root);
-    reopened
-        .ensure(Some("session-a"), 100, 1000)
-        .expect("released quota is reusable");
 }
 
 #[cfg(unix)]
 #[test]
-fn descendant_symlink_is_rejected_without_sibling_poisoning() {
-    use std::os::unix::fs::symlink;
+fn unknown_measurement_retains_history_and_does_not_deny_any_namespace() {
     let temp = tempfile::tempdir().expect("temp");
     let authority = SessionScratchAuthorityV1::new(temp.path().join("scratch"));
-    let first = authority.ensure(Some("first"), 100, 1000).expect("first");
-    let _second = authority.ensure(Some("second"), 100, 1000).expect("second");
-    let target = temp.path().join("outside");
-    std::fs::create_dir(&target).expect("target");
-    symlink(&target, first.directory.join("escape")).expect("symlink");
-    let error = authority
-        .ensure(Some("first"), 100, 1000)
-        .expect_err("symlink");
-    assert!(matches!(error, SessionScratchErrorV1::Symlink { .. }));
-    assert!(authority.session_directory(Some("second")).exists());
+    let a = authority.ensure(Some("a"), 1, 1).expect("a");
+    let b = authority.ensure(Some("b"), 1, 1).expect("b");
+    fs::write(a.directory.join("data"), b"history").expect("data");
+    fs::write(b.directory.join("data"), b"known").expect("data");
+    assert_eq!(authority.observe(1, 100).known_subtotal_bytes, 12);
+    std::os::unix::fs::symlink(temp.path(), a.directory.join("unreadable")).expect("symlink");
+    let unknown = authority.observe(2, 100);
+    assert_eq!(unknown.known_subtotal_bytes, 5);
+    assert_eq!(unknown.unknown_owners, vec!["sessions/a"]);
+    assert!(matches!(
+        unknown.owners.get("sessions/a"),
+        Some(SessionScratchObservationV1::Unknown {
+            observed_at_ms: 2,
+            last_successful_measurement: Some(SessionScratchMeasurementV1 {
+                bytes: 7,
+                observed_at_ms: 1,
+                ..
+            }),
+            ..
+        })
+    ));
+    authority
+        .ensure(Some("a"), 1, 1)
+        .expect("cleanup can run in A");
+    authority.ensure(Some("b"), 1, 1).expect("B remains usable");
+    assert!(
+        authority.measure("b").is_err(),
+        "unknown aggregate must not be exposed as exact totals"
+    );
+    // Root identity is still an admission boundary.
+    fs::remove_dir_all(&b.directory).expect("remove b");
+    std::os::unix::fs::symlink(temp.path(), &b.directory).expect("bad root");
+    assert!(authority.ensure(Some("b"), 1, 1).is_err());
 }
 
 #[test]
-fn ordinary_namespace_preparation_ignores_invalid_siblings() {
+fn bounded_measurement_and_missing_owner_remain_unknown_until_authenticated_cleanup() {
     let temp = tempfile::tempdir().expect("temp");
     let authority = SessionScratchAuthorityV1::new(temp.path().join("scratch"));
-    let provision = authority
-        .ensure_session_namespace(Some("healthy"), 100)
-        .expect("healthy namespace");
-    assert!(provision.directory.is_dir());
-    std::fs::write(
-        authority.root().join("sessions").join("broken"),
-        b"not a namespace",
-    )
-    .expect("broken sibling");
+    let a = authority.ensure(Some("a"), 1, 1).expect("a");
+    fs::write(a.directory.join("data"), b"old").expect("data");
+    authority.observe(1, 100);
+    assert!(!authority.observe(2, 0).unknown_owners.is_empty());
+    fs::remove_dir_all(a.directory).expect("external removal");
+    assert!(!authority.observe(3, 100).unknown_owners.is_empty());
+    authority
+        .delete(Some("a"))
+        .expect("authenticated missing owner");
+    assert!(!authority.observe(4, 100).owners.contains_key("sessions/a"));
+    assert!(authority.ensure(Some("../escape"), 1, 1).is_err());
+}
 
-    let reopened = authority
-        .ensure_session_namespace(Some("healthy"), 100)
-        .expect("sibling failure must remain observational");
-    assert_eq!(reopened.directory, provision.directory);
+#[test]
+fn maintenance_budget_counts_directories_across_namespaces_and_keeps_quarantine_visible() {
+    let temp = tempfile::tempdir().expect("temp");
+    let root = temp.path().join("scratch");
+    let authority = SessionScratchAuthorityV1::new(&root);
+    for key in ["a", "b"] {
+        let namespace = authority.ensure(Some(key), 1, 1).expect("namespace");
+        fs::create_dir_all(namespace.directory.join("nested/leaf")).expect("directories");
+    }
+    assert!(authority.observe(1, 100).unknown_owners.is_empty());
+    assert!(!authority.observe(2, 4).unknown_owners.is_empty());
+    authority.delete(Some("a")).expect("delete a");
+    authority.delete(Some("b")).expect("delete b");
+    fs::remove_dir(root.join(SESSION_NAMESPACE_DIR)).expect("no sessions");
+    let quarantine = root.join(QUARANTINE_DIR).join("retained");
+    fs::create_dir_all(&quarantine).expect("quarantine");
+    fs::write(quarantine.join("data"), b"retained bytes").expect("retained bytes");
+    let report = authority
+        .gc(SessionScratchGcConfigV1::default(), 42)
+        .expect("gc");
+    assert_eq!(report.workspace_usage_bytes, Some(14));
+    assert_eq!(report.observed_at_ms, 42);
 }
 
 #[test]

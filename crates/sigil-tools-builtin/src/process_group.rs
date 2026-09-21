@@ -246,9 +246,8 @@ fn macos_ps_has_live_group_members(stdout: &str, process_group_id: u32) -> Resul
         let state = fields
             .next()
             .context("macOS process-group inspection row is missing state")?;
-        if fields.next().is_some() {
-            bail!("macOS process-group inspection row has unexpected fields");
-        }
+        // `ps` may add columns in a future macOS release. The process-group probe only
+        // consumes pgid and state, so trailing columns are intentionally ignored.
         if observed_group == process_group_id && !state.starts_with('Z') {
             return Ok(true);
         }

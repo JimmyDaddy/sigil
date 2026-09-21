@@ -1,6 +1,6 @@
 //! RFC-0071: Resource Authority owner for the persistent SessionScratch namespace.
 //!
-//! The authority owns namespace allocation, no-follow measurement, quota admission, leases and
+//! The authority owns namespace allocation, no-follow measurement, soft observations, leases and
 //! cleanup. Consumers receive only the exact directory selected for the admitted session scope;
 //! they do not derive or create sibling roots themselves.
 
@@ -16,12 +16,7 @@ use std::{
 use std::time::SystemTime;
 
 use fs2::FileExt;
-use sigil_kernel::{
-    resource::{ScratchQuotaExceededError, ScratchQuotaScope},
-    secure_private_path_permissions,
-};
-
-use crate::quota::{QuotaBookV1, QuotaErrorV1};
+use sigil_kernel::secure_private_path_permissions;
 
 const SESSION_NAMESPACE_DIR: &str = "sessions";
 const LEASE_MARKER_DIR: &str = ".leases";
@@ -41,8 +36,6 @@ pub enum SessionScratchErrorV1 {
     UnsupportedEntry { path: String },
     #[error("session scratch measurement exceeded {limit} entries after {observed} entries")]
     EntryLimitExceeded { limit: usize, observed: usize },
-    #[error(transparent)]
-    QuotaExceeded(#[from] ScratchQuotaExceededError),
     #[error("session scratch filesystem operation failed: {0}")]
     Filesystem(String),
     #[error("session scratch lease registry is unavailable")]
@@ -61,10 +54,36 @@ pub struct SessionScratchUsageV1 {
     pub workspace_entry_count: usize,
 }
 
+/// One bounded sample, never a capacity reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionScratchMeasurementV1 {
+    pub bytes: u64,
+    pub entries: usize,
+    pub observed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionScratchObservationV1 {
+    Known(SessionScratchMeasurementV1),
+    Unknown {
+        reason: String,
+        observed_at_ms: u64,
+        last_successful_measurement: Option<SessionScratchMeasurementV1>,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionScratchWorkspaceObservationV1 {
+    pub observed_at_ms: u64,
+    pub known_subtotal_bytes: u64,
+    pub known_subtotal_entries: usize,
+    pub unknown_owners: Vec<String>,
+    pub owners: BTreeMap<String, SessionScratchObservationV1>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionScratchProvisionV1 {
     pub directory: PathBuf,
-    pub usage: SessionScratchUsageV1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +110,10 @@ pub struct SessionScratchGcReportV1 {
     pub skipped_invalid: usize,
     pub quarantined: usize,
     pub deleted_bytes: u64,
-    pub workspace_usage_bytes: u64,
+    pub workspace_usage_bytes: Option<u64>,
+    pub workspace_known_subtotal_bytes: u64,
+    pub unknown_owners: Vec<String>,
+    pub observed_at_ms: u64,
     pub diagnostics: Vec<String>,
 }
 
@@ -135,7 +157,7 @@ impl Drop for SessionScratchLeaseV1 {
 pub struct SessionScratchAuthorityV1 {
     root: PathBuf,
     leases: Arc<SessionScratchLeaseRegistryV1>,
-    quota: Arc<Mutex<Option<QuotaBookV1>>>,
+    observations: Arc<Mutex<BTreeMap<String, SessionScratchObservationV1>>>,
 }
 
 impl SessionScratchAuthorityV1 {
@@ -144,7 +166,7 @@ impl SessionScratchAuthorityV1 {
         Self {
             root: root.into(),
             leases: Arc::new(SessionScratchLeaseRegistryV1::default()),
-            quota: Arc::new(Mutex::new(None)),
+            observations: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -164,8 +186,11 @@ impl SessionScratchAuthorityV1 {
         &self,
         session_scope_id: Option<&str>,
     ) -> Result<SessionScratchLeaseV1, SessionScratchErrorV1> {
-        let key = session_scope_key(session_scope_id);
+        let key = checked_session_scope_key(session_scope_id)?;
         let namespace_lock = self.lock_namespace(&key)?;
+        // Close the prepare/acquire gap against GC and reject a namespace swapped to a symlink.
+        ensure_directory(&self.root.join(SESSION_NAMESPACE_DIR))?;
+        ensure_directory(&self.session_directory(Some(&key)))?;
         let (marker, marker_file) = self.create_lease_marker(&key)?;
         let mut keys = self
             .leases
@@ -182,137 +207,159 @@ impl SessionScratchAuthorityV1 {
         })
     }
 
+    /// Prepares only this namespace. Thresholds are retained for observation/configuration;
+    /// a directory measurement cannot grant or revoke physical writing capacity.
     pub fn ensure(
         &self,
         session_scope_id: Option<&str>,
-        per_session_bytes: u64,
-        workspace_hard_bytes: u64,
+        _per_session_bytes: u64,
+        _workspace_warning_bytes: u64,
     ) -> Result<SessionScratchProvisionV1, SessionScratchErrorV1> {
-        let key = session_scope_key(session_scope_id);
+        let key = checked_session_scope_key(session_scope_id)?;
+        let _lock = self.lock_namespace(&key)?;
         let sessions = self.root.join(SESSION_NAMESPACE_DIR);
         let directory = sessions.join(&key);
         ensure_directory(&self.root)?;
         ensure_directory(&sessions)?;
         ensure_directory(&directory)?;
-        let usage = self.measure(&key)?;
-        if usage.session_bytes > per_session_bytes {
-            return Err(ScratchQuotaExceededError {
-                scope: ScratchQuotaScope::Session,
-                usage_bytes: usage.session_bytes,
-                quota_bytes: per_session_bytes,
-            }
-            .into());
-        }
-        if usage.workspace_bytes > workspace_hard_bytes {
-            return Err(ScratchQuotaExceededError {
-                scope: ScratchQuotaScope::Workspace,
-                usage_bytes: usage.workspace_bytes,
-                quota_bytes: workspace_hard_bytes,
-            }
-            .into());
-        }
-        let profile = scratch_quota_profile(workspace_hard_bytes);
-        self.with_quota(Some(workspace_hard_bytes), |quota| {
-            quota
-                .reconcile_owned(
-                    format!("session-scratch:{key}"),
-                    &profile,
-                    usage.session_bytes,
-                    usage.session_entry_count as u64,
-                )
-                .map(|_| ())
-        })?;
-        Ok(SessionScratchProvisionV1 { directory, usage })
+        Ok(SessionScratchProvisionV1 { directory })
     }
 
-    /// Prepares one ordinary command's session namespace without using sibling measurements as an
-    /// admission condition.  Workspace-wide physical usage is an observation; managed writers
-    /// remain responsible for their own authority-issued capacity reservations.
-    pub fn ensure_session_namespace(
-        &self,
-        session_scope_id: Option<&str>,
-        per_session_bytes: u64,
-    ) -> Result<SessionScratchProvisionV1, SessionScratchErrorV1> {
-        let key = session_scope_key(session_scope_id);
-        let sessions = self.root.join(SESSION_NAMESPACE_DIR);
-        let directory = sessions.join(&key);
-        ensure_directory(&self.root)?;
-        ensure_directory(&sessions)?;
-        ensure_directory(&directory)?;
-        let usage = self.measure_session_only(&key)?;
-        if usage.session_bytes > per_session_bytes {
-            return Err(ScratchQuotaExceededError {
-                scope: ScratchQuotaScope::Session,
-                usage_bytes: usage.session_bytes,
-                quota_bytes: per_session_bytes,
+    /// Bounded maintenance observation. Unknown owners retain their last successful sample;
+    /// it is never included in the current known subtotal or used as an admission condition.
+    pub fn observe(&self, now_ms: u64, max_entries: usize) -> SessionScratchWorkspaceObservationV1 {
+        let mut observations = match self.observations.lock() {
+            Ok(observations) => observations,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut samples = BTreeMap::new();
+        let mut remaining_entries = max_entries;
+        for namespace in [SESSION_NAMESPACE_DIR, QUARANTINE_DIR] {
+            let directory = self.root.join(namespace);
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    samples.insert(namespace.to_owned(), Err(fs_error(error)));
+                    continue;
+                }
+            };
+            for (index, entry) in entries.enumerate() {
+                if remaining_entries == 0 {
+                    samples.insert(
+                        format!("{namespace}:unscanned"),
+                        Err(SessionScratchErrorV1::EntryLimitExceeded {
+                            limit: max_entries,
+                            observed: index + 1,
+                        }),
+                    );
+                    break;
+                }
+                remaining_entries = remaining_entries.saturating_sub(1);
+                match entry {
+                    Ok(entry) => {
+                        let key = format!("{namespace}/{}", entry.file_name().to_string_lossy());
+                        let sample = if is_plain_directory(&entry.path()) {
+                            walk_with_budget(&entry.path(), &mut remaining_entries, max_entries)
+                        } else {
+                            Err(SessionScratchErrorV1::NotPlainDirectory {
+                                path: entry.path().display().to_string(),
+                            })
+                        };
+                        samples.insert(key, sample);
+                    }
+                    Err(error) => {
+                        samples.insert(format!("{namespace}:entry-{index}"), Err(fs_error(error)));
+                    }
+                }
             }
-            .into());
         }
-        Ok(SessionScratchProvisionV1 { directory, usage })
+        // A missing previously observed owner is not proof of deletion: retain Unknown until an
+        // owner/lease-checked cleanup or a later successful sample resolves its state.
+        for key in observations.keys().filter(|key| key.contains('/')) {
+            samples.entry(key.clone()).or_insert_with(|| {
+                Err(SessionScratchErrorV1::Filesystem(
+                    "previously observed namespace is missing or was not scanned".to_owned(),
+                ))
+            });
+        }
+        observations.retain(|key, _| key.contains('/'));
+        let mut result = SessionScratchWorkspaceObservationV1 {
+            observed_at_ms: now_ms,
+            ..Default::default()
+        };
+        for (key, sample) in samples {
+            let observation = match sample {
+                Ok(state) => {
+                    result.known_subtotal_bytes =
+                        result.known_subtotal_bytes.saturating_add(state.bytes);
+                    result.known_subtotal_entries =
+                        result.known_subtotal_entries.saturating_add(state.entries);
+                    SessionScratchObservationV1::Known(SessionScratchMeasurementV1 {
+                        bytes: state.bytes,
+                        entries: state.entries,
+                        observed_at_ms: now_ms,
+                    })
+                }
+                Err(error) => {
+                    let last_successful_measurement =
+                        observations.get(&key).and_then(|value| match value {
+                            SessionScratchObservationV1::Known(sample) => Some(*sample),
+                            SessionScratchObservationV1::Unknown {
+                                last_successful_measurement,
+                                ..
+                            } => *last_successful_measurement,
+                        });
+                    result.unknown_owners.push(key.clone());
+                    SessionScratchObservationV1::Unknown {
+                        reason: error.to_string(),
+                        observed_at_ms: now_ms,
+                        last_successful_measurement,
+                    }
+                }
+            };
+            observations.insert(key.clone(), observation.clone());
+            result.owners.insert(key, observation);
+        }
+        result
     }
 
+    /// Returns exact totals only when every bounded observation succeeded.
     pub fn measure(
         &self,
         session_key: &str,
     ) -> Result<SessionScratchUsageV1, SessionScratchErrorV1> {
-        let sessions = self.root.join(SESSION_NAMESPACE_DIR);
-        if !sessions.is_dir() {
-            return Ok(SessionScratchUsageV1::default());
+        let observed = self.observe(observation_time_ms(), DEFAULT_MAX_ENTRIES);
+        if !observed.unknown_owners.is_empty() {
+            return Err(SessionScratchErrorV1::Filesystem(format!(
+                "scratch usage is unknown for {} owner(s)",
+                observed.unknown_owners.len()
+            )));
         }
-        let session_directory = sessions.join(session_key);
-        let session = if is_plain_directory(&session_directory) {
-            walk(&session_directory, DEFAULT_MAX_ENTRIES)?
-        } else {
-            WalkState::default()
-        };
-        let mut usage = SessionScratchUsageV1 {
-            session_bytes: session.bytes,
-            session_entry_count: session.entries,
-            ..SessionScratchUsageV1::default()
-        };
-        for entry in fs::read_dir(&sessions).map_err(fs_error)? {
-            let path = entry.map_err(fs_error)?.path();
-            let metadata = fs::symlink_metadata(&path).map_err(fs_error)?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(SessionScratchErrorV1::NotPlainDirectory {
-                    path: path.display().to_string(),
-                });
+        let session = observed
+            .owners
+            .get(&format!("{SESSION_NAMESPACE_DIR}/{session_key}"));
+        let (session_bytes, session_entry_count) = match session {
+            Some(SessionScratchObservationV1::Known(sample)) => (sample.bytes, sample.entries),
+            None => (0, 0),
+            Some(SessionScratchObservationV1::Unknown { .. }) => {
+                return Err(SessionScratchErrorV1::Filesystem(
+                    "session measurement is unknown".to_owned(),
+                ));
             }
-            if path == session_directory {
-                continue;
-            }
-            let sibling = walk(&path, DEFAULT_MAX_ENTRIES)?;
-            usage.workspace_bytes = usage.workspace_bytes.saturating_add(sibling.bytes);
-            usage.workspace_entry_count =
-                usage.workspace_entry_count.saturating_add(sibling.entries);
-        }
-        usage.workspace_bytes = usage.workspace_bytes.saturating_add(usage.session_bytes);
-        usage.workspace_entry_count = usage
-            .workspace_entry_count
-            .saturating_add(usage.session_entry_count);
-        Ok(usage)
-    }
-
-    fn measure_session_only(
-        &self,
-        session_key: &str,
-    ) -> Result<SessionScratchUsageV1, SessionScratchErrorV1> {
-        let sessions = self.root.join(SESSION_NAMESPACE_DIR);
-        if !sessions.is_dir() {
-            return Ok(SessionScratchUsageV1::default());
-        }
-        let session_directory = sessions.join(session_key);
-        let session = if is_plain_directory(&session_directory) {
-            walk(&session_directory, DEFAULT_MAX_ENTRIES)?
-        } else {
-            WalkState::default()
         };
         Ok(SessionScratchUsageV1 {
-            session_bytes: session.bytes,
-            workspace_bytes: session.bytes,
-            session_entry_count: session.entries,
-            workspace_entry_count: session.entries,
+            session_bytes,
+            session_entry_count,
+            workspace_bytes: observed.known_subtotal_bytes,
+            workspace_entry_count: observed.known_subtotal_entries,
         })
+    }
+
+    fn forget_deleted_observation(&self, key: &str) {
+        if let Ok(mut observations) = self.observations.lock() {
+            observations.remove(&format!("{SESSION_NAMESPACE_DIR}/{key}"));
+        }
     }
 
     pub fn gc(
@@ -323,11 +370,11 @@ impl SessionScratchAuthorityV1 {
         let sessions = self.root.join(SESSION_NAMESPACE_DIR);
         let mut report = SessionScratchGcReportV1::default();
         let entries = match fs::read_dir(&sessions) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(fs_error(error)),
         };
-        for entry in entries {
+        for entry in entries.into_iter().flatten() {
             let path = match entry.map_err(fs_error) {
                 Ok(entry) => entry.path(),
                 Err(error) => return Err(error),
@@ -374,7 +421,6 @@ impl SessionScratchAuthorityV1 {
                     continue;
                 }
             };
-            report.workspace_usage_bytes = report.workspace_usage_bytes.saturating_add(state.bytes);
             if now_ms.saturating_sub(state.newest_ms) < config.ttl_ms {
                 report.skipped_recent += 1;
                 drop(namespace_lock);
@@ -387,10 +433,18 @@ impl SessionScratchAuthorityV1 {
             }
             fs::remove_dir_all(&path).map_err(fs_error)?;
             drop(namespace_lock);
-            self.release_quota_for_key(key)?;
+            self.forget_deleted_observation(key);
             report.deleted += 1;
             report.deleted_bytes = report.deleted_bytes.saturating_add(state.bytes);
         }
+        let observation = self.observe(now_ms, config.max_entries);
+        report.workspace_usage_bytes = observation
+            .unknown_owners
+            .is_empty()
+            .then_some(observation.known_subtotal_bytes);
+        report.workspace_known_subtotal_bytes = observation.known_subtotal_bytes;
+        report.unknown_owners = observation.unknown_owners;
+        report.observed_at_ms = now_ms;
         Ok(report)
     }
 
@@ -398,7 +452,7 @@ impl SessionScratchAuthorityV1 {
         &self,
         session_scope_id: Option<&str>,
     ) -> Result<SessionScratchDeleteOutcomeV1, SessionScratchErrorV1> {
-        let key = session_scope_key(session_scope_id);
+        let key = checked_session_scope_key(session_scope_id)?;
         let directory = self.session_directory(session_scope_id);
         if self.is_leased(&key)? {
             return Ok(SessionScratchDeleteOutcomeV1::SkippedLeased);
@@ -411,6 +465,7 @@ impl SessionScratchAuthorityV1 {
         let metadata = match fs::symlink_metadata(&directory) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.forget_deleted_observation(&key);
                 return Ok(SessionScratchDeleteOutcomeV1::NotPresent);
             }
             Err(error) => return Err(fs_error(error)),
@@ -423,58 +478,12 @@ impl SessionScratchAuthorityV1 {
         }
         fs::remove_dir_all(&directory).map_err(fs_error)?;
         drop(namespace_lock);
-        self.release_quota_for_key(&key)?;
+        self.forget_deleted_observation(&key);
         Ok(SessionScratchDeleteOutcomeV1::Deleted)
     }
 
-    fn quota_path(&self) -> PathBuf {
-        self.root
-            .join(".authority-quota")
-            .join("session-scratch.json")
-    }
-
-    fn with_quota<T>(
-        &self,
-        workspace_cap: Option<u64>,
-        operation: impl FnOnce(&mut QuotaBookV1) -> Result<T, QuotaErrorV1>,
-    ) -> Result<T, SessionScratchErrorV1> {
-        let mut quota = self
-            .quota
-            .lock()
-            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?;
-        if quota.is_none() {
-            let path = self.quota_path();
-            let book = match workspace_cap {
-                Some(cap) => QuotaBookV1::open(path, cap),
-                None => QuotaBookV1::open_existing(path),
-            }
-            .map_err(quota_error)?;
-            *quota = Some(book);
-        }
-        operation(
-            quota
-                .as_mut()
-                .ok_or(SessionScratchErrorV1::LeaseRegistryUnavailable)?,
-        )
-        .map_err(quota_error)
-    }
-
-    fn release_quota_for_key(&self, key: &str) -> Result<(), SessionScratchErrorV1> {
-        let path = self.quota_path();
-        let quota_is_loaded = self
-            .quota
-            .lock()
-            .map_err(|_| SessionScratchErrorV1::LeaseRegistryUnavailable)?
-            .is_some();
-        if !path.exists() && !quota_is_loaded {
-            return Ok(());
-        }
-        self.with_quota(None, |quota| {
-            quota.release_owner(&format!("session-scratch:{key}"))
-        })
-    }
-
     fn lock_namespace(&self, key: &str) -> Result<File, SessionScratchErrorV1> {
+        ensure_directory(&self.root)?;
         let directory = self.root.join(LEASE_LOCK_DIR);
         ensure_directory(&directory)?;
         let path = directory.join(format!("{}.lock", key_digest(key)));
@@ -528,6 +537,13 @@ impl SessionScratchAuthorityV1 {
         let prefix = format!("{}-", key_digest(key));
         for entry in entries {
             let path = entry.map_err(fs_error)?.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+            {
+                continue;
+            }
             let metadata = fs::symlink_metadata(&path).map_err(fs_error)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(SessionScratchErrorV1::NotPlainDirectory {
@@ -618,58 +634,6 @@ fn key_digest(key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn scratch_quota_profile(
-    workspace_hard_bytes: u64,
-) -> sigil_kernel::resource::ResourceQuotaProfileV1 {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"session-scratch-quota-v1");
-    hasher.update(workspace_hard_bytes.to_be_bytes());
-    sigil_kernel::resource::ResourceQuotaProfileV1 {
-        class: sigil_kernel::resource::ResourceQuotaClassV1::SessionScratch,
-        max_bytes: workspace_hard_bytes,
-        max_entries: DEFAULT_MAX_ENTRIES as u64,
-        max_open_holders: 1,
-        max_age_ms: None,
-        hard_runtime_enforcement_required: true,
-        profile_hash: sigil_kernel::resource::CanonicalHash::from_bytes(hasher.finalize().into()),
-    }
-}
-
-fn quota_error(error: QuotaErrorV1) -> SessionScratchErrorV1 {
-    match error {
-        QuotaErrorV1::ReservationExceeded { reserved, max, .. } => ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
-            usage_bytes: reserved,
-            quota_bytes: max,
-        }
-        .into(),
-        QuotaErrorV1::WorkspaceOvercommit {
-            used,
-            incoming,
-            cap,
-        } => ScratchQuotaExceededError {
-            scope: ScratchQuotaScope::Workspace,
-            usage_bytes: used.saturating_add(incoming),
-            quota_bytes: cap,
-        }
-        .into(),
-        QuotaErrorV1::EntryExceeded { reserved, max, .. } => {
-            let observed = usize::try_from(reserved);
-            let limit = usize::try_from(max);
-            match (observed, limit) {
-                (Ok(observed), Ok(limit)) => {
-                    SessionScratchErrorV1::EntryLimitExceeded { limit, observed }
-                }
-                _ => SessionScratchErrorV1::Filesystem(format!(
-                    "session scratch entry counts exceed platform range: observed={reserved} limit={max}"
-                )),
-            }
-        }
-        other => SessionScratchErrorV1::Filesystem(other.to_string()),
-    }
-}
-
 fn is_plain_directory(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
@@ -681,6 +645,26 @@ fn session_scope_key(session_scope_id: Option<&str>) -> String {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("no-session")
         .to_owned()
+}
+
+fn checked_session_scope_key(
+    session_scope_id: Option<&str>,
+) -> Result<String, SessionScratchErrorV1> {
+    let key = session_scope_key(session_scope_id);
+    if key == "." || key == ".." || key.contains(['/', '\\']) || key.contains('\0') {
+        return Err(SessionScratchErrorV1::Filesystem(
+            "invalid session scratch namespace identity".to_owned(),
+        ));
+    }
+    Ok(key)
+}
+
+fn observation_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn ensure_directory(path: &Path) -> Result<(), SessionScratchErrorV1> {
@@ -708,19 +692,18 @@ struct WalkState {
 }
 
 fn walk(root: &Path, max_entries: usize) -> Result<WalkState, SessionScratchErrorV1> {
+    let mut remaining_entries = max_entries;
+    walk_with_budget(root, &mut remaining_entries, max_entries)
+}
+
+fn walk_with_budget(
+    root: &Path,
+    remaining_entries: &mut usize,
+    max_entries: usize,
+) -> Result<WalkState, SessionScratchErrorV1> {
     let mut state = WalkState::default();
     let mut pending = vec![root.to_path_buf()];
-    let mut observed = 0usize;
     while let Some(path) = pending.pop() {
-        if path != root {
-            observed = observed.saturating_add(1);
-            if observed > max_entries {
-                return Err(SessionScratchErrorV1::EntryLimitExceeded {
-                    limit: max_entries,
-                    observed,
-                });
-            }
-        }
         let metadata = fs::symlink_metadata(&path).map_err(fs_error)?;
         if metadata.file_type().is_symlink() {
             return Err(SessionScratchErrorV1::Symlink {
@@ -739,12 +722,16 @@ fn walk(root: &Path, max_entries: usize) -> Result<WalkState, SessionScratchErro
             });
         }
         state.newest_ms = state.newest_ms.max(modified_ms(&metadata));
-        let mut children = fs::read_dir(&path)
-            .map_err(fs_error)?
-            .map(|entry| entry.map(|entry| entry.path()).map_err(fs_error))
-            .collect::<Result<Vec<_>, _>>()?;
-        children.sort();
-        pending.extend(children.into_iter().rev());
+        for entry in fs::read_dir(&path).map_err(fs_error)? {
+            if *remaining_entries == 0 {
+                return Err(SessionScratchErrorV1::EntryLimitExceeded {
+                    limit: max_entries,
+                    observed: max_entries.saturating_add(1),
+                });
+            }
+            *remaining_entries -= 1;
+            pending.push(entry.map_err(fs_error)?.path());
+        }
     }
     Ok(state)
 }

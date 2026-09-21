@@ -97,6 +97,20 @@ impl TerminalCaptureLedger {
             .saturating_add(self.stderr_observed_bytes.load(Ordering::Acquire))
     }
 
+    pub(super) fn observed_stream_bytes(&self) -> (u64, u64) {
+        (
+            self.stdout_observed_bytes.load(Ordering::SeqCst),
+            self.stderr_observed_bytes.load(Ordering::SeqCst),
+        )
+    }
+
+    pub(super) fn reconcile_observed_stream_bytes(&self, stdout: u64, stderr: u64) {
+        self.stdout_observed_bytes
+            .fetch_max(stdout, Ordering::SeqCst);
+        self.stderr_observed_bytes
+            .fetch_max(stderr, Ordering::SeqCst);
+    }
+
     pub(super) fn limit_bytes(&self) -> Option<u64> {
         let limit = self.limit_bytes.load(Ordering::Acquire);
         (limit > 0).then_some(limit)

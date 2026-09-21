@@ -258,6 +258,7 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
     let manager = TerminalProcessManager::new(temp.path())?.with_preview_limit_bytes(256);
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-1")?),
             command: "printf 'out\\n'; printf 'err\\n' >&2".to_owned(),
             cwd: None,
@@ -344,6 +345,7 @@ async fn terminal_lifecycle_fast_exit_preserves_readiness_and_generation() -> Re
     let entry = manager
         .start_with_readiness(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-fast-ready")?),
                 command: command.to_owned(),
                 cwd: None,
@@ -383,6 +385,7 @@ async fn terminal_lifecycle_route_failure_retries_then_fails_and_persists_task()
     let entry = manager
         .start_with_readiness_and_sink(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-route-failure")?),
                 command: "sleep 10".to_owned(),
                 cwd: None,
@@ -391,6 +394,7 @@ async fn terminal_lifecycle_route_failure_retries_then_fails_and_persists_task()
             },
             TerminalReadinessCondition::None,
             Some(sink.clone()),
+            None,
         )
         .await?;
     let mut events = manager.subscribe(&entry.handle.task_id).await?;
@@ -424,6 +428,11 @@ async fn terminal_lifecycle_route_failure_retries_then_fails_and_persists_task()
         serde_json::from_slice(&tokio::fs::read(&artifacts.absolute_meta).await?)?;
     assert_eq!(stored.status, failed.status);
     assert_eq!(stored.generation, failed.generation);
+    assert!(manager.shutdown_owned().await.is_err());
+    assert!(
+        manager.shutdown_owned().await.is_err(),
+        "a released process cannot clear the failed required lifecycle publication"
+    );
     Ok(())
 }
 
@@ -465,6 +474,7 @@ async fn terminal_wait_observes_change_that_happened_before_wait_subscription() 
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-lost-wake")?),
             command: "sleep 5".to_owned(),
             cwd: None,
@@ -506,6 +516,7 @@ async fn terminal_wait_timeout_is_a_typed_normal_outcome_and_cancel_wakes_exit()
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-wait-timeout")?),
             command: "sleep 5".to_owned(),
             cwd: None,
@@ -548,6 +559,7 @@ async fn terminal_status_and_cancel_return_the_exact_lifecycle_generation() -> R
     let entry = manager
         .start_with_readiness(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-exact-cancel-generation")?),
                 command: "printf 'READY\\n'; sleep 5".to_owned(),
                 cwd: None,
@@ -593,6 +605,7 @@ async fn terminal_process_manager_read_is_bounded_by_offset_and_limit() -> Resul
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-read")?),
             command: "printf abcdef".to_owned(),
             cwd: None,
@@ -629,6 +642,7 @@ async fn terminal_process_manager_read_clamps_public_limit() -> Result<()> {
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-read-hard-clamp")?),
             command: "dd if=/dev/zero bs=1024 count=200 2>/dev/null | tr '\\000' x".to_owned(),
             cwd: None,
@@ -661,6 +675,7 @@ async fn terminal_output_limit_kills_term_ignoring_descendant_and_records_eviden
         .with_cancel_grace(Duration::from_millis(50));
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-output-limit")?),
             command: concat!(
                 "sh -c 'trap \"\" TERM; echo $$ > \"$DESCENDANT_PID_FILE\"; ",
@@ -721,6 +736,7 @@ async fn terminal_fast_exit_dual_stream_limits_preserve_observed_total() -> Resu
         .with_cancel_grace(Duration::from_millis(50));
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-fast-dual-limit")?),
             command: "head -c 4096 /dev/zero; head -c 4096 /dev/zero >&2".to_owned(),
             cwd: None,
@@ -817,6 +833,7 @@ async fn terminal_pty_output_limit_is_structured_and_bounded() -> Result<()> {
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-pty-output-limit")?),
                 command: "trap '' TERM; while :; do printf 0123456789abcdef; done".to_owned(),
                 cwd: None,
@@ -894,6 +911,7 @@ async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Resul
         TerminalProcessManager::new(temp.path())?.with_cancel_grace(Duration::from_millis(50));
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-cancel")?),
             command: "sleep 5".to_owned(),
             cwd: None,
@@ -941,6 +959,7 @@ async fn terminal_process_manager_rejects_empty_command_and_workspace_escape() -
     let escape_error = manager
         .start(TerminalStartRequest {
             task_id: Some(TerminalTaskId::new("terminal-escape")?),
+            max_runtime_secs: None,
             command: "pwd".to_owned(),
             cwd: Some(PathBuf::from("..")),
             shell: None,
@@ -962,6 +981,7 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
     let task_id = TerminalTaskId::new("terminal-duplicate")?;
     manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(task_id.clone()),
             command: "sleep 1".to_owned(),
             cwd: None,
@@ -972,6 +992,7 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
 
     let error = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(task_id.clone()),
             command: "pwd".to_owned(),
             cwd: None,
@@ -1002,6 +1023,7 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
 
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: None,
             command: command.to_owned(),
             cwd: Some(subdir.clone()),
@@ -1031,6 +1053,7 @@ async fn terminal_process_manager_preview_and_reads_use_bounded_offsets() -> Res
     let manager = TerminalProcessManager::new(temp.path())?.with_preview_limit_bytes(4);
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-truncate")?),
             command: "printf 0123456789".to_owned(),
             cwd: None,
@@ -1064,6 +1087,7 @@ async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> 
     let manager = TerminalProcessManager::new(temp.path())?;
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-done")?),
             command: "printf done".to_owned(),
             cwd: None,
@@ -1097,6 +1121,7 @@ async fn terminal_process_manager_pty_records_context_and_env() -> Result<()> {
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(task_id.clone()),
                 command: "printf 'env:%s' \"$SIGIL_TEST_ENV\"".to_owned(),
                 cwd: None,
@@ -1168,6 +1193,7 @@ async fn terminal_process_manager_macos_seatbelt_pty_records_sandbox_and_denies_
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-sandboxed-pty")?),
                 command: concat!(
                     "printf ok > allowed.txt; ",
@@ -1250,6 +1276,7 @@ async fn terminal_process_manager_linux_bubblewrap_pty_records_sandbox_and_denie
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-bubblewrap-pty")?),
                 command: concat!(
                     "printf ok > allowed.txt; ",
@@ -1330,6 +1357,7 @@ async fn terminal_process_manager_docker_pty_fails_closed_without_local_fallback
     let error = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-docker-pty")?),
                 command: "printf should-not-run".to_owned(),
                 cwd: None,
@@ -1366,6 +1394,7 @@ async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_a
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-pty")?),
                 command: "trap '' WINCH; IFS= read -r line; printf 'got:%s\\n' \"$line\""
                     .to_owned(),
@@ -1441,6 +1470,7 @@ async fn terminal_process_manager_pty_preserves_single_stream_byte_order() -> Re
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-pty-order")?),
                 command,
                 cwd: None,
@@ -1497,6 +1527,7 @@ async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()
     let entry = manager
         .start_pty(
             TerminalStartRequest {
+                max_runtime_secs: None,
                 task_id: Some(TerminalTaskId::new("terminal-pty-cancel")?),
                 command: "sleep 5".to_owned(),
                 cwd: None,
@@ -1535,6 +1566,7 @@ async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Re
 
     let spawn_error = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-spawn-error")?),
             command: "echo never".to_owned(),
             cwd: None,
@@ -1557,6 +1589,7 @@ async fn terminal_process_manager_kill_fallback_cancels_term_ignoring_process() 
         TerminalProcessManager::new(temp.path())?.with_cancel_grace(Duration::from_millis(1));
     let entry = manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(TerminalTaskId::new("terminal-kill-fallback")?),
             command: "trap '' TERM; sleep 5".to_owned(),
             cwd: None,
@@ -1930,10 +1963,11 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     manager.tasks.lock().await.insert(
         task_id.clone(),
         super::ManagedTerminalTask {
+            started_at_ms: 0,
+            capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
             summary: Arc::clone(&summary),
             lifecycle: test_lifecycle(&task_id)?,
             control: super::TerminalTaskControl::Process { cancel_tx },
-            lifecycle_route_abort: None,
         },
     );
     let error = manager
@@ -1950,12 +1984,13 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     manager.tasks.lock().await.insert(
         missing_receiver_task_id.clone(),
         super::ManagedTerminalTask {
+            started_at_ms: 0,
+            capture_ledger: Arc::new(super::TerminalCaptureLedger::default()),
             summary: Arc::clone(&missing_receiver_summary),
             lifecycle: test_lifecycle(&missing_receiver_task_id)?,
             control: super::TerminalTaskControl::Process {
                 cancel_tx: missing_receiver_tx,
             },
-            lifecycle_route_abort: None,
         },
     );
     let send_error = manager
@@ -2235,7 +2270,7 @@ fn test_shell(dir: &Path) -> Result<String> {
     let shell = dir.join("sh");
     std::fs::write(
         &shell,
-        "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; fi\nexec /bin/sh -c \"$1\"\n",
+        "#!/bin/sh\ncase \"$1\" in -c|-lc) shift ;; esac\nexec /bin/sh -c \"$1\"\n",
     )?;
     let mut permissions = std::fs::metadata(&shell)?.permissions();
     permissions.set_mode(0o755);
@@ -2265,4 +2300,41 @@ async fn wait_for_terminal_status(
         sleep(Duration::from_millis(20)).await;
     }
     manager.status(task_id).await
+}
+
+#[test]
+fn terminal_owner_never_publishes_success_with_incomplete_cleanup() {
+    for cleanup in [
+        ExecutionCleanupStatus::Unknown,
+        ExecutionCleanupStatus::Failed,
+        ExecutionCleanupStatus::Unsupported,
+    ] {
+        let receipt = ExecutionCleanupReceipt {
+            status: cleanup,
+            reason: Some("owned descendants not fully settled".to_owned()),
+        };
+        assert_eq!(
+            super::worker::terminal_status_after_cleanup(
+                TerminalTaskStatus::Exited { exit_code: Some(0) },
+                Some(&receipt)
+            ),
+            TerminalTaskStatus::Interrupted
+        );
+    }
+    for cleanup in [
+        ExecutionCleanupStatus::Completed,
+        ExecutionCleanupStatus::NotNeeded,
+    ] {
+        let receipt = ExecutionCleanupReceipt {
+            status: cleanup,
+            reason: None,
+        };
+        assert_eq!(
+            super::worker::terminal_status_after_cleanup(
+                TerminalTaskStatus::Exited { exit_code: Some(0) },
+                Some(&receipt)
+            ),
+            TerminalTaskStatus::Exited { exit_code: Some(0) }
+        );
+    }
 }

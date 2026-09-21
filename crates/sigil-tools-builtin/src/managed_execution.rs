@@ -28,6 +28,8 @@ pub struct ManagedTerminalStartRequestV1 {
     pub cwd: std::path::PathBuf,
     pub environment: std::collections::BTreeMap<String, String>,
     pub pty_size: Option<BoundedPtySizeV1>,
+    /// Optional process runtime deadline; independent of the tool response wait budget.
+    pub max_runtime_secs: Option<u64>,
 }
 
 /// Runtime-owned persistent terminal launch port. Built-in terminal lifecycle code only knows

@@ -23,10 +23,14 @@ async fn core_reads_files_without_preparing_optional_terminal_runtime() -> Resul
         Arc::new(UnavailableManagedCommandExecutionPortV1),
         BuiltinToolSelection::core(),
         None,
-        || panic!("core must not prepare terminal configuration or its authority port"),
+        || BuiltinTerminalOptions {
+            execution_config: TerminalExecutionConfig::default(),
+            lifecycle_route: None,
+            executor: Arc::new(UnavailableManagedCommandExecutionPortV1),
+        },
     );
 
-    assert!(handles.terminal.is_none());
+    assert!(handles.terminal.is_some());
     for name in [
         "read_file",
         "read_tool_artifact",
@@ -37,7 +41,12 @@ async fn core_reads_files_without_preparing_optional_terminal_runtime() -> Resul
         "glob",
         "grep",
         "vcs_inspect",
-        "bash",
+        "exec_command",
+        "exec_read",
+        "exec_wait",
+        "exec_input",
+        "exec_resize",
+        "exec_cancel",
     ] {
         assert!(
             registry.spec_for(name).is_some(),
@@ -56,7 +65,7 @@ async fn core_reads_files_without_preparing_optional_terminal_runtime() -> Resul
     .await?;
     assert!(!result.is_error(), "{result:?}");
     assert!(result.content.contains("core file content"));
-    for name in ["terminal_start", "terminal_read", "apply_changeset"] {
+    for name in ["bash", "terminal_start", "terminal_read", "apply_changeset"] {
         assert!(registry.spec_for(name).is_none());
         assert!(
             registry
@@ -87,14 +96,15 @@ fn changesets_can_be_selected_without_terminal_preparation() -> Result<()> {
         &mut registry,
         BuiltinToolPaths::workspace_defaults(workspace.path()),
         Arc::new(UnavailableManagedCommandExecutionPortV1),
-        BuiltinToolSelection {
-            terminal: false,
-            changesets: true,
-        },
+        BuiltinToolSelection { changesets: true },
         None,
-        || panic!("changeset registration must not prepare a terminal runtime"),
+        || BuiltinTerminalOptions {
+            execution_config: TerminalExecutionConfig::default(),
+            lifecycle_route: None,
+            executor: Arc::new(UnavailableManagedCommandExecutionPortV1),
+        },
     );
-    assert!(handles.terminal.is_none());
+    assert!(handles.terminal.is_some());
     assert!(registry.spec_for("apply_changeset").is_some());
     assert!(registry.spec_for("terminal_start").is_none());
     Ok(())
@@ -109,10 +119,7 @@ fn terminal_selection_prepares_its_owner_once_without_changesets() -> Result<()>
         &mut registry,
         BuiltinToolPaths::workspace_defaults(workspace.path()),
         Arc::new(UnavailableManagedCommandExecutionPortV1),
-        BuiltinToolSelection {
-            terminal: true,
-            changesets: false,
-        },
+        BuiltinToolSelection { changesets: false },
         None,
         || {
             preparations.set(preparations.get() + 1);
@@ -125,8 +132,8 @@ fn terminal_selection_prepares_its_owner_once_without_changesets() -> Result<()>
     );
     assert_eq!(preparations.get(), 1);
     assert!(handles.terminal.is_some());
-    assert!(registry.spec_for("terminal_start").is_some());
-    assert!(registry.spec_for("terminal_cancel").is_some());
+    assert!(registry.spec_for("exec_command").is_some());
+    assert!(registry.spec_for("exec_cancel").is_some());
     assert!(registry.spec_for("apply_changeset").is_none());
     Ok(())
 }

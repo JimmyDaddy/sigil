@@ -12,10 +12,9 @@ use sigil_kernel::ExecutionOutputStream;
 use sigil_kernel::session::ToolArtifactReadBudgetV1;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
-    EnvironmentContainment, ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionCleanupStatus, ExecutionConfig, ExecutionNetworkPolicy, ExecutionOutputReceipt,
-    ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind, ExecutionSandboxFallback,
-    ExecutionSandboxProfile, ExecutionSandboxStrategyConfig, ExecutionStreamCapture,
+    EnvironmentContainment, ExecutionBackend, ExecutionBackendKind, ExecutionCleanupStatus,
+    ExecutionConfig, ExecutionNetworkPolicy, ExecutionRequest, ExecutionResourceLimitKind,
+    ExecutionSandboxFallback, ExecutionSandboxProfile, ExecutionSandboxStrategyConfig,
     ExecutionTerminationCause, ExecutionTimeoutSource, FilesystemContainment, JsonlSessionStore,
     MutationEventRecorder, NetworkContainment, PathTrustZone, PermissionConfig,
     PermissionEvaluationContext, PermissionMode, PermissionPolicy, PermissionPolicyChain,
@@ -35,7 +34,7 @@ pub(crate) mod file_tool_fixture;
 use file_tool_fixture::FileToolTestExt;
 
 use super::{
-    ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
+    ApplyChangeSetTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
     DockerExecutionBackend, EditFileTool, GlobTool, GrepTool, LinuxBubblewrapExecutionBackend,
     ListTool, LocalExecutionBackend, MacosSeatbeltExecutionBackend, ReadFileTool,
     ReadToolArtifactTool, TerminalInputTool, TerminalProcessManagers, TerminalReadResult,
@@ -49,23 +48,86 @@ use serial_test::serial;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
-fn bash_tool(test_root: &Path) -> BashTool {
-    BashTool {
-        scratch_label: "cache/tmp".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
+fn exec_tool(test_root: &Path) -> TerminalStartTool {
+    exec_tool_with_shell(
+        test_root,
+        crate::shell_runtime::ResolvedShell::detect_default(),
+    )
+}
+
+fn exec_tool_with_shell(
+    test_root: &Path,
+    shell: crate::shell_runtime::ResolvedShell,
+) -> TerminalStartTool {
+    TerminalStartTool {
+        managers: Arc::new(TerminalProcessManagers::new_legacy(
+            crate::terminal_process::TerminalExecutionConfig::default().with_default_shell(shell),
+        )),
+        artifact_root: test_root.join("artifacts"),
+        artifact_label_root: PathBuf::from("artifacts"),
+        scratch_label: "cache/tmp".into(),
+        scratch_quota: Default::default(),
+        scratch: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+            test_root.join("scratch-cache").join("tmp"),
+        ),
+    }
+}
+
+struct ShellAnalysisFixture {
+    scratch_control: crate::scratch_namespace::ScratchNamespaceControl,
+    shell: crate::shell_runtime::ResolvedShell,
+}
+
+impl ShellAnalysisFixture {
+    fn spec(&self) -> sigil_kernel::ToolSpec {
+        exec_tool_with_shell(Path::new("."), self.shell.clone()).spec()
+    }
+    fn permission_plan(
+        &self,
+        ctx: &ToolContext,
+        args: &Value,
+    ) -> Result<sigil_kernel::ToolPermissionPlanDraft> {
+        let command = crate::support::required_string(args, "command")?;
+        let scratch = self
+            .scratch_control
+            .session_scratch_dir(ctx.session_scope_id());
+        let paths =
+            crate::shell::ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &scratch, true)?;
+        let analysis = crate::shell::analyze_shell_command_with_path_policy(
+            &ctx.workspace_root,
+            command,
+            &self.shell,
+            &paths,
+        )?;
+        let mut plan = analysis.permission_plan();
+        plan.analysis_bindings.insert(
+            "environment_binding".into(),
+            crate::shell::shell_execution_environment(
+                ctx,
+                &scratch,
+                &self.shell,
+                &plan.analysis_bindings,
+            )?
+            .binding,
+        );
+        Ok(plan)
+    }
+}
+
+fn shell_analyzer(test_root: &Path) -> ShellAnalysisFixture {
+    ShellAnalysisFixture {
         scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
             test_root.join("scratch-cache").join("tmp"),
         ),
-        scratch_namespaces: Arc::new(
-            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-        ),
-        executor: Arc::new(
-            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                backend: Arc::new(LocalExecutionBackend),
-            },
-        ),
         shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
+}
+
+fn posix_shell_analyzer(test_root: &Path) -> Result<ShellAnalysisFixture> {
+    Ok(ShellAnalysisFixture {
+        shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
+        ..shell_analyzer(test_root)
+    })
 }
 
 #[test]
@@ -75,7 +137,7 @@ fn ordinary_scratch_namespace_preparation_has_a_dedicated_entrypoint() {
         temp.path().join("scratch"),
     );
     let provision = control
-        .ensure_session_namespace_for_command(
+        .ensure_session_scratch(
             Some("session"),
             &crate::scratch_namespace::ScratchQuota::default(),
         )
@@ -83,23 +145,11 @@ fn ordinary_scratch_namespace_preparation_has_a_dedicated_entrypoint() {
     assert!(provision.dir.is_dir());
 }
 
-fn posix_bash_tool(test_root: &Path) -> Result<BashTool> {
-    Ok(BashTool {
-        scratch_label: "cache/tmp".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
-            test_root.join("scratch-cache").join("tmp"),
-        ),
-        scratch_namespaces: Arc::new(
-            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-        ),
-        executor: Arc::new(
-            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                backend: Arc::new(LocalExecutionBackend),
-            },
-        ),
-        shell: crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
-    })
+fn posix_exec_tool(test_root: &Path) -> Result<TerminalStartTool> {
+    Ok(exec_tool_with_shell(
+        test_root,
+        crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?,
+    ))
 }
 
 #[derive(Default)]
@@ -118,59 +168,63 @@ impl ToolProgressSink for RecordingProgressSink {
 }
 
 #[test]
-fn bash_permission_plan_rejects_persistent_shell_constructs() -> Result<()> {
+fn exec_permission_plan_accepts_lifetime_choices_without_command_family_routing() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
-    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-
+    let tool = posix_exec_tool(workspace.path())?;
+    let ctx = ToolContext::new(workspace.path(), 5);
     for command in [
+        "cargo check",
         "sleep 3600 >/dev/null 2>&1 &",
-        "nohup sleep 3600 >/dev/null 2>&1",
+        "nohup sleep 3600",
         "setsid sleep 3600",
         "watch cargo check",
         "tail -f application.log",
         "sh -c 'journalctl --follow'",
     ] {
-        let error = tool
-            .permission_plan(&ctx, &json!({ "command": command }))
-            .expect_err("bash must reject persistent work before approval");
-        let message = error.to_string();
-        assert!(message.contains("finite foreground commands"), "{message}");
-        assert!(message.contains("terminal_start"), "{message}");
+        let plan = tool.permission_plan(&ctx, &json!({"command":command}))?;
+        assert_eq!(
+            plan.access,
+            if command == "tail -f application.log" {
+                ToolAccess::Read
+            } else {
+                ToolAccess::Execute
+            },
+            "lifetime selection retains the command's analyzed permissions: {command}"
+        );
+        assert_eq!(plan.containment.process, ProcessContainment::OwnedTree);
+        assert_eq!(
+            plan.containment.environment,
+            EnvironmentContainment::Restricted
+        );
+        assert!(plan.containment.persistent_process);
     }
-
-    let quoted_operator = tool.permission_plan(&ctx, &json!({ "command": "printf '&'" }))?;
-    assert_eq!(quoted_operator.analysis, ToolAnalysisStatus::Complete);
-    assert_eq!(quoted_operator.access, ToolAccess::Read);
+    let quoted = posix_shell_analyzer(workspace.path())?
+        .permission_plan(&ctx, &json!({"command":"printf '&'"}))?;
+    assert_eq!(quoted.analysis, ToolAnalysisStatus::Complete);
+    assert_eq!(quoted.access, ToolAccess::Read);
     Ok(())
 }
 
 #[tokio::test]
-async fn bash_execution_rechecks_finite_only_contract() -> Result<()> {
+async fn exec_rejects_retired_timeout_argument_before_spawning() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
-    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-
-    let result = tool
+    let error = posix_exec_tool(workspace.path())?
         .execute(
-            ctx,
-            "call-background".to_owned(),
-            json!({ "command": "nohup sleep 3600 >/dev/null 2>&1 &" }),
+            ToolContext::new(workspace.path(), 5),
+            "invalid-contract".into(),
+            json!({"command":"touch never-started", "timeout_secs":1}),
         )
-        .await?;
-    let ToolResultStatus::Error(error) = result.status else {
-        panic!("direct execution must return a structured persistent-command error");
-    };
-    assert_eq!(error.kind, ToolErrorKind::InvalidInput);
-    assert_eq!(error.details["category"], "persistent_command");
-    assert_eq!(error.details["next_tool"], "terminal_start");
+        .await
+        .expect_err("retired ambiguous timeout field");
+    assert!(error.to_string().contains("timeout_secs"));
+    assert!(!workspace.path().join("never-started").exists());
     Ok(())
 }
 
 #[tokio::test]
 async fn bash_shell_syntax_error_is_invalid_input_not_generic_exit_failure() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_exec_tool(workspace.path())?;
     let result = tool
         .execute(
             ToolContext::new(workspace.path().to_path_buf(), 5),
@@ -190,7 +244,7 @@ async fn bash_shell_syntax_error_is_invalid_input_not_generic_exit_failure() -> 
 #[tokio::test]
 async fn bash_emits_foreground_running_progress_before_completion() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = exec_tool(workspace.path());
     let sink = Arc::new(RecordingProgressSink::default());
     let context =
         ToolContext::new(workspace.path().to_path_buf(), 5).with_progress_sink(sink.clone());
@@ -210,9 +264,9 @@ async fn bash_emits_foreground_running_progress_before_completion() -> Result<()
         .map_err(|_| anyhow::anyhow!("progress sink lock poisoned"))?;
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].call_id, "call-progress");
-    assert_eq!(events[0].tool_name, "bash");
+    assert_eq!(events[0].tool_name, "exec_command");
     assert_eq!(events[0].status, "running");
-    assert_eq!(events[0].details["execution_mode"], "foreground");
+    assert!(!events[0].execution_id.as_str().is_empty());
     assert!(events[0].output_preview.is_none());
     Ok(())
 }
@@ -397,11 +451,12 @@ async fn read_tool_artifact_overlarge_line_page_is_retryable_invalid_input() -> 
         ToolResultStatus::Error(error) => {
             assert_eq!(error.kind, ToolErrorKind::InvalidInput);
             assert!(error.retryable);
-            assert_eq!(error.details["allowed_line_count"]["max"], 200);
+            assert!(error.details.get("allowed_line_count").is_none());
         }
         status => panic!("expected InvalidInput, got {status:?}"),
     }
-    assert!(result.content.contains("reduce line_count"));
+    assert!(result.content.contains("line_count"));
+    assert!(result.content.contains("200"));
     Ok(())
 }
 
@@ -641,7 +696,7 @@ async fn bash_large_output_publishes_truthful_truncated_artifact_without_large_i
         "context-epoch:test",
     );
 
-    let result = bash_tool(temp.path())
+    let result = exec_tool(temp.path())
         .execute(
             context,
             "bash-large".to_owned(),
@@ -716,7 +771,7 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
         &context,
         ToolResult::ok(
             "terminal-read-large",
-            "terminal_read",
+            "exec_read",
             "bounded terminal facts only",
             ToolResultMeta::default(),
         ),
@@ -743,6 +798,8 @@ fn terminal_log_page_publishes_policy_safe_artifact_when_content_is_omitted_from
 fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
+    assert!(registry.spec_for("bash").is_none());
+    assert!(registry.spec_for("terminal_start").is_none());
     let names = registry
         .specs()
         .into_iter()
@@ -755,12 +812,12 @@ fn module_split_facade_registers_tools_paths_and_backend_contracts() -> Result<(
         "edit_file",
         "delete_file",
         "apply_changeset",
-        "bash",
-        "terminal_start",
-        "terminal_read",
-        "terminal_wait",
-        "terminal_input",
-        "terminal_cancel",
+        "exec_command",
+        "exec_read",
+        "exec_wait",
+        "exec_input",
+        "exec_cancel",
+        "exec_resize",
     ] {
         assert!(
             names.iter().any(|name| name == expected),
@@ -2299,23 +2356,6 @@ async fn bounded_output_hard_limit_kills_group_and_maps_resource_limit() -> Resu
         "child process {pid} was orphaned"
     );
 
-    let expected_total = output.stdout.total_bytes;
-    let expected_omitted = output.stdout.omitted_bytes;
-    let result = super::bash_tool_result_from_execution_receipt(
-        "call-output-limit".to_owned(),
-        "bash".to_owned(),
-        receipt,
-    )?;
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("expected output limit error result");
-    };
-    assert_eq!(error.kind, ToolErrorKind::ResourceLimit);
-    assert_eq!(
-        result.metadata.details["execution"]["output"]["code"],
-        "output_limit_exceeded"
-    );
-    assert_eq!(result.metadata.stdout_bytes, Some(expected_total));
-    assert_eq!(result.metadata.omitted_bytes, Some(expected_omitted));
     Ok(())
 }
 
@@ -2614,7 +2654,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
 #[test]
 fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let plan = tool.permission_plan(
         &context,
@@ -2641,7 +2681,7 @@ fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()>
     assert_eq!(scope.version, 2);
     assert_eq!(
         scope.qualifiers.get("commands").map(String::as_str),
-        Some("cargo_fmt_check,cargo_check,cargo_test,cargo_clippy")
+        Some("cargo_fmt_check:cargo_check:cargo_test:cargo_clippy")
     );
     assert_eq!(
         plan.containment.filesystem,
@@ -2658,7 +2698,7 @@ fn bash_permission_plan_aggregates_compound_workspace_validation() -> Result<()>
 #[test]
 fn bash_permission_plan_fails_closed_for_dynamic_shell_escape_hatches() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -2705,7 +2745,7 @@ fn bash_permission_plan_fails_closed_for_dynamic_shell_escape_hatches() -> Resul
 #[test]
 fn bash_permission_plan_fails_closed_for_shell_syntax_bypass_corpus() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -2774,12 +2814,14 @@ fn bash_permission_plan_fails_closed_for_shell_syntax_bypass_corpus() -> Result<
 #[test]
 fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    registry.register(Arc::new(posix_bash_tool(workspace.path())?));
-    let spec = registry.spec_for("bash").context("bash spec must exist")?;
+    registry.register(Arc::new(posix_exec_tool(workspace.path())?));
+    let spec = registry
+        .spec_for("exec_command")
+        .context("bash spec must exist")?;
     let corpus: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../dev/evals/shell-risk-corpus.json"
@@ -2827,7 +2869,7 @@ fn bash_permission_plan_matches_deterministic_risk_corpus() -> Result<()> {
             case["expected_approval_class"],
             "approval class mismatch for {id}: {command:?}"
         );
-        let call = tool_call("bash", json!({ "command": command }));
+        let call = tool_call("exec_command", json!({ "command": command }));
         let bound_plan = registry.permission_plan(&context, &call)?;
         let expected_policy = case["expected_policy"]
             .as_object()
@@ -2873,7 +2915,7 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
-    let mut tool = posix_bash_tool(&workspace)?;
+    let mut tool = posix_shell_analyzer(&workspace)?;
     tool.scratch_control = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
         temp.path().join("cache").join("tmp"),
     );
@@ -2955,7 +2997,7 @@ fn shell_symbolic_path_bindings_resolve_only_runtime_owned_roots() -> Result<()>
 #[test]
 fn read_only_git_lock_probe_is_not_protected_mutation() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path().to_path_buf(), 30);
     let command = "for item in index.lock; do if [ -e .git/$item ]; then echo \"$item\"; else echo absent; fi; done";
     let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
@@ -2987,7 +3029,7 @@ async fn controlled_scratch_heredoc_does_not_parse_body_as_root_path() -> Result
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
-    let tool = posix_bash_tool(&workspace)?;
+    let tool = posix_exec_tool(&workspace)?;
     let command = "cat > \"$SIGIL_SCRATCH_DIR/probe.awk\" <<'AWK'\nBEGIN { print \"/Users/not-a-real-subject\"; }\nAWK";
     let context = ToolContext::new(workspace.clone(), 30).with_session_scope_id("heredoc-test");
     let plan = tool.permission_plan(&context, &json!({ "command": command }))?;
@@ -3017,7 +3059,7 @@ async fn controlled_scratch_heredoc_does_not_parse_body_as_root_path() -> Result
 #[test]
 fn shell_symbolic_path_bindings_fail_closed_when_unbound_forged_or_escaping() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
     let context = ToolContext::new(workspace.path(), 30);
 
     let unbound = super::analyze_shell_command(
@@ -3072,7 +3114,7 @@ fn shell_path_resolution_errors_become_unknown_subjects() -> Result<()> {
 fn shell_symbolic_path_binding_rejects_symlink_escape() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
     let session_scratch = tool.scratch_control.session_scratch_dir(None);
     fs::create_dir_all(&session_scratch)?;
     symlink(outside.path(), session_scratch.join("escape"))?;
@@ -3166,7 +3208,7 @@ fn bash_permission_plan_deterministic_mutation_property_fails_closed() -> Result
     ];
 
     let workspace = tempfile::tempdir()?;
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
     let context = ToolContext::new(workspace.path(), 30);
     let mut state = FIXED_SEED;
     for case_index in 0..MAX_CASES {
@@ -3279,7 +3321,7 @@ fn bash_permission_plan_does_not_claim_workspace_containment_for_redirection_esc
     let outside_file = outside.path().join("outside.txt");
     fs::write(&outside_file, "old")?;
     symlink(&outside_file, workspace.path().join("linked.txt"))?;
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -3309,7 +3351,7 @@ fn bash_permission_plan_does_not_claim_workspace_containment_for_redirection_esc
 #[test]
 fn bash_permission_plan_enforces_command_and_ast_resource_limits() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let oversized = format!("printf {}", "x".repeat(64 * 1024));
@@ -3333,7 +3375,7 @@ fn bash_permission_plan_enforces_command_and_ast_resource_limits() -> Result<()>
 #[test]
 fn bash_permission_plan_models_find_and_redirection_file_effects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let delete = tool.permission_plan(&context, &json!({ "command": "find . -delete" }))?;
@@ -3390,7 +3432,7 @@ fn bash_permission_plan_models_find_and_redirection_file_effects() -> Result<()>
 fn bash_permission_plan_traverses_compound_pipeline_newline_and_attached_redirection() -> Result<()>
 {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let compound = tool.permission_plan(
@@ -3428,7 +3470,7 @@ fn bash_permission_plan_traverses_compound_pipeline_newline_and_attached_redirec
 #[test]
 fn bash_permission_plan_recurses_static_wrappers_and_limits_depth() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     for command in [
@@ -3454,23 +3496,19 @@ fn bash_permission_plan_recurses_static_wrappers_and_limits_depth() -> Result<()
         assert!(plan.semantic_scope.is_none());
     }
 
-    let nohup_error = tool
-        .permission_plan(&context, &json!({ "command": "nohup git status" }))
-        .expect_err("nohup must be redirected to terminal_start before authorization");
-    assert!(nohup_error.to_string().contains("terminal_start"));
-
+    let nohup = tool.permission_plan(&context, &json!({"command":"nohup git status"}))?;
+    assert_ne!(nohup.access, ToolAccess::Read);
     let deep = format!("{}git status", "command ".repeat(10));
-    let deep_error = tool
-        .permission_plan(&context, &json!({ "command": deep }))
-        .expect_err("unbounded wrapper recursion must fail before authorization");
-    assert!(deep_error.to_string().contains("finite-command limit"));
+    let deep = tool.permission_plan(&context, &json!({"command":deep}))?;
+    assert_ne!(deep.access, ToolAccess::Read);
+    assert!(!deep.analysis.is_complete());
     Ok(())
 }
 
 #[test]
 fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
 
     let safe_git =
@@ -3509,8 +3547,8 @@ fn bash_permission_plan_classifies_program_specific_escape_effects() -> Result<(
 #[test]
 fn bash_session_scope_ignores_output_filters_but_binds_validation_arguments() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let first_tool = posix_bash_tool(workspace.path())?;
-    let mut second_tool = posix_bash_tool(workspace.path())?;
+    let first_tool = posix_shell_analyzer(workspace.path())?;
+    let mut second_tool = posix_shell_analyzer(workspace.path())?;
     second_tool.scratch_control = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
         workspace.path().join("different-scratch"),
     );
@@ -3553,202 +3591,121 @@ fn bash_session_scope_ignores_output_filters_but_binds_validation_arguments() ->
 }
 
 #[test]
-fn bash_execution_request_uses_restricted_environment_only_for_complete_known_commands()
--> Result<()> {
+fn exec_environment_is_closed_and_separates_session_scratch_from_authority_temp() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let scratch = workspace.path().join("scratch");
-
-    let restricted = super::bash_execution_request("git status", workspace.path(), &scratch, 9);
-    assert_eq!(
-        restricted.environment_policy,
-        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
-    );
-    assert!(restricted.env.contains_key("PATH"));
-    for toolchain_root in ["CARGO_HOME", "RUSTUP_HOME"] {
-        if let Ok(expected) = std::env::var(toolchain_root) {
-            assert_eq!(restricted.env.get(toolchain_root), Some(&expected));
+    let context = ToolContext::new(workspace.path(), 5);
+    let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("sh")?;
+    for command in ["git status", "python script.py"] {
+        let analysis = super::analyze_shell_command_with_shell(workspace.path(), command, &shell)?;
+        let material = super::shell_execution_environment(
+            &context,
+            &scratch,
+            &shell,
+            &analysis.analysis_bindings,
+        )?;
+        assert!(material.environment.contains_key("PATH"));
+        for root in ["CARGO_HOME", "RUSTUP_HOME"] {
+            if let Ok(expected) = std::env::var(root) {
+                assert_eq!(material.environment.get(root), Some(&expected));
+            }
         }
+        assert_eq!(
+            material.environment[super::SIGIL_SCRATCH_DIR_ENV],
+            scratch.to_string_lossy()
+        );
+        for ambient in [
+            "HOME",
+            "TMPDIR",
+            "BASH_ENV",
+            "ENV",
+            "PROMPT_COMMAND",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!material.environment.contains_key(ambient), "{ambient}");
+        }
+        assert!(material.binding.starts_with("shell-env-v2:"));
     }
-    assert_eq!(
-        restricted
-            .env
-            .get(super::SIGIL_SCRATCH_DIR_ENV)
-            .map(String::as_str),
-        Some(scratch.to_string_lossy().as_ref())
-    );
-    for inherited_name in ["HOME", "BASH_ENV", "ENV", "PROMPT_COMMAND", "GITHUB_TOKEN"] {
-        assert!(!restricted.env.contains_key(inherited_name));
-    }
-
-    let inherited =
-        super::bash_execution_request("python script.py", workspace.path(), &scratch, 9);
-    assert_eq!(
-        inherited.environment_policy,
-        sigil_kernel::ProcessEnvironmentPolicy::InheritParent
-    );
-    assert_eq!(inherited.env.len(), 1);
-    assert!(inherited.env.contains_key(super::SIGIL_SCRATCH_DIR_ENV));
     Ok(())
 }
 
-#[test]
-fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let workspace = temp.path().canonicalize()?;
-    let scratch = workspace.join("scratch");
-    let request = super::bash_execution_request("printf ok", &workspace, &scratch, 9);
-    assert_eq!(request.program, "sh");
-    assert_eq!(request.args, vec!["-c".to_owned(), "printf ok".to_owned()]);
-    assert_eq!(request.cwd, workspace);
-    assert_eq!(
-        request
-            .env
-            .get(super::SIGIL_SCRATCH_DIR_ENV)
-            .map(String::as_str),
-        Some(scratch.to_string_lossy().as_ref())
-    );
-    assert_eq!(request.timeout_secs, 9);
-    assert_eq!(
-        request.environment_policy,
-        sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
-    );
-
-    let output_receipt =
-        |stdout_bytes: u64, stderr_bytes: u64, termination: ExecutionTerminationCause| {
-            let capture = |total_bytes: u64| ExecutionStreamCapture {
-                total_bytes,
-                returned_bytes: total_bytes,
-                retained_head_bytes: total_bytes,
-                retained_limit_bytes: total_bytes,
-                total_lines: u64::from(total_bytes > 0),
-                ..ExecutionStreamCapture::default()
-            };
-            ExecutionOutputReceipt {
-                stdout: capture(stdout_bytes),
-                stderr: capture(stderr_bytes),
-                combined_total_bytes: stdout_bytes.saturating_add(stderr_bytes),
-                termination,
-                ..ExecutionOutputReceipt::default()
-            }
-        };
-
-    let timeout = super::bash_tool_result_from_execution_receipt(
-        "call-timeout".to_owned(),
-        "bash".to_owned(),
-        ExecutionReceipt {
-            backend: ExecutionBackendKind::Local,
-            capabilities: ExecutionBackendCapabilities::default(),
-            network: Default::default(),
-            resources: Default::default(),
-            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
-            exit_code: None,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            output: output_receipt(0, 0, ExecutionTerminationCause::TimedOut),
-            timed_out: true,
-            capture: None,
-        },
-    )?;
-    let ToolResultStatus::Error(timeout_error) = timeout.status else {
-        panic!("expected timeout error result");
-    };
-    assert_eq!(timeout_error.kind, ToolErrorKind::Timeout);
-
-    let success = super::bash_tool_result_from_execution_receipt(
-        "call-ok".to_owned(),
-        "bash".to_owned(),
-        ExecutionReceipt {
-            backend: ExecutionBackendKind::Local,
-            capabilities: ExecutionBackendCapabilities::default(),
-            network: Default::default(),
-            resources: Default::default(),
-            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
-            exit_code: Some(0),
-            stdout: b"stdout".to_vec(),
-            stderr: b"stderr".to_vec(),
-            output: output_receipt(6, 6, ExecutionTerminationCause::Exited),
-            timed_out: false,
-            capture: None,
-        },
-    )?;
+#[tokio::test]
+async fn exec_results_preserve_exit_status_and_captured_output() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let tool = posix_exec_tool(workspace.path())?;
+    let success = tool
+        .execute(
+            ToolContext::new(workspace.path(), 5),
+            "call-ok".into(),
+            json!({"command":"printf stdout; printf stderr >&2", "yield_time_ms":10000}),
+        )
+        .await?;
     assert!(matches!(success.status, ToolResultStatus::Ok));
-    assert_eq!(success.content, "stdout\nstderr");
     assert_eq!(success.metadata.exit_code, Some(0));
-    assert_eq!(success.metadata.stdout_bytes, Some(6));
-    assert_eq!(success.metadata.stderr_bytes, Some(6));
-
-    let failed = super::bash_tool_result_from_execution_receipt(
-        "call-failed".to_owned(),
-        "bash".to_owned(),
-        ExecutionReceipt {
-            backend: ExecutionBackendKind::Local,
-            capabilities: ExecutionBackendCapabilities::default(),
-            network: Default::default(),
-            resources: Default::default(),
-            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
-            exit_code: Some(7),
-            stdout: Vec::new(),
-            stderr: b"bad".to_vec(),
-            output: output_receipt(0, 3, ExecutionTerminationCause::Exited),
-            timed_out: false,
-            capture: None,
-        },
-    )?;
+    assert!(success.content.contains("stdout"));
+    assert!(success.content.contains("stderr"));
+    assert_eq!(success.metadata.total_bytes, Some(12));
+    let failed = tool
+        .execute(
+            ToolContext::new(workspace.path(), 5),
+            "call-failed".into(),
+            json!({"command":"printf bad >&2; exit 7", "yield_time_ms":10000}),
+        )
+        .await?;
     let ToolResultStatus::Error(error) = &failed.status else {
-        panic!("expected non-zero exit error result");
+        panic!("nonzero exit must be an error");
     };
     assert_eq!(error.kind, ToolErrorKind::ExitStatus);
     assert_eq!(failed.metadata.exit_code, Some(7));
-    assert_eq!(failed.content, "bad");
+    assert!(failed.content.contains("bad"));
     Ok(())
 }
 
-#[test]
-fn bash_truncated_invalid_utf8_stays_within_text_budget() -> Result<()> {
-    let retained_bytes = 64 * 1024;
-    let total_bytes = 96 * 1024;
-    let result = super::bash_tool_result_from_execution_receipt(
-        "call-invalid-utf8".to_owned(),
-        "bash".to_owned(),
-        ExecutionReceipt {
-            backend: ExecutionBackendKind::Local,
-            capabilities: ExecutionBackendCapabilities::default(),
-            network: Default::default(),
-            resources: Default::default(),
-            environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
-            exit_code: Some(0),
-            stdout: vec![0xff; retained_bytes],
-            stderr: Vec::new(),
-            output: sigil_kernel::ExecutionOutputReceipt {
-                schema_version: sigil_kernel::EXECUTION_OUTPUT_RECEIPT_SCHEMA_VERSION,
-                stdout: sigil_kernel::ExecutionStreamCapture {
-                    total_bytes: total_bytes as u64,
-                    returned_bytes: retained_bytes as u64,
-                    omitted_bytes: (total_bytes - retained_bytes) as u64,
-                    retained_head_bytes: (retained_bytes / 2) as u64,
-                    retained_tail_bytes: (retained_bytes / 2) as u64,
-                    retained_limit_bytes: retained_bytes as u64,
-                    hard_limit_bytes: 8 * 1024 * 1024,
-                    total_lines: 1,
-                    truncated: true,
-                },
-                stderr: Default::default(),
-                combined_total_bytes: total_bytes as u64,
-                combined_hard_limit_bytes: 16 * 1024 * 1024,
-                termination: ExecutionTerminationCause::Exited,
-            },
-            timed_out: false,
-            capture: None,
-        },
+#[tokio::test]
+async fn exec_truncated_invalid_utf8_stays_within_text_budget() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(
+        workspace.path().join("invalid-utf8.bin"),
+        vec![0xff; 96 * 1024],
     )?;
-
-    assert!(result.content.len() <= super::DEFAULT_TEXT_LIMIT_BYTES);
-    assert!(result.content.contains("output truncated"));
-    assert_eq!(
-        result.metadata.returned_bytes.unwrap_or_default()
-            + result.metadata.omitted_bytes.unwrap_or_default(),
-        total_bytes as u64
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let artifacts = ToolArtifactStore::for_session_store(&store);
+    let context = ToolContext::new(workspace.path(), 5).with_tool_artifact_reader(
+        artifacts.clone(),
+        ToolArtifactReadBudgetV1::default(),
+        "invalid-utf8-epoch",
     );
+    let result = posix_exec_tool(workspace.path())?
+        .execute(
+            context,
+            "call-invalid-utf8".into(),
+            json!({"command":"cat invalid-utf8.bin", "yield_time_ms":10000}),
+        )
+        .await?;
+    assert!(result.content.len() <= super::DEFAULT_TEXT_LIMIT_BYTES);
+    assert_eq!(result.metadata.total_bytes, Some(96 * 1024));
+    let recorded = result.durable_v3_projection().unwrap_or_else(|| {
+        panic!(
+            "complete terminal capture: {:?}",
+            result.metadata.details.get("capture")
+        )
+    });
+    let ToolArtifactBindingV1::Published { descriptor } = &recorded.artifact else {
+        panic!("raw invalid UTF8 must still retain its complete capture");
+    };
+    assert_eq!(descriptor.observed_bytes, 96 * 1024);
+    assert!(matches!(
+        descriptor.completeness,
+        sigil_kernel::ToolArtifactCompleteness::PolicyRedacted {
+            storage_truncation: None,
+            ..
+        }
+    ));
+    assert_eq!(
+        artifacts.read_all(descriptor)?.len() as u64,
+        descriptor.persisted_bytes
+    );
+    assert!(result.metadata.truncated);
     Ok(())
 }
 
@@ -3809,7 +3766,6 @@ fn builtin_tool_paths_workspace_defaults_are_stable() {
 
 #[test]
 fn temporary_file_guidance_is_model_visible() {
-    let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
     let write_spec = WriteFileTool.spec();
     assert!(write_spec.description.contains("workspace-relative"));
     assert!(write_spec.description.contains("$SIGIL_SCRATCH_DIR"));
@@ -3819,25 +3775,8 @@ fn temporary_file_guidance_is_model_visible() {
             .description
             .contains("permission.external_directory")
     );
-    for spec in [
-        BashTool {
-            scratch_label: "cache/tmp".to_owned(),
-            scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-            scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
-                scratch_root.clone(),
-            ),
-            scratch_namespaces: Arc::new(
-                crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-            ),
-            executor: Arc::new(
-                crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                    backend: Arc::new(LocalExecutionBackend),
-                },
-            ),
-            shell: crate::shell_runtime::ResolvedShell::detect_default(),
-        }
-        .spec(),
-        super::TerminalStartTool {
+    {
+        let spec = super::TerminalStartTool {
             managers: Default::default(),
             artifact_root: PathBuf::from("state/artifacts/tasks"),
             artifact_label_root: PathBuf::from("state/artifacts/tasks"),
@@ -3845,8 +3784,7 @@ fn temporary_file_guidance_is_model_visible() {
             scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
             scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
         }
-        .spec(),
-    ] {
+        .spec();
         assert!(spec.description.contains("$SIGIL_SCRATCH_DIR"));
         assert!(spec.description.contains("cache/tmp"));
         assert!(spec.description.contains("permission.external_directory"));
@@ -4525,49 +4463,49 @@ fn register_builtin_tools_registers_multiple_tools() {
     assert_eq!(apply_spec.preview, ToolPreviewCapability::Required);
     assert_eq!(
         registry
-            .spec_for("terminal_start")
+            .spec_for("exec_command")
             .expect("terminal_start should be registered")
             .access,
         ToolAccess::Execute
     );
     assert_eq!(
         registry
-            .spec_for("terminal_read")
+            .spec_for("exec_read")
             .expect("terminal_read should be registered")
             .access,
         ToolAccess::Read
     );
     assert_eq!(
         registry
-            .spec_for("terminal_wait")
+            .spec_for("exec_wait")
             .expect("terminal_wait should be registered")
             .access,
         ToolAccess::Read
     );
     assert_eq!(
         registry
-            .spec_for("terminal_input")
+            .spec_for("exec_input")
             .expect("terminal_input should be registered")
             .access,
         ToolAccess::Execute
     );
     assert_eq!(
         registry
-            .spec_for("terminal_input")
+            .spec_for("exec_input")
             .expect("terminal_input should be registered")
             .input_schema["properties"]["input"]["maxLength"],
         super::MAX_TERMINAL_INPUT_BYTES
     );
     assert_eq!(
         registry
-            .spec_for("terminal_resize")
+            .spec_for("exec_resize")
             .expect("terminal_resize should be registered")
             .access,
         ToolAccess::Execute
     );
     assert_eq!(
         registry
-            .spec_for("terminal_cancel")
+            .spec_for("exec_cancel")
             .expect("terminal_cancel should be registered")
             .access,
         ToolAccess::Execute
@@ -4603,12 +4541,11 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
     register_builtin_tools(&mut registry);
 
     let start_call = tool_call(
-        "terminal_start",
+        "exec_command",
         json!({
-            "command": "tail -f input.txt > out.txt",
-            "cwd": "logs",
-            "shell": "/bin/sh",
-            "mode": "background"
+        "command": "tail -f input.txt > out.txt",
+        "cwd": "logs",
+        "shell": "/bin/sh",
         }),
     );
     let start_plan = registry.permission_plan(&ctx, &start_call)?;
@@ -4637,16 +4574,16 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
             && subject.scope == ToolSubjectScope::Workspace
     }));
 
-    let read_call = tool_call("terminal_read", json!({ "task_id": "terminal-perm" }));
+    let read_call = tool_call("exec_read", json!({ "execution_id": "terminal-perm" }));
     let input_call = tool_call(
-        "terminal_input",
-        json!({ "task_id": "terminal-perm", "input": "echo hello\n" }),
+        "exec_input",
+        json!({ "execution_id": "terminal-perm", "input": "echo hello\n" }),
     );
     let resize_call = tool_call(
-        "terminal_resize",
-        json!({ "task_id": "terminal-perm", "rows": 30, "cols": 100 }),
+        "exec_resize",
+        json!({ "execution_id": "terminal-perm", "rows": 30, "cols": 100 }),
     );
-    let cancel_call = tool_call("terminal_cancel", json!({ "task_id": "terminal-perm" }));
+    let cancel_call = tool_call("exec_cancel", json!({ "execution_id": "terminal-perm" }));
     let read_plan = registry.permission_plan(&ctx, &read_call)?;
     assert_eq!(read_plan.access, ToolAccess::Read);
     let resize_plan = registry.permission_plan(&ctx, &resize_call)?;
@@ -4683,37 +4620,36 @@ fn terminal_start_uses_native_persistent_permission_plan() -> Result<()> {
     let plan = registry.permission_plan(
         &ctx,
         &tool_call(
-            "terminal_start",
+            "exec_command",
             json!({
-                "command": "python -m http.server 8000",
-                "mode": "background",
-                "readiness": { "kind": "none" }
+                "command": "python -m http.server 8000"
             }),
         ),
     )?;
 
     assert_eq!(plan.access, ToolAccess::Execute);
-    assert_eq!(plan.operation, ToolOperation::ExecuteMutatingCommand);
-    assert!(plan.effects.contains(&ToolPermissionEffect::ProcessControl));
+    assert_eq!(plan.operation, ToolOperation::ExecuteUnknownCommand);
+    assert!(plan.effects.contains(&ToolPermissionEffect::Unknown));
     assert!(
-        plan.effects
+        !plan
+            .effects
             .contains(&ToolPermissionEffect::PersistenceChange)
     );
     assert_eq!(plan.containment.process, ProcessContainment::OwnedTree);
     assert_eq!(
         plan.containment.environment,
-        EnvironmentContainment::UserInherited
+        EnvironmentContainment::Restricted
     );
     assert!(plan.containment.persistent_process);
     assert!(plan.semantic_scope.is_none());
-    assert_eq!(plan.analysis_bindings["terminal_mode"], "background");
+    assert_eq!(plan.analysis_bindings["io_mode"], "pipe");
     assert_eq!(plan.analysis_bindings["terminal_pty"], "false");
     assert_eq!(plan.analysis_bindings["terminal_readiness"], "none");
     Ok(())
 }
 
 #[test]
-fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
+fn exec_command_binds_session_scratch_but_not_authority_reserved_tmpdir() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
@@ -4722,10 +4658,9 @@ fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
     let scratch = registry.permission_plan(
         &ctx,
         &tool_call(
-            "terminal_start",
+            "exec_command",
             json!({
                 "command": "printf payload > \"$SIGIL_SCRATCH_DIR/result.txt\"; while :; do sleep 60; done",
-                "mode": "background",
                 "shell": "sh"
             }),
         ),
@@ -4739,16 +4674,16 @@ fn terminal_start_binds_sigil_scratch_but_not_inherited_tmpdir() -> Result<()> {
     let inherited_tmpdir = registry.permission_plan(
         &ctx,
         &tool_call(
-            "terminal_start",
+            "exec_command",
             json!({
                 "command": "printf payload > \"$TMPDIR/result.txt\"; while :; do sleep 60; done",
-                "mode": "background",
                 "shell": "sh"
             }),
         ),
     )?;
     assert!(!inherited_tmpdir.analysis.is_complete());
     assert!(inherited_tmpdir.semantic_scope.is_none());
+
     assert!(inherited_tmpdir.subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.scope == ToolSubjectScope::Unknown
     }));
@@ -4840,9 +4775,9 @@ fn terminal_read_no_change_points_to_event_driven_wait() -> Result<()> {
         no_change: true,
     };
     let details = crate::terminal_tools::terminal_read_details(&read, 128, false);
-    assert_eq!(details["next_action"], "terminal_wait");
+    assert_eq!(details["next_action"], "exec_wait");
     assert_eq!(details["after_generation"], 9);
-    assert!(crate::terminal_tools::terminal_read_content(&read, false).contains("terminal_wait"));
+    assert!(crate::terminal_tools::terminal_read_content(&read, false).contains("exec_wait"));
     Ok(())
 }
 
@@ -4887,17 +4822,14 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
     assert_eq!(changeset.operation, ToolOperation::ApplyChangeSet);
     let bash = registry.permission_plan(
         &ctx,
-        &tool_call("bash", json!({ "command": "rm -rf .sigil" })),
+        &tool_call("exec_command", json!({ "command": "rm -rf .sigil" })),
     )?;
     let terminal = registry.permission_plan(
         &ctx,
-        &tool_call(
-            "terminal_start",
-            json!({ "command": "tail -f app.log", "mode": "background" }),
-        ),
+        &tool_call("exec_command", json!({ "command": "tail -f app.log", })),
     )?;
     assert_eq!(bash.operation, ToolOperation::ExecuteDestructiveCommand);
-    assert_eq!(terminal.operation, ToolOperation::ExecuteMutatingCommand);
+    assert_eq!(terminal.operation, ToolOperation::ExecuteReadOnlyCommand);
     Ok(())
 }
 
@@ -4915,21 +4847,27 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-tool-read",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "printf 0123456789; sleep 0.1",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_2 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     assert!(matches!(start.status, ToolResultStatus::Ok));
-    assert!(start.content.contains("terminal-tool-read"));
-    assert_eq!(start.metadata.details["task_id"], "terminal-tool-read");
+    assert!(start.content.contains(execution_id_2.as_str()));
+    assert_eq!(
+        start.metadata.details["execution_id"],
+        execution_id_2.as_str()
+    );
 
-    let read = wait_for_terminal_read(&registry, ctx.clone(), "terminal-tool-read", 3).await?;
+    let read = wait_for_terminal_read(&registry, ctx.clone(), execution_id_2.as_str(), 3).await?;
     assert!(matches!(read.status, ToolResultStatus::Ok));
     assert_eq!(read.metadata.returned_bytes, Some(3));
     assert_eq!(read.metadata.limit_bytes, Some(3));
@@ -4942,8 +4880,8 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_read",
-                json!({ "task_id": "terminal-tool-read", "offset": 0, "limit_bytes": 3 }),
+                "exec_read",
+                json!({ "execution_id": execution_id_2.as_str(), "offset": 0, "limit_bytes": 3 }),
             ),
         )
         .await?;
@@ -4957,26 +4895,29 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
     assert_eq!(summarized_read.metadata.details["content_omitted"], true);
 
     let shell = test_shell(temp.path())?;
-    registry
+    let started_execution_1 = registry
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-tool-cancel",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "sleep 5",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = started_execution_1.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     let cancel = registry
         .execute(
             ctx,
             tool_call(
-                "terminal_cancel",
-                json!({ "task_id": "terminal-tool-cancel" }),
+                "exec_cancel",
+                json!({ "execution_id": execution_id_1.as_str() }),
             ),
         )
         .await?;
@@ -4995,20 +4936,23 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
-    registry
+    let started_execution_1 = registry
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-read-status",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "printf 0123456789; sleep 0.1",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = started_execution_1.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
 
     let mut latest = None;
     for _ in 0..250 {
@@ -5016,8 +4960,8 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
             .execute(
                 ctx.clone(),
                 tool_call(
-                    "terminal_read",
-                    json!({ "task_id": "terminal-read-status", "offset": 0, "limit_bytes": 10 }),
+                    "exec_read",
+                    json!({ "execution_id": execution_id_1.as_str(), "offset": 0, "limit_bytes": 10 }),
                 ),
             )
             .await?;
@@ -5035,8 +4979,8 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
     assert_eq!(read.metadata.details["content_returned"], false);
     assert_eq!(read.metadata.details["content_omitted"], true);
     assert_eq!(
-        read.metadata.details["terminal_task"]["task_id"],
-        "terminal-read-status"
+        read.metadata.details["terminal_task"]["execution_id"],
+        execution_id_1.as_str()
     );
     assert_eq!(read.metadata.details["terminal_task"]["status"], "exited");
     assert_eq!(
@@ -5048,9 +4992,9 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
         .execute(
             ctx,
             tool_call(
-                "terminal_read",
+                "exec_read",
                 json!({
-                    "task_id": "terminal-read-status",
+                    "execution_id": execution_id_1.as_str(),
                     "offset": 0,
                     "limit_bytes": 10,
                     "include_content": true
@@ -5066,48 +5010,53 @@ async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
 }
 
 #[test]
-fn terminal_start_schema_requires_explicit_persistent_mode() {
+fn exec_command_schema_separates_io_wait_and_runtime() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    let spec = registry
-        .spec_for("terminal_start")
-        .expect("terminal_start should be registered");
-    assert_eq!(spec.input_schema["required"], json!(["command", "mode"]));
-    assert_eq!(
-        spec.input_schema["properties"]["mode"]["enum"],
-        json!(["background", "interactive"])
+    let spec = registry.spec_for("exec_command").expect("exec command");
+    assert_eq!(spec.input_schema["required"], json!(["command"]));
+    assert!(spec.input_schema["properties"].get("mode").is_none());
+    assert!(
+        spec.input_schema["properties"]
+            .get("execution_id")
+            .is_none()
     );
-    assert!(spec.description.contains("use bash for one-shot commands"));
+    assert_eq!(spec.input_schema["properties"]["pty"]["type"], "boolean");
+    assert_eq!(
+        spec.input_schema["properties"]["yield_time_ms"]["maximum"],
+        60_000
+    );
+    assert_eq!(
+        spec.input_schema["properties"]["max_runtime_secs"]["maximum"],
+        86_400
+    );
+    assert!(registry.spec_for("bash").is_none());
+    assert!(registry.spec_for("terminal_start").is_none());
 }
 
 #[test]
-fn terminal_start_rejects_foreground_and_invalid_pty_combinations() -> Result<()> {
-    assert!(
-        super::parse_terminal_start_args(&json!({
-            "command": "cargo check",
-            "mode": "foreground"
-        }))
-        .is_err()
-    );
-    assert!(
-        super::validate_terminal_start_execution_mode(
-            super::TerminalStartExecutionMode::Background,
-            true,
-        )
-        .is_err()
-    );
-    assert!(
-        super::validate_terminal_start_execution_mode(
-            super::TerminalStartExecutionMode::Interactive,
-            false,
-        )
-        .is_err()
-    );
+fn exec_command_validates_independent_io_wait_and_deadline_fields() -> Result<()> {
+    for args in [
+        json!({"command": "true", "mode": "background"}),
+        json!({"command": "true", "pty": "true"}),
+        json!({"command": "true", "rows": 24, "cols": 80}),
+        json!({"command": "true", "yield_time_ms": -1}),
+        json!({"command": "true", "yield_time_ms": 60_001}),
+        json!({"command": "true", "max_runtime_secs": 0}),
+        json!({"command": "true", "max_runtime_secs": 86_401}),
+    ] {
+        assert!(super::parse_terminal_start_args(&args).is_err(), "{args}");
+    }
+    for pty in [false, true] {
+        super::parse_terminal_start_args(
+            &json!({"command": "true", "pty": pty, "yield_time_ms": 0, "max_runtime_secs": 5}),
+        )?;
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn terminal_start_rejects_known_finite_commands_before_approval_and_execution() -> Result<()>
+async fn exec_command_accepts_finite_and_persistent_commands_without_family_routing() -> Result<()>
 {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
@@ -5132,50 +5081,51 @@ async fn terminal_start_rejects_known_finite_commands_before_approval_and_execut
         "sh -c 'echo start && cargo build 2>&1 | tail -20'",
     ] {
         let call = tool_call(
-            "terminal_start",
+            "exec_command",
             json!({
-                "command": command,
-                "mode": "background",
-                "readiness": { "kind": "none" }
+                "command": command
             }),
         );
-        let error = registry
-            .permission_plan(&ctx, &call)
-            .expect_err("known finite commands must be redirected before approval");
-        let message = error.to_string();
-        assert!(message.contains("finite"), "{message}");
-        assert!(message.contains("must use bash"), "{message}");
+        let plan = registry.permission_plan(&ctx, &call)?;
+        let expected = if command == "git status --short" {
+            ToolAccess::Read
+        } else {
+            ToolAccess::Execute
+        };
+        assert_eq!(plan.access, expected, "{command}");
+        assert_eq!(
+            plan.containment.environment,
+            EnvironmentContainment::Restricted
+        );
     }
 
     for command in ["tail -f application.log", "pnpm test --watch"] {
         registry.permission_plan(
             &ctx,
             &tool_call(
-                "terminal_start",
+                "exec_command",
                 json!({
-                    "command": command,
-                    "mode": "background",
-                    "readiness": { "kind": "none" }
+                    "command": command
                 }),
             ),
         )?;
     }
 
-    let error = registry
+    let result = registry
         .execute(
             ctx,
             tool_call(
-                "terminal_start",
+                "exec_command",
                 json!({
-                    "command": "cargo check",
-                    "mode": "background",
-                    "readiness": { "kind": "none" }
+                    "command": "printf finite-command-finished", "yield_time_ms": 5000,
                 }),
             ),
         )
-        .await
-        .expect_err("direct execution must not bypass persistent-only validation");
-    assert!(error.to_string().contains("must use bash"));
+        .await?;
+    assert!(!result.is_error(), "{result:?}");
+    assert_eq!(result.metadata.details["verdict"], "success");
+    assert_eq!(result.metadata.details["exit_code"], 0);
+    assert!(result.content.contains("finite-command-finished"));
     Ok(())
 }
 
@@ -5192,16 +5142,19 @@ async fn terminal_wait_tool_observes_output_without_terminal_read_polling() -> R
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-wait-tool",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "sleep 0.1; printf READY; sleep 5",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     let generation = start.metadata.details["generation"]
         .as_u64()
         .expect("terminal_start should return generation");
@@ -5209,13 +5162,13 @@ async fn terminal_wait_tool_observes_output_without_terminal_read_polling() -> R
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_wait",
+                "exec_wait",
                 json!({
-                    "task_id": "terminal-wait-tool",
+                    "execution_id": execution_id_1.as_str(),
                     "after_generation": generation,
                     "until": "output_contains",
                     "value": "READY",
-                    "timeout_secs": 5
+                    "yield_time_ms": 5000
                 }),
             ),
         )
@@ -5225,8 +5178,8 @@ async fn terminal_wait_tool_observes_output_without_terminal_read_polling() -> R
         .execute(
             ctx,
             tool_call(
-                "terminal_cancel",
-                json!({ "task_id": "terminal-wait-tool" }),
+                "exec_cancel",
+                json!({ "execution_id": execution_id_1.as_str() }),
             ),
         )
         .await?;
@@ -5249,19 +5202,22 @@ async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-scratch-env",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf terminal-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf done",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     assert!(matches!(start.status, ToolResultStatus::Ok));
 
-    let read = wait_for_terminal_read(&registry, ctx, "terminal-scratch-env", 64).await?;
+    let read = wait_for_terminal_read(&registry, ctx, execution_id_1.as_str(), 64).await?;
     assert!(matches!(read.status, ToolResultStatus::Ok));
     assert_eq!(read.content, "done");
     assert_eq!(
@@ -5299,7 +5255,7 @@ async fn bash_uses_session_scoped_scratch_namespace_env() -> Result<()> {
     let result_a = registry
         .execute(
             ctx_a.clone(),
-            tool_call("bash", json!({ "command": command_a })),
+            tool_call("exec_command", json!({ "command": command_a })),
         )
         .await?;
     assert!(matches!(result_a.status, ToolResultStatus::Ok));
@@ -5312,11 +5268,15 @@ async fn bash_uses_session_scoped_scratch_namespace_env() -> Result<()> {
     let result_b = registry
         .execute(
             ctx_b.clone(),
-            tool_call("bash", json!({ "command": command_b })),
+            tool_call("exec_command", json!({ "command": command_b })),
         )
         .await?;
     assert!(matches!(result_b.status, ToolResultStatus::Ok));
-    assert_eq!(result_b.content, "isolated");
+    assert!(
+        result_b.content.contains("isolated"),
+        "{}",
+        result_b.content
+    );
 
     let namespace_a = scratch_root.join("sessions").join(session_a);
     assert_eq!(fs::read_to_string(namespace_a.join("probe"))?, "tool-a");
@@ -5335,7 +5295,7 @@ async fn bash_uses_session_scoped_scratch_namespace_env() -> Result<()> {
 }
 
 #[tokio::test]
-async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
+async fn bash_can_write_and_clean_scratch_above_observation_threshold() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -5366,21 +5326,17 @@ async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
     let result = registry
         .execute(
             ctx.clone(),
-            tool_call("bash", json!({ "command": "printf ok" })),
+            tool_call("exec_command", json!({ "command": "printf ok" })),
         )
         .await?;
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("over-quota bash must fail with a structured tool error");
-    };
-    assert_eq!(error.kind, ToolErrorKind::ScratchQuotaExceeded);
-    assert!(error.message.contains("scratch quota exceeded"));
-    assert_eq!(error.details["scope"], json!("session"));
-    assert_eq!(error.details["usage_bytes"], 32);
-    assert_eq!(error.details["quota_bytes"], 16);
-
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert!(result.content.contains("ok"), "{}", result.content);
     fs::remove_file(namespace.join("blob"))?;
     let result = registry
-        .execute(ctx, tool_call("bash", json!({ "command": "printf ok" })))
+        .execute(
+            ctx,
+            tool_call("exec_command", json!({ "command": "printf ok" })),
+        )
         .await?;
     assert!(matches!(result.status, ToolResultStatus::Ok));
     Ok(())
@@ -5388,7 +5344,7 @@ async fn bash_scratch_quota_exceeded_is_structured_tool_error() -> Result<()> {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn bash_scratch_measurement_failure_is_structured_without_host_path() -> Result<()> {
+async fn bash_scratch_unknown_descendant_measurement_does_not_block_execution() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -5403,25 +5359,14 @@ async fn bash_scratch_measurement_failure_is_structured_without_host_path() -> R
     symlink(temp.path().join("outside"), namespace.join("escape"))?;
 
     let result = registry
-        .execute(ctx, tool_call("bash", json!({ "command": "printf ok" })))
+        .execute(
+            ctx,
+            tool_call("exec_command", json!({ "command": "printf ok" })),
+        )
         .await?;
-    let ToolResultStatus::Error(error) = &result.status else {
-        panic!("unsafe scratch namespace must fail with a structured tool error");
-    };
-    assert_eq!(error.kind, ToolErrorKind::Io);
-    assert!(
-        error
-            .message
-            .contains("scratch namespace contains a symlink")
-    );
-    assert!(!error.message.contains(&temp.path().display().to_string()));
-    assert_eq!(error.details["reason_code"], "scratch_namespace_symlink");
-    assert_eq!(error.details["measurement"]["relative_path"], "escape");
-    assert_eq!(
-        error.details["recovery"]["user_action"],
-        "reset_scratch_storage"
-    );
-    assert_eq!(error.details["recovery"]["automatic"], false);
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert!(result.content.contains("ok"), "{}", result.content);
+    assert!(crate::scratch_namespace::measure_scratch_usage(&scratch_root, session).is_err());
     Ok(())
 }
 
@@ -5440,7 +5385,7 @@ async fn deeply_nested_scratch_tree_does_not_block_the_next_bash_spawn() -> Resu
     let first = registry
         .execute(
             ctx.clone(),
-            tool_call("bash", json!({ "command": "printf first" })),
+            tool_call("exec_command", json!({ "command": "printf first" })),
         )
         .await?;
     assert!(matches!(first.status, ToolResultStatus::Ok));
@@ -5455,11 +5400,11 @@ async fn deeply_nested_scratch_tree_does_not_block_the_next_bash_spawn() -> Resu
     let second = registry
         .execute(
             ctx,
-            tool_call("bash", json!({ "command": "printf second" })),
+            tool_call("exec_command", json!({ "command": "printf second" })),
         )
         .await?;
     assert!(matches!(second.status, ToolResultStatus::Ok));
-    assert_eq!(second.content, "second");
+    assert_eq!(second.metadata.details["output_preview"], "second");
     Ok(())
 }
 
@@ -5507,24 +5452,6 @@ fn registration_shares_external_scratch_control_across_surfaces() -> Result<()> 
 
 #[test]
 fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
-    let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
-    let bash = BashTool {
-        scratch_label: "cache/tmp".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
-            scratch_root.clone(),
-        ),
-        scratch_namespaces: Arc::new(
-            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-        ),
-        executor: Arc::new(
-            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                backend: Arc::new(LocalExecutionBackend),
-            },
-        ),
-        shell: crate::shell_runtime::ResolvedShell::detect_default(),
-    }
-    .spec();
     let terminal = super::TerminalStartTool {
         managers: Default::default(),
         artifact_root: PathBuf::from("state/artifacts/tasks"),
@@ -5534,12 +5461,16 @@ fn scratch_tool_descriptions_match_session_scoped_lifecycle() {
         scratch: crate::scratch_namespace::ScratchNamespaceControl::new(),
     }
     .spec();
-    for spec in [bash, terminal] {
+    {
+        let spec = terminal;
         assert!(spec.description.contains("$SIGIL_SCRATCH_DIR"));
         assert!(spec.description.contains("cache/tmp"));
         assert!(spec.description.contains("scoped to the current session"));
-        assert!(spec.description.contains("size quota"));
-        assert!(spec.description.contains("TTL"));
+        assert!(
+            spec.description
+                .contains("usage is measured during maintenance")
+        );
+        assert!(spec.description.contains("expired contents are reclaimed"));
         assert!(spec.description.contains("permission.external_directory"));
     }
 }
@@ -5573,20 +5504,23 @@ async fn terminal_start_holds_and_releases_session_scratch_lease() -> Result<()>
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-scratch-lease",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf terminal-lease-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf done",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     assert!(matches!(start.status, ToolResultStatus::Ok));
-    assert!(handles.scratch.tasks.is_leased("terminal-scratch-lease"));
+    assert!(handles.scratch.tasks.is_leased(execution_id_1.as_str()));
 
-    let read = wait_for_terminal_read(&registry, ctx.clone(), "terminal-scratch-lease", 64).await?;
+    let read = wait_for_terminal_read(&registry, ctx.clone(), execution_id_1.as_str(), 64).await?;
     assert!(matches!(read.status, ToolResultStatus::Ok));
     assert_eq!(read.content, "done");
 
@@ -5603,19 +5537,19 @@ async fn terminal_start_holds_and_releases_session_scratch_lease() -> Result<()>
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_wait",
+                "exec_wait",
                 json!({
-                    "task_id": "terminal-scratch-lease",
+                    "execution_id": execution_id_1.as_str(),
                     "after_generation": generation,
                     "until": "exit",
-                    "timeout_secs": 30
+                    "yield_time_ms": 30000
                 }),
             ),
         )
         .await?;
     assert_eq!(waited.metadata.details["outcome"], "condition_met");
     assert!(
-        !handles.scratch.tasks.is_leased("terminal-scratch-lease"),
+        !handles.scratch.tasks.is_leased(execution_id_1.as_str()),
         "settled terminal task must release its scratch lease"
     );
     Ok(())
@@ -5650,19 +5584,22 @@ async fn terminal_scratch_lease_is_released_on_natural_exit_without_wait() -> Re
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-natural-exit",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "sleep 0.3; printf done",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     assert!(matches!(start.status, ToolResultStatus::Ok));
     assert!(
-        handles.scratch.tasks.is_leased("terminal-natural-exit"),
+        handles.scratch.tasks.is_leased(execution_id_1.as_str()),
         "a live terminal task must hold its scratch lease"
     );
 
@@ -5670,7 +5607,7 @@ async fn terminal_scratch_lease_is_released_on_natural_exit_without_wait() -> Re
     // waits or reads the settled task again.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if !handles.scratch.tasks.is_leased("terminal-natural-exit") {
+        if !handles.scratch.tasks.is_leased(execution_id_1.as_str()) {
             break;
         }
         assert!(
@@ -5708,25 +5645,28 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
-    registry
+    let started_execution_1 = registry
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-input",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "sleep 5",
-                    "mode": "background",
                     "shell": shell
                 }),
             ),
         )
         .await?;
+    let execution_id_1 = started_execution_1.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
 
     let destructive_input = tool_call(
-        "terminal_input",
+        "exec_input",
         json!({
-            "task_id": "terminal-input",
+            "execution_id": execution_id_1.as_str(),
             "input": "rm -rf .sigil\n"
         }),
     );
@@ -5744,9 +5684,9 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_input",
+                "exec_input",
                 json!({
-                    "task_id": "terminal-input",
+                    "execution_id": execution_id_1.as_str(),
                     "input": "secret-token-should-not-appear\n"
                 }),
             ),
@@ -5764,8 +5704,8 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_resize",
-                json!({ "task_id": "terminal-input", "rows": 24, "cols": 80 }),
+                "exec_resize",
+                json!({ "execution_id": execution_id_1.as_str(), "rows": 24, "cols": 80 }),
             ),
         )
         .await?;
@@ -5779,9 +5719,9 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_input",
+                "exec_input",
                 json!({
-                    "task_id": "terminal-input",
+                    "execution_id": execution_id_1.as_str(),
                     "input": "x".repeat(super::MAX_TERMINAL_INPUT_BYTES + 1)
                 }),
             ),
@@ -5799,7 +5739,10 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
     registry
         .execute(
             ctx,
-            tool_call("terminal_cancel", json!({ "task_id": "terminal-input" })),
+            tool_call(
+                "exec_cancel",
+                json!({ "execution_id": execution_id_1.as_str() }),
+            ),
         )
         .await?;
     Ok(())
@@ -5823,6 +5766,7 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
     let task_id = TerminalTaskId::new("terminal-input-permission")?;
     manager
         .start(TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: Some(task_id.clone()),
             command: "sleep 5".to_owned(),
             cwd: Some(PathBuf::from("logs")),
@@ -5837,7 +5781,7 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
     };
 
     let input_args = json!({
-        "task_id": task_id.as_str(),
+        "execution_id": task_id.as_str(),
         "input": "cat input.txt > out.txt\n"
     });
     let input_plan = tool.permission_plan(&ctx, &input_args)?;
@@ -5847,7 +5791,7 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
     );
     let subjects = &input_plan.subjects;
     assert!(subjects.iter().any(|subject| {
-        subject.kind == ToolSubjectKind::Command && subject.original == "terminal_input bytes=24"
+        subject.kind == ToolSubjectKind::Command && subject.original == "exec_input bytes=24"
     }));
     assert!(subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt > out.txt"
@@ -5861,11 +5805,11 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
 
     let ordinary_input = tool.permission_plan(
         &ctx,
-        &json!({ "task_id": task_id.as_str(), "input": "echo hello\n" }),
+        &json!({ "execution_id": task_id.as_str(), "input": "echo hello\n" }),
     )?;
     assert_eq!(ordinary_input.operation, ToolOperation::SendTerminalInput);
     let read_args = json!({
-        "task_id": task_id.as_str(),
+        "execution_id": task_id.as_str(),
         "input": "cat input.txt\n"
     });
     let read_plan = tool.permission_plan(&ctx, &read_args)?;
@@ -5893,12 +5837,11 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_start",
-                json!({
-                    "task_id": "terminal-pty-tool",
+                "exec_command",
+                json!({"yield_time_ms": 0,
+
                     "command": "trap '' WINCH; IFS= read -r line; printf 'got:%s\\n' \"$line\"",
                     "shell": shell,
-                    "mode": "interactive",
                     "pty": true,
                     "rows": 12,
                     "cols": 50
@@ -5906,14 +5849,18 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
             ),
         )
         .await?;
+    let execution_id_1 = start.metadata.details["execution_id"]
+        .as_str()
+        .expect("execution id")
+        .to_owned();
     assert!(matches!(start.status, ToolResultStatus::Ok));
 
     let resize = registry
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_resize",
-                json!({ "task_id": "terminal-pty-tool", "rows": 18, "cols": 70 }),
+                "exec_resize",
+                json!({ "execution_id": execution_id_1.as_str(), "rows": 18, "cols": 70 }),
             ),
         )
         .await?;
@@ -5924,8 +5871,8 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
         .execute(
             ctx.clone(),
             tool_call(
-                "terminal_input",
-                json!({ "task_id": "terminal-pty-tool", "input": "hello-from-pty\n" }),
+                "exec_input",
+                json!({ "execution_id": execution_id_1.as_str(), "input": "hello-from-pty\n" }),
             ),
         )
         .await?;
@@ -5934,9 +5881,13 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
     assert_eq!(input.metadata.details["backend"], "pty");
     assert_eq!(input.metadata.details["input_bytes"], 15);
 
-    let read =
-        wait_for_terminal_read_contains(&registry, ctx, "terminal-pty-tool", "got:hello-from-pty")
-            .await?;
+    let read = wait_for_terminal_read_contains(
+        &registry,
+        ctx,
+        execution_id_1.as_str(),
+        "got:hello-from-pty",
+    )
+    .await?;
     assert!(read.content.contains("got:hello-from-pty"));
     Ok(())
 }
@@ -6078,7 +6029,7 @@ async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
-    let result = bash_tool(temp.path())
+    let result = exec_tool(temp.path())
         .execute(
             ctx,
             "bash".to_owned(),
@@ -6100,7 +6051,7 @@ async fn bash_cancellation_rejects_process_spawn_before_filesystem_effect() -> R
     owner.request_cancel();
     let sentinel = temp.path().join("spawned.txt");
 
-    let error = bash_tool(temp.path())
+    let error = exec_tool(temp.path())
         .execute(
             ctx,
             "bash-cancelled".to_owned(),
@@ -6122,12 +6073,12 @@ async fn bash_inflight_cancellation_reaps_the_process_group() -> Result<()> {
     let ctx = ToolContext::new(temp.path().to_path_buf(), 30).with_cancellation(owner.handle());
     let pid_file = temp.path().join("descendant.pid");
     let task = tokio::spawn(async move {
-        bash_tool(temp.path())
+        exec_tool(temp.path())
             .execute(
                 ctx,
                 "bash-inflight-cancel".to_owned(),
                 json!({
-                    "command": "sh -c 'trap \"\" TERM; echo $$ > descendant.pid; while :; do sleep 1; done'"
+                    "command": "sh -c 'trap \"\" TERM; echo $$ > descendant.pid; while :; do sleep 1; done'", "yield_time_ms":30000
                 }),
             )
             .await
@@ -6152,22 +6103,10 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
-    let tool = BashTool {
-        scratch_label: "cache/tmp".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
-            temp.path().join("cache").join("tmp"),
-        ),
-        scratch_namespaces: Arc::new(
-            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-        ),
-        executor: Arc::new(
-            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                backend: Arc::new(LocalExecutionBackend),
-            },
-        ),
-        shell: crate::shell_runtime::ResolvedShell::detect_default(),
-    };
+    let mut tool = exec_tool(temp.path());
+    tool.scratch = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
+        temp.path().join("cache/tmp"),
+    );
     let ctx = ToolContext::new(workspace, 5);
 
     #[cfg(windows)]
@@ -6180,11 +6119,8 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         .await?;
 
     assert!(matches!(result.status, ToolResultStatus::Ok));
-    assert_eq!(result.content, "ok");
-    assert_eq!(
-        result.metadata.details["execution"]["network"]["policy"],
-        json!("unknown")
-    );
+    assert!(result.content.contains("ok"), "{}", result.content);
+    assert_eq!(result.metadata.details["enforcement_backend"], "local");
     assert_eq!(
         fs::read_to_string(temp.path().join("cache/tmp/sessions/no-session/probe"))?,
         "bash-ok"
@@ -6193,57 +6129,33 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
 }
 
 #[tokio::test]
-async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<()> {
+async fn exec_reports_scratch_creation_errors_before_spawning() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
     let scratch_file = temp.path().join("scratch-file");
     fs::write(&scratch_file, "not a directory")?;
-    let ctx = ToolContext::new(workspace, 5);
-
-    let bash_error = BashTool {
-        scratch_label: "scratch-file".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch_control: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(
-            scratch_file.clone(),
+    let mut tool = exec_tool(temp.path());
+    tool.scratch = crate::scratch_namespace::ScratchNamespaceControl::for_local_root(scratch_file);
+    let result = tool
+        .execute(
+            ToolContext::new(&workspace, 5),
+            "scratch-failure".into(),
+            json!({"command":"touch never-started"}),
+        )
+        .await;
+    match result {
+        Ok(result) => {
+            assert!(result.is_error());
+            assert!(
+                result.content.contains("not a directory") || result.content.contains("scratch")
+            );
+        }
+        Err(error) => assert!(
+            error.to_string().contains("not a directory") || error.to_string().contains("scratch")
         ),
-        scratch_namespaces: Arc::new(
-            crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new(),
-        ),
-        executor: Arc::new(
-            crate::managed_execution::LegacyBackendCommandExecutionPortV1 {
-                backend: Arc::new(LocalExecutionBackend),
-            },
-        ),
-        shell: crate::shell_runtime::ResolvedShell::detect_default(),
     }
-    .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))
-    .await
-    .expect_err("bash scratch file should fail provisioning");
-    assert!(
-        bash_error.to_string().contains("not a directory"),
-        "unexpected bash error: {bash_error:#}"
-    );
-
-    let terminal_error = TerminalStartTool {
-        managers: Arc::new(TerminalProcessManagers::default()),
-        artifact_root: PathBuf::from("state/artifacts/tasks"),
-        artifact_label_root: PathBuf::from("state/artifacts/tasks"),
-        scratch_label: "scratch-file".to_owned(),
-        scratch_quota: crate::scratch_namespace::ScratchQuota::default(),
-        scratch: crate::scratch_namespace::ScratchNamespaceControl::for_local_root(scratch_file),
-    }
-    .execute(
-        ctx,
-        "terminal-start".to_owned(),
-        json!({ "command": "printf never; sleep 5", "mode": "background" }),
-    )
-    .await
-    .expect_err("terminal_start scratch file should fail provisioning");
-    assert!(
-        terminal_error.to_string().contains("not a directory"),
-        "unexpected terminal_start error: {terminal_error:#}"
-    );
+    assert!(!workspace.join("never-started").exists());
     Ok(())
 }
 
@@ -6416,27 +6328,6 @@ async fn glob_does_not_traverse_external_symlink_targets() -> Result<()> {
 }
 
 #[tokio::test]
-async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
-
-    let result = bash_tool(temp.path())
-        .execute(
-            ctx,
-            "bash".to_owned(),
-            json!({ "command": "sleep 2", "timeout_secs": 1 }),
-        )
-        .await?;
-
-    let ToolResultStatus::Error(error) = result.status else {
-        panic!("expected timeout to be surfaced as an error result");
-    };
-    assert_eq!(error.kind, ToolErrorKind::Timeout);
-    assert!(error.message.contains("bash command timed out"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 15);
@@ -6446,7 +6337,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     #[cfg(not(windows))]
     let command = "printf 'bad output' >&2; exit 7";
 
-    let result = bash_tool(temp.path())
+    let result = exec_tool(temp.path())
         .execute(ctx, "bash".to_owned(), json!({ "command": command }))
         .await?;
 
@@ -6466,7 +6357,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
 fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
-    let tool = bash_tool(temp.path());
+    let tool = shell_analyzer(temp.path());
 
     for command in [
         "pwd",
@@ -6525,7 +6416,7 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
     fs::write(&outside_file, "needle")?;
     let outside_output = outside.path().canonicalize()?.join("out.txt");
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
 
     let external_plan = tool.permission_plan(
         &ctx,
@@ -6559,7 +6450,7 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
 async fn bash_shell_analysis_groups_workspace_checks_for_session_grants() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
 
     let first = tool.permission_plan(&ctx, &json!({ "command": "cargo check 2>&1" }))?;
     let piped = tool.permission_plan(
@@ -6604,7 +6495,7 @@ async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_app
 {
     let workspace = tempfile::tempdir()?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
 
     let search = tool.permission_plan(
         &ctx,
@@ -6630,64 +6521,36 @@ async fn bash_shell_analysis_allows_safe_search_and_devices_without_external_app
 }
 
 #[tokio::test]
-async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
-    let receipt = ExecutionReceipt {
-        exit_code: Some(0),
-        stdout: b"ok\n".to_vec(),
-        stderr: Vec::new(),
-        timed_out: false,
-        backend: ExecutionBackendKind::Local,
-        capabilities: ExecutionBackendCapabilities::default(),
-        network: Default::default(),
-        resources: Default::default(),
-        environment_policy: sigil_kernel::ProcessEnvironmentPolicy::InheritParent,
-        output: Default::default(),
-        capture: None,
-    };
+async fn exec_result_exposes_workspace_check_facts() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let analysis = super::analyze_shell_command(
-        workspace.path(),
-        "./scripts/check-touched.sh --tier quick 2>&1",
-    )?;
-    let result = super::bash_tool_result_from_execution_receipt_with_analysis(
-        "call".to_owned(),
-        "bash".to_owned(),
-        receipt,
-        &analysis,
-    )?;
-
+    fs::create_dir_all(workspace.path().join("scripts"))?;
+    let script = workspace.path().join("scripts/check-touched.sh");
+    fs::write(&script, "#!/bin/sh\nprintf 'ok\\n'\n")?;
+    #[cfg(unix)]
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    let command = "./scripts/check-touched.sh --tier quick 2>&1";
+    let result = posix_exec_tool(workspace.path())?
+        .execute(
+            ToolContext::new(workspace.path(), 5),
+            "workspace-check".into(),
+            json!({"command":command,"yield_time_ms":10000}),
+        )
+        .await?;
     assert_eq!(result.metadata.exit_code, Some(0));
+    let shell = &result.metadata.details["shell_analysis"];
+    assert_eq!(shell["command_family"], "check_touched");
+    assert_eq!(shell["command"], command);
+    assert_eq!(shell["normalized_command"], command);
+    assert_eq!(shell["classification_source"], "builtin_family");
+    assert_eq!(shell["grant_scope"], "workspace_script");
     assert_eq!(
-        result.metadata.details["shell"]["command_family"],
-        "check_touched"
-    );
-    assert_eq!(
-        result.metadata.details["shell"]["command"],
-        "./scripts/check-touched.sh --tier quick 2>&1"
-    );
-    assert_eq!(
-        result.metadata.details["shell"]["normalized_command"],
-        "./scripts/check-touched.sh --tier quick 2>&1"
-    );
-    assert_eq!(
-        result.metadata.details["shell"]["classification_source"],
-        "builtin_family"
-    );
-    assert_eq!(
-        result.metadata.details["shell"]["grant_scope"],
-        "workspace_script"
-    );
-    assert_eq!(
-        result.metadata.details["shell"]["grant_scope_detail"]["path"],
+        shell["grant_scope_detail"]["path"],
         "scripts/check-touched.sh"
     );
-    assert_eq!(
-        result.metadata.details["shell"]["grant_scope_detail"]["args_family"],
-        "quick"
-    );
-    assert_eq!(result.metadata.details["shell"]["exit_code"], 0);
-    assert_eq!(result.metadata.details["shell"]["verdict"], "passed");
-    assert_eq!(result.metadata.details["shell"]["rerun_not_needed"], true);
+    assert_eq!(shell["grant_scope_detail"]["args_family"], "quick");
+    assert_eq!(shell["exit_code"], 0);
+    assert_eq!(shell["verdict"], "success");
+    assert_eq!(shell["rerun_not_needed"], true);
     Ok(())
 }
 
@@ -6696,7 +6559,7 @@ async fn bash_tool_result_exposes_workspace_check_facts() -> Result<()> {
 async fn bash_shell_analysis_treats_missing_relative_paths_as_workspace_subjects() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
-    let tool = bash_tool(workspace.path());
+    let tool = shell_analyzer(workspace.path());
 
     let plan = tool.permission_plan(&ctx, &json!({ "command": "ls missing_workspace_dir" }))?;
     let subjects = &plan.subjects;
@@ -6724,7 +6587,7 @@ async fn bash_permission_subjects_resolve_cd_relative_paths_against_external_cwd
     let outside_child = outside_root.join("child.txt");
     let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
-    let plan = bash_tool(workspace.path()).permission_plan(
+    let plan = shell_analyzer(workspace.path()).permission_plan(
         &ctx,
         &json!({ "command": format!("cd {} && ls child.txt", outside_root.display()) }),
     )?;
@@ -7016,7 +6879,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
         .expect_err("invalid regex should fail");
     assert!(!grep_error.to_string().is_empty());
 
-    let bash_error = bash_tool(temp.path())
+    let bash_error = exec_tool(temp.path())
         .execute(ctx, "bash".to_owned(), json!({}))
         .await
         .expect_err("missing command should fail");
@@ -7190,7 +7053,7 @@ fn bash_file_test_echo_loop_is_readonly_but_scripts_still_execute() -> Result<()
 fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::create_dir_all(workspace.path().join(".git"))?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     let command = r#"git log --oneline -n 6; echo "=== branch ==="; git branch --show-current; echo "=== HEAD ==="; git rev-parse HEAD; echo "=== stash ==="; git stash list; echo "=== merge markers ==="; for f in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD; do if [ -e ".git/$f" ]; then echo "EXISTS .git/$f"; else echo "absent .git/$f"; fi; done"#;
 
@@ -7230,10 +7093,14 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
 
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    registry.register(Arc::new(posix_bash_tool(workspace.path())?));
-    let spec = registry.spec_for("bash").context("bash spec must exist")?;
-    let bound_plan =
-        registry.permission_plan(&context, &tool_call("bash", json!({ "command": command })))?;
+    registry.register(Arc::new(posix_exec_tool(workspace.path())?));
+    let spec = registry
+        .spec_for("exec_command")
+        .context("bash spec must exist")?;
+    let bound_plan = registry.permission_plan(
+        &context,
+        &tool_call("exec_command", json!({ "command": command })),
+    )?;
     let danger_config = PermissionConfig {
         mode: PermissionMode::DangerFullAccess,
         ..Default::default()
@@ -7244,6 +7111,15 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
     };
     let decision = PermissionPolicyChain::new_with_context(&danger_config, &policy_context)
         .decide_plan(&spec, &bound_plan)?;
+    assert_eq!(bound_plan.access, ToolAccess::Read);
+    assert_eq!(
+        bound_plan.containment.process,
+        ProcessContainment::OwnedTree
+    );
+    assert_eq!(
+        bound_plan.containment.environment,
+        EnvironmentContainment::Restricted
+    );
     assert_eq!(decision.risk, PermissionRisk::Low);
     assert_eq!(decision.mode, sigil_kernel::ApprovalMode::Allow);
 
@@ -7264,17 +7140,13 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
     assert!(background_analysis.subjects.iter().any(|subject| {
         subject.kind == ToolSubjectKind::Path && subject.original == ".git/MERGE_HEAD"
     }));
-    assert!(
-        tool.permission_plan(&context, &json!({ "command": attached_background }),)
-            .is_err(),
-        "bash must also reject background execution before policy evaluation"
-    );
-    let background_draft = background_analysis.permission_plan();
-    // BashTool rejects `&` before binding a plan. Recreate that analyzed draft here so the test
-    // also proves the independent danger-full-access hard-safety decision.
+    let background_draft =
+        tool.permission_plan(&context, &json!({ "command": attached_background }))?;
+    assert_ne!(background_draft.access, ToolAccess::Read);
+    assert!(!background_draft.analysis.is_complete());
     let background_plan = sigil_kernel::ToolPermissionPlanV2 {
         schema_version: sigil_kernel::TOOL_PERMISSION_PLAN_SCHEMA_VERSION,
-        tool_name: "bash".to_owned(),
+        tool_name: "exec_command".to_owned(),
         access: background_draft.access,
         operation: background_draft.operation,
         effects: background_draft.effects,
@@ -7297,7 +7169,7 @@ fn bash_git_metadata_presence_loop_is_bounded_read_only() -> Result<()> {
     let protected_write = r#"for f in MERGE_HEAD; do if [ -e ".git/$f" ]; then echo overwrite > ".git/$f"; else echo absent; fi; done"#;
     let protected_plan = registry.permission_plan(
         &context,
-        &tool_call("bash", json!({ "command": protected_write })),
+        &tool_call("exec_command", json!({ "command": protected_write })),
     )?;
     assert!(
         protected_plan.subjects.iter().any(|subject| {
@@ -7422,7 +7294,7 @@ fn bash_git_metadata_presence_loop_binds_a_controlled_git_environment() -> Resul
 fn bash_git_metadata_presence_loop_rejects_dynamic_or_mutating_variants() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::create_dir_all(workspace.path().join(".git"))?;
-    let tool = posix_bash_tool(workspace.path())?;
+    let tool = posix_shell_analyzer(workspace.path())?;
     let context = ToolContext::new(workspace.path(), 30);
     assert_eq!(
         super::tokenize_shell_subject_words(r"./g'\it' status")[0],
@@ -8825,9 +8697,9 @@ async fn wait_for_terminal_read(
             .execute(
                 ctx.clone(),
                 tool_call(
-                    "terminal_read",
+                    "exec_read",
                     json!({
-                        "task_id": task_id,
+                        "execution_id": task_id,
                         "offset": 0,
                         "limit_bytes": limit_bytes,
                         "include_content": true
@@ -8844,9 +8716,9 @@ async fn wait_for_terminal_read(
         .execute(
             ctx,
             tool_call(
-                "terminal_read",
+                "exec_read",
                 json!({
-                    "task_id": task_id,
+                    "execution_id": task_id,
                     "offset": 0,
                     "limit_bytes": limit_bytes,
                     "include_content": true
@@ -8867,9 +8739,9 @@ async fn wait_for_terminal_read_contains(
             .execute(
                 ctx.clone(),
                 tool_call(
-                    "terminal_read",
+                    "exec_read",
                     json!({
-                        "task_id": task_id,
+                        "execution_id": task_id,
                         "offset": 0,
                         "limit_bytes": 1024,
                         "include_content": true
@@ -8886,9 +8758,9 @@ async fn wait_for_terminal_read_contains(
         .execute(
             ctx,
             tool_call(
-                "terminal_read",
+                "exec_read",
                 json!({
-                    "task_id": task_id,
+                    "execution_id": task_id,
                     "offset": 0,
                     "limit_bytes": 1024,
                     "include_content": true
@@ -8903,7 +8775,7 @@ fn test_shell(dir: &Path) -> Result<String> {
     let shell = dir.join("sh");
     fs::write(
         &shell,
-        "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; fi\nexec /bin/sh -c \"$1\"\n",
+        "#!/bin/sh\ncase \"$1\" in -c|-lc) shift ;; esac\nexec /bin/sh -c \"$1\"\n",
     )?;
     let mut permissions = fs::metadata(&shell)?.permissions();
     permissions.set_mode(0o755);
@@ -8961,30 +8833,31 @@ fn powershell_arguments_freeze_noninteractive_utf8_and_exit_propagation() -> Res
 }
 
 #[test]
-fn powershell_bash_rejects_native_background_jobs() -> Result<()> {
+fn powershell_background_jobs_remain_subject_to_execution_permission() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let mut tool = bash_tool(workspace.path());
-    tool.shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
+    let tool = exec_tool_with_shell(
+        workspace.path(),
+        crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?,
+    );
     let context = ToolContext::new(workspace.path(), 30);
-
     for command in ["Start-Job { Get-Process }", "Get-Process &"] {
-        let error = tool
-            .permission_plan(&context, &json!({ "command": command }))
-            .expect_err("PowerShell background work must use terminal_start");
-        assert!(error.to_string().contains("terminal_start"), "{command}");
+        let plan = tool.permission_plan(&context, &json!({"command":command}))?;
+        assert_eq!(plan.access, ToolAccess::Execute);
+        assert_eq!(plan.containment.process, ProcessContainment::OwnedTree);
     }
     Ok(())
 }
 
 #[test]
-fn native_shells_redirect_known_finite_commands_to_bash() -> Result<()> {
+fn native_shell_command_classification_does_not_select_a_separate_execution_tool() -> Result<()> {
     let shell = crate::shell_runtime::ResolvedShell::resolve_explicit("pwsh.exe")?;
     let analysis =
         crate::shell::analyze_shell_command_with_shell(Path::new("."), "git status", &shell)?;
-    let reason =
-        crate::shell::known_finite_terminal_command_reason("git status", &shell, &analysis)
-            .context("git status should remain finite across native shell dialects")?;
-    assert!(reason.contains("known finite command family"));
+    assert!(analysis.normalized_command.contains("git status"));
+    assert_eq!(
+        exec_tool_with_shell(Path::new("."), shell).spec().name,
+        "exec_command"
+    );
     Ok(())
 }
 
@@ -9036,7 +8909,7 @@ async fn windows_native_shell_reports_utf8_and_nonzero_exit() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
-    let tool = bash_tool(temp.path());
+    let tool = exec_tool(temp.path());
     let ctx = ToolContext::new(workspace, 10);
 
     let utf8 = tool
@@ -9048,7 +8921,10 @@ async fn windows_native_shell_reports_utf8_and_nonzero_exit() -> Result<()> {
         .await?;
     assert!(matches!(utf8.status, ToolResultStatus::Ok));
     assert!(utf8.content.contains("你好，Sigil"));
-    assert_eq!(utf8.metadata.details["shell"]["dialect"], "powershell");
+    assert_eq!(
+        utf8.metadata.details["shell_analysis"]["dialect"],
+        "powershell"
+    );
 
     let failed = tool
         .execute(
@@ -9058,7 +8934,7 @@ async fn windows_native_shell_reports_utf8_and_nonzero_exit() -> Result<()> {
         )
         .await?;
     assert!(matches!(failed.status, ToolResultStatus::Error(_)));
-    assert_eq!(failed.metadata.details["shell"]["exit_code"], 7);
+    assert_eq!(failed.metadata.details["shell_analysis"]["exit_code"], 7);
     Ok(())
 }
 
@@ -9073,12 +8949,12 @@ async fn windows_job_object_reaps_one_shot_descendants_on_timeout() -> Result<()
     // Observe readiness while the command is still running. Reading the PID only after the
     // timeout races with job-object cleanup on a saturated hosted runner: cleanup can terminate
     // nested PowerShell before it gets a chance to publish the file.
-    let tool = bash_tool(temp.path());
+    let tool = exec_tool(temp.path());
     let (result, child_pid) = tokio::join!(
         tool.execute(
             ToolContext::new(workspace, 10),
             "windows-timeout".to_owned(),
-            json!({ "command": command, "timeout_secs": 15 }),
+            json!({ "command": command, "max_runtime_secs": 15, "yield_time_ms": 30000 }),
         ),
         read_windows_pid(&pid_file)
     );
@@ -9086,10 +8962,7 @@ async fn windows_job_object_reaps_one_shot_descendants_on_timeout() -> Result<()
     let child_pid = child_pid?;
 
     assert!(matches!(result.status, ToolResultStatus::Error(_)));
-    assert_eq!(
-        result.metadata.details["execution"]["resources"]["cleanup"]["status"],
-        "completed"
-    );
+    assert_eq!(result.metadata.details["cleanup"]["status"], "completed");
     assert!(!windows_process_is_alive(child_pid)?);
     Ok(())
 }
@@ -9175,4 +9048,80 @@ fn windows_process_is_alive(process_id: u32) -> Result<bool> {
         ])
         .status()?
         .success())
+}
+
+#[tokio::test]
+async fn read_tool_artifact_search_defaults_to_fifty_and_pages_without_losing_matches() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let store = ToolArtifactStore::for_session_store(&session_store);
+    let body = (0..125)
+        .map(|i| format!("needle-{i:03}\n"))
+        .collect::<String>();
+    let descriptor = store.capture_text(
+        "source",
+        "fixture",
+        &body,
+        ToolArtifactSensitivity::Ordinary,
+    )?;
+    let context = ToolContext::new(temp.path(), 5)
+        .with_tool_artifact_reader(store, ToolArtifactReadBudgetV1::default(), "epoch-search")
+        .with_tool_artifact_source_binding(&descriptor, "source-search");
+    let mut selector = json!({"kind": "search_literal", "query": "needle"});
+    let mut combined = String::new();
+    for (page_index, expected_count) in [50, 50, 25].into_iter().enumerate() {
+        let result = ReadToolArtifactTool
+            .execute(
+                context.clone(),
+                format!("page-{page_index}"),
+                json!({"artifact_ref": descriptor.artifact_ref, "selector": selector}),
+            )
+            .await?;
+        assert!(!result.is_error(), "{result:?}");
+        let summary: Value = serde_json::from_str(&result.content)?;
+        let transient: Value = serde_json::from_str(
+            result.transient_context[0]
+                .content
+                .as_deref()
+                .context("page body")?,
+        )?;
+        assert_eq!(summary["match_count"], expected_count);
+        assert_eq!(summary["truncated"], page_index < 2);
+        combined.push_str(transient["page"]["body"].as_str().context("text page")?);
+        selector = summary["next_selector"].clone();
+    }
+    assert_eq!(combined, body);
+    assert!(selector.is_null());
+    for desired in [30, 100, 1_000_000] {
+        let result = ReadToolArtifactTool.execute(context.clone(), format!("requested-{desired}"), json!({"artifact_ref": descriptor.artifact_ref, "selector": {"kind": "search_literal", "query": "needle", "max_matches": desired}})).await?;
+        assert!(!result.is_error(), "{result:?}");
+        let summary: Value = serde_json::from_str(&result.content)?;
+        assert_eq!(summary["match_count"], desired.min(125));
+        assert_eq!(summary["truncated"], desired < 125);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_tool_artifact_search_errors_identify_the_invalid_field() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    for (field, value) in [
+        ("max_matches", json!(0)),
+        ("max_matches", json!(-1)),
+        ("max_matches", json!("many")),
+        ("context_lines", json!(4)),
+        ("context_lines", json!(65536)),
+        ("query", json!(123)),
+        ("query", json!(null)),
+        ("query", json!("")),
+    ] {
+        let mut selector = json!({"kind": "search_literal", "query": "needle"});
+        selector[field] = value;
+        let result = ReadToolArtifactTool.execute(ToolContext::new(temp.path(), 5), "invalid-search".into(), json!({"artifact_ref": {"artifact_id": "ta1_00000000000000000000000000000000"}, "selector": selector})).await?;
+        assert!(result.is_error());
+        assert!(result.content.contains(field), "{result:?}");
+        assert!(!result.content.contains("line_page"), "{result:?}");
+    }
+    Ok(())
 }

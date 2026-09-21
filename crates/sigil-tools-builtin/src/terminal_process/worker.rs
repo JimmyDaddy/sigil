@@ -62,14 +62,16 @@ pub(super) struct TerminalWorker {
 }
 
 pub(super) struct ManagedTerminalWorker {
+    pub(super) stop_rx: watch::Receiver<bool>,
+    pub(super) observer: Option<sigil_kernel::RunCancellationHandle>,
     pub(super) handle: Box<dyn sigil_kernel::managed_execution::ManagedProcessHandleV1>,
     pub(super) stdout_writer: tokio::io::DuplexStream,
     pub(super) stderr_writer: tokio::io::DuplexStream,
     pub(super) cancel_rx: mpsc::Receiver<ManagedTerminalCommand>,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
     pub(super) artifacts: TerminalTaskArtifacts,
-    pub(super) stdout_task: JoinHandle<Result<io::CaptureOutcome>>,
-    pub(super) stderr_task: JoinHandle<Result<io::CaptureOutcome>>,
+    pub(super) stdout_task: super::manager::OwnedCaptureJoin,
+    pub(super) stderr_task: super::manager::OwnedCaptureJoin,
     pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
     pub(super) preview_limit_bytes: usize,
     pub(super) lifecycle: TerminalLifecycleOwner,
@@ -113,22 +115,37 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
     let mut cancel_requested = false;
     let mut stdout_writer = worker.stdout_writer;
     let mut stderr_writer = worker.stderr_writer;
+    let mut pending_command = None;
+    let mut stop_rx = worker.stop_rx;
+    let mut shutdown_observed = false;
 
     while stream_open {
         tokio::select! {
             biased;
-            command = cancel_rx.recv(), if cancel_open => {
+            () = execution_owner_stopping(&mut stop_rx), if !shutdown_observed => {
+                shutdown_observed = true;
+                match handle.cancel(sigil_kernel::managed_execution::ProcessCancelReasonV1::ParentShutdown).await {
+                    Ok(_) => cancel_requested = true,
+                    Err(error) => {
+                        stream_error.get_or_insert_with(|| format!("managed execution shutdown failed: {error}"));
+                    }
+                }
+                stream_open = false;
+            }
+            command = async {
+                if pending_command.is_some() { pending_command.take() } else { cancel_rx.recv().await }
+            }, if cancel_open => {
                 let Some(command) = command else {
                     cancel_open = false;
                     continue;
                 };
                 match command {
                     ManagedTerminalCommand::WriteStdin { input, respond_to } => {
-                        let result = handle
-                            .write_stdin(input)
-                            .await
-                            .map(|_| ())
-                            .map_err(|error| error.to_string());
+                        let (result, interrupted_by) = interruptible_terminal_operation(
+                            handle.write_stdin(input), &mut cancel_rx, &mut stop_rx,
+                        ).await;
+                        pending_command = interrupted_by;
+                        let result = result.map(|_| ());
                         let _ = respond_to.send(result);
                     }
                     ManagedTerminalCommand::Resize { size, respond_to } => {
@@ -181,7 +198,15 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
                             | sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Pty => &mut stdout_writer,
                             sigil_kernel::managed_execution::ManagedProcessOutputChannelV1::Stderr => &mut stderr_writer,
                         };
-                        if let Err(error) = writer.write_all(&frame.payload).await {
+                        let (write_result, interrupted_by) = interruptible_terminal_operation(
+                            writer.write_all(&frame.payload), &mut cancel_rx, &mut stop_rx,
+                        ).await;
+                        if interrupted_by.is_some() {
+                            stream_error.get_or_insert_with(|| "output forwarding interrupted by a cancellation request".to_owned());
+                            pending_command = interrupted_by;
+                            continue;
+                        }
+                        if let Err(error) = write_result {
                             stream_error.get_or_insert_with(|| {
                                 format!("managed terminal output projection failed: {error}")
                             });
@@ -203,10 +228,31 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
     drop(stdout_writer);
     drop(stderr_writer);
     let receipt = handle.wait_and_finalize().await;
-    let mut stdout_task = CaptureTaskState::new(TerminalOutputStream::Stdout, worker.stdout_task);
-    let mut stderr_task = CaptureTaskState::new(TerminalOutputStream::Stderr, worker.stderr_task);
-    let capture_error = join_capture_tasks(&mut stdout_task, &mut stderr_task).await;
-    let capture_error = stream_error.or(capture_error);
+    let drain_stage = worker
+        .observer
+        .as_ref()
+        .map(|observer| observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::OutputDrain));
+    let (stdout_error, stderr_error) = tokio::join!(
+        join_managed_capture(&worker.stdout_task),
+        join_managed_capture(&worker.stderr_task)
+    );
+    let capture_error = stdout_error.or(stderr_error);
+    if let Some(stage) = drain_stage {
+        stage.finish(capture_error.is_none());
+    }
+    let capture_error = stream_error.or(capture_error).or_else(|| {
+        receipt.as_ref().ok().and_then(|receipt| {
+            [
+                &receipt.process.stdout_summary,
+                &receipt.process.stderr_summary,
+            ]
+            .iter()
+            .any(|stream| {
+                stream.source == sigil_kernel::managed_execution::ManagedOutputSourceV1::ReadFailed
+            })
+            .then(|| "managed process reported incomplete output capture".to_owned())
+        })
+    });
     let (status, cleanup) = match receipt {
         Ok(ref receipt) => (
             managed_terminal_status(&receipt.process.termination),
@@ -222,6 +268,28 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
     let fallback = capture_error
         .as_ref()
         .map(|_| TerminalOutputTerminationReason::OutputCaptureFailed);
+    let mut capture_evidence =
+        TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback);
+    if let Ok(receipt) = &receipt {
+        let stdout = &receipt.process.stdout_summary;
+        let stderr = &receipt.process.stderr_summary;
+        worker
+            .capture_ledger
+            .reconcile_observed_stream_bytes(stdout.observed_bytes, stderr.observed_bytes);
+        let observed = stdout.observed_bytes.saturating_add(stderr.observed_bytes);
+        let retained = stdout.retained_bytes.saturating_add(stderr.retained_bytes);
+        capture_evidence.observed_total_bytes = capture_evidence.observed_total_bytes.max(observed);
+        capture_evidence.omitted_observed_bytes = capture_evidence
+            .omitted_observed_bytes
+            .max(observed.saturating_sub(retained));
+        if stdout.truncated || stderr.truncated {
+            capture_evidence.limit_bytes = Some(retained);
+            if capture_evidence.termination_reason.is_none() {
+                capture_evidence.termination_reason =
+                    Some(TerminalOutputTerminationReason::OutputLimitExceeded);
+            }
+        }
+    }
     let finalization_response = match &receipt {
         Ok(_) => Ok(()),
         Err(error) => Err(error.to_string()),
@@ -233,7 +301,7 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
         capture_error,
         worker.preview_limit_bytes,
         cleanup,
-        TerminalCaptureEvidence::from_ledger(&worker.capture_ledger, fallback),
+        capture_evidence,
     )
     .await;
     worker
@@ -241,6 +309,67 @@ pub(super) async fn run_managed_terminal_worker(worker: ManagedTerminalWorker) {
         .mark_terminal(entry.status.clone(), entry.output_total_bytes);
     for respond_to in cancel_waiters {
         let _ = respond_to.send(finalization_response.clone());
+    }
+}
+
+pub(super) async fn join_managed_capture(
+    slot: &super::manager::OwnedCaptureJoin,
+) -> Option<String> {
+    let mut owner = slot.lock().await;
+    let result = match owner.as_mut() {
+        Some(task) => task.await,
+        None => return None,
+    };
+    owner.take();
+    match result {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(_) => Some("managed output capture owner panicked".to_owned()),
+    }
+}
+
+/// An input write or capture backpressure must never hide an explicit cancel command. Dropping
+/// the operation future is safe: sandbox stdin retains its joined writer owner, and a partially
+/// forwarded output frame is already covered by the final interrupted capture receipt.
+async fn interruptible_terminal_operation<T, E: std::fmt::Display>(
+    operation: impl std::future::Future<Output = std::result::Result<T, E>>,
+    commands: &mut mpsc::Receiver<ManagedTerminalCommand>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> (
+    std::result::Result<T, String>,
+    Option<ManagedTerminalCommand>,
+) {
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            () = execution_owner_stopping(stop_rx) => {
+                let (respond_to, _) = oneshot::channel();
+                return (Err("operation interrupted by execution owner shutdown".to_owned()),
+                    Some(ManagedTerminalCommand::Cancel { respond_to }));
+            }
+            command = commands.recv() => match command {
+                Some(command @ ManagedTerminalCommand::Cancel { .. }) => {
+                    return (Err("operation interrupted by execution cancellation".to_owned()), Some(command));
+                }
+                Some(ManagedTerminalCommand::WriteStdin { respond_to, .. } | ManagedTerminalCommand::Resize { respond_to, .. }) => {
+                    let _ = respond_to.send(Err("execution control is busy; wait for the current operation".to_owned()));
+                }
+                None => return (operation.await.map_err(|error| error.to_string()), None),
+            },
+            result = &mut operation => return (result.map_err(|error| error.to_string()), None),
+        }
+    }
+}
+
+async fn execution_owner_stopping(stop_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *stop_rx.borrow_and_update() {
+            return;
+        }
+        if stop_rx.changed().await.is_err() {
+            return;
+        }
     }
 }
 
@@ -258,7 +387,7 @@ fn managed_terminal_status(
         }
         sigil_kernel::managed_execution::ProcessTerminationV1::TimedOut => {
             TerminalTaskStatus::Failed {
-                reason: "managed terminal exceeded its execution limit".to_owned(),
+                reason: "managed terminal timed out".to_owned(),
             }
         }
         other => TerminalTaskStatus::Failed {
@@ -951,6 +1080,25 @@ async fn finalize_terminal_task_with_override(
     .await
 }
 
+pub(super) fn terminal_status_after_cleanup(
+    status: TerminalTaskStatus,
+    cleanup: Option<&ExecutionCleanupReceipt>,
+) -> TerminalTaskStatus {
+    let cleanup_incomplete = cleanup.is_some_and(|receipt| {
+        !matches!(
+            receipt.status,
+            ExecutionCleanupStatus::Completed | ExecutionCleanupStatus::NotNeeded
+        )
+    });
+    let cancelled_without_reap = matches!(status, TerminalTaskStatus::Cancelled)
+        && !cleanup.is_some_and(|receipt| receipt.status == ExecutionCleanupStatus::Completed);
+    if status.is_terminal() && (cleanup_incomplete || cancelled_without_reap) {
+        TerminalTaskStatus::Interrupted
+    } else {
+        status
+    }
+}
+
 async fn finalize_terminal_summary(
     summary: &Arc<Mutex<TerminalTaskEntry>>,
     artifacts: &TerminalTaskArtifacts,
@@ -994,13 +1142,7 @@ async fn finalize_terminal_summary(
         };
     }
 
-    if matches!(final_status, TerminalTaskStatus::Cancelled)
-        && !cleanup_override
-            .as_ref()
-            .is_some_and(|receipt| receipt.status == ExecutionCleanupStatus::Completed)
-    {
-        final_status = TerminalTaskStatus::Interrupted;
-    }
+    final_status = terminal_status_after_cleanup(final_status, cleanup_override.as_ref());
     let mut entry = summary.lock().await;
     entry.status = final_status;
     entry.output_preview = (!log_summary.preview.is_empty()).then_some(log_summary.preview);
@@ -1555,4 +1697,53 @@ pub(super) async fn send_terminate_signal(process_id: u32) -> Result<()> {
 #[cfg(not(any(unix, windows)))]
 pub(super) async fn send_terminate_signal(_process_id: u32) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod execution_control_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn capture_backpressure_interruption_preserves_failure_when_cancel_is_rejected()
+    -> Result<()> {
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let (commands, mut receiver) = mpsc::channel(1);
+        let operation = tokio::spawn(async move {
+            let (_stop, mut stop_rx) = watch::channel(false);
+            interruptible_terminal_operation(
+                writer.write_all(&[b'x'; 1024]),
+                &mut receiver,
+                &mut stop_rx,
+            )
+            .await
+        });
+        // Observe a real first byte before cancellation, proving the write is partial and
+        // blocked by the live bounded capture pipe instead of merely never being polled.
+        let mut first = [0_u8; 1];
+        reader.read_exact(&mut first).await?;
+        assert_eq!(first, [b'x']);
+        let (respond_to, response) = oneshot::channel();
+        commands
+            .send(ManagedTerminalCommand::Cancel { respond_to })
+            .await?;
+        let (capture, interrupted_by) = operation.await?;
+        assert!(
+            capture.is_err(),
+            "a partially forwarded frame is never complete"
+        );
+        let Some(ManagedTerminalCommand::Cancel { respond_to }) = interrupted_by else {
+            bail!("cancel must retain its owner acknowledgement");
+        };
+        let _ = respond_to.send(Err("owner rejected cancellation".to_owned()));
+        assert!(response.await?.is_err());
+        // The owner forwards this independent capture error into finalization even if process
+        // cancellation fails. A control response cannot upgrade this frame to successful IO.
+        assert!(
+            capture
+                .expect_err("interrupted frame capture must fail")
+                .contains("interrupted")
+        );
+        Ok(())
+    }
 }

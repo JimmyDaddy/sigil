@@ -6,21 +6,21 @@ use sigil_kernel::resource::{
     ResourceRetentionPolicyV1, StorageAdmissionSourceClassV1,
 };
 
-fn source() -> StorageAdmissionSourceV1 {
+pub(super) fn source() -> StorageAdmissionSourceV1 {
     StorageAdmissionSourceV1::ApplicationCutoverRoot {
         cutover_manifest_hash: CanonicalHash::from_bytes([0x11; 32]),
         application_generation: 1,
     }
 }
 
-fn authority() -> AuthorityGeneration {
+pub(super) fn authority() -> AuthorityGeneration {
     AuthorityGeneration {
         epoch: 1,
         instance_hash: CanonicalHash::from_bytes([0x12; 32]),
     }
 }
 
-fn grant() -> StorageAdmissionGrantV1 {
+pub(super) fn grant() -> StorageAdmissionGrantV1 {
     StorageAdmissionGrantV1 {
         grant_id: OpaqueStorageGrantId::new("grant-storage-test".to_owned()),
         admission_hash: CanonicalHash::from_bytes([1; 32]),

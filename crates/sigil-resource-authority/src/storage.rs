@@ -5,7 +5,7 @@
 //! migrate a historical resource ledger. A physical writer may publish a bounded marker and
 //! `records.jsonl`, but those are checked as current namespace facts, never as an authority log.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,9 @@ use sigil_kernel::resource::{
 };
 
 use crate::quota::{QuotaBookV1, QuotaErrorV1};
+
+#[path = "control_log_recovery.rs"]
+mod control_log_recovery;
 
 /// Authority-private grant table. A grant is registered for the current authority generation;
 /// a lease is live only while it is present in `admitted_namespaces`.
@@ -70,6 +73,22 @@ struct StorageAdmissionRecordV1 {
     grant: StorageAdmissionGrantV1,
     request: ManagedStorageAdmissionRequestV1,
     namespace_hash: CanonicalHash,
+    // Cloned records retain the active claim while an authority operation still uses them.
+    _owner_claim: Arc<StorageOwnerClaimV1>,
+}
+
+#[derive(Debug)]
+struct StorageOwnerClaimV1 {
+    owner_key: String,
+    active_owners: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl Drop for StorageOwnerClaimV1 {
+    fn drop(&mut self) {
+        if let Ok(mut owners) = self.active_owners.lock() {
+            owners.remove(&self.owner_key);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -84,6 +103,7 @@ pub struct AuthorityManagedStorageServiceV1 {
     table: AuthorityStorageGrantTableV1,
     authority_generation: AuthorityGeneration,
     quota: Arc<Mutex<QuotaBookV1>>,
+    active_owners: Arc<Mutex<BTreeSet<String>>>,
     state_root: Option<PathBuf>,
     _process_state: Option<Arc<StorageProcessStateV1>>,
 }
@@ -91,6 +111,7 @@ pub struct AuthorityManagedStorageServiceV1 {
 struct StorageProcessStateV1 {
     _process_lock: File,
     quota: Arc<Mutex<QuotaBookV1>>,
+    active_owners: Arc<Mutex<BTreeSet<String>>>,
 }
 
 static STORAGE_PROCESS_STATES: OnceLock<Mutex<BTreeMap<PathBuf, Weak<StorageProcessStateV1>>>> =
@@ -107,6 +128,7 @@ impl AuthorityManagedStorageServiceV1 {
             table,
             authority_generation,
             quota: Arc::new(Mutex::new(QuotaBookV1::new(quota_cap))),
+            active_owners: Arc::new(Mutex::new(BTreeSet::new())),
             state_root: None,
             _process_state: None,
         }
@@ -173,6 +195,7 @@ impl AuthorityManagedStorageServiceV1 {
             let process_state = Arc::new(StorageProcessStateV1 {
                 _process_lock: process_lock,
                 quota: Arc::new(Mutex::new(quota)),
+                active_owners: Arc::new(Mutex::new(BTreeSet::new())),
             });
             states.insert(canonical_root, Arc::downgrade(&process_state));
             process_state
@@ -182,6 +205,7 @@ impl AuthorityManagedStorageServiceV1 {
             table,
             authority_generation,
             quota: Arc::clone(&process_state.quota),
+            active_owners: Arc::clone(&process_state.active_owners),
             state_root: Some(root),
             _process_state: Some(process_state),
         })
@@ -232,17 +256,34 @@ impl AuthorityManagedStorageServiceV1 {
 
     fn reserve_quota(
         &self,
-        record: &StorageAdmissionRecordV1,
-    ) -> Result<(), ManagedStorageErrorV1> {
+        grant: &StorageAdmissionGrantV1,
+        namespace_hash: CanonicalHash,
+    ) -> Result<Arc<StorageOwnerClaimV1>, ManagedStorageErrorV1> {
+        let owner_key = storage_quota_owner_key(grant.grant_hash, namespace_hash);
+        let mut active_owners = self
+            .active_owners
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
+        if active_owners.contains(&owner_key) {
+            return Err(ManagedStorageErrorV1::DuplicateClaim);
+        }
         let mut quota = self
             .quota
             .lock()
             .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
-        let owner_key = storage_quota_owner_key(record.grant.grant_hash, record.namespace_hash);
-        quota
-            .reserve_owned(owner_key.clone(), &record.grant.quota_profile, 0, 1)
-            .map(|_| ())
-            .map_err(storage_quota_error)
+        quota.ensure_healthy().map_err(storage_quota_error)?;
+        if quota.reservation_for_owner(&owner_key).is_none() {
+            quota
+                .reserve_owned(owner_key.clone(), &grant.quota_profile, 0, 1)
+                .map_err(storage_quota_error)?;
+        }
+        // A detached holder may reuse its exact charge, but a live holder in another service
+        // must never acquire the same namespace. The claim is process-wide like the quota book.
+        active_owners.insert(owner_key.clone());
+        Ok(Arc::new(StorageOwnerClaimV1 {
+            owner_key,
+            active_owners: Arc::clone(&self.active_owners),
+        }))
     }
 
     fn reconcile_quota(
@@ -314,13 +355,6 @@ impl AuthorityManagedStorageServiceV1 {
         } else {
             capability.handle_id.as_str().to_owned()
         };
-        let record = StorageAdmissionRecordV1 {
-            handle_id: handle_id.clone(),
-            grant: grant.clone(),
-            request,
-            namespace_hash,
-        };
-        self.reserve_quota(&record)?;
         let mut admitted = self
             .table
             .admitted_namespaces
@@ -328,14 +362,19 @@ impl AuthorityManagedStorageServiceV1 {
             .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
         if admitted.contains_key(&handle_id)
             || admitted.values().any(|current| {
-                current.grant.grant_hash == record.grant.grant_hash
-                    && current.namespace_hash == record.namespace_hash
+                current.grant.grant_hash == grant.grant_hash
+                    && current.namespace_hash == namespace_hash
             })
         {
-            drop(admitted);
-            let _ = self.release_quota(&record);
             return Err(ManagedStorageErrorV1::DuplicateClaim);
         }
+        let record = StorageAdmissionRecordV1 {
+            handle_id: handle_id.clone(),
+            grant: grant.clone(),
+            request,
+            namespace_hash,
+            _owner_claim: self.reserve_quota(&grant, namespace_hash)?,
+        };
         admitted.insert(handle_id.clone(), record);
         Ok(ManagedStorageNamespaceHandleV1::new(
             OpaqueKernelCapabilityHandleId::new(handle_id),
@@ -449,7 +488,18 @@ impl AuthorityManagedStorageServiceV1 {
         record: &StorageAdmissionRecordV1,
         directory: &Path,
     ) -> Result<PhysicalStorageFrontierV1, ManagedStorageErrorV1> {
-        let path = directory.join("records.jsonl");
+        if record.grant.semantic_owner == ManagedStorageSemanticOwnerV1::ApplicationControlRecovery
+        {
+            return self.control_recovery_frontier(record, directory);
+        }
+        let path = directory.join(
+            if record.grant.semantic_owner == ManagedStorageSemanticOwnerV1::ApplicationCommandIndex
+            {
+                "records.sqlite3"
+            } else {
+                "records.jsonl"
+            },
+        );
         let bytes = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 if !is_safe_physical_metadata(&metadata)
@@ -457,6 +507,34 @@ impl AuthorityManagedStorageServiceV1 {
                     || metadata.len() > record.grant.quota_profile.max_bytes
                 {
                     return Err(ManagedStorageErrorV1::AuthorityUnavailable);
+                }
+                if record.grant.semantic_owner
+                    == ManagedStorageSemanticOwnerV1::ApplicationControlLog
+                {
+                    let file = open_no_follow_file(&path)
+                        .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
+                    let (byte_length, record_count, content_hash) =
+                        sigil_kernel::managed_storage::read_jsonl_physical_frontier(file)
+                            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
+                    return Ok(PhysicalStorageFrontierV1 {
+                        byte_length,
+                        record_count,
+                        content_hash,
+                    });
+                }
+                if record.grant.semantic_owner
+                    == ManagedStorageSemanticOwnerV1::ApplicationCommandIndex
+                {
+                    let file = open_no_follow_file(&path)
+                        .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
+                    let (byte_length, content_hash) =
+                        sigil_kernel::managed_storage::read_physical_digest(file)
+                            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?;
+                    return Ok(PhysicalStorageFrontierV1 {
+                        byte_length,
+                        record_count: u64::from(byte_length != 0),
+                        content_hash,
+                    });
                 }
                 read_no_follow_file(&path)
                     .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
@@ -556,7 +634,8 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
         &self,
         handle: &ManagedStorageNamespaceHandleV1,
     ) -> Result<(), ManagedStorageErrorV1> {
-        self.record_for_handle(handle)?;
+        let record = self.record_for_handle(handle)?;
+        self.validate_control_log_fence(&record)?;
         // Even an existing capacity grant stops authorizing writes when another namespace's
         // uncertain persistence poisons the shared quota book. record_for_handle releases the
         // admission lock before taking this quota lock; the check performs no filesystem I/O.
@@ -565,6 +644,49 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
             .ensure_healthy()
             .map_err(storage_quota_error)
+    }
+
+    fn acquire_forward_guard(
+        &self,
+        handle: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<
+        Box<dyn sigil_kernel::managed_storage::ManagedStorageForwardGuardV1>,
+        ManagedStorageErrorV1,
+    > {
+        self.control_forward_guard(handle)
+    }
+
+    fn preview_control_log_recovery(
+        &self,
+        recovery: &ManagedStorageNamespaceHandleV1,
+        old: &ManagedStorageNamespaceHandleV1,
+        successor: &ManagedStorageNamespaceHandleV1,
+        request: sigil_kernel::managed_storage::ControlLogRecoveryRequestV1,
+    ) -> Result<sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1, ManagedStorageErrorV1>
+    {
+        self.control_recovery_preview(recovery, old, successor, request)
+    }
+
+    fn advance_control_log_recovery(
+        &self,
+        recovery: &ManagedStorageNamespaceHandleV1,
+        old: &ManagedStorageNamespaceHandleV1,
+        successor: &ManagedStorageNamespaceHandleV1,
+        preview: &sigil_kernel::managed_storage::ControlLogRecoveryPreviewV1,
+        header: &[u8],
+    ) -> Result<sigil_kernel::managed_storage::ControlLogRecoveryStateV1, ManagedStorageErrorV1>
+    {
+        self.control_recovery_advance(recovery, old, successor, preview, header)
+    }
+
+    fn query_control_log_recovery(
+        &self,
+        recovery: &ManagedStorageNamespaceHandleV1,
+    ) -> Result<
+        Option<sigil_kernel::managed_storage::ControlLogRecoveryStateV1>,
+        ManagedStorageErrorV1,
+    > {
+        self.control_recovery_query(recovery)
     }
 
     fn reconcile_namespace_quota(
@@ -599,12 +721,33 @@ impl ManagedStorageServiceV1 for AuthorityManagedStorageServiceV1 {
             .map_err(storage_quota_error)
     }
 
+    fn detach_namespace(
+        &self,
+        handle: ManagedStorageNamespaceHandleV1,
+    ) -> Result<(), ManagedStorageErrorV1> {
+        self.record_for_handle(&handle)?;
+        self.table
+            .admitted_namespaces
+            .lock()
+            .map_err(|_| ManagedStorageErrorV1::AuthorityUnavailable)?
+            .remove(handle.handle_id.as_str());
+        Ok(())
+    }
+
     fn finalize_namespace(
         &self,
         handle: ManagedStorageNamespaceHandleV1,
         reason: String,
     ) -> Result<ManagedStorageStorageReceiptV1, ManagedStorageErrorV1> {
         let record = self.record_for_handle(&handle)?;
+        if record.grant.semantic_owner == ManagedStorageSemanticOwnerV1::ApplicationControlRecovery
+            && self.state_root.is_some()
+        {
+            let directory = self.physical_namespace_directory(&record)?;
+            let _lock = open_physical_namespace_lock(&directory)?;
+            let frontier = self.read_physical_frontier(&record, &directory)?;
+            return self.finalize_record(handle, record, reason, Some(frontier));
+        }
         self.finalize_record(handle, record, reason, None)
     }
 
@@ -812,6 +955,10 @@ fn storage_owner_leaf(owner: ManagedStorageSemanticOwnerV1) -> Option<&'static s
             AdapterDurableStateClassV1::IdempotencyLedger => Some("adapter-idempotency-ledger"),
         },
         ManagedStorageSemanticOwnerV1::ApplicationControlLog => Some("application-control-log"),
+        ManagedStorageSemanticOwnerV1::ApplicationCommandIndex => Some("application-command-index"),
+        ManagedStorageSemanticOwnerV1::ApplicationControlRecovery => {
+            Some("application-control-recovery")
+        }
         ManagedStorageSemanticOwnerV1::WorkspaceMutationState
         | ManagedStorageSemanticOwnerV1::PlanStore
         | ManagedStorageSemanticOwnerV1::ProviderConnectionState
@@ -911,6 +1058,13 @@ fn reject_reparse_components(path: &Path, allow_missing_leaf: bool) -> std::io::
 }
 
 fn read_no_follow_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = open_no_follow_file(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn open_no_follow_file(path: &Path) -> std::io::Result<File> {
     reject_reparse_components(path, false)?;
     let mut options = OpenOptions::new();
     options.read(true);
@@ -925,7 +1079,7 @@ fn read_no_follow_file(path: &Path) -> std::io::Result<Vec<u8>> {
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let mut file = options.open(path)?;
+    let file = options.open(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !is_safe_physical_metadata(&metadata) || !metadata.is_file() {
         return Err(std::io::Error::new(
@@ -933,9 +1087,7 @@ fn read_no_follow_file(path: &Path) -> std::io::Result<Vec<u8>> {
             "managed object is not a regular file",
         ));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    Ok(file)
 }
 
 fn hash_is_nonzero(value: CanonicalHash) -> bool {

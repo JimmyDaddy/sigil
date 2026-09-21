@@ -81,7 +81,7 @@ fn vcs_inspect_contract_is_fixed_read_only_and_registered() -> Result<()> {
     let spec = tool.spec();
     assert_eq!(spec.name, "vcs_inspect");
     assert_eq!(spec.access, ToolAccess::Read);
-    assert_eq!(spec.input_schema["additionalProperties"], false);
+    assert!(spec.input_schema.get("additionalProperties").is_none());
     assert!(spec.input_schema["properties"].get("command").is_none());
     assert!(spec.input_schema["properties"].get("path").is_none());
     assert_eq!(tool.mutation_tracking(), ToolMutationTracking::None);

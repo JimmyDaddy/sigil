@@ -38,7 +38,6 @@ pub struct BorrowedConfigurationRequestV1 {
 
 /// Closed receipt for one configuration root observation and replacement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BorrowedConfigurationReceiptV1 {
     pub schema_version: u16,
     pub capsule_id: OpaqueRegistrationCapsuleId,

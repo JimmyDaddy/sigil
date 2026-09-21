@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +41,15 @@ use sigil_kernel::resource::{
 use crate::environment::{apply_reserved_environment, standard_reserved_environment};
 use crate::launch_plan::SealedSandboxLaunchPlanV1;
 use crate::receipt::verify_enforcement;
+
+mod persistent_input;
+use persistent_input::PersistentInput;
+
+mod persistent_deadline;
+use persistent_deadline::PersistentRuntimeDeadline;
+
+mod owned_blocking;
+pub use owned_blocking::{OwnedBlockingWork, OwnedBlockingWorkError};
 
 mod summary_capture;
 use summary_capture::spawn_summary_capture;
@@ -1107,13 +1116,19 @@ fn terminate_controlled_child(
 /// Waits for a native child without placing an unbounded `Child::wait` call on a Tokio worker. A
 /// caller-side timeout can cancel this future between probes when Tokio is present, while the
 /// synchronous fallback preserves compatibility with the crate's non-Tokio unit-test executor.
-async fn wait_for_child_status(child: Arc<Mutex<Child>>) -> Result<ExitStatus, std::io::Error> {
+async fn wait_for_child_status(
+    child: Arc<Mutex<Child>>,
+    _deadline: &PersistentRuntimeDeadline,
+) -> Result<ExitStatus, std::io::Error> {
     loop {
         let status = {
-            let mut child = child
-                .lock()
-                .map_err(|_| std::io::Error::other("managed child lock poisoned"))?;
-            child.try_wait()?
+            match child.try_lock() {
+                Ok(mut child) => child.try_wait()?,
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(std::io::Error::other("managed child lock poisoned"));
+                }
+            }
         };
         if let Some(status) = status {
             return Ok(status);
@@ -1127,13 +1142,17 @@ async fn wait_for_child_status(child: Arc<Mutex<Child>>) -> Result<ExitStatus, s
 /// managed caller's deadline expires.
 async fn wait_for_pty_child_status(
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    _deadline: &PersistentRuntimeDeadline,
 ) -> Result<portable_pty::ExitStatus, std::io::Error> {
     loop {
         let status = {
-            let mut child = child
-                .lock()
-                .map_err(|_| std::io::Error::other("managed PTY child lock poisoned"))?;
-            child.try_wait()?
+            match child.try_lock() {
+                Ok(mut child) => child.try_wait()?,
+                Err(std::sync::TryLockError::WouldBlock) => None,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(std::io::Error::other("managed PTY child lock poisoned"));
+                }
+            }
         };
         if let Some(status) = status {
             return Ok(status);
@@ -1237,61 +1256,160 @@ fn spawn_drain(
     cap: u64,
     frame_tx: tokio::sync::mpsc::UnboundedSender<BoundedProcessOutputFrameV1>,
     state: Arc<Mutex<CapState>>,
-) {
-    std::thread::spawn(move || {
-        let mut sequence: u64 = 0;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match pipe.read(&mut chunk) {
-                Ok(0) => {
+) -> io::Result<PersistentDrain> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let owner_state = Arc::clone(&state);
+    let reader = std::thread::Builder::new()
+        .name("sigil-process-output".to_owned())
+        .spawn(move || {
+            let mut sequence: u64 = 0;
+            let mut chunk = [0u8; 4096];
+            loop {
+                if worker_stop.load(Ordering::SeqCst) {
                     state
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .source = ManagedOutputSourceV1::Complete;
+                        .unwrap_or_else(|error| error.into_inner())
+                        .source = ManagedOutputSourceV1::Incomplete;
                     break;
                 }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => {
-                    state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .source = ManagedOutputSourceV1::ReadFailed;
-                    break;
-                }
-                Ok(read) => {
-                    let mut guard = state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let previous = guard.retained.len();
-                    guard.push(&chunk[..read]);
-                    let fit_fully = guard.retained.len() == previous + read;
-                    drop(guard);
-                    if fit_fully && read > 0 {
-                        let payload = chunk[..read].to_vec();
-                        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
-                            channel,
-                            sequence,
-                            payload,
-                            end_of_stream: false,
-                            truncated: false,
-                        });
-                        sequence += 1;
+                match pipe.read(&mut chunk) {
+                    Ok(0) => {
+                        state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .source = ManagedOutputSourceV1::Complete;
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    #[cfg(unix)]
+                    Err(error)
+                        if channel == ManagedProcessOutputChannelV1::Pty
+                            && error.raw_os_error() == Some(libc::EIO) =>
+                    {
+                        // Unix PTY masters report EIO when their final slave closes: this is the
+                        // platform's real end-of-stream signal, not a capture read failure.
+                        state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .source = ManagedOutputSourceV1::Complete;
+                        break;
+                    }
+                    Err(_) => {
+                        state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .source = ManagedOutputSourceV1::ReadFailed;
+                        break;
+                    }
+                    Ok(read) => {
+                        let mut guard = state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let previous = guard.retained.len();
+                        guard.push(&chunk[..read]);
+                        let fit_fully = guard.retained.len() == previous + read;
+                        drop(guard);
+                        if fit_fully && read > 0 {
+                            let payload = chunk[..read].to_vec();
+                            let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
+                                channel,
+                                sequence,
+                                payload,
+                                end_of_stream: false,
+                                truncated: false,
+                            });
+                            sequence += 1;
+                        }
                     }
                 }
             }
+            let truncated = state
+                .lock()
+                .map(|guard| guard.observed > cap)
+                .unwrap_or(false);
+            let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
+                channel,
+                sequence,
+                payload: Vec::new(),
+                end_of_stream: true,
+                truncated,
+            });
+        })?;
+    Ok(PersistentDrain {
+        reader: Some(reader),
+        stop,
+        state: owner_state,
+    })
+}
+
+struct PersistentDrain {
+    reader: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<CapState>>,
+}
+
+impl PersistentDrain {
+    fn interrupt(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        #[cfg(windows)]
+        if let Some(reader) = self.reader.as_ref() {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: this live owned thread handle is retained until its join below. Cancel
+            // targets only this reader's synchronous IO and is repeated across the call race.
+            unsafe {
+                windows_sys::Win32::System::IO::CancelSynchronousIo(reader.as_raw_handle());
+            }
         }
-        let truncated = state
-            .lock()
-            .map(|guard| guard.observed > cap)
-            .unwrap_or(false);
-        let _ = frame_tx.send(BoundedProcessOutputFrameV1 {
-            channel,
-            sequence,
-            payload: Vec::new(),
-            end_of_stream: true,
-            truncated,
-        });
-    });
+    }
+
+    fn join(&mut self) -> bool {
+        while self
+            .reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+        {
+            self.interrupt();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let joined = self
+            .reader
+            .take()
+            .is_none_or(|reader| reader.join().is_ok());
+        if !joined {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .source = ManagedOutputSourceV1::ReadFailed;
+        }
+        joined
+    }
+
+    fn finish(mut self) -> bool {
+        // Reaped leaders do not prove EOF: an inherited writer may remain open. Give the sole
+        // nonblocking reader a bounded drain, then stop/join it with truthful incomplete output.
+        let until = std::time::Instant::now() + Duration::from_secs(1);
+        while self
+            .reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        self.join()
+    }
+}
+
+impl Drop for PersistentDrain {
+    fn drop(&mut self) {
+        self.interrupt();
+        let _ = self.join();
+    }
 }
 
 #[async_trait]
@@ -1499,6 +1617,10 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
         bundle: IssuedExecutionAdmissionBundleV1,
         request: ManagedExecutionRequestV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
+        let deadline_at = std::time::Instant::now()
+            .checked_add(Duration::from_millis(request.limits.max_runtime_ms))
+            .filter(|_| request.limits.max_runtime_ms != 0)
+            .ok_or(ManagedExecutionErrorV1::AdmissionMismatch)?;
         let is_extension = matches!(bundle, IssuedExecutionAdmissionBundleV1::Extension { .. });
         let is_code_intel = matches!(bundle, IssuedExecutionAdmissionBundleV1::CodeIntel { .. });
         if !matches!(bundle, IssuedExecutionAdmissionBundleV1::Terminal { .. })
@@ -1534,13 +1656,16 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
                     return Err(error);
                 }
             };
-            return self.start_persistent_pty(
-                prepared,
-                launch,
-                request.limits.max_output_bytes,
-                Arc::clone(inventory),
-                claim,
-            );
+            return self
+                .start_persistent_pty(
+                    prepared,
+                    launch,
+                    request.limits.max_output_bytes,
+                    deadline_at,
+                    Arc::clone(inventory),
+                    claim,
+                )
+                .await;
         }
         let claim = inventory
             .prepare_spawn(process_inventory_spawn_request(&prepared))
@@ -1648,6 +1773,39 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             }
         };
         let stdin_pipe = child.stdin.take();
+        #[cfg(unix)]
+        if let Some(stdin) = stdin_pipe.as_ref() {
+            use std::os::fd::AsRawFd;
+            if persistent_input::make_nonblocking(stdin.as_raw_fd()).is_err() {
+                let mut claim = Some(claim);
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if persistent_input::make_nonblocking(stdout_pipe.as_raw_fd()).is_err()
+                || persistent_input::make_nonblocking(stderr_pipe.as_raw_fd()).is_err()
+            {
+                let mut claim = Some(claim);
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        }
+        let stdin = Arc::new(PersistentInput::new(
+            stdin_pipe.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
+        ));
         // The reader owns the process pipe and must never wait for a UI/protocol consumer. The
         // frame payload is already bounded by `cap` in `spawn_drain`, so this transport does not
         // make retained output unbounded.
@@ -1655,25 +1813,74 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             tokio::sync::mpsc::unbounded_channel::<BoundedProcessOutputFrameV1>();
         let handle_stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
         let handle_stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
-        spawn_drain(
+        let stdout_reader = match spawn_drain(
             stdout_pipe,
             ManagedProcessOutputChannelV1::Stdout,
             cap,
             frame_tx.clone(),
             Arc::clone(&handle_stdout_cap),
-        );
-        spawn_drain(
+        ) {
+            Ok(reader) => reader,
+            Err(_) => {
+                let mut claim = Some(claim);
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let stderr_reader = match spawn_drain(
             stderr_pipe,
             ManagedProcessOutputChannelV1::Stderr,
             cap,
             frame_tx,
             Arc::clone(&handle_stderr_cap),
-        );
+        ) {
+            Ok(reader) => reader,
+            Err(_) => {
+                let mut claim = Some(claim);
+                terminate_reap_and_settle(
+                    &mut child,
+                    process_owner.as_ref(),
+                    inventory.as_ref(),
+                    &mut claim,
+                )?;
+                drop(stdout_reader);
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
 
+        let child = Arc::new(Mutex::new(child));
+        let process_owner = process_owner.map(Arc::new);
+        let deadline_child = Arc::clone(&child);
+        let deadline_owner = process_owner.clone();
+        let deadline_stdin = Arc::clone(&stdin);
+        let deadline = Arc::new(PersistentRuntimeDeadline::new(deadline_at, move || {
+            let Ok(mut child) = deadline_child.lock() else {
+                return Err(());
+            };
+            let was_running = !matches!(child.try_wait(), Ok(Some(_)));
+            let tree_stopped = deadline_owner
+                .as_ref()
+                .is_none_or(|owner| owner.terminate().is_ok());
+            let child_stopped = !was_running || child.kill().is_ok();
+            let input_stopped = deadline_stdin.close_and_join().is_ok();
+            if tree_stopped && child_stopped && input_stopped {
+                Ok(was_running)
+            } else {
+                Err(())
+            }
+        }));
         let handle = LocalPersistentProcessHandleV1 {
-            child: Arc::new(Mutex::new(child)),
+            observer: None,
+            readers: vec![stdout_reader, stderr_reader],
+            child,
             process_owner,
-            stdin: Arc::new(Mutex::new(stdin_pipe)),
+            deadline,
+            stdin,
             stdin_open: Arc::new(AtomicBool::new(true)),
             frame_rx: Some(frame_rx),
             stdout_cap: handle_stdout_cap,
@@ -1685,16 +1892,18 @@ impl ManagedExecutionServiceV1 for SandboxManagedExecutionServiceV1 {
             process_inventory: Arc::clone(inventory),
             process_claim: Some(claim),
         };
-        Ok(Box::new(handle))
+        let deadline = Arc::clone(&handle.deadline);
+        activate_persistent_deadline(Box::new(handle), &deadline).await
     }
 }
 
 impl SandboxManagedExecutionServiceV1 {
-    fn start_persistent_pty(
+    async fn start_persistent_pty(
         &self,
         prepared: PreparedLocalRunV1,
         launch: ManagedPtyLaunchV1,
         cap: u64,
+        deadline_at: std::time::Instant,
         process_inventory: Arc<dyn sigil_resource_authority::AuthorityProcessInventoryPortV1>,
         process_claim: sigil_resource_authority::AuthorityProcessInventoryClaimV1,
     ) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
@@ -1741,22 +1950,74 @@ impl SandboxManagedExecutionServiceV1 {
         } else {
             None
         };
+        #[cfg(unix)]
+        if launch
+            .master
+            .as_raw_fd()
+            .is_none_or(|fd| persistent_input::make_nonblocking(fd).is_err())
+        {
+            let mut child = launch.child;
+            terminate_reap_and_settle_pty(
+                child.as_mut(),
+                process_inventory.as_ref(),
+                process_claim,
+            )?;
+            return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+        }
+        let stdin = Arc::new(PersistentInput::new(Some(launch.writer)));
         let (frame_tx, frame_rx) =
             tokio::sync::mpsc::unbounded_channel::<BoundedProcessOutputFrameV1>();
         let stdout_cap = Arc::new(Mutex::new(CapState::new(cap)));
         let stderr_cap = Arc::new(Mutex::new(CapState::new(cap)));
-        spawn_drain(
+        let reader = match spawn_drain(
             launch.reader,
             ManagedProcessOutputChannelV1::Pty,
             cap,
             frame_tx,
             Arc::clone(&stdout_cap),
-        );
+        ) {
+            Ok(reader) => reader,
+            Err(_) => {
+                let mut child = launch.child;
+                terminate_reap_and_settle_pty(
+                    child.as_mut(),
+                    process_inventory.as_ref(),
+                    process_claim,
+                )?;
+                return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+            }
+        };
+        let child = Arc::new(Mutex::new(launch.child));
+        let process_owner = process_owner.map(Arc::new);
+        let deadline_child = Arc::clone(&child);
+        let deadline_owner = process_owner.clone();
+        let deadline_stdin = Arc::clone(&stdin);
+        let deadline = Arc::new(PersistentRuntimeDeadline::new(deadline_at, move || {
+            let Ok(mut child) = deadline_child.lock() else {
+                return Err(());
+            };
+            let was_running = !matches!(child.try_wait(), Ok(Some(_)));
+            let tree_stopped = deadline_owner
+                .as_ref()
+                .is_none_or(|owner| owner.terminate().is_ok());
+            let child_stopped = !was_running || child.kill().is_ok();
+            let input_stopped = deadline_stdin.close_and_join().is_ok();
+            if tree_stopped && child_stopped && input_stopped {
+                Ok(was_running)
+            } else {
+                Err(())
+            }
+        }));
         let handle = LocalPersistentPtyProcessHandleV1 {
-            child: Arc::new(Mutex::new(launch.child)),
+            #[cfg(windows)]
+            exit_watcher: None,
+            observer: None,
+            readers: vec![reader],
+            child,
             process_owner,
+            deadline,
             master: Arc::new(Mutex::new(Some(launch.master))),
-            stdin: Arc::new(Mutex::new(Some(launch.writer))),
+            stdin,
             stdin_open: Arc::new(AtomicBool::new(true)),
             frame_rx: Some(frame_rx),
             stdout_cap,
@@ -1768,9 +2029,37 @@ impl SandboxManagedExecutionServiceV1 {
             process_claim: Some(process_claim),
         };
         #[cfg(windows)]
-        spawn_windows_pty_exit_watcher(&handle.child, &handle.master);
-        Ok(Box::new(handle))
+        let handle = {
+            let mut handle = handle;
+            match spawn_windows_pty_exit_watcher(&handle.child, &handle.master) {
+                Ok(watcher) => handle.exit_watcher = Some(watcher),
+                Err(_) => {
+                    let _ = handle.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+                    let _ = Box::new(handle).wait_and_finalize().await;
+                    return Err(ManagedExecutionErrorV1::ProviderUnavailable);
+                }
+            }
+            handle
+        };
+        let deadline = Arc::clone(&handle.deadline);
+        activate_persistent_deadline(Box::new(handle), &deadline).await
     }
+}
+
+async fn activate_persistent_deadline(
+    mut handle: Box<dyn ManagedProcessHandleV1>,
+    deadline: &PersistentRuntimeDeadline,
+) -> Result<Box<dyn ManagedProcessHandleV1>, ManagedExecutionErrorV1> {
+    if deadline.start().is_err() {
+        let cancellation = handle.cancel(ProcessCancelReasonV1::ParentShutdown).await;
+        let finalization = handle.wait_and_finalize().await;
+        return Err(if cancellation.is_err() || finalization.is_err() {
+            ManagedExecutionErrorV1::OutcomeUncertain
+        } else {
+            ManagedExecutionErrorV1::ProviderUnavailable
+        });
+    }
+    Ok(handle)
 }
 
 /// ConPTY does not necessarily close the reader when the child exits while the master handle is
@@ -1783,44 +2072,81 @@ impl SandboxManagedExecutionServiceV1 {
 fn spawn_windows_pty_exit_watcher(
     child: &Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     master: &Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-) {
+) -> std::io::Result<WindowsPtyExitWatcher> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
     let child = Arc::downgrade(child);
     let master = Arc::downgrade(master);
-    std::thread::spawn(move || {
-        loop {
-            let Some(child_ref) = child.upgrade() else {
-                return;
-            };
-            let exited = {
-                let mut child = match child_ref.lock() {
-                    Ok(child) => child,
-                    Err(poisoned) => poisoned.into_inner(),
+    let worker = std::thread::Builder::new()
+        .name("sigil-pty-exit".to_owned())
+        .spawn(move || {
+            loop {
+                if stopped.load(Ordering::SeqCst) {
+                    return;
+                }
+                let Some(child_ref) = child.upgrade() else {
+                    return;
                 };
-                matches!(child.try_wait(), Ok(Some(_)))
-            };
-            if exited {
-                if let Some(master_ref) = master.upgrade() {
-                    match master_ref.lock() {
-                        Ok(mut master) => {
-                            master.take();
-                        }
-                        Err(poisoned) => {
-                            poisoned.into_inner().take();
+                let exited = {
+                    let mut child = match child_ref.lock() {
+                        Ok(child) => child,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    matches!(child.try_wait(), Ok(Some(_)))
+                };
+                if exited {
+                    if let Some(master_ref) = master.upgrade() {
+                        match master_ref.lock() {
+                            Ok(mut master) => {
+                                master.take();
+                            }
+                            Err(poisoned) => {
+                                poisoned.into_inner().take();
+                            }
                         }
                     }
+                    return;
                 }
-                return;
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
+        })?;
+    Ok(WindowsPtyExitWatcher {
+        worker: Some(worker),
+        stop,
+    })
+}
+
+#[cfg(windows)]
+struct WindowsPtyExitWatcher {
+    worker: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+#[cfg(windows)]
+impl WindowsPtyExitWatcher {
+    fn finish(&mut self) -> bool {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker
+            .take()
+            .is_none_or(|worker| worker.join().is_ok())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsPtyExitWatcher {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }
 
 /// Local persistent process handle (non-clone, non-serialize).
 struct LocalPersistentProcessHandleV1 {
+    readers: Vec<PersistentDrain>,
+    observer: Option<sigil_kernel::RunCancellationHandle>,
     child: Arc<Mutex<Child>>,
-    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    process_owner: Option<Arc<sigil_process::ProcessTreeOwnerGuard>>,
+    deadline: Arc<PersistentRuntimeDeadline>,
+    stdin: Arc<PersistentInput>,
     stdin_open: Arc<AtomicBool>,
     frame_rx: Option<tokio::sync::mpsc::UnboundedReceiver<BoundedProcessOutputFrameV1>>,
     stdout_cap: Arc<Mutex<CapState>>,
@@ -1842,12 +2168,18 @@ impl ManagedProcessOutputStreamV1 for LocalPersistentOutputStreamV1 {
     async fn next_frame(
         &mut self,
     ) -> Result<Option<BoundedProcessOutputFrameV1>, ManagedProcessControlErrorV1> {
+        // The watchdog stops the owned process independently. Capture consumes every queued
+        // frame through real reader EOF; a late observer must not turn expiry into lost output.
         Ok(self.rx.recv().await)
     }
 }
 
 #[async_trait]
 impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
+    fn observe_cleanup(&mut self, observer: sigil_kernel::RunCancellationHandle) {
+        self.observer = Some(observer);
+    }
+
     fn process_ref(&self) -> ReflectiveOpaqueProcessRef {
         ReflectiveOpaqueProcessRef::new(OpaqueProcessRef::new(format!(
             "process-{}",
@@ -1877,27 +2209,11 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
                 action: "write_stdin",
             });
         }
-        let mut guard =
-            self.stdin
-                .lock()
-                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
-                    action: "write_stdin",
-                })?;
-        match guard.as_mut() {
-            Some(stdin) => {
-                use std::io::Write;
-                stdin.write_all(&input.payload).map_err(|_| {
-                    ManagedProcessControlErrorV1::InvalidState {
-                        action: "write_stdin",
-                    }
-                })?;
+        self.stdin.write(input.payload).await.map_err(|_| {
+            ManagedProcessControlErrorV1::InvalidState {
+                action: "write_stdin",
             }
-            None => {
-                return Err(ManagedProcessControlErrorV1::InvalidState {
-                    action: "write_stdin",
-                });
-            }
-        }
+        })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::WriteStdin,
@@ -1921,15 +2237,18 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
                 action: "close_stdin",
             });
         }
-        let mut guard =
-            self.stdin
-                .lock()
-                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
-                    action: "close_stdin",
-                })?;
-        *guard = None;
-        // The kernel action set labels the stdin boundary mutation as WriteStdin; the typed
-        // effect (EOF) is real, the label is the closed-set approximation.
+        let stdin = Arc::clone(&self.stdin);
+        OwnedBlockingWork::spawn("sigil-process-close-input", move || stdin.close_and_join())
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?
+            .await
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::WriteStdin,
@@ -1941,14 +2260,35 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
         self.cancelled.store(true, Ordering::SeqCst);
-        if let Some(process_owner) = self.process_owner.as_ref() {
-            let _ = process_owner.terminate();
+        let stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ProcessStop)
+        });
+        let stdin = Arc::clone(&self.stdin);
+        let process_owner = self.process_owner.clone();
+        let child = Arc::clone(&self.child);
+        let result = match OwnedBlockingWork::spawn("sigil-process-stop", move || {
+            // Attempt all stop actions even if closing stdin fails. The exact child and tree
+            // owners stay captured until every synchronous stop operation has returned.
+            let input = stdin.close_and_join().map_err(|_| ());
+            let tree = process_owner
+                .as_ref()
+                .map_or(Ok(()), |owner| owner.terminate().map_err(|_| ()));
+            let process = child.lock().map_err(|_| ()).and_then(|mut child| {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    Ok(())
+                } else {
+                    child.kill().map_err(|_| ())
+                }
+            });
+            input.and(tree).and(process)
+        }) {
+            Ok(work) => work.await.map_err(|_| ()).and_then(|result| result),
+            Err(_) => Err(()),
+        };
+        if let Some(stage) = stage {
+            stage.finish(result.is_ok());
         }
-        let mut guard = self
-            .child
-            .lock()
-            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
-        let _ = guard.kill();
+        result.map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::Cancel,
@@ -1959,12 +2299,38 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
         self.finalizing.store(true, Ordering::SeqCst);
-        let wait_result = wait_for_child_status(Arc::clone(&self.child)).await;
+        let reap_stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ProcessStop)
+        });
+        let wait_result = wait_for_child_status(Arc::clone(&self.child), &self.deadline).await;
+        if let Some(stage) = reap_stage {
+            stage.finish(wait_result.is_ok());
+        }
+        let deadline = Arc::clone(&self.deadline);
+        let stdin = Arc::clone(&self.stdin);
+        let deadline_outcome = OwnedBlockingWork::spawn("sigil-process-join-controls", move || {
+            let deadline_join = deadline.finish();
+            let input_join = stdin
+                .close_and_join()
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain);
+            deadline_join.and(input_join)?;
+            deadline.expired()
+        })
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
         let (termination, reaped) = match wait_result {
             Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                 let _ = status;
                 (ProcessTerminationV1::Cancelled, true)
             }
+            Ok(_) if deadline_outcome.is_err() => (
+                ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+                true,
+            ),
+            Ok(_) if matches!(deadline_outcome, Ok(true)) => (ProcessTerminationV1::TimedOut, true),
             Ok(status) => (classify_status(status), true),
             Err(_) => (
                 ProcessTerminationV1::OutcomeUncertain {
@@ -1978,11 +2344,42 @@ impl ManagedProcessHandleV1 for LocalPersistentProcessHandleV1 {
                 .process_claim
                 .take()
                 .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
-            self.process_inventory
-                .settle_spawn(claim)
-                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            let inventory = Arc::clone(&self.process_inventory);
+            let stage = self.observer.as_ref().map(|observer| {
+                observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ResourceSettlement)
+            });
+            let result = OwnedBlockingWork::spawn("sigil-process-settle-inventory", move || {
+                inventory.settle_spawn(claim)
+            })
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+            .await
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            if let Some(stage) = stage {
+                stage.finish(result.is_ok());
+            }
+            result.map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
         }
         // Drain whatever the pipes still hold so EOF markers land (bounded by pipe content).
+        let stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::OutputDrain)
+        });
+        let readers = std::mem::take(&mut self.readers);
+        let joined = OwnedBlockingWork::spawn("sigil-process-join-output", move || {
+            let mut complete = true;
+            for reader in readers {
+                complete &= reader.finish();
+            }
+            complete
+        })
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        if let Some(stage) = stage {
+            stage.finish(joined);
+        }
+        if !joined {
+            return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+        }
         if let Some(mut rx) = self.frame_rx.take() {
             while let Some(frame) = rx.recv().await {
                 let _ = frame;
@@ -2051,10 +2448,15 @@ fn resource_receipt_from_prepared(prepared: &PreparedLocalRunV1) -> ExecutionRes
 }
 
 struct LocalPersistentPtyProcessHandleV1 {
+    #[cfg(windows)]
+    exit_watcher: Option<WindowsPtyExitWatcher>,
+    readers: Vec<PersistentDrain>,
+    observer: Option<sigil_kernel::RunCancellationHandle>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
-    process_owner: Option<sigil_process::ProcessTreeOwnerGuard>,
+    process_owner: Option<Arc<sigil_process::ProcessTreeOwnerGuard>>,
+    deadline: Arc<PersistentRuntimeDeadline>,
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    stdin: Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>,
+    stdin: Arc<PersistentInput>,
     stdin_open: Arc<AtomicBool>,
     frame_rx: Option<tokio::sync::mpsc::UnboundedReceiver<BoundedProcessOutputFrameV1>>,
     stdout_cap: Arc<Mutex<CapState>>,
@@ -2066,8 +2468,36 @@ struct LocalPersistentPtyProcessHandleV1 {
     process_claim: Option<sigil_resource_authority::AuthorityProcessInventoryClaimV1>,
 }
 
+impl Drop for LocalPersistentProcessHandleV1 {
+    fn drop(&mut self) {
+        if self.process_claim.is_some() {
+            // An abandoned caller still owns its child until this guard stops it. A missing
+            // final receipt remains uncertain to the authority; Drop does not forge settlement.
+            let _ = self.deadline.expire();
+        }
+        let _ = self.deadline.finish();
+        let _ = self.stdin.close_and_join();
+        self.readers.clear();
+    }
+}
+
+impl Drop for LocalPersistentPtyProcessHandleV1 {
+    fn drop(&mut self) {
+        if self.process_claim.is_some() {
+            let _ = self.deadline.expire();
+        }
+        let _ = self.deadline.finish();
+        let _ = self.stdin.close_and_join();
+        self.readers.clear();
+    }
+}
+
 #[async_trait]
 impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
+    fn observe_cleanup(&mut self, observer: sigil_kernel::RunCancellationHandle) {
+        self.observer = Some(observer);
+    }
+
     fn process_ref(&self) -> ReflectiveOpaqueProcessRef {
         ReflectiveOpaqueProcessRef::new(OpaqueProcessRef::new(format!(
             "process-{}",
@@ -2097,24 +2527,11 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
                 action: "write_stdin",
             });
         }
-        let mut guard =
-            self.stdin
-                .lock()
-                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
-                    action: "write_stdin",
-                })?;
-        let Some(writer) = guard.as_mut() else {
-            return Err(ManagedProcessControlErrorV1::InvalidState {
+        self.stdin.write(input.payload).await.map_err(|_| {
+            ManagedProcessControlErrorV1::InvalidState {
                 action: "write_stdin",
-            });
-        };
-        use std::io::Write;
-        writer
-            .write_all(&input.payload)
-            .and_then(|_| writer.flush())
-            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
-                action: "write_stdin",
-            })?;
+            }
+        })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::WriteStdin,
@@ -2165,13 +2582,18 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
                 action: "close_stdin",
             });
         }
-        let mut guard =
-            self.stdin
-                .lock()
-                .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
-                    action: "close_stdin",
-                })?;
-        guard.take();
+        let stdin = Arc::clone(&self.stdin);
+        OwnedBlockingWork::spawn("sigil-process-close-input", move || stdin.close_and_join())
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?
+            .await
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?
+            .map_err(|_| ManagedProcessControlErrorV1::InvalidState {
+                action: "close_stdin",
+            })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::WriteStdin,
@@ -2183,16 +2605,35 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
         _reason: ProcessCancelReasonV1,
     ) -> Result<ProcessControlReceiptV1, ManagedProcessControlErrorV1> {
         self.cancelled.store(true, Ordering::SeqCst);
-        if let Some(process_owner) = self.process_owner.as_ref() {
-            process_owner
-                .terminate()
-                .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
+        let stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ProcessStop)
+        });
+        let stdin = Arc::clone(&self.stdin);
+        let process_owner = self.process_owner.clone();
+        let child = Arc::clone(&self.child);
+        let result = match OwnedBlockingWork::spawn("sigil-process-stop", move || {
+            // Attempt all stop actions even if closing stdin fails. The exact child and tree
+            // owners stay captured until every synchronous stop operation has returned.
+            let input = stdin.close_and_join().map_err(|_| ());
+            let tree = process_owner
+                .as_ref()
+                .map_or(Ok(()), |owner| owner.terminate().map_err(|_| ()));
+            let process = child.lock().map_err(|_| ()).and_then(|mut child| {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    Ok(())
+                } else {
+                    child.kill().map_err(|_| ())
+                }
+            });
+            input.and(tree).and(process)
+        }) {
+            Ok(work) => work.await.map_err(|_| ()).and_then(|result| result),
+            Err(_) => Err(()),
+        };
+        if let Some(stage) = stage {
+            stage.finish(result.is_ok());
         }
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
-        let _ = child.kill();
+        result.map_err(|_| ManagedProcessControlErrorV1::InvalidState { action: "cancel" })?;
         Ok(control_receipt(
             &self.attempt_id,
             ProcessControlActionV1::Cancel,
@@ -2202,12 +2643,38 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
     async fn wait_and_finalize(
         mut self: Box<Self>,
     ) -> Result<ManagedExecutionReceiptV1, ManagedExecutionErrorV1> {
-        let wait_result = wait_for_pty_child_status(Arc::clone(&self.child)).await;
+        let reap_stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ProcessStop)
+        });
+        let wait_result = wait_for_pty_child_status(Arc::clone(&self.child), &self.deadline).await;
+        if let Some(stage) = reap_stage {
+            stage.finish(wait_result.is_ok());
+        }
+        let deadline = Arc::clone(&self.deadline);
+        let stdin = Arc::clone(&self.stdin);
+        let deadline_outcome = OwnedBlockingWork::spawn("sigil-process-join-controls", move || {
+            let deadline_join = deadline.finish();
+            let input_join = stdin
+                .close_and_join()
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain);
+            deadline_join.and(input_join)?;
+            deadline.expired()
+        })
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
         let (termination, reaped) = match wait_result {
             Ok(status) if self.cancelled.load(Ordering::SeqCst) => {
                 let _ = status;
                 (ProcessTerminationV1::Cancelled, true)
             }
+            Ok(_) if deadline_outcome.is_err() => (
+                ProcessTerminationV1::OutcomeUncertain {
+                    evidence_digest: zero_hash(),
+                },
+                true,
+            ),
+            Ok(_) if matches!(deadline_outcome, Ok(true)) => (ProcessTerminationV1::TimedOut, true),
             Ok(status) => (classify_pty_status(status), true),
             Err(_) => (
                 ProcessTerminationV1::OutcomeUncertain {
@@ -2221,15 +2688,65 @@ impl ManagedProcessHandleV1 for LocalPersistentPtyProcessHandleV1 {
                 .process_claim
                 .take()
                 .ok_or(ManagedExecutionErrorV1::OutcomeUncertain)?;
-            self.process_inventory
-                .settle_spawn(claim)
+            let inventory = Arc::clone(&self.process_inventory);
+            let stage = self.observer.as_ref().map(|observer| {
+                observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::ResourceSettlement)
+            });
+            let result = OwnedBlockingWork::spawn("sigil-process-settle-inventory", move || {
+                inventory.settle_spawn(claim)
+            })
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+            .await
+            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            if let Some(stage) = stage {
+                stage.finish(result.is_ok());
+            }
+            result.map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        }
+        #[cfg(windows)]
+        if let Some(mut watcher) = self.exit_watcher.take() {
+            let joined = OwnedBlockingWork::spawn("sigil-pty-exit-join", move || watcher.finish())
+                .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+                .await
                 .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+            if !joined {
+                return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+            }
         }
         // Closing the master releases the PTY reader after the child has been reaped.
-        self.master
-            .lock()
-            .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
-            .take();
+        let master = Arc::clone(&self.master);
+        OwnedBlockingWork::spawn("sigil-process-close-pty", move || {
+            master
+                .lock()
+                .map(|mut master| {
+                    master.take();
+                })
+                .map_err(|_| ())
+        })
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        let stage = self.observer.as_ref().map(|observer| {
+            observer.begin_cleanup_stage(sigil_kernel::RunCleanupStage::OutputDrain)
+        });
+        let readers = std::mem::take(&mut self.readers);
+        let joined = OwnedBlockingWork::spawn("sigil-process-join-output", move || {
+            let mut complete = true;
+            for reader in readers {
+                complete &= reader.finish();
+            }
+            complete
+        })
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?
+        .await
+        .map_err(|_| ManagedExecutionErrorV1::OutcomeUncertain)?;
+        if let Some(stage) = stage {
+            stage.finish(joined);
+        }
+        if !joined {
+            return Err(ManagedExecutionErrorV1::OutcomeUncertain);
+        }
         if let Some(mut rx) = self.frame_rx.take() {
             while let Some(frame) = rx.recv().await {
                 let _ = frame;

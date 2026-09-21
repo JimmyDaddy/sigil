@@ -176,70 +176,25 @@ fn deeply_nested_namespace_remains_measurable_and_does_not_poison_siblings() -> 
     assert_eq!(usage.session_bytes, 8);
     assert_eq!(usage.session_entry_count, 1);
 
-    let provision_b =
-        ensure_session_scratch(&scratch_root, Some(session_b), &ScratchQuota::default())?;
-    assert_eq!(provision_b.usage.session_bytes, 0);
-    assert_eq!(provision_b.usage.workspace_bytes, 8);
+    ensure_session_scratch(&scratch_root, Some(session_b), &ScratchQuota::default())?;
+    let usage = measure_scratch_usage(&scratch_root, session_b)?;
+    assert_eq!(usage.session_bytes, 0);
+    assert_eq!(usage.workspace_bytes, 8);
     Ok(())
 }
 
 #[test]
-fn quota_exceeded_is_structured_and_releases_deterministically() -> Result<()> {
+fn scratch_thresholds_are_observational_for_every_namespace() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let scratch_root = temp.path().join("cache").join("tmp");
-    let session = "quota-session-0000-0000-0000-000000000003";
     let quota = ScratchQuota {
-        per_session_bytes: 16,
-        workspace_hard_bytes: 1024 * 1024,
+        per_session_bytes: 1,
+        workspace_hard_bytes: 1,
     };
-    ensure_session_scratch(&scratch_root, Some(session), &quota)?;
-    let namespace = session_scratch_dir(&scratch_root, Some(session));
-    fs::write(namespace.join("blob"), vec![b'x'; 32])?;
-
-    let error = ensure_session_scratch(&scratch_root, Some(session), &quota)
-        .expect_err("over-quota session must fail provisioning");
-    let quota_error = error
-        .downcast_ref::<ScratchQuotaExceededError>()
-        .expect("quota failure must be the structured error");
-    assert_eq!(quota_error.scope, ScratchQuotaScope::Session);
-    assert_eq!(quota_error.usage_bytes, 32);
-    assert_eq!(quota_error.quota_bytes, 16);
-    assert_eq!(
-        quota_error.to_string(),
-        "scratch quota exceeded (session): 32 bytes used of 16 bytes allowed"
-    );
-
-    // Releasing space makes the next provision succeed deterministically.
-    fs::remove_file(namespace.join("blob"))?;
-    let provision = ensure_session_scratch(&scratch_root, Some(session), &quota)?;
-    assert_eq!(provision.usage.session_bytes, 0);
-    Ok(())
-}
-
-#[test]
-fn workspace_hard_cap_spans_all_session_namespaces() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let scratch_root = temp.path().join("cache").join("tmp");
-    let quota = ScratchQuota {
-        per_session_bytes: 1024 * 1024,
-        workspace_hard_bytes: 16,
-    };
-    let session_a = "hard-cap-a-0000-0000-0000-000000000004";
-    let session_b = "hard-cap-b-0000-0000-0000-000000000005";
-    ensure_session_scratch(&scratch_root, Some(session_a), &quota)?;
-    fs::write(
-        session_scratch_dir(&scratch_root, Some(session_a)).join("blob"),
-        vec![b'y'; 24],
-    )?;
-
-    let error = ensure_session_scratch(&scratch_root, Some(session_b), &quota)
-        .expect_err("workspace hard cap must reject a second session namespace");
-    let quota_error = error
-        .downcast_ref::<ScratchQuotaExceededError>()
-        .expect("quota failure must be the structured error");
-    assert_eq!(quota_error.scope, ScratchQuotaScope::Workspace);
-    assert_eq!(quota_error.usage_bytes, 24);
-    assert_eq!(quota_error.quota_bytes, 16);
+    let provision = ensure_session_scratch(temp.path(), Some("a"), &quota)?;
+    fs::write(provision.dir.join("payload"), b"over both thresholds")?;
+    ensure_session_scratch(temp.path(), Some("a"), &quota)?;
+    ensure_session_scratch(temp.path(), Some("b"), &quota)?;
+    assert_eq!(measure_scratch_usage(temp.path(), "a")?.session_bytes, 20);
     Ok(())
 }
 
@@ -561,5 +516,48 @@ fn scratch_usage_defaults_to_zero_for_missing_root() -> Result<()> {
     let scratch_root = temp.path().join("missing").join("tmp");
     let usage = measure_scratch_usage(&scratch_root, "no-such-session")?;
     assert_eq!(usage, ScratchUsage::default());
+    Ok(())
+}
+
+#[test]
+fn transferred_execution_scratch_lease_survives_registry_poison_without_reacquisition() -> Result<()>
+{
+    let fixture = tempfile::tempdir()?;
+    let artifact = fixture.path().join("live-execution-scratch");
+    fs::write(&artifact, "must stay available while execution owns it")?;
+    let namespaces = Arc::new(crate::scratch_namespace::ScratchNamespaceLeaseRegistry::new());
+    let tasks = ScratchTaskLeaseRegistry::new();
+    let key = "transferred-session";
+    let lease = namespaces.acquire(key)?;
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = tasks.inner.lock().expect("initial task registry lock");
+        panic!("fault injected before execution ownership transfer");
+    }));
+    assert!(poisoned.is_err());
+    tasks.register_owned("execution-1", lease);
+    assert!(tasks.is_leased("execution-1"));
+    assert_eq!(
+        namespaces
+            .inner
+            .lock()
+            .expect("namespace lease registry")
+            .get(key)
+            .copied(),
+        Some(1),
+        "the admission guard is moved, never reacquired"
+    );
+    assert!(!namespaces.delete_if_unleased(key, || {
+        fs::remove_file(&artifact)?;
+        Ok(())
+    })?);
+    assert!(artifact.exists());
+    tasks.release("execution-1");
+    assert!(!tasks.is_leased("execution-1"));
+    assert!(!namespaces.is_leased(key));
+    assert!(namespaces.delete_if_unleased(key, || {
+        fs::remove_file(&artifact)?;
+        Ok(())
+    })?);
+    assert!(!artifact.exists());
     Ok(())
 }

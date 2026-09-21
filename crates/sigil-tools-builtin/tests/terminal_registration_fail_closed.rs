@@ -43,10 +43,7 @@ mod unix {
         ) -> Result<SessionScratchProvision> {
             let dir = self.session_scratch_dir(session_scope_id);
             fs::create_dir_all(&dir)?;
-            Ok(SessionScratchProvision {
-                dir,
-                usage: ScratchUsage::default(),
-            })
+            Ok(SessionScratchProvision { dir })
         }
 
         fn measure_scratch_usage(&self, _session_key: &str) -> Result<ScratchUsage> {
@@ -74,11 +71,9 @@ mod unix {
     fn call(pty: bool) -> Result<ToolCall> {
         Ok(ToolCall {
             id: format!("terminal-start-{pty}"),
-            name: "terminal_start".to_owned(),
+            name: "exec_command".to_owned(),
             args_json: serde_json::to_string(&json!({
-                "task_id": format!("fail-closed-{pty}"),
                 "command": "touch spawned-by-terminal",
-                "mode": if pty { "interactive" } else { "background" },
                 "pty": pty,
             }))?,
         })
@@ -137,6 +132,7 @@ mod unix {
         let workspace = tempfile::tempdir()?;
         let manager = TerminalProcessManager::new(workspace.path())?;
         let request = TerminalStartRequest {
+            max_runtime_secs: None,
             task_id: None,
             command: "touch spawned-by-public-manager".to_owned(),
             cwd: None,

@@ -31,7 +31,6 @@ pub enum BorrowedNativeSavePurposeV1 {
 /// Host-private registration capsule. `destination` is deliberately confined to the native
 /// client/server stack; it must never be projected to a renderer, public DTO, or closed receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BorrowedNativeSaveRequestV1 {
     pub schema_version: u16,
     pub purpose: BorrowedNativeSavePurposeV1,
@@ -44,7 +43,6 @@ pub struct BorrowedNativeSaveRequestV1 {
 
 /// Closed native-save receipt: no path, no authority token, and no mutable writer handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct BorrowedNativeSaveReceiptV1 {
     pub schema_version: u16,
     pub capsule_id: OpaqueRegistrationCapsuleId,

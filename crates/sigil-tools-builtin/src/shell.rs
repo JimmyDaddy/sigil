@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 #[cfg(unix)]
@@ -11,58 +10,30 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
 };
 
-use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
+use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    EnvironmentContainment, ExecutionCleanupStatus, ExecutionContainmentRequest,
-    ExecutionOutputReceipt, ExecutionReceipt, ExecutionRequest, ExecutionStreamCapture,
-    ExecutionTerminationCause, FilesystemContainment, NetworkContainment, ProcessContainment, Tool,
-    ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode, ToolAnalysisStatus, ToolCategory,
-    ToolContext, ToolErrorKind, ToolExecutionId, ToolOperation, ToolPermissionEffect,
-    ToolPermissionPlanDraft, ToolPermissionSummary, ToolPreviewCapability, ToolProgressEvent,
-    ToolResult, ToolResultMeta, ToolSemanticScope, ToolSpec, ToolSubject, ToolSubjectScope,
-    safe_persistence_text,
+    EnvironmentContainment, ExecutionContainmentRequest, FilesystemContainment, NetworkContainment,
+    ProcessContainment, ToolAccess, ToolAnalysisReason, ToolAnalysisReasonCode, ToolAnalysisStatus,
+    ToolContext, ToolOperation, ToolPermissionEffect, ToolPermissionPlanDraft,
+    ToolPermissionSummary, ToolSemanticScope, ToolSubject, ToolSubjectScope,
 };
 use tree_sitter::{Node, Parser};
 
 use crate::{
-    constants::{
-        DEFAULT_TEXT_LIMIT_BYTES, HARD_TEXT_LIMIT_BYTES, SIGIL_SCRATCH_DIR_ENV, WORKSPACE_TEMP_ROOT,
-    },
-    managed_execution::ManagedCommandExecutionPortV1,
+    constants::{SIGIL_SCRATCH_DIR_ENV, WORKSPACE_TEMP_ROOT},
     path::{
         ResolvedToolPath, absolute_path_from, canonical_workspace_root, lexically_normalize_path,
         resolve_existing_prefix, resolve_tool_path_from_base,
     },
-    scratch_namespace::{
-        ScratchNamespaceControl, ScratchNamespaceLeaseRegistry, ScratchQuota,
-        scratch_provision_error_result, session_scratch_key,
-    },
     shell_runtime::{ResolvedShell, ShellDialect},
-    support::{
-        TextLimitResult, ceil_char_boundary, floor_char_boundary, limit_text_head_tail,
-        required_string, sha256_hex,
-    },
+    support::sha256_hex,
 };
 
 const SHELL_SEMANTIC_REGISTRY_VERSION: u32 = 2;
 const SHELL_ENVIRONMENT_POLICY_VERSION: u32 = 2;
 const FILE_PRESENCE_EXECUTION_BINDING_KEY: &str = "file_presence_execution_binding";
 const FILE_PRESENCE_EXECUTION_PROFILE_VERSION: u32 = 1;
-#[cfg(test)]
-#[allow(dead_code)]
-const WORKSPACE_CHECK_MIN_AVAILABLE_BYTES: u64 = 1024 * 1024 * 1024;
-#[cfg(test)]
-#[allow(dead_code)]
-const WORKSPACE_CHECK_TARGET_HEADROOM_DIVISOR: u64 = 16;
-#[cfg(test)]
-#[allow(dead_code)]
-const WORKSPACE_CHECK_MAX_TARGET_HEADROOM_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-#[cfg(test)]
-#[allow(dead_code)]
-const WORKSPACE_CHECK_TARGET_SCAN_CEILING_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-
 #[derive(Debug, Clone)]
 struct FilePresenceExecutionProfile {
     binding: String,
@@ -112,766 +83,6 @@ impl FilePresenceExecutionProfile {
 struct TrustedExecutableIdentity {
     program: PathBuf,
     binding: Value,
-}
-
-pub(crate) struct BashTool {
-    pub(crate) scratch_label: String,
-    pub(crate) scratch_quota: ScratchQuota,
-    pub(crate) scratch_control: ScratchNamespaceControl,
-    pub(crate) scratch_namespaces: Arc<ScratchNamespaceLeaseRegistry>,
-    pub(crate) executor: Arc<dyn ManagedCommandExecutionPortV1>,
-    pub(crate) shell: ResolvedShell,
-}
-
-impl BashTool {
-    fn session_scratch_dir(&self, ctx: &ToolContext) -> PathBuf {
-        self.scratch_control
-            .session_scratch_dir(ctx.session_scope_id())
-    }
-
-    fn analyze_command(&self, ctx: &ToolContext, command: &str) -> Result<ShellCommandAnalysis> {
-        let path_policy = ShellPathPolicyBinding::for_runtime(
-            &ctx.workspace_root,
-            &self.session_scratch_dir(ctx),
-            true,
-        )?;
-        analyze_shell_command_with_path_policy(
-            &ctx.workspace_root,
-            command,
-            &self.shell,
-            &path_policy,
-        )
-    }
-}
-
-#[async_trait]
-impl Tool for BashTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "bash".to_owned(),
-            description: format!(
-                "Run a shell command from the workspace root using {} syntax (the tool name remains `bash`). Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files that must survive across tool calls in this session (shown as {}). The scratch directory is scoped to the current session, private to this user, capped by a size quota, and reclaimed after a TTL; do not rely on it for long-term storage. OS temp directories are outside the workspace and require permission.external_directory.",
-                shell_syntax_guidance(&self.shell),
-                self.scratch_label
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string" },
-                    "timeout_secs": { "type": "integer" }
-                },
-                "required": ["command"]
-            }),
-            category: ToolCategory::Shell,
-            access: ToolAccess::Execute,
-            network_effect: None,
-            preview: ToolPreviewCapability::None,
-        }
-    }
-
-    fn permission_plan(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPermissionPlanDraft> {
-        let command = required_string(args, "command")?;
-        reject_non_finite_bash_command(command, &self.shell)?;
-        let analysis = self.analyze_command(ctx, command)?;
-        let file_presence_profile = file_presence_execution_profile_for_binding(
-            &ctx.workspace_root,
-            &self.shell,
-            analysis
-                .analysis_bindings
-                .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
-        )?;
-        let mut plan = analysis.permission_plan();
-        let capabilities = self.executor.capabilities();
-        let network_receipt = self.executor.planned_network_receipt();
-        let filesystem_proven = matches!(
-            plan.containment.filesystem,
-            FilesystemContainment::Unspecified
-        ) || capabilities.filesystem_isolation;
-        let network_proven = match plan.containment.network {
-            NetworkContainment::Unspecified | NetworkContainment::Allow => true,
-            NetworkContainment::Deny => network_receipt.is_denied(),
-            NetworkContainment::ReadOnly => false,
-        };
-        let process_proven = matches!(plan.containment.process, ProcessContainment::Unspecified)
-            || capabilities.process_isolation;
-        let environment_proven = plan.containment.environment == EnvironmentContainment::Restricted;
-        let containment_proven = filesystem_proven
-            && network_proven
-            && process_proven
-            && environment_proven
-            && !plan.containment.persistent_process;
-        plan.analysis_bindings.insert(
-            "containment_proven".to_owned(),
-            containment_proven.to_string(),
-        );
-        plan.analysis_bindings.insert(
-            "execution_backend".to_owned(),
-            format!(
-                "{}:{}:{}",
-                self.executor.kind().as_str(),
-                serde_json::to_string(&capabilities)?,
-                serde_json::to_string(&network_receipt)?
-            ),
-        );
-        plan.analysis_bindings.insert(
-            "execution_profile".to_owned(),
-            serde_json::to_string(&plan.containment)?,
-        );
-        plan.analysis_bindings.insert(
-            "environment_binding".to_owned(),
-            shell_environment_binding_with_profile(
-                ctx,
-                &self.session_scratch_dir(ctx),
-                &self.shell,
-                plan.containment.environment,
-                file_presence_profile.as_ref(),
-            )?,
-        );
-        Ok(plan)
-    }
-
-    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
-        let command = required_string(&args, "command")?;
-        if let Err(error) = reject_non_finite_bash_command(command, &self.shell) {
-            return Ok(ToolResult::error(
-                call_id,
-                self.spec().name,
-                ToolErrorKind::InvalidInput,
-                error.to_string(),
-            )
-            .with_error_details(
-                false,
-                json!({
-                    "category": "persistent_command",
-                    "retryable": false,
-                    "next_tool": "terminal_start"
-                }),
-            ));
-        }
-        let timeout_secs = args
-            .get("timeout_secs")
-            .and_then(Value::as_u64)
-            .unwrap_or(ctx.timeout_secs);
-        let session_scope_id = ctx.session_scope_id().map(str::to_owned);
-        let session_scratch = self
-            .scratch_control
-            .session_scratch_dir(session_scope_id.as_deref());
-        let (request, fallback_analysis) = if let Some(plan) = ctx.prepared_permission_plan() {
-            anyhow::ensure!(
-                plan.tool_name == "bash",
-                "prepared permission plan belongs to a different tool"
-            );
-            let file_presence_profile = file_presence_execution_profile_for_binding(
-                &ctx.workspace_root,
-                &self.shell,
-                plan.analysis_bindings
-                    .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
-            )?;
-            let expected_environment_binding = shell_environment_binding_with_profile(
-                &ctx,
-                &session_scratch,
-                &self.shell,
-                plan.containment.environment,
-                file_presence_profile.as_ref(),
-            )?;
-            anyhow::ensure!(
-                plan.analysis_bindings.get("environment_binding")
-                    == Some(&expected_environment_binding),
-                "prepared shell environment binding changed before execution"
-            );
-            let expected_path_policy_binding =
-                ShellPathPolicyBinding::for_runtime(&ctx.workspace_root, &session_scratch, true)?
-                    .stable_hash();
-            anyhow::ensure!(
-                plan.analysis_bindings.get("path_policy_binding")
-                    == Some(&expected_path_policy_binding),
-                "prepared shell symbolic path binding changed before execution"
-            );
-            (
-                bash_execution_request_from_containment(
-                    command,
-                    &ctx.workspace_root,
-                    &session_scratch,
-                    timeout_secs,
-                    &self.shell,
-                    plan.containment.environment,
-                    file_presence_profile.as_ref(),
-                ),
-                None,
-            )
-        } else {
-            // Direct tool invocations used by diagnostics/tests have no agent-prepared envelope.
-            // Analyze once here and use that same result for execution and receipt projection.
-            let analysis = self.analyze_command(&ctx, command)?;
-            let file_presence_profile = file_presence_execution_profile_for_binding(
-                &ctx.workspace_root,
-                &self.shell,
-                analysis
-                    .analysis_bindings
-                    .get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
-            )?;
-            let request = bash_execution_request_from_containment(
-                command,
-                &ctx.workspace_root,
-                &session_scratch,
-                timeout_secs,
-                &self.shell,
-                analysis.containment.environment,
-                file_presence_profile.as_ref(),
-            );
-            (request, Some(analysis))
-        };
-        let workspace_check = fallback_analysis
-            .as_ref()
-            .is_some_and(|analysis| analysis.command_family.is_workspace_check())
-            || ctx
-                .prepared_permission_plan()
-                .is_some_and(|plan| plan.operation == ToolOperation::ExecuteWorkspaceCheckCommand);
-        // Disk measurements are observations, not an execution admission policy.  A workspace
-        // check must reach the requested command even when free-space probing is unavailable or
-        // below a heuristic headroom threshold; the managed scratch writer and the OS remain the
-        // authorities for real capacity failures.
-        let _ = workspace_check;
-        // RFC-0062 14.1: provision the session-scoped scratch namespace (owner-only, quota
-        // checked) before any child can write into it. Quota failures are recoverable tool
-        // errors, never a silent fallback to the system temp directory.
-        let scratch_control = self.scratch_control.clone();
-        let provision_scope = session_scope_id.clone();
-        let provision_quota = self.scratch_quota;
-        let provision = tokio::task::spawn_blocking(move || {
-            scratch_control
-                .ensure_session_namespace_for_command(provision_scope.as_deref(), &provision_quota)
-        })
-        .await
-        .context("scratch provisioning task panicked")?;
-        let session_key = session_scratch_key(session_scope_id.as_deref());
-        match provision {
-            Ok(_provision) => {}
-            Err(error) => {
-                return Ok(scratch_provision_error_result(
-                    call_id,
-                    self.spec().name,
-                    &self.scratch_label,
-                    error,
-                ));
-            }
-        };
-        let _scratch_lease = self
-            .scratch_namespaces
-            .acquire(&session_key)
-            .map_err(|error| {
-                anyhow::anyhow!("session scratch lease could not be durably established: {error}")
-            })?;
-        // RFC-0062 8.1: create the harness-owned capture plan and staging sink BEFORE spawn so
-        // stdout/stderr capture is independent of the bounded post-execution preview.
-        let mut request = request;
-        let capture_plan = ctx.tool_artifact_store().map(|store| {
-            sigil_kernel::ToolExecutionCapturePlanV1::process_defaults(
-                store.session_scope_id_hash().to_owned(),
-                &call_id,
-                "bash",
-            )
-        });
-        let mut capture_setup_failed = false;
-        if let Some(plan) = capture_plan.as_ref()
-            && let Some(sink) = ctx.create_policy_safe_tool_output_sink(
-                &call_id,
-                "bash",
-                "text/plain; charset=utf-8",
-                sigil_kernel::ToolArtifactEncoding::Utf8,
-                sigil_kernel::ToolArtifactSensitivity::Ordinary,
-            )
-        {
-            let config = plan.process_capture_config();
-            match sink.begin_process_capture(config) {
-                Ok(staged) => {
-                    request.capture = Some(sigil_kernel::ExecutionCaptureHandle {
-                        sink: staged,
-                        config,
-                    });
-                }
-                Err(_error) => {
-                    // Capture storage is secondary to process execution. Keep the command
-                    // running, but retain a typed diagnostic so settlement never pretends that
-                    // the missing artifact was a pipe-reader failure or a complete capture.
-                    capture_setup_failed = true;
-                }
-            }
-        }
-        if capture_plan.is_some() && request.capture.is_none() {
-            capture_setup_failed = true;
-        }
-        let _process_effect = ctx.begin_forward_effect(sigil_kernel::RunEffectKind::Process)?;
-        let execution_hash = sigil_kernel::stable_event_hash(call_id.as_bytes());
-        let execution_digest = execution_hash
-            .strip_prefix("sha256:")
-            .unwrap_or(execution_hash.as_str());
-        ctx.emit_progress(ToolProgressEvent {
-            execution_id: ToolExecutionId::new(format!("bash-{execution_digest}"))?,
-            call_id: call_id.clone(),
-            tool_name: "bash".to_owned(),
-            sequence: 1,
-            status: "running".to_owned(),
-            message: Some("foreground shell command is running".to_owned()),
-            output_preview: None,
-            output_log_ref: None,
-            total_bytes: Some(0),
-            updated_at_ms: None,
-            details: json!({ "execution_mode": "foreground" }),
-        })?;
-        let receipt = self
-            .executor
-            .execute_with_cancellation(request, ctx.cancellation_handle())
-            .await?;
-        if matches!(
-            receipt.effective_output().termination,
-            ExecutionTerminationCause::Cancelled
-        ) && receipt.resources.cleanup.status != ExecutionCleanupStatus::Completed
-            && let Some(cancellation) = ctx.cancellation_handle()
-        {
-            cancellation.mark_cleanup_incomplete();
-        }
-        let observed_bytes = receipt.effective_output().combined_total_bytes;
-        let capture_completion_missing =
-            capture_plan.is_some() && !capture_setup_failed && receipt.capture.is_none();
-        let mut result = if let Some(analysis) = fallback_analysis.as_ref() {
-            bash_tool_result_from_execution_receipt_with_analysis(
-                call_id,
-                self.spec().name,
-                receipt,
-                analysis,
-            )?
-        } else {
-            bash_tool_result_from_execution_receipt_with_plan(
-                call_id,
-                self.spec().name,
-                receipt,
-                command,
-                &self.shell,
-                ctx.prepared_permission_plan()
-                    .context("prepared permission plan disappeared before receipt projection")?,
-            )?
-        };
-        if capture_setup_failed {
-            attach_capture_storage_failure(&mut result, observed_bytes, "capture_setup_failed");
-            result = result.with_unavailable_artifact_capture(observed_bytes);
-        } else if capture_completion_missing {
-            attach_capture_storage_failure(&mut result, observed_bytes, "capture_transfer_failed");
-            result = result.with_unavailable_artifact_capture(observed_bytes);
-        }
-        let capture_outcome = result.take_capture_outcome();
-        if let Some(outcome) = capture_outcome {
-            // RFC-0062 9.2/9.3: settle the harness-owned capture into the canonical dual-segment
-            // artifact. The observed resource meter comes from the backend, not the bounded text.
-            match outcome.sink.finish_process_capture(
-                outcome.observed_bytes,
-                u32::from(result.content != safe_persistence_text(&result.content)),
-                outcome.source,
-            ) {
-                Ok((descriptor, segments, completeness)) => {
-                    if completeness.storage
-                        == sigil_kernel::session::ToolStorageCompletenessV1::Unavailable
-                    {
-                        attach_capture_storage_failure(
-                            &mut result,
-                            observed_bytes,
-                            "capture_write_failed",
-                        );
-                    }
-                    if let Some(plan) = capture_plan.as_ref() {
-                        match sigil_kernel::ToolResultRecordedV3::from_process_capture(
-                            &result,
-                            descriptor,
-                            plan,
-                            segments,
-                            completeness,
-                            sigil_kernel::tool_model_view_initial_limit("bash"),
-                        ) {
-                            Ok((recorded, display)) => {
-                                result.set_durable_v3_projection(recorded, display);
-                            }
-                            Err(_error) => {
-                                attach_capture_storage_failure(
-                                    &mut result,
-                                    observed_bytes,
-                                    "capture_settlement_failed",
-                                );
-                                result = result.with_unavailable_artifact_capture(observed_bytes);
-                            }
-                        }
-                    } else {
-                        result = result.with_unavailable_artifact_capture(observed_bytes);
-                    }
-                }
-                Err(_error) => {
-                    attach_capture_storage_failure(
-                        &mut result,
-                        observed_bytes,
-                        "capture_settlement_failed",
-                    );
-                    result = result.with_unavailable_artifact_capture(observed_bytes);
-                }
-            }
-        }
-        Ok(result)
-    }
-}
-
-fn attach_capture_storage_failure(result: &mut ToolResult, observed_bytes: u64, stage: &str) {
-    if !result.metadata.details.is_object() {
-        result.metadata.details = json!({});
-    }
-    result.metadata.details["capture"] = json!({
-        "code": "capture_storage_failed",
-        "stage": stage,
-        "observed_bytes": observed_bytes,
-        "command_completed": true,
-        "action": "free local disk space before requesting the full saved output"
-    });
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WorkspaceCheckResourceProbe {
-    available_bytes: u64,
-    target_bytes_lower_bound: u64,
-    target_scan_truncated: bool,
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-impl WorkspaceCheckResourceProbe {
-    fn required_available_bytes(self) -> u64 {
-        WORKSPACE_CHECK_MIN_AVAILABLE_BYTES.saturating_add(
-            self.target_bytes_lower_bound
-                .checked_div(WORKSPACE_CHECK_TARGET_HEADROOM_DIVISOR)
-                .unwrap_or_default()
-                .min(WORKSPACE_CHECK_MAX_TARGET_HEADROOM_BYTES),
-        )
-    }
-
-    fn has_capacity(self) -> bool {
-        self.available_bytes >= self.required_available_bytes()
-    }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn workspace_check_resource_probe(workspace_root: &Path) -> Result<WorkspaceCheckResourceProbe> {
-    let available_bytes = fs2::available_space(workspace_root).with_context(|| {
-        format!(
-            "failed to inspect free space for {}",
-            workspace_root.display()
-        )
-    })?;
-    let (target_bytes_lower_bound, target_scan_truncated) =
-        bounded_directory_size(&workspace_root.join("target"));
-    Ok(WorkspaceCheckResourceProbe {
-        available_bytes,
-        target_bytes_lower_bound,
-        target_scan_truncated,
-    })
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn bounded_directory_size(path: &Path) -> (u64, bool) {
-    if !path.is_dir() {
-        return (0, false);
-    }
-    let mut total = 0_u64;
-    for entry in walkdir::WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if entry.file_type().is_file() {
-            total = total.saturating_add(entry.metadata().map_or(0, |metadata| metadata.len()));
-            if total >= WORKSPACE_CHECK_TARGET_SCAN_CEILING_BYTES {
-                return (total, true);
-            }
-        }
-    }
-    (total, false)
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-fn workspace_check_resource_error(
-    _call_id: &str,
-    _tool_name: &str,
-    _command: &str,
-    _probe: &WorkspaceCheckResourceProbe,
-) -> Option<ToolResult> {
-    None
-}
-
-fn reject_non_finite_bash_command(command: &str, shell: &ResolvedShell) -> Result<()> {
-    let reason = match shell.dialect() {
-        ShellDialect::Posix => {
-            if posix_shell_contains_background_operator(command) {
-                Some("background operator `&`")
-            } else {
-                persistent_shell_command_reason(command, 0)
-            }
-        }
-        ShellDialect::PowerShell => powershell_persistent_command_reason(command),
-        ShellDialect::Cmd => cmd_persistent_command_reason(command),
-    };
-    if let Some(reason) = reason {
-        bail!(
-            "bash only supports finite foreground commands; {reason} requires terminal_start with an explicit background or interactive mode"
-        );
-    }
-    Ok(())
-}
-
-fn posix_shell_contains_background_operator(command: &str) -> bool {
-    let mut parser = Parser::new();
-    let language = tree_sitter_bash::LANGUAGE;
-    if parser.set_language(&language.into()).is_err() {
-        return false;
-    }
-    parser
-        .parse(command, None)
-        .is_some_and(|tree| shell_ast_contains_kind(tree.root_node(), "&"))
-}
-
-fn shell_ast_contains_kind(node: Node<'_>, target: &str) -> bool {
-    node.kind() == target
-        || (0..node.child_count()).any(|index| {
-            node.child(index as u32)
-                .is_some_and(|child| shell_ast_contains_kind(child, target))
-        })
-}
-
-fn persistent_shell_command_reason(command: &str, depth: usize) -> Option<&'static str> {
-    if depth > MAX_SHELL_WRAPPER_DEPTH {
-        return Some("shell wrapper recursion exceeds the finite-command limit");
-    }
-    let tokens = tokenize_shell_subject_words(command);
-    for segment in split_shell_command_segments(&tokens) {
-        for pipeline_segment in split_shell_pipeline(segment) {
-            if let Some(reason) = persistent_shell_segment_reason(pipeline_segment, depth) {
-                return Some(reason);
-            }
-        }
-    }
-    None
-}
-
-fn persistent_shell_segment_reason(words: &[String], depth: usize) -> Option<&'static str> {
-    if depth > MAX_SHELL_WRAPPER_DEPTH {
-        return Some("shell wrapper recursion exceeds the finite-command limit");
-    }
-    let (program, args) = shell_segment_command_and_args(words)?;
-    match program {
-        "nohup" => return Some("nohup launches persistence-oriented work"),
-        "setsid" => return Some("setsid detaches process lifecycle ownership"),
-        "watch" => return Some("watch is a persistent command runner"),
-        "tail" | "journalctl" if args.iter().any(|arg| shell_follow_option(arg)) => {
-            return Some("follow mode is persistent");
-        }
-        "docker" | "podman" | "nerdctl" | "kubectl"
-            if args.first().is_some_and(|arg| arg == "logs")
-                && args.iter().skip(1).any(|arg| shell_follow_option(arg)) =>
-        {
-            return Some("log follow mode is persistent");
-        }
-        "sh" | "bash" | "zsh" => {
-            return static_shell_payload(args)
-                .and_then(|payload| persistent_shell_command_reason(payload, depth + 1));
-        }
-        "sudo" | "doas" | "env" | "command" if !args.is_empty() => {
-            return persistent_shell_segment_reason(args, depth + 1);
-        }
-        _ => {}
-    }
-    if let Some(inner) = static_wrapper_inner(program, args) {
-        return persistent_shell_segment_reason(inner, depth + 1);
-    }
-    None
-}
-
-fn shell_follow_option(arg: &str) -> bool {
-    matches!(arg, "-f" | "-F" | "--follow") || arg.starts_with("--follow=")
-}
-
-fn powershell_persistent_command_reason(command: &str) -> Option<&'static str> {
-    if command
-        .trim_end()
-        .strip_suffix('&')
-        .is_some_and(|prefix| !prefix.ends_with('&'))
-    {
-        return Some("PowerShell background operator `&`");
-    }
-    command
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|'))
-        .any(|word| word.eq_ignore_ascii_case("start-job"))
-        .then_some("Start-Job creates background work")
-}
-
-fn cmd_persistent_command_reason(command: &str) -> Option<&'static str> {
-    let words = command.split_whitespace().collect::<Vec<_>>();
-    (words
-        .first()
-        .is_some_and(|word| word.eq_ignore_ascii_case("start"))
-        && words
-            .iter()
-            .skip(1)
-            .any(|word| word.eq_ignore_ascii_case("/b")))
-    .then_some("start /b creates background work")
-}
-
-pub(crate) fn known_finite_terminal_command_reason(
-    command: &str,
-    shell: &ResolvedShell,
-    analysis: &ShellCommandAnalysis,
-) -> Option<String> {
-    if persistent_shell_command_reason(command, 0).is_some() {
-        return None;
-    }
-    if analysis.command_family.is_known_finite() {
-        return Some(format!(
-            "known finite command family `{}`",
-            analysis.command_family.as_str()
-        ));
-    }
-    known_finite_terminal_command_reason_from_tokens(
-        &tokenize_shell_subject_words(command),
-        shell,
-        0,
-    )
-}
-
-fn known_finite_terminal_command_reason_from_tokens(
-    tokens: &[String],
-    shell: &ResolvedShell,
-    depth: usize,
-) -> Option<String> {
-    if depth > MAX_SHELL_WRAPPER_DEPTH {
-        return None;
-    }
-    let mut first_reason = None;
-    for segment in split_shell_command_segments(tokens) {
-        for pipeline_segment in split_shell_pipeline(segment) {
-            match terminal_segment_duration_evidence(pipeline_segment, shell, depth) {
-                TerminalSegmentDurationEvidence::KnownFinite(reason) => {
-                    first_reason.get_or_insert(reason);
-                }
-                TerminalSegmentDurationEvidence::Persistent
-                | TerminalSegmentDurationEvidence::Unknown => return None,
-            }
-        }
-    }
-    first_reason
-}
-
-enum TerminalSegmentDurationEvidence {
-    KnownFinite(String),
-    Persistent,
-    Unknown,
-}
-
-fn terminal_segment_duration_evidence(
-    words: &[String],
-    shell: &ResolvedShell,
-    depth: usize,
-) -> TerminalSegmentDurationEvidence {
-    if depth > MAX_SHELL_WRAPPER_DEPTH {
-        return TerminalSegmentDurationEvidence::Unknown;
-    }
-    if persistent_shell_segment_reason(words, depth).is_some() {
-        return TerminalSegmentDurationEvidence::Persistent;
-    }
-    let Some((program, args)) = shell_segment_command_and_args(words) else {
-        return TerminalSegmentDurationEvidence::Unknown;
-    };
-    if matches!(program, "sh" | "bash" | "zsh") {
-        return static_shell_payload(args)
-            .and_then(|payload| {
-                known_finite_terminal_command_reason_from_tokens(
-                    &tokenize_shell_subject_words(payload),
-                    shell,
-                    depth + 1,
-                )
-            })
-            .map_or(
-                TerminalSegmentDurationEvidence::Unknown,
-                TerminalSegmentDurationEvidence::KnownFinite,
-            );
-    }
-    if let Some(inner) = static_wrapper_inner(program, args) {
-        return terminal_segment_duration_evidence(inner, shell, depth + 1);
-    }
-    let has_watch_flag = args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--watch" | "--watch-all" | "--watchAll" | "-w"
-        ) || arg.starts_with("--watch=")
-    });
-    if has_watch_flag {
-        return TerminalSegmentDurationEvidence::Persistent;
-    }
-    let known_reason = match program {
-        "cargo" => cargo_finite_subcommand(args)
-            .map(|subcommand| format!("finite cargo `{subcommand}` command")),
-        "npm" | "pnpm" | "yarn" | "bun" => package_manager_finite_script(args)
-            .map(|script| format!("finite {program} `{script}` package script")),
-        _ if shell.dialect() != ShellDialect::Posix => None,
-        _ => None,
-    };
-    if let Some(reason) = known_reason {
-        return TerminalSegmentDurationEvidence::KnownFinite(reason);
-    }
-    let family = command_family_for_simple_segment_with_depth(words, depth);
-    if family.is_known_finite() {
-        TerminalSegmentDurationEvidence::KnownFinite(format!(
-            "known finite command family `{}`",
-            family.as_str()
-        ))
-    } else {
-        TerminalSegmentDurationEvidence::Unknown
-    }
-}
-
-fn cargo_finite_subcommand(args: &[String]) -> Option<&str> {
-    args.iter()
-        .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-        .map(String::as_str)
-        .filter(|subcommand| {
-            matches!(
-                *subcommand,
-                "build" | "check" | "clippy" | "doc" | "fmt" | "test"
-            )
-        })
-}
-
-fn package_manager_finite_script(args: &[String]) -> Option<&str> {
-    let (script, remaining) = match args.first().map(String::as_str) {
-        Some("run") => (args.get(1)?.as_str(), &args[2..]),
-        Some(script) => (script, &args[1..]),
-        None => return None,
-    };
-    if remaining.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--watch" | "--watch-all" | "--watchAll" | "-w"
-        ) || arg.starts_with("--watch=")
-    }) {
-        return None;
-    }
-    let normalized = script
-        .rsplit([':', '/'])
-        .next()
-        .unwrap_or(script)
-        .to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "build" | "check" | "ci" | "fmt" | "format" | "lint" | "test" | "typecheck" | "type-check"
-    )
-    .then_some(script)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1012,10 +223,6 @@ impl CommandFamily {
                 | Self::CargoValidationChain { .. }
                 | Self::CheckTouched { .. }
         )
-    }
-
-    pub(crate) fn is_known_finite(&self) -> bool {
-        !matches!(self, Self::Unknown)
     }
 
     fn is_workspace_read_only(&self) -> bool {
@@ -2371,7 +1578,7 @@ fn shell_semantic_scope(
                     .iter()
                     .map(|step| step.as_str())
                     .collect::<Vec<_>>()
-                    .join(","),
+                    .join(":"),
             );
             scope
                 .qualifiers
@@ -3049,17 +2256,6 @@ fn shell_expansion_is_bounded_symbol(
         || path_policy.sandbox_tmpdir_root.is_some() && matches!(expansion, "$TMPDIR" | "${TMPDIR}")
 }
 
-fn shell_syntax_guidance(shell: &ResolvedShell) -> String {
-    match shell.dialect() {
-        ShellDialect::Posix => format!("POSIX shell ({})", shell.program().display()),
-        ShellDialect::PowerShell => format!(
-            "PowerShell ({}) with PowerShell syntax such as `$env:NAME` and `$null`",
-            shell.program().display()
-        ),
-        ShellDialect::Cmd => format!("cmd.exe ({}) syntax", shell.program().display()),
-    }
-}
-
 fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantScope> {
     match family {
         CommandFamily::CheckTouched { tier } => Some(CommandGrantScope::WorkspaceScript {
@@ -3070,98 +2266,49 @@ fn workspace_check_grant_scope(family: &CommandFamily) -> Option<CommandGrantSco
     }
 }
 
-#[cfg(test)]
-pub(crate) fn bash_execution_request(
-    command: &str,
-    workspace_root: &Path,
-    scratch_root: &Path,
-    timeout_secs: u64,
-) -> ExecutionRequest {
-    let shell = ResolvedShell::resolve_explicit("sh").expect("sh is a supported shell");
-    let analysis = analyze_shell_command_with_shell(workspace_root, command, &shell)
-        .expect("test shell command analysis should succeed");
-    bash_execution_request_with_shell(
-        command,
-        workspace_root,
-        scratch_root,
-        timeout_secs,
-        &shell,
-        &analysis,
-    )
+pub(crate) fn controlled_shell_environment() -> BTreeMap<String, String> {
+    controlled_shell_environment_with(|name| std::env::var(name).ok())
 }
 
-#[cfg(test)]
-pub(crate) fn bash_execution_request_with_shell(
-    command: &str,
-    workspace_root: &Path,
+/// Exact restricted launch material shared by permission binding and the execution owner.
+/// A claimed trusted file-presence profile is revalidated before its pinned executable and
+/// closed Git environment can be used; changed executable identity fails before spawning.
+pub(crate) struct ShellExecutionEnvironment {
+    pub(crate) shell_program: String,
+    pub(crate) environment: BTreeMap<String, String>,
+    pub(crate) binding: String,
+}
+
+pub(crate) fn shell_execution_environment(
+    ctx: &ToolContext,
     scratch_root: &Path,
-    timeout_secs: u64,
     shell: &ResolvedShell,
-    analysis: &ShellCommandAnalysis,
-) -> ExecutionRequest {
-    bash_execution_request_from_containment(
-        command,
-        workspace_root,
-        scratch_root,
-        timeout_secs,
+    analysis_bindings: &BTreeMap<String, String>,
+) -> Result<ShellExecutionEnvironment> {
+    let profile = file_presence_execution_profile_for_binding(
+        &ctx.workspace_root,
         shell,
-        analysis.containment.environment,
-        None,
-    )
-}
-
-fn bash_execution_request_from_containment(
-    command: &str,
-    workspace_root: &Path,
-    scratch_root: &Path,
-    timeout_secs: u64,
-    shell: &ResolvedShell,
-    environment_containment: EnvironmentContainment,
-    file_presence_profile: Option<&FilePresenceExecutionProfile>,
-) -> ExecutionRequest {
-    let restricted_environment = environment_containment == EnvironmentContainment::Restricted;
-    let mut env = if restricted_environment {
-        controlled_shell_environment()
-    } else {
-        BTreeMap::new()
-    };
-    env.insert(
+        analysis_bindings.get(FILE_PRESENCE_EXECUTION_BINDING_KEY),
+    )?;
+    let scratch_root = absolute_path_from(&ctx.workspace_root, scratch_root);
+    let mut environment = controlled_shell_environment();
+    environment.insert(
         SIGIL_SCRATCH_DIR_ENV.to_owned(),
         scratch_root.to_string_lossy().into_owned(),
     );
-    if restricted_environment {
-        env.insert(
-            "TMPDIR".to_owned(),
-            scratch_root.to_string_lossy().into_owned(),
-        );
+    if let Some(profile) = &profile {
+        profile.apply_to_environment(&mut environment);
     }
-    if let Some(profile) = file_presence_profile {
-        profile.apply_to_environment(&mut env);
-    }
-    ExecutionRequest {
-        program: file_presence_profile.map_or_else(
-            || shell.program_string(),
-            |profile| profile.shell_program.to_string_lossy().into_owned(),
-        ),
-        args: shell.one_shot_args(command),
-        cwd: workspace_root.to_path_buf(),
-        env,
-        environment_policy: if restricted_environment {
-            sigil_kernel::ProcessEnvironmentPolicy::IsolatedExtension
-        } else {
-            sigil_kernel::ProcessEnvironmentPolicy::InheritParent
-        },
-        timeout_ms: None,
-        timeout_secs,
-        cpu_time_ms: None,
-        memory_limit_bytes: None,
-        process_count_limit: None,
-        capture: None,
-    }
-}
-
-fn controlled_shell_environment() -> BTreeMap<String, String> {
-    controlled_shell_environment_with(|name| std::env::var(name).ok())
+    let shell_program = profile.map_or_else(
+        || shell.program_string(),
+        |profile| profile.shell_program.to_string_lossy().into_owned(),
+    );
+    let binding = shell_environment_binding_for_environment(&shell_program, true, &environment)?;
+    Ok(ShellExecutionEnvironment {
+        shell_program,
+        environment,
+        binding,
+    })
 }
 
 fn controlled_shell_environment_with(
@@ -3408,49 +2555,6 @@ pub(crate) fn bounded_file_presence_execution_environment(
     Ok((profile.shell_program, execution_environment))
 }
 
-pub(crate) fn shell_environment_binding(
-    ctx: &ToolContext,
-    scratch_root: &Path,
-    shell: &ResolvedShell,
-    environment_containment: EnvironmentContainment,
-) -> Result<String> {
-    shell_environment_binding_with_profile(ctx, scratch_root, shell, environment_containment, None)
-}
-
-fn shell_environment_binding_with_profile(
-    ctx: &ToolContext,
-    scratch_root: &Path,
-    shell: &ResolvedShell,
-    environment_containment: EnvironmentContainment,
-    file_presence_profile: Option<&FilePresenceExecutionProfile>,
-) -> Result<String> {
-    let scratch_root = absolute_path_from(&ctx.workspace_root, scratch_root);
-    let restricted = environment_containment == EnvironmentContainment::Restricted;
-    let mut environment = if restricted {
-        controlled_shell_environment()
-    } else {
-        std::env::vars().collect::<BTreeMap<_, _>>()
-    };
-    environment.insert(
-        SIGIL_SCRATCH_DIR_ENV.to_owned(),
-        scratch_root.to_string_lossy().into_owned(),
-    );
-    if restricted {
-        environment.insert(
-            "TMPDIR".to_owned(),
-            scratch_root.to_string_lossy().into_owned(),
-        );
-    }
-    if let Some(profile) = file_presence_profile {
-        profile.apply_to_environment(&mut environment);
-    }
-    let shell_program = file_presence_profile.map_or_else(
-        || shell.program_string(),
-        |profile| profile.shell_program.to_string_lossy().into_owned(),
-    );
-    shell_environment_binding_for_environment(&shell_program, restricted, &environment)
-}
-
 fn shell_environment_binding_for_environment(
     shell_program: &str,
     restricted: bool,
@@ -3468,368 +2572,6 @@ fn shell_environment_binding_for_environment(
     ))
 }
 
-#[cfg(test)]
-pub(crate) fn bash_tool_result_from_execution_receipt(
-    call_id: String,
-    tool_name: String,
-    receipt: ExecutionReceipt,
-) -> Result<ToolResult> {
-    bash_tool_result_from_execution_receipt_inner(call_id, tool_name, receipt, None)
-}
-
-pub(crate) fn bash_tool_result_from_execution_receipt_with_analysis(
-    call_id: String,
-    tool_name: String,
-    receipt: ExecutionReceipt,
-    analysis: &ShellCommandAnalysis,
-) -> Result<ToolResult> {
-    bash_tool_result_from_execution_receipt_inner(
-        call_id,
-        tool_name,
-        receipt,
-        Some(ShellReceiptContext::Analysis(analysis)),
-    )
-}
-
-fn bash_tool_result_from_execution_receipt_with_plan(
-    call_id: String,
-    tool_name: String,
-    receipt: ExecutionReceipt,
-    command: &str,
-    shell: &ResolvedShell,
-    plan: &sigil_kernel::ToolPermissionPlanV2,
-) -> Result<ToolResult> {
-    bash_tool_result_from_execution_receipt_inner(
-        call_id,
-        tool_name,
-        receipt,
-        Some(ShellReceiptContext::Prepared {
-            command,
-            shell,
-            plan,
-        }),
-    )
-}
-
-#[derive(Clone, Copy)]
-enum ShellReceiptContext<'a> {
-    Analysis(&'a ShellCommandAnalysis),
-    Prepared {
-        command: &'a str,
-        shell: &'a ResolvedShell,
-        plan: &'a sigil_kernel::ToolPermissionPlanV2,
-    },
-}
-
-fn bash_tool_result_from_execution_receipt_inner(
-    call_id: String,
-    tool_name: String,
-    mut receipt: ExecutionReceipt,
-    shell_context: Option<ShellReceiptContext<'_>>,
-) -> Result<ToolResult> {
-    let capture_outcome = receipt.capture.take();
-    let output = receipt.effective_output();
-    let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
-    let limited_stdout = captured_stream_text(&receipt.stdout, &output.stdout, limit_bytes);
-    let limited_stderr = captured_stream_text(&receipt.stderr, &output.stderr, limit_bytes);
-    let mut content = String::new();
-    if !limited_stdout.content.is_empty() {
-        content.push_str(&limited_stdout.content);
-    }
-    if !limited_stderr.content.is_empty() {
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(&limited_stderr.content);
-    }
-    let output_truncated = output.stdout.truncated
-        || output.stderr.truncated
-        || limited_stdout.truncated
-        || limited_stderr.truncated;
-    let tail_available = output.stdout.retained_tail_bytes > 0
-        || output.stderr.retained_tail_bytes > 0
-        || output_truncated;
-    let metadata = ToolResultMeta {
-        exit_code: receipt.exit_code,
-        stdout_bytes: Some(output.stdout.total_bytes),
-        stderr_bytes: Some(output.stderr.total_bytes),
-        truncated: output_truncated,
-        omitted_bytes: Some(
-            limited_stdout
-                .omitted_bytes
-                .saturating_add(limited_stderr.omitted_bytes),
-        ),
-        limit_bytes: Some(limit_bytes as u64),
-        returned_bytes: Some(
-            limited_stdout
-                .returned_bytes
-                .saturating_add(limited_stderr.returned_bytes),
-        ),
-        total_bytes: Some(output.combined_total_bytes),
-        returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
-        total_lines: Some(
-            output
-                .stdout
-                .total_lines
-                .saturating_add(output.stderr.total_lines),
-        ),
-        details: execution_receipt_details_with_context(
-            &receipt,
-            shell_context,
-            output_truncated,
-            tail_available,
-        ),
-        ..ToolResultMeta::default()
-    };
-    if let Some((kind, message)) = execution_termination_error(&output.termination) {
-        let details = metadata.details.clone();
-        let mut result =
-            ToolResult::error(call_id, tool_name, kind, message).with_error_details(false, details);
-        if !content.is_empty() {
-            result.content = content;
-        }
-        result.metadata = metadata;
-        if let Some(outcome) = capture_outcome {
-            result.attach_capture_outcome(outcome);
-        }
-        return Ok(result);
-    }
-    if receipt.exit_code == Some(0) {
-        let mut result = ToolResult::ok(call_id, tool_name, content, metadata);
-        if let Some(outcome) = capture_outcome {
-            result.attach_capture_outcome(outcome);
-        }
-        Ok(result)
-    } else {
-        let summary_end = floor_char_boundary(
-            &content,
-            sigil_kernel::TOOL_RESULT_ERROR_SUMMARY_MAX_BYTES.min(content.len()),
-        );
-        let summary = &content[..summary_end];
-        let message = if summary_end < content.len() {
-            format!(
-                "bash command exited with non-zero status; full output is available in the tool artifact ({summary})"
-            )
-        } else if summary.is_empty() {
-            "bash command exited with non-zero status".to_owned()
-        } else {
-            summary.to_owned()
-        };
-        let syntax_error = content.to_ascii_lowercase().contains("syntax error")
-            || content.to_ascii_lowercase().contains("parse error");
-        let kind = if syntax_error {
-            ToolErrorKind::InvalidInput
-        } else {
-            ToolErrorKind::ExitStatus
-        };
-        let mut result = ToolResult::error(call_id, tool_name, kind, message);
-        if syntax_error {
-            result = result.with_error_details(
-                false,
-                json!({ "category": "shell_syntax", "retryable": false }),
-            );
-        }
-        result.content = content;
-        result.metadata = metadata;
-        if let Some(outcome) = capture_outcome {
-            result.attach_capture_outcome(outcome);
-        }
-        Ok(result)
-    }
-}
-
-fn captured_stream_text(
-    bytes: &[u8],
-    capture: &ExecutionStreamCapture,
-    fallback_limit_bytes: usize,
-) -> TextLimitResult {
-    if !capture.truncated {
-        let text = String::from_utf8_lossy(bytes);
-        let mut limited = limit_text_head_tail(&text, fallback_limit_bytes);
-        if limited.content.len() > fallback_limit_bytes {
-            limited.content = bounded_text_projection(
-                &text,
-                fallback_limit_bytes,
-                capture
-                    .total_bytes
-                    .saturating_sub(capture.returned_bytes.min(fallback_limit_bytes as u64)),
-            );
-        }
-        limited.total_bytes = capture.total_bytes;
-        limited.total_lines = capture.total_lines;
-        limited.returned_bytes = limited
-            .returned_bytes
-            .min(capture.returned_bytes)
-            .min(fallback_limit_bytes as u64);
-        limited.omitted_bytes = capture.total_bytes.saturating_sub(limited.returned_bytes);
-        return limited;
-    }
-
-    let head_len = usize::try_from(capture.retained_head_bytes)
-        .unwrap_or(bytes.len())
-        .min(bytes.len());
-    let tail_len = usize::try_from(capture.retained_tail_bytes)
-        .unwrap_or(bytes.len().saturating_sub(head_len))
-        .min(bytes.len().saturating_sub(head_len));
-    let head = String::from_utf8_lossy(&bytes[..head_len]);
-    let tail = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(tail_len)..]);
-    let retained = format!("{head}{tail}");
-    let content = bounded_text_projection(&retained, fallback_limit_bytes, capture.omitted_bytes);
-    let returned_bytes = capture
-        .returned_bytes
-        .min(fallback_limit_bytes as u64)
-        .min(capture.total_bytes);
-    TextLimitResult {
-        returned_bytes,
-        returned_lines: content.lines().count() as u64,
-        total_bytes: capture.total_bytes,
-        total_lines: capture.total_lines,
-        truncated: true,
-        omitted_bytes: capture.total_bytes.saturating_sub(returned_bytes),
-        content,
-    }
-}
-
-fn bounded_text_projection(input: &str, max_bytes: usize, omitted_bytes: u64) -> String {
-    let notice = format!("[sigil: output truncated, omitted {omitted_bytes} bytes]");
-    if max_bytes <= notice.len() {
-        let end = floor_char_boundary(&notice, max_bytes);
-        return notice[..end].to_owned();
-    }
-    let separators = 2usize;
-    let raw_budget = max_bytes.saturating_sub(notice.len() + separators);
-    let head_budget = raw_budget / 2;
-    let tail_budget = raw_budget.saturating_sub(head_budget);
-    let head_end = floor_char_boundary(input, head_budget.min(input.len()));
-    let tail_start =
-        ceil_char_boundary(input, input.len().saturating_sub(tail_budget)).max(head_end);
-    format!("{}\n{notice}\n{}", &input[..head_end], &input[tail_start..])
-}
-
-fn execution_termination_error(
-    termination: &ExecutionTerminationCause,
-) -> Option<(ToolErrorKind, &'static str)> {
-    match termination {
-        ExecutionTerminationCause::Exited => None,
-        ExecutionTerminationCause::TimedOut => {
-            Some((ToolErrorKind::Timeout, "bash command timed out"))
-        }
-        ExecutionTerminationCause::Cancelled => Some((
-            ToolErrorKind::Interrupted,
-            "bash command interrupted by run cancellation",
-        )),
-        ExecutionTerminationCause::OutputLimit { .. } => Some((
-            ToolErrorKind::ResourceLimit,
-            "bash command exceeded the output limit",
-        )),
-        ExecutionTerminationCause::ReaderFailed { .. } => {
-            Some((ToolErrorKind::Io, "bash command output reader failed"))
-        }
-    }
-}
-
-fn execution_receipt_details_with_context(
-    receipt: &ExecutionReceipt,
-    shell_context: Option<ShellReceiptContext<'_>>,
-    output_truncated: bool,
-    tail_available: bool,
-) -> Value {
-    let output = receipt.effective_output();
-    let mut details = json!({
-        "execution": {
-            "backend": receipt.backend,
-            "capabilities": receipt.capabilities,
-            "network": receipt.network,
-            "resources": receipt.resources,
-        }
-    });
-    if !matches!(output.termination, ExecutionTerminationCause::Exited)
-        || output.stdout.truncated
-        || output.stderr.truncated
-    {
-        details["execution"]["output"] = execution_output_details(&output);
-    }
-    if let Some(shell_context) = shell_context {
-        details["shell"] = match shell_context {
-            ShellReceiptContext::Analysis(analysis) => json!({
-                "program": analysis.shell_program.as_str(),
-                "dialect": analysis.shell_dialect.as_str(),
-                "command": analysis.command.as_str(),
-                "normalized_command": analysis.normalized_command.as_str(),
-                "command_family": analysis.command_family.as_str(),
-                "classification_source": analysis.classification_source.as_str(),
-                "call": {"summary": format!("command={}", analysis.command.as_str())},
-                "grant_scope": analysis.grant_scope.as_ref().map(CommandGrantScope::as_str),
-                "grant_scope_detail": shell_grant_scope_detail(analysis.grant_scope.as_ref()),
-                "approval_reason": analysis.explanation.as_str(),
-                "exit_code": receipt.exit_code,
-                "verdict": shell_verdict(receipt),
-                "output_truncated": output_truncated,
-                "tail_available": tail_available,
-                "rerun_not_needed": shell_rerun_not_needed(analysis, receipt),
-            }),
-            ShellReceiptContext::Prepared {
-                command,
-                shell,
-                plan,
-            } => json!({
-                "program": shell.program_string(),
-                "dialect": shell.dialect().as_str(),
-                "command": command,
-                "normalized_command": normalize_shell_command_for_permission(command),
-                "call": {"summary": format!("command={command}")},
-                "command_family": plan.semantic_scope.as_ref().map(|scope| scope.family.as_str()).unwrap_or("reviewed_shell"),
-                "classification_source": "prepared_permission_plan_v2",
-                "permission_plan_hash": plan.plan_hash.as_str(),
-                "approval_reason": plan.operation.as_str(),
-                "exit_code": receipt.exit_code,
-                "verdict": shell_verdict(receipt),
-                "output_truncated": output_truncated,
-                "tail_available": tail_available,
-                "rerun_not_needed": plan.operation == ToolOperation::ExecuteWorkspaceCheckCommand
-                    && receipt.exit_code == Some(0)
-                    && matches!(receipt.effective_output().termination, ExecutionTerminationCause::Exited),
-            }),
-        };
-    }
-    details
-}
-
-fn execution_output_details(output: &ExecutionOutputReceipt) -> Value {
-    let mut details = json!({
-        "termination": output.termination.as_str(),
-        "stdout": &output.stdout,
-        "stderr": &output.stderr,
-        "combined_total_bytes": output.combined_total_bytes,
-        "combined_hard_limit_bytes": output.combined_hard_limit_bytes,
-    });
-    match &output.termination {
-        ExecutionTerminationCause::OutputLimit {
-            stream,
-            limit_bytes,
-            observed_bytes,
-        } => {
-            details["code"] = json!("output_limit_exceeded");
-            details["stream"] = json!(stream.as_str());
-            details["limit_bytes"] = json!(limit_bytes);
-            details["observed_bytes"] = json!(observed_bytes);
-        }
-        ExecutionTerminationCause::ReaderFailed { stream, reason } => {
-            details["code"] = json!("output_reader_failed");
-            details["stream"] = json!(stream.as_str());
-            details["reason"] = json!(reason);
-        }
-        ExecutionTerminationCause::TimedOut => {
-            details["code"] = json!("execution_timeout");
-        }
-        ExecutionTerminationCause::Cancelled => {
-            details["code"] = json!("execution_cancelled");
-        }
-        ExecutionTerminationCause::Exited => {}
-    }
-    details
-}
-
 pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Value {
     match scope {
         Some(CommandGrantScope::WorkspaceScript { path, args_family }) => json!({
@@ -3838,29 +2580,6 @@ pub(crate) fn shell_grant_scope_detail(scope: Option<&CommandGrantScope>) -> Val
         }),
         _ => Value::Null,
     }
-}
-
-fn shell_verdict(receipt: &ExecutionReceipt) -> &'static str {
-    match receipt.effective_output().termination {
-        ExecutionTerminationCause::TimedOut => "timed_out",
-        ExecutionTerminationCause::Cancelled => "interrupted",
-        ExecutionTerminationCause::OutputLimit { .. } => "resource_limited",
-        ExecutionTerminationCause::ReaderFailed { .. } => "output_reader_failed",
-        ExecutionTerminationCause::Exited => match receipt.exit_code {
-            Some(0) => "passed",
-            Some(_) => "failed",
-            None => "unknown",
-        },
-    }
-}
-
-fn shell_rerun_not_needed(analysis: &ShellCommandAnalysis, receipt: &ExecutionReceipt) -> bool {
-    analysis.command_family.is_workspace_check()
-        && receipt.exit_code == Some(0)
-        && matches!(
-            receipt.effective_output().termination,
-            ExecutionTerminationCause::Exited
-        )
 }
 
 pub(crate) fn command_permission_subject(command: &str) -> String {
@@ -5926,4 +4645,20 @@ pub(crate) fn is_path_argument(command: &str, word: &str) -> bool {
             | "truncate"
             | "dd"
     )
+}
+
+/// A bounded diagnostic observation before a workspace validation command. Capacity estimates
+/// never replace the resource authority or the OS as the execution admission authority.
+pub(crate) fn workspace_check_resource_observation(workspace_root: &Path) -> Value {
+    const MINIMUM_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+    match fs2::available_space(workspace_root) {
+        Ok(available_bytes) => json!({
+            "status": "observed",
+            "available_bytes": available_bytes,
+            "minimum_headroom_bytes": MINIMUM_HEADROOM_BYTES,
+            "low_space_hint": available_bytes < MINIMUM_HEADROOM_BYTES,
+            "admission_gate": false,
+        }),
+        Err(_) => json!({ "status": "unavailable", "admission_gate": false }),
+    }
 }

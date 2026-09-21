@@ -9,7 +9,7 @@
 //!
 //! The workspace-wide `scratch_root` is only the base; it is never handed to a child as the
 //! scratch directory itself. Namespaces are created owner-only before any file can be written,
-//! metered against a per-session quota plus a workspace hard cap, and reclaimed by TTL GC that
+//! measured during maintenance against warning thresholds, and reclaimed by TTL GC that
 //! never deletes a namespace with an active tool or terminal lease.
 //!
 //! This module is deliberately free of session/artifact kernel types: it only needs the session
@@ -67,12 +67,12 @@ pub fn session_scratch_dir(scratch_root: &Path, session_scope_id: Option<&str>) 
         .join(session_scratch_key(session_scope_id))
 }
 
-/// Capacity limits for the scratch namespaces of one workspace.
+/// Observation and cleanup thresholds; ordinary child writes are not capacity-reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScratchQuota {
-    /// Per-session namespace cap, enforced before every scratch-using spawn.
+    /// Per-session usage warning threshold.
     pub per_session_bytes: u64,
-    /// Aggregate cap across all session namespaces under the same workspace scratch root.
+    /// Workspace usage warning threshold (historical field name).
     pub workspace_hard_bytes: u64,
 }
 
@@ -119,7 +119,6 @@ pub struct ScratchUsage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionScratchProvision {
     pub dir: PathBuf,
-    pub usage: ScratchUsage,
 }
 
 /// Physical SessionScratch owner seam. Production runtime composition supplies the authority
@@ -134,15 +133,6 @@ pub trait ScratchNamespaceProvider: Send + Sync + std::fmt::Debug {
         session_scope_id: Option<&str>,
         quota: &ScratchQuota,
     ) -> Result<SessionScratchProvision>;
-    /// Prepares an ordinary command namespace. Providers may keep workspace-wide measurements as
-    /// observations here; managed writers use the full quota-aware method above.
-    fn ensure_session_namespace_for_command(
-        &self,
-        session_scope_id: Option<&str>,
-        quota: &ScratchQuota,
-    ) -> Result<SessionScratchProvision> {
-        self.ensure_session_scratch(session_scope_id, quota)
-    }
     fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage>;
     fn gc_scratch_namespaces(
         &self,
@@ -345,27 +335,36 @@ impl ScratchTaskLeaseRegistry {
         namespaces: &Arc<ScratchNamespaceLeaseRegistry>,
     ) -> Result<()> {
         let lease = namespaces.acquire(session_key)?;
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.insert(task_id.to_owned(), (session_key.to_owned(), lease));
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("scratch task lease registry lock poisoned"))
-        }
+        self.register_owned(task_id, lease);
+        Ok(())
+    }
+
+    /// Transfers the already-admitted tool lease into the live execution owner. This performs
+    /// no second authority acquisition that could fail after the child has started. The map
+    /// contains independent RAII guards and has no partially committed cross-entry invariant;
+    /// recovering its lock retains those real guards even after another holder panicked.
+    pub(crate) fn register_owned(&self, task_id: &str, lease: ScratchNamespaceLease) {
+        let session_key = lease.key.clone();
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(task_id.to_owned(), (session_key, lease));
     }
 
     /// Releases the lease of one terminal task. Idempotent.
     pub fn release(&self, task_id: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.remove(task_id);
-        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id);
     }
 
     #[must_use]
     pub fn is_leased(&self, task_id: &str) -> bool {
         self.inner
             .lock()
-            .map(|inner| inner.contains_key(task_id))
-            .unwrap_or(true)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(task_id)
     }
 }
 
@@ -469,15 +468,6 @@ impl ScratchNamespaceControl {
     ) -> Result<SessionScratchProvision> {
         self.provider
             .ensure_session_scratch(session_scope_id, quota)
-    }
-
-    pub fn ensure_session_namespace_for_command(
-        &self,
-        session_scope_id: Option<&str>,
-        quota: &ScratchQuota,
-    ) -> Result<SessionScratchProvision> {
-        self.provider
-            .ensure_session_namespace_for_command(session_scope_id, quota)
     }
 
     pub fn measure_scratch_usage(&self, session_key: &str) -> Result<ScratchUsage> {
@@ -656,7 +646,7 @@ pub fn measure_scratch_usage(scratch_root: &Path, session_key: &str) -> Result<S
 pub fn ensure_session_scratch(
     scratch_root: &Path,
     session_scope_id: Option<&str>,
-    quota: &ScratchQuota,
+    _quota: &ScratchQuota,
 ) -> Result<SessionScratchProvision> {
     let session_key = session_scratch_key(session_scope_id);
     let sessions_root = scratch_root.join(SESSION_SCRATCH_NAMESPACE_DIR);
@@ -694,26 +684,8 @@ pub fn ensure_session_scratch(
         }
         secure_private_path_permissions(path)?;
     }
-    let usage = measure_scratch_usage(scratch_root, &session_key)?;
-    if usage.session_bytes > quota.per_session_bytes {
-        return Err(ScratchQuotaExceededError {
-            scope: sigil_kernel::resource::ScratchQuotaScope::Session,
-            usage_bytes: usage.session_bytes,
-            quota_bytes: quota.per_session_bytes,
-        }
-        .into());
-    }
-    if usage.workspace_bytes > quota.workspace_hard_bytes {
-        return Err(ScratchQuotaExceededError {
-            scope: sigil_kernel::resource::ScratchQuotaScope::Workspace,
-            usage_bytes: usage.workspace_bytes,
-            quota_bytes: quota.workspace_hard_bytes,
-        }
-        .into());
-    }
     Ok(SessionScratchProvision {
         dir: namespace_root,
-        usage,
     })
 }
 
@@ -842,7 +814,10 @@ pub struct ScratchGcReport {
     pub skipped_invalid: usize,
     pub quarantined: usize,
     pub deleted_bytes: u64,
-    pub workspace_usage_bytes: u64,
+    pub workspace_usage_bytes: Option<u64>,
+    pub workspace_known_subtotal_bytes: u64,
+    pub unknown_owners: Vec<String>,
+    pub observed_at_ms: u64,
     /// Bounded diagnostics for namespaces that could not be measured or deleted.
     pub diagnostics: Vec<String>,
 }
@@ -921,7 +896,9 @@ pub fn gc_scratch_namespaces(
                 continue;
             }
         };
-        report.workspace_usage_bytes = report.workspace_usage_bytes.saturating_add(state.bytes);
+        report.workspace_known_subtotal_bytes = report
+            .workspace_known_subtotal_bytes
+            .saturating_add(state.bytes);
         if now_ms.saturating_sub(state.newest_ms) < config.ttl_ms {
             report.skipped_recent += 1;
             continue;
@@ -943,6 +920,9 @@ pub fn gc_scratch_namespaces(
             report.skipped_leased += 1;
         }
     }
+    report.workspace_usage_bytes =
+        (report.skipped_invalid == 0).then_some(report.workspace_known_subtotal_bytes);
+    report.observed_at_ms = now_ms;
     Ok(report)
 }
 

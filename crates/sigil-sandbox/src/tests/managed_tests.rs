@@ -905,3 +905,136 @@ fn r71_managed_over_bound_agreement_fails_closed() {
     assert!(matches!(error, ManagedExecutionErrorV1::AdmissionMismatch));
     let _ = too_few_envs;
 }
+
+#[cfg(unix)]
+#[test]
+fn managed_deadline_stops_blocked_pipe_and_pty_input_without_output_polling() {
+    for pty in [false, true] {
+        let dir = tempfile::tempdir().expect("fixture");
+        let command = if pty {
+            "stty raw -echo; printf ready; sleep 30"
+        } else {
+            "printf ready; sleep 30"
+        };
+        let svc = terminal_service(
+            dir.path(),
+            vec![OsString::from("-c"), OsString::from(command)],
+        );
+        let mut request = exec_request(&["/bin/sh", "-c", command], false);
+        request.limits.max_runtime_ms = 500;
+        request.capture.pty = pty;
+        request.limits.pty_required = pty;
+        request.pty_size = pty.then_some(BoundedPtySizeV1 { rows: 24, cols: 80 });
+        let started = std::time::Instant::now();
+        let mut handle =
+            futures::executor::block_on(svc.start_persistent(bundle("terminal"), request))
+                .expect("spawn");
+        let mut stream = handle.take_output_stream().expect("stream");
+        let frame = futures::executor::block_on(stream.next_frame())
+            .expect("output")
+            .expect("ready frame");
+        assert!(frame.payload.windows(5).any(|window| window == b"ready"));
+        // This exceeds the real pipe/PTY input buffer. The child never reads stdin and this
+        // caller deliberately stops polling output; the watchdog must still stop the tree.
+        let input = futures::executor::block_on(handle.write_stdin(BoundedProcessInputV1 {
+            payload: vec![b'x'; 1024 * 1024],
+        }));
+        assert!(
+            input.is_err(),
+            "a non-reading process must not accept the entire payload"
+        );
+        let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalized");
+        assert!(
+            matches!(receipt.process.termination, ProcessTerminationV1::TimedOut),
+            "{receipt:?}"
+        );
+        assert_eq!(
+            receipt.resources.cleanup_status,
+            ResourceCleanupStatusV1::Released
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "input backpressure blocked the deadline"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_cancel_reclaims_an_interrupted_blocked_pty_input_owner() {
+    let dir = tempfile::tempdir().expect("fixture");
+    let command = "stty raw -echo; printf ready; sleep 30";
+    let svc = terminal_service(
+        dir.path(),
+        vec![OsString::from("-c"), OsString::from(command)],
+    );
+    let mut request = exec_request(&["/bin/sh", "-c", command], false);
+    request.capture.pty = true;
+    request.limits.pty_required = true;
+    request.pty_size = Some(BoundedPtySizeV1 { rows: 24, cols: 80 });
+    let mut handle = svc
+        .start_persistent(bundle("terminal"), request)
+        .await
+        .expect("spawn");
+    let mut stream = handle.take_output_stream().expect("stream");
+    stream
+        .next_frame()
+        .await
+        .expect("output")
+        .expect("ready frame");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            handle.write_stdin(BoundedProcessInputV1 {
+                payload: vec![b'x'; 1024 * 1024]
+            })
+        )
+        .await
+        .is_err()
+    );
+    // Dropping the caller future above must retain the sole input owner for cancel + join.
+    let started = std::time::Instant::now();
+    handle
+        .cancel(ProcessCancelReasonV1::UserCancelled)
+        .await
+        .expect("cancel");
+    let receipt = handle.wait_and_finalize().await.expect("finalize");
+    assert!(matches!(
+        receipt.process.termination,
+        ProcessTerminationV1::Cancelled
+    ));
+    assert_eq!(
+        receipt.resources.cleanup_status,
+        ResourceCleanupStatusV1::Released
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_delayed_finalization_preserves_an_already_exited_process() {
+    let dir = tempfile::tempdir().expect("fixture");
+    let svc = terminal_service(
+        dir.path(),
+        vec![OsString::from("-c"), OsString::from("printf done")],
+    );
+    let mut request = exec_request(&["/bin/sh", "-c", "printf done"], false);
+    request.limits.max_runtime_ms = 300;
+    let mut handle = futures::executor::block_on(svc.start_persistent(bundle("terminal"), request))
+        .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    let mut stream = handle.take_output_stream().expect("stream");
+    let mut output = Vec::new();
+    while let Some(frame) = futures::executor::block_on(stream.next_frame()).expect("frame") {
+        output.extend(frame.payload);
+    }
+    assert_eq!(output, b"done", "late observation preserves queued output");
+    let receipt = futures::executor::block_on(handle.wait_and_finalize()).expect("finalize");
+    assert!(
+        matches!(
+            receipt.process.termination,
+            ProcessTerminationV1::Exited { code: 0 }
+        ),
+        "{receipt:?}"
+    );
+}

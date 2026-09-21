@@ -5,6 +5,14 @@ const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_BYTES: u64 = 64 * 1024;
 const TERMINAL_LIFECYCLE_OUTPUT_PUBLISH_INTERVAL_MS: u64 = 250;
 pub(super) const TERMINAL_LIFECYCLE_ROUTE_MAX_ATTEMPTS: usize = 3;
 const TERMINAL_LIFECYCLE_ROUTE_RETRY_DELAYS_MS: [u64; 2] = [25, 100];
+type OwnedTerminalJoin = Arc<Mutex<Option<JoinHandle<()>>>>;
+pub(super) type OwnedCaptureJoin = Arc<Mutex<Option<JoinHandle<Result<io::CaptureOutcome>>>>>;
+
+#[derive(Clone)]
+struct OwnedTerminalRoute {
+    stop: watch::Sender<bool>,
+    join: OwnedTerminalJoin,
+}
 
 #[derive(Clone)]
 pub struct TerminalProcessManager {
@@ -21,6 +29,12 @@ pub struct TerminalProcessManager {
     execution_owner: TerminalExecutionOwnerV1,
     /// RFC-0062 14.1: shared task-scoped scratch leases; released when a task terminalizes.
     scratch_leases: Option<Arc<crate::scratch_namespace::ScratchTaskLeaseRegistry>>,
+    admission: Arc<Mutex<()>>,
+    stop_tx: watch::Sender<bool>,
+    owned_workers: Arc<StdMutex<Vec<OwnedTerminalJoin>>>,
+    owned_routes: Arc<StdMutex<Vec<OwnedTerminalRoute>>>,
+    owned_captures: Arc<StdMutex<Vec<OwnedCaptureJoin>>>,
+    owner_failed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -41,7 +55,100 @@ fn default_terminal_execution_owner() -> TerminalExecutionOwnerV1 {
 }
 
 impl TerminalProcessManager {
+    /// Closes admission and wakes every admitted managed execution without waiting for cleanup.
+    pub fn request_stop_all(&self) {
+        self.stop_tx.send_replace(true);
+    }
+
+    /// Joins the workers and lifecycle publishers this manager actually admitted.
+    ///
+    /// # Errors
+    /// Returns an error for worker panic, nonterminal execution or incomplete resource cleanup.
+    pub async fn shutdown_owned(&self) -> Result<()> {
+        self.request_stop_all();
+        // A start admitted before the stop signal must finish transferring all its owners.
+        let admission = self.admission.lock().await;
+        let joins = self
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        drop(admission);
+        let mut failures = 0usize;
+        for slot in joins {
+            let mut owner = slot.lock().await;
+            if let Some(worker) = owner.as_mut() {
+                if worker.await.is_err() {
+                    self.owner_failed.store(true, Ordering::SeqCst);
+                    failures += 1;
+                }
+                owner.take();
+            }
+        }
+        let captures = self
+            .owned_captures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        for capture in captures {
+            if super::worker::join_managed_capture(&capture)
+                .await
+                .is_some()
+            {
+                failures += 1;
+            }
+        }
+        let mut publication_has_no_terminal = failures != 0;
+        let summaries = self
+            .tasks
+            .lock()
+            .await
+            .values()
+            .map(|task| Arc::clone(&task.summary))
+            .collect::<Vec<_>>();
+        for summary in summaries {
+            let entry = summary.lock().await;
+            publication_has_no_terminal |= !entry.status.is_terminal();
+            if !entry.status.is_terminal()
+                || entry.cleanup.as_ref().is_none_or(|cleanup| {
+                    cleanup.status != sigil_kernel::ExecutionCleanupStatus::Completed
+                })
+            {
+                failures += 1;
+            }
+        }
+        let routes = self
+            .owned_routes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        for slot in routes {
+            if publication_has_no_terminal {
+                slot.stop.send_replace(true);
+            }
+            let mut owner = slot.join.lock().await;
+            if let Some(route) = owner.as_mut() {
+                // A stop is observed between publications. An in-progress required append
+                // keeps its owner and finishes before the publisher can acknowledge shutdown.
+                if route.await.is_err() {
+                    failures += 1;
+                }
+                owner.take();
+            }
+        }
+        if failures != 0 {
+            self.owner_failed.store(true, Ordering::SeqCst);
+        }
+        if self.owner_failed.load(Ordering::SeqCst) {
+            bail!("execution shutdown retains an unconfirmed cleanup or owner failure");
+        }
+        Ok(())
+    }
+
     fn ensure_execution_available(&self) -> Result<()> {
+        if *self.stop_tx.borrow() {
+            bail!("execution owner is shutting down");
+        }
         match &self.execution_owner {
             TerminalExecutionOwnerV1::Managed(port) if !port.is_available() => {
                 Err(anyhow::Error::new(
@@ -113,6 +220,12 @@ impl TerminalProcessManager {
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
             execution_owner: default_terminal_execution_owner(),
             scratch_leases: None,
+            admission: Arc::new(Mutex::new(())),
+            stop_tx: watch::channel(false).0,
+            owned_workers: Arc::new(StdMutex::new(Vec::new())),
+            owned_routes: Arc::new(StdMutex::new(Vec::new())),
+            owned_captures: Arc::new(StdMutex::new(Vec::new())),
+            owner_failed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -180,7 +293,7 @@ impl TerminalProcessManager {
         request: TerminalStartRequest,
         readiness: TerminalReadinessCondition,
     ) -> Result<TerminalTaskEntry> {
-        self.start_with_readiness_and_sink(request, readiness, None)
+        self.start_with_readiness_and_sink(request, readiness, None, None)
             .await
     }
 
@@ -190,7 +303,9 @@ impl TerminalProcessManager {
         request: TerminalStartRequest,
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+        observer: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<TerminalTaskEntry> {
+        let _admission = self.admission.lock().await;
         self.ensure_execution_available()?;
         let plan = self
             .prepare_start(request, TerminalStartMode::LocalProcess)
@@ -203,6 +318,7 @@ impl TerminalProcessManager {
                     readiness,
                     lifecycle_sink,
                     None,
+                    observer,
                 )
                 .await
             }
@@ -245,6 +361,7 @@ impl TerminalProcessManager {
         let mut child = command_process
             .spawn()
             .with_context(|| format!("failed to start terminal command: {}", plan.command))?;
+        let started_at_ms = current_epoch_ms();
         let process_id = child.id();
         let process_owner = match ProcessTreeOwnerGuard::assign(process_id) {
             Ok(owner) => owner,
@@ -284,10 +401,11 @@ impl TerminalProcessManager {
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
         let managed = ManagedTerminalTask {
+            started_at_ms,
+            capture_ledger: Arc::clone(&capture_ledger),
             summary: Arc::clone(&summary),
             lifecycle: lifecycle.clone(),
             control: TerminalTaskControl::Process { cancel_tx },
-            lifecycle_route_abort: None,
         };
 
         self.tasks
@@ -345,7 +463,7 @@ impl TerminalProcessManager {
         pty_size: Option<TerminalPtySize>,
         readiness: TerminalReadinessCondition,
     ) -> Result<TerminalTaskEntry> {
-        self.start_pty_with_readiness_and_sink(request, pty_size, readiness, None)
+        self.start_pty_with_readiness_and_sink(request, pty_size, readiness, None, None)
             .await
     }
 
@@ -356,7 +474,9 @@ impl TerminalProcessManager {
         pty_size: Option<TerminalPtySize>,
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
+        observer: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<TerminalTaskEntry> {
+        let _admission = self.admission.lock().await;
         self.ensure_execution_available()?;
         match &self.execution_owner {
             TerminalExecutionOwnerV1::Managed(managed_execution) => {
@@ -369,6 +489,7 @@ impl TerminalProcessManager {
                     readiness,
                     lifecycle_sink,
                     Some(pty_size.unwrap_or_default()),
+                    observer,
                 )
                 .await
             }
@@ -411,8 +532,11 @@ impl TerminalProcessManager {
             self.artifact_limits,
             lifecycle.clone(),
         )?;
+        let started_at_ms = current_epoch_ms();
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let managed = ManagedTerminalTask {
+            started_at_ms,
+            capture_ledger: Arc::clone(&pty_runtime.capture_ledger),
             summary: Arc::clone(&summary),
             lifecycle: lifecycle.clone(),
             control: TerminalTaskControl::Pty {
@@ -425,7 +549,6 @@ impl TerminalProcessManager {
                 artifacts: Arc::new(plan.artifacts.clone()),
                 preview_limit_bytes: self.preview_limit_bytes,
             },
-            lifecycle_route_abort: None,
         };
 
         self.tasks
@@ -469,8 +592,10 @@ impl TerminalProcessManager {
         readiness: TerminalReadinessCondition,
         lifecycle_sink: Option<Arc<dyn sigil_kernel::TerminalLifecycleSink>>,
         pty_size: Option<TerminalPtySize>,
+        observer: Option<sigil_kernel::RunCancellationHandle>,
     ) -> Result<TerminalTaskEntry> {
         let request = crate::ManagedTerminalStartRequestV1 {
+            max_runtime_secs: plan.max_runtime_secs,
             program: plan.shell.clone(),
             args: plan.shell_args.clone(),
             cwd: plan.resolved_cwd.absolute.clone(),
@@ -480,11 +605,6 @@ impl TerminalProcessManager {
                 cols: size.cols,
             }),
         };
-        let handle = managed_execution
-            .start_persistent(request)
-            .await
-            .map_err(|error| anyhow::Error::new(error).context("managed terminal launch failed"))?;
-
         let lifecycle = TerminalLifecycleOwner::new(
             plan.task_id.clone(),
             plan.initial_entry.handle.execution_backend,
@@ -492,13 +612,23 @@ impl TerminalProcessManager {
             &readiness,
         )?
         .with_scratch_leases(self.scratch_leases.clone());
-        lifecycle.mark_running();
-        let lifecycle_route_baseline = lifecycle.snapshot();
-        let lifecycle_route_receiver = lifecycle.subscribe();
         let output_file = Arc::new(Mutex::new(CombinedOutputWriter::new(
             open_append_file(&plan.artifacts.absolute_output).await?,
             self.artifact_limits.combined_bytes,
         )));
+        self.record_permission_context(&plan)?;
+        let mut handle = managed_execution
+            .start_persistent(request)
+            .await
+            .map_err(|error| anyhow::Error::new(error).context("managed terminal launch failed"))?;
+        if let Some(observer) = observer.as_ref() {
+            handle.observe_cleanup(observer.clone());
+        }
+        let started_at_ms = current_epoch_ms();
+
+        lifecycle.mark_running();
+        let lifecycle_route_baseline = lifecycle.snapshot();
+        let lifecycle_route_receiver = lifecycle.subscribe();
         let capture_ledger = Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle.clone()));
         let (capture_failure_tx, _capture_failure_rx) = mpsc::unbounded_channel();
         let (stdout_writer, stdout_reader) = tokio::io::duplex(64 * 1024);
@@ -521,18 +651,44 @@ impl TerminalProcessManager {
             Arc::clone(&capture_ledger),
             capture_failure_tx,
         );
+        let stdout_task = Arc::new(Mutex::new(Some(stdout_task)));
+        let stderr_task = Arc::new(Mutex::new(Some(stderr_task)));
+        self.owned_captures
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend([Arc::clone(&stdout_task), Arc::clone(&stderr_task)]);
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let (command_tx, cancel_rx) = mpsc::channel(1);
         let managed = ManagedTerminalTask {
+            started_at_ms,
+            capture_ledger: Arc::clone(&capture_ledger),
             summary: Arc::clone(&summary),
             lifecycle: lifecycle.clone(),
             control: TerminalTaskControl::Managed { command_tx },
-            lifecycle_route_abort: None,
         };
         self.tasks
             .lock()
             .await
             .insert(plan.task_id.clone(), managed);
+        let worker = tokio::spawn(run_managed_terminal_worker(ManagedTerminalWorker {
+            handle,
+            stdout_writer,
+            stderr_writer,
+            cancel_rx,
+            summary: Arc::clone(&summary),
+            artifacts: plan.artifacts.clone(),
+            stdout_task,
+            stderr_task,
+            capture_ledger,
+            preview_limit_bytes: self.preview_limit_bytes,
+            lifecycle: lifecycle.clone(),
+            stop_rx: self.stop_tx.subscribe(),
+            observer,
+        }));
+        self.owned_workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::new(Mutex::new(Some(worker))));
         self.attach_lifecycle_route(
             &plan.task_id,
             Arc::clone(&summary),
@@ -542,20 +698,6 @@ impl TerminalProcessManager {
             lifecycle_sink,
         )
         .await?;
-        self.record_permission_context(&plan)?;
-        tokio::spawn(run_managed_terminal_worker(ManagedTerminalWorker {
-            handle,
-            stdout_writer,
-            stderr_writer,
-            cancel_rx,
-            summary,
-            artifacts: plan.artifacts,
-            stdout_task,
-            stderr_task,
-            capture_ledger,
-            preview_limit_bytes: self.preview_limit_bytes,
-            lifecycle,
-        }));
         Ok(plan.initial_entry)
     }
 
@@ -579,7 +721,11 @@ impl TerminalProcessManager {
         entry.readiness = lifecycle.readiness.clone();
         entry.output_total_bytes = entry.output_total_bytes.max(lifecycle.total_output_bytes);
         entry.updated_at_ms = entry.updated_at_ms.max(lifecycle.emitted_at_ms);
+        let (stdout_bytes, stderr_bytes) = task.capture_ledger.observed_stream_bytes();
         Ok(TerminalTaskSnapshot {
+            started_at_ms: task.started_at_ms,
+            stdout_bytes,
+            stderr_bytes,
             entry,
             generation: lifecycle.generation,
             readiness: lifecycle.readiness,
@@ -633,10 +779,17 @@ impl TerminalProcessManager {
         };
         let manager = self.clone();
         let route_task_id = task_id.clone();
+        let (stop, mut stopping) = watch::channel(false);
         let route = tokio::spawn(async move {
             loop {
-                if receiver.changed().await.is_err() {
-                    break;
+                tokio::select! {
+                    biased;
+                    () = async {
+                        if !*stopping.borrow_and_update() { let _ = stopping.changed().await; }
+                    } => break,
+                    changed = receiver.changed() => {
+                        if changed.is_err() { break; }
+                    }
                 }
                 let event = receiver.borrow_and_update().clone();
                 if !should_publish_lifecycle_event(&last_published, &event) {
@@ -687,13 +840,13 @@ impl TerminalProcessManager {
                 }
             }
         });
-        let abort = route.abort_handle();
-        drop(route);
-        let mut tasks = self.tasks.lock().await;
-        let managed = tasks
-            .get_mut(task_id)
-            .ok_or_else(|| anyhow!("terminal task disappeared before lifecycle routing"))?;
-        managed.lifecycle_route_abort = Some(abort);
+        self.owned_routes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(OwnedTerminalRoute {
+                stop,
+                join: Arc::new(Mutex::new(Some(route))),
+            });
         Ok(())
     }
 
@@ -704,6 +857,7 @@ impl TerminalProcessManager {
         lifecycle: &TerminalLifecycleOwner,
         error: &anyhow::Error,
     ) {
+        self.owner_failed.store(true, Ordering::SeqCst);
         let diagnostic = format!("{error:#}");
         let reason = format!(
             "terminal_lifecycle_route_failed:sha256:{:x}",
@@ -1189,7 +1343,7 @@ impl TerminalProcessManager {
             .terminal_execution
             .resolve_shell(request.shell.as_deref())?;
         let shell_program = shell.program_string();
-        let shell_args = shell.terminal_args(&command);
+        let shell_args = shell.one_shot_args(&command);
         let env = request.env;
         let execution = match mode {
             TerminalStartMode::LocalProcess => local_process_execution(),
@@ -1246,6 +1400,7 @@ impl TerminalProcessManager {
         write_task_meta(&artifacts.absolute_meta, &initial_entry).await?;
 
         Ok(TerminalTaskStartPlan {
+            max_runtime_secs: request.max_runtime_secs,
             task_id,
             command,
             shell: shell_program,
@@ -1370,10 +1525,11 @@ impl From<TerminalPtyExecution> for TerminalStartExecution {
 
 #[derive(Clone)]
 pub(super) struct ManagedTerminalTask {
+    pub(super) started_at_ms: u64,
+    pub(super) capture_ledger: Arc<TerminalCaptureLedger>,
     pub(super) summary: Arc<Mutex<TerminalTaskEntry>>,
     pub(super) lifecycle: TerminalLifecycleOwner,
     pub(super) control: TerminalTaskControl,
-    pub(super) lifecycle_route_abort: Option<tokio::task::AbortHandle>,
 }
 
 #[derive(Clone)]
@@ -1415,6 +1571,7 @@ pub(super) struct CancelCommand {
 }
 
 pub(super) struct TerminalTaskStartPlan {
+    pub(super) max_runtime_secs: Option<u64>,
     pub(super) task_id: TerminalTaskId,
     pub(super) command: String,
     pub(super) shell: String,
@@ -1424,4 +1581,210 @@ pub(super) struct TerminalTaskStartPlan {
     pub(super) resolved_cwd: ResolvedTerminalCwd,
     pub(super) initial_entry: TerminalTaskEntry,
     pub(super) pty_command: Option<TerminalPtyCommandSpec>,
+}
+
+#[cfg(test)]
+mod owned_shutdown_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct SuccessfulLifecycleSink;
+
+    #[async_trait::async_trait]
+    impl sigil_kernel::TerminalLifecycleSink for SuccessfulLifecycleSink {
+        async fn publish(&self, _: sigil_kernel::TerminalLifecycleUpdateV2) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_shutdown_owned_joins_panicked_worker_before_waiting_publisher() -> Result<()>
+    {
+        let fixture = tempfile::tempdir()?;
+        let manager = TerminalProcessManager::new(fixture.path())?;
+        let plan = manager
+            .prepare_start(
+                TerminalStartRequest::new("printf fixture"),
+                TerminalStartMode::LocalProcess,
+            )
+            .await?;
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &TerminalReadinessCondition::None,
+        )?;
+        lifecycle.mark_running();
+        let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
+        let (command_tx, _commands) = mpsc::channel(1);
+        manager.tasks.lock().await.insert(
+            plan.task_id.clone(),
+            ManagedTerminalTask {
+                started_at_ms: current_epoch_ms(),
+                capture_ledger: Arc::new(TerminalCaptureLedger::with_lifecycle(lifecycle.clone())),
+                summary: Arc::clone(&summary),
+                lifecycle: lifecycle.clone(),
+                control: TerminalTaskControl::Managed { command_tx },
+            },
+        );
+        manager
+            .attach_lifecycle_route(
+                &plan.task_id,
+                summary,
+                lifecycle.clone(),
+                lifecycle.subscribe(),
+                lifecycle.snapshot(),
+                Some(Arc::new(SuccessfulLifecycleSink)),
+            )
+            .await?;
+        let (release_panic, panic_point) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _owned_lifecycle = lifecycle;
+            panic_point.await.expect("explicit worker failure point");
+            panic!("injected worker panic before terminal publication");
+        });
+        manager
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::new(Mutex::new(Some(worker))));
+        let shutdown = manager.shutdown_owned();
+        tokio::pin!(shutdown);
+        assert!(
+            timeout(Duration::from_millis(10), &mut shutdown)
+                .await
+                .is_err()
+        );
+        release_panic
+            .send(())
+            .map_err(|_| anyhow!("failure point lost"))?;
+        assert!(timeout(Duration::from_secs(2), shutdown).await?.is_err());
+        assert!(
+            manager.shutdown_owned().await.is_err(),
+            "panic evidence must remain sticky"
+        );
+        let mut owners = manager
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        owners.extend(
+            manager
+                .owned_routes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .map(|route| Arc::clone(&route.join)),
+        );
+        for owner in owners {
+            assert!(owner.lock().await.is_none(), "every handle was joined");
+        }
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct BlockingLifecycleSink {
+        started: StdMutex<Option<oneshot::Sender<()>>>,
+        release: StdMutex<Option<std_mpsc::Receiver<()>>>,
+        completed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl sigil_kernel::TerminalLifecycleSink for BlockingLifecycleSink {
+        async fn publish(&self, _: sigil_kernel::TerminalLifecycleUpdateV2) -> Result<()> {
+            let release = self
+                .release
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(release) = release {
+                let started = self
+                    .started
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                let completed = Arc::clone(&self.completed);
+                tokio::task::spawn_blocking(move || {
+                    if let Some(started) = started {
+                        let _ = started.send(());
+                    }
+                    release.recv().expect("explicit audit release");
+                    completed.store(true, Ordering::SeqCst);
+                })
+                .await?;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_shutdown_owned_waits_for_inflight_publication_after_worker_panic()
+    -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let manager = TerminalProcessManager::new(fixture.path())?;
+        let plan = manager
+            .prepare_start(
+                TerminalStartRequest::new("printf fixture"),
+                TerminalStartMode::LocalProcess,
+            )
+            .await?;
+        let lifecycle = TerminalLifecycleOwner::new(
+            plan.task_id.clone(),
+            plan.initial_entry.handle.execution_backend,
+            plan.initial_entry.handle.sandbox_profile,
+            &TerminalReadinessCondition::None,
+        )?;
+        let summary = Arc::new(Mutex::new(plan.initial_entry));
+        let (started, audit_started) = oneshot::channel();
+        let (release, audit_release) = std_mpsc::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        manager
+            .attach_lifecycle_route(
+                &plan.task_id,
+                summary,
+                lifecycle.clone(),
+                lifecycle.subscribe(),
+                lifecycle.snapshot(),
+                Some(Arc::new(BlockingLifecycleSink {
+                    started: StdMutex::new(Some(started)),
+                    release: StdMutex::new(Some(audit_release)),
+                    completed: Arc::clone(&completed),
+                })),
+            )
+            .await?;
+        lifecycle.mark_running();
+        timeout(Duration::from_secs(2), audit_started).await??;
+        let worker = tokio::spawn(async {
+            panic!("injected worker panic during publication");
+        });
+        manager
+            .owned_workers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(Arc::new(Mutex::new(Some(worker))));
+        let shutdown = manager.shutdown_owned();
+        tokio::pin!(shutdown);
+        assert!(
+            timeout(Duration::from_millis(10), &mut shutdown)
+                .await
+                .is_err()
+        );
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "required append is still owned and running"
+        );
+        release
+            .send(())
+            .map_err(|_| anyhow!("audit release was lost"))?;
+        assert!(timeout(Duration::from_secs(2), shutdown).await?.is_err());
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "shutdown joined the actual append"
+        );
+        assert!(
+            manager.shutdown_owned().await.is_err(),
+            "worker panic remains a failure"
+        );
+        Ok(())
+    }
 }

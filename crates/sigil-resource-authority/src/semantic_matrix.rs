@@ -177,6 +177,8 @@ pub fn owner_label(owner: ManagedStorageSemanticOwnerV1) -> &'static str {
         ManagedStorageSemanticOwnerV1::DurableMemory(_) => "DurableMemory",
         ManagedStorageSemanticOwnerV1::WorkspaceMutationState => "WorkspaceMutationState",
         ManagedStorageSemanticOwnerV1::ApplicationControlLog => "ApplicationControlLog",
+        ManagedStorageSemanticOwnerV1::ApplicationCommandIndex => "ApplicationCommandIndex",
+        ManagedStorageSemanticOwnerV1::ApplicationControlRecovery => "ApplicationControlRecovery",
         ManagedStorageSemanticOwnerV1::PlanStore => "PlanStore",
         ManagedStorageSemanticOwnerV1::SessionCatalog => "SessionCatalog",
         ManagedStorageSemanticOwnerV1::ProviderConnectionState => "ProviderConnectionState",
