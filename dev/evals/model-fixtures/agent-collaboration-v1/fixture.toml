@@ -1,0 +1,61 @@
+schema_version = 1
+id = "agent-collaboration-v1"
+prompt_file = "prompt.txt"
+prompt_sha256 = "sha256:5e0e434b8234951c0a1e115522b3bac43113a041eaf862ee0be3bfa434ecc182"
+allowed_tools = ["read_file", "glob", "grep", "spawn_agents"]
+max_turns = 8
+max_output_tokens = 8192
+expected_terminal = ["completed"]
+expected_verification = ["passed"]
+agent_delegation = true
+
+[[assertions]]
+id = "spawn-agents-succeeded"
+kind = "tool_status"
+tool_name = "spawn_agents"
+status = "succeeded"
+
+[[assertions]]
+id = "two-explore-agents-completed-and-delivered"
+kind = "agent_batch_succeeded"
+minimum_members = 2
+profile_id = "explore"
+
+[[assertions]]
+id = "source-unchanged"
+kind = "workspace_source_unchanged"
+
+[[files]]
+path = "Cargo.toml"
+source = "files/Cargo.toml"
+sha256 = "sha256:3a92a52df86f9ca00242e7f86d843a07a76192f1548666f3076614549144933d"
+
+[[files]]
+path = "Cargo.lock"
+source = "files/Cargo.lock"
+sha256 = "sha256:884c2d8e7bcd079989aae9c99b4f3e21902a93445ef43e69c0e2c7ad8bd06946"
+
+[[files]]
+path = "src/lib.rs"
+source = "files/src/lib.rs"
+sha256 = "sha256:b8a9893bba7bca6cce8058e3e04ae7f2bcefa9db7d53247a0fcf68042c78c08d"
+
+[[files]]
+path = "src/parser.rs"
+source = "files/src/parser.rs"
+sha256 = "sha256:5ccbce1958df9f7a5961e167efb05e925beda13a8051a91371ae805a32900492"
+
+[[files]]
+path = "src/formatter.rs"
+source = "files/src/formatter.rs"
+sha256 = "sha256:447cad2f519a9b2cde2aa133274a6aed08fc5af1d81427b2e3a02929cec1ca57"
+
+[[files]]
+path = "tests/pipeline.rs"
+source = "files/tests/pipeline.rs"
+sha256 = "sha256:48c07ec0093ff677dcebf3b61b1aad023a15443a5281292f4a72b9ffc25c09fe"
+
+[[checks]]
+id = "tests"
+command = ["cargo", "test", "--quiet"]
+timeout_ms = 30000

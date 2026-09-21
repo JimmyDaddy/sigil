@@ -31,8 +31,8 @@
       "reason": "session has no durable artifact store"
     },
     {
-      "stage": "child_plan_finalization",
-      "tool": "submit_plan_draft",
+      "stage": "child_plan_result_submission",
+      "tool": "submit_plan_review_result",
       "status": "draft_ready",
       "provider_request_count_after_missing_authority": 0
     }

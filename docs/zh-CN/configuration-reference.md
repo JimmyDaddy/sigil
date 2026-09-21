@@ -101,14 +101,10 @@ provider 模板、凭据来源、模型发现与排障见[模型服务指南](pr
 
 | 区块 / 字段 | 默认值 | 用途 |
 | --- | --- | --- |
-| `[task].enabled` | `true` | 开启任务规划。 |
-| `[task].routing_policy` | `"auto"` | 普通对话路由策略：`manual`（chat-first，仅保留显式 `/plan` 与 `/task`）或由 coordinator 接管的 `auto`（`Chat` / `PlanReview` / `Task` 三路 decision）；不会授予工具权限。 |
-| `[task].max_plan_steps` | `12` | 单个计划最多包含多少步。 |
-| `[task].max_replans` | `2` | 最多允许重新规划多少次。 |
+| `[task].enabled` | `true` | 开启普通对话中的可选 Task 转交能力。 |
+| `[task].routing_policy` | `"auto"` | `manual` 关闭普通对话中的自动 Plan/Task 转交入口；`auto` 提供正向 typed 工具供模型按需选择。host 不分类用户意图，也不会因此授予工具权限。 |
 | `[task].max_subagents` | `8` | 最多同时运行多少个子智能体。 |
-| `[task].max_parallel_read_steps` | `4` | 单批最多启动多少个相互独立的 shared-read-only Task step；parent 终态仍按稳定 plan 顺序提交。 |
-| `[task].max_parallel_changeset_steps` | `2` | 单批最多启动多少个相互独立的 `ChangesetOnly` 写子智能体 step；同批成员共享不可变 base snapshot，且不会修改 parent workspace。 |
-| `[task].max_planning_research_agents` | `3` | 每次 Planner attempt 最多使用多少个只读 Explore probe；`0` 表示关闭，超过硬上限 `4` 的值会被截断。 |
+| `[task].max_concurrent_provider_routes` | `4` | 子智能体同时发出的 provider 请求上限；最小有效值为 `1`。 |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`、`explicit_request_only` 或 `proactive`。 |
 | `[task].allow_write_subagents` | `true` | 符合条件的子智能体能否请求修改文件。 |
 | `[task.<role>].connection` / `.model` / `.reasoning_effort` | 继承 `[agent]` | 可按角色单独选择当前路由；`connection` 与 `model` 必须同时设置，`provider` 不是合法字段。 |

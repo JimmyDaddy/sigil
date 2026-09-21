@@ -61,6 +61,7 @@ Run `sigil doctor` and confirm `default=deepseek-default/deepseek-v4-flash`, the
 - Authentication: export `SIGIL_API_KEY` in the same shell that launches Sigil.
 - Wrong model: check the exact `[agent].connection` plus `[agent].model` route and any task-role override.
 - FIM unavailable: confirm `fim_model` and endpoint support.
+- A tool-schema error mentioning `additionalProperties`: DeepSeek rejects explicit `additionalProperties: true`, so Sigil recursively omits it from both standard tool requests and Anthropic-compatible Messages requests that include hosted web search; JSON Schema keeps extra fields allowed by default. Explicit `false` is preserved, and strict mode for standard tools sends `false` as DeepSeek requires. See the [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api/) and [Tool Calls](https://api-docs.deepseek.com/guides/tool_calls/) docs.
 - Slow stream: check network access and model-request timeouts.
 
 <!-- public-doc-cta: return-providers -->

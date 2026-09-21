@@ -909,7 +909,8 @@
         "important-paths",
         "web-tool-inputs",
         "approval-outcomes",
-        "session-recovery-facts"
+        "session-recovery-facts",
+        "command-execution"
       ],
       "cta_key": "return-user-guide",
       "heading_labels": {
@@ -922,7 +923,8 @@
           "Important Paths",
           "Web Tool Inputs",
           "Approval Outcomes",
-          "Session Recovery Facts"
+          "Session Recovery Facts",
+          "Command Execution"
         ],
         "zh-CN": [
           "TUI 键位",
@@ -933,7 +935,8 @@
           "重要路径",
           "Web 工具输入",
           "审批结果",
-          "会话恢复要点"
+          "会话恢复要点",
+          "命令执行"
         ]
       },
       "cta_target": "user-guide.md",

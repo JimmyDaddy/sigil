@@ -332,7 +332,7 @@ apps/desktop/src-tauri/src/appearance.rs
 
 约束：
 
-- 最大 4 KiB，deny unknown fields，enum 之外的值拒绝。
+- 最大 4 KiB，未知字段忽略，enum 之外的值拒绝。
 - 使用同目录 temporary file + sync + atomic replace；不保存 workspace/path/user identity。
 - missing、损坏、unknown version 或 I/O unavailable 都 fail-soft 到 `system`，不得阻止窗口、workspace 或 run。
 - preference 修改错误只进入 Appearance surface，不复用 workspace/run global error。

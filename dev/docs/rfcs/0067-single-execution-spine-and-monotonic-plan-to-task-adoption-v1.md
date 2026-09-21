@@ -82,7 +82,7 @@ semantic route
 
 - `task_plan_from_plan_draft` 一定成功；
 - task title、step display name、intent aliases 和 contract set 一定可 materialize；
-- 当前 `task.max_plan_steps`、role registry 和 capability baseline 与 draft 相容；
+- 当前 Task display checklist、role registry 和 capability baseline 与 draft 相容；该 proposal 不授权 host 对 Task steps 做业务调度。
 - handoff 需要的所有 durable records 能作为一个提交单元写入；
 - Run 之后一定先得到 Task identity，再做资源和环境检查。
 

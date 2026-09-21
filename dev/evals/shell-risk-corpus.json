@@ -74,8 +74,8 @@
       "expected_policy": { "manual": "ask", "auto_edit": "ask", "danger_full_access": "allow", "risk": "destructive" }
     },
     {
-      "id": "sandbox-tmpdir-workspace-check",
-      "command": "cargo check --target-dir \"$TMPDIR/build\"",
+      "id": "runtime-scratch-workspace-check",
+      "command": "cargo check --target-dir \"$SIGIL_SCRATCH_DIR/build\"",
       "expected_analysis": "complete",
       "expected_operation": "execute_workspace_check_command",
       "required_effects": ["file_read", "execute_workspace_code"],

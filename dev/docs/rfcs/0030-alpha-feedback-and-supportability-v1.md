@@ -101,7 +101,7 @@ TUI support bundle 在该 doctor report 外增加可选 `session`：只包含 se
 
 `privacy` 必须诚实列出 support bundle 可能保留的非秘密配置摘要：provider/model label、MCP alias、capability/sandbox status。它只能声称排除配置文件正文、credential/environment name/value、conversation/tool/file content，不能笼统声称“无配置数据”。
 
-所有 struct 使用显式 serde 字段名与 `deny_unknown_fields` 反序列化测试。Schema V1 的字段、枚举 token 与语义完全冻结；任何新增、删除、重命名或语义改变都需要新 schema version。精确 JSON fixture 同时锁定机器契约。
+所有 struct 使用显式 serde 字段名与反序列化测试。Schema V1 的当前必需字段、枚举 token 与语义继续校验；未知字段（包括退休字段）投影忽略，精确 JSON fixture 同时锁定机器契约的已知部分。
 
 ### 6.3 Sanitization and bounds
 

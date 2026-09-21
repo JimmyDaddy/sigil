@@ -664,7 +664,7 @@ mixed writer batch。本切片提供：
 
 - 非序列化的 host acceptance authority：`UserDeclaredRoot` 只能绑定原始 user-turn
   authority；`SuggestedDecomposition` 必须绑定 exact proposal digest 的显式用户确认。provider
-  proposal 仍使用 `deny_unknown_fields`，不能提交 acceptance kind、authority id、runtime
+  proposal 仍只读取当前字段，不能提交 acceptance kind、authority id、runtime
   intent id 或 stack version；
 - runtime-owned、确定性且 retry-stable 的 intent/criterion id resolution；provider alias
   只作为 admission 输入，不直接成为 durable identity；
@@ -894,7 +894,7 @@ TUI worker 已改为调用同一 application command，不再私有重建 permis
 
 R51.7 第二批已完成 Desktop typed surface：
 
-- `sigil-desktop` 只定义独立、bounded、`deny_unknown_fields` 的 Intent Stack wire DTO 和
+- `sigil-desktop` 只定义独立、bounded 的 Intent Stack wire DTO 和
   typed local HTTP client；crate 不依赖 kernel/runtime/http，也不向 renderer 投影 bearer、
   session path、workspace root、raw patch、file content、permission policy 或 approval
   authority；

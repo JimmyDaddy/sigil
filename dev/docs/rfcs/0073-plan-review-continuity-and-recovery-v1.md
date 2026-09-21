@@ -14,7 +14,7 @@
 
 本批删除独立 finalizer session/resource allocator、最近 12 个工具结果 / 24 KiB evidence builder、未使用的 PlanCompileInput 构造和重复 draft 校验，以及未广告的 `submit_plan_draft` 与 Accept-only `confirm_plan_review_candidate` 执行分支。旧工具名只保留明确协议拒绝与历史审计识别；历史 `finalizer_session_ref` 继续用于既有 durable attempt 的原样恢复，不据此分配新会话。真实来源绑定、只读权限、用户 Run 批准、取消和 resource settlement、revision 原子 terminal/outbox 保持各自的执行边界。
 
-同批清除没有生产调用的旧生成算法：`compile_executable_plan_candidate`、`task_plan_from_plan_draft`、旧 candidate intent prepare/materialize/bind、`append_plan_execution_adoption_at_frontier`，以及只供这些算法测试的 `create_task_from_plan` / `PlanExecutionService::adopt` 链。历史 `ExecutablePlanCandidateV1`、`PlanCompileBindingV1`、`PreparedIntentAdmissionV1`、`PlanExecutionAdoptedV1`、ready/failure/materialization 记录及其 reader、projection、validator 继续保留；旧日志测试直接读取[固定历史数据](../../../crates/sigil-kernel/src/tests/fixtures/historical_plan_execution_v1.json)，不再用旧生成器制造输入。当前批准仍使用原子的 `append_plan_approval_task_shell_at_frontier` 写入直接执行 authority。
+同批清除没有生产调用的旧生成算法：`compile_executable_plan_candidate`、`task_plan_from_plan_draft`、旧 candidate intent prepare/materialize/bind、`append_plan_execution_adoption_at_frontier`，以及只供这些算法测试的 `create_task_from_plan` / `PlanExecutionService::adopt` 链。后续 RFC-0077 R77.7 又彻底删除历史 `ExecutablePlanCandidateV1`、`PlanCompileBindingV1`、`PreparedIntentAdmissionV1`、`PlanExecutionAdoptedV1`、旧 ready/failure/materialization 记录及其 reader、projection、validator 和固定历史 fixture；当前代码不提供旧日志解码或迁移。当前批准仍使用原子的 `append_plan_approval_task_shell_at_frontier` 写入直接执行 authority。
 
 修订 guidance 的新 dispatch 身份同时绑定 `UserInputIdentityV1.generation`。未启动失败仍不制造 attempt；同文字、同 snapshot 的下一代指导可以保持相同物理 ordinal，但必须得到不同 attempt / Plan / child / run 身份。启动与失败结算核对当前已接受代次，拒绝旧派发和迟到失败污染新代。既有 attempt 的持久格式不变，恢复时从首次 attempt control 前的 immutable prefix 读取代次并原样保留历史身份。
 
@@ -180,7 +180,7 @@ host 提供 Plan id/hash、source、时间、attempt 和所有权限。工具参
 
 schema 可以提供可选的 `presentation`：摘要、可读步骤、workspace-relative target paths、suggested checks。它仅改善现有 Plan workbench 和 display-only checklist，不是基础方案的接收条件。
 
-解析分两层：先严格解析 core envelope，再单独校验 presentation。core 的 unknown field、错误 outcome、空正文或越界必须返回具体问题；presentation 中非法路径、重复 step id、超长展示名等只使对应展示字段不可用并产生安全 notice。任何丢弃都保留原因，不把非法 metadata 用于 scoped grant；suggested checks 仍不替代可信 verification policy。
+解析分两层：先把 core envelope 投影到当前需要的字段，再单独校验 presentation。未知字段（包括已经退休的字段）忽略；当前需要的字段仍必须通过类型、枚举、长度、绑定和权限校验。presentation 中非法路径、重复 step id、超长展示名等只使对应展示字段不可用并产生安全 notice。任何丢弃都保留原因，不把非法 metadata 用于 scoped grant；suggested checks 仍不替代可信 verification policy。
 
 工具 schema 与纯文本候选确认使用同一 `draft | no_plan` 结果语义。采用当前 provider-neutral schema 构造器，不能假定所有 provider 都支持特定 JSON Schema union，也不引入 provider 私有字段。
 

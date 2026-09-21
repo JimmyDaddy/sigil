@@ -1,6 +1,6 @@
 # RFC-0066：Durable Task Execution Contracts V2
 
-状态：已实施（2026-08-18）
+状态：历史实现（2026-08-18）；TaskPlan step scheduler、participant dispatch/retry 与 no-progress 流程已由 RFC-0077 退役，不再作为当前 Task 执行或恢复契约。当前 Direct Task 只恢复 direct admission 与真实执行 owner。
 
 ## 1. 背景
 

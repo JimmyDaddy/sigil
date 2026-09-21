@@ -16,17 +16,13 @@ Workspace changes or an unavailable workspace snapshot do not prevent running or
 [task]
 enabled = true
 routing_policy = "auto"
-max_plan_steps = 12
-max_replans = 2
 max_subagents = 8
-max_parallel_read_steps = 4
-max_parallel_changeset_steps = 2
-max_planning_research_agents = 3
+max_concurrent_provider_routes = 4
 multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-The values above are the current schema defaults. Quick Setup saves `auto + explicit_request_only`; a matching qualified release sidecar may instead recommend `auto + proactive`. Provider, model, endpoint, task-config digest and build must match for that installation recommendation. Missing or stale release evidence does not disable a configured executor. Runtime routing uses actual provider/tool/executor availability and the user's policy. `sigil doctor` reports configuration and release evaluation separately.
+Task uses the ordinary model tool loop. The model chooses whether to start a Task, how to split it, and when to delegate, run work in parallel, or wait. The host enforces permissions, approvals, budgets, execution, and durable records; it does not create steps or schedule business work. `max_subagents` limits child agents, and `max_concurrent_provider_routes` limits simultaneous provider requests from those agents. These values are the current schema defaults. Quick Setup saves `auto + explicit_request_only`; a matching qualified release sidecar may instead recommend `auto + proactive`. Provider, model, endpoint, task-config digest and build must match for that installation recommendation. Missing or stale release evidence does not disable a configured executor. Runtime routing uses actual provider/tool/executor availability and the user's policy. `sigil doctor` reports configuration and release evaluation separately.
 
 For a coarse rollback, set `routing_policy = "manual"` and
 `multi_agent_mode = "explicit_request_only"`. This disables automatic handoff
@@ -34,22 +30,14 @@ and proactive spawn without deleting durable Task history. A route-local
 zero-tolerance invariant applies the same effective fallback to subsequent
 input for the affected session and build.
 
-`routing_policy` is a three-way semantic admission policy. The current schema
-default is `auto`, so ordinary input first runs an independent routing-only
-decision turn; the model can type one decision between `Chat`, `PlanReview`,
-and `Task` (the exact decision set depends on the effective route capability).
-A `PlanReview` decision runs a read-only plan review and waits for your
-decision; only an accepted plan can create a durable Task. A `Task` decision
-enters the durable planner/executor flow directly; simple prompts still remain
-chat, and routing never bypasses write, shell, network, or merge approval.
-Setting `routing_policy = "manual"` disables automatic routing for ordinary
-input while `/plan` and `/task` remain available as explicit entries.
-An approved Plan keeps its stable Task identity while materialization prepares
-execution contracts. A blocked preparation, workspace conflict, or uncertain
-external effect remains a typed recoverable state: retry, revise, inspect, or
-cancel it explicitly instead of treating it as a failed Task or replaying an
-unknown effect.
-Planner, executor, subagent, and final-synthesis transcripts stay in isolated child sessions, while the parent keeps bounded results and one host-committed final answer. Independent shared-read-only Task steps may execute concurrently; `max_parallel_read_steps` bounds that fan-out together with `max_subagents`, while the host commits their terminal results to the parent in stable plan order. Independent `ChangesetOnly` write-subagent steps may also run concurrently, bounded by `max_parallel_changeset_steps` and `max_subagents`. Every member uses the same immutable parent-workspace snapshot, produces a proposal without changing that workspace, and is accepted for review only after the parent revalidates the snapshot. Independent physical `Worktree` writers can also run as a bounded whole batch in supported Git repositories. Sigil freezes the exact clean or safe dirty/untracked baseline, rebinds each child to a separately owned checkout, extracts bounded proposals, and routes them through a deterministic conflict graph. Non-conflicting integration lanes may apply and verify concurrently, but final promotion still requires exact integration review and authoritative parent verification. Direct or effectful writes in the shared parent workspace remain sequential and exclusive. The TUI Task strip and info rail mark every active step, and cancelling the Task closes the whole active batch. Before accepting a plan, the isolated planner may request one host-owned batch of independent read-only Explore probes. `max_planning_research_agents` defaults to `3`, is hard-capped at `4`, and may be set to `0` to disable this planner-only fan-out. The host waits for terminal probe results and resumes the planner automatically; no model polling command is required. The production HTTP driver, including the Desktop-owned `sigil serve` child, shares the same typed Task pause/continue, guidance, integration-review, restart-control, and recovery contracts with the TUI. Use `/plan` for a read-only plan and `/task` for deterministic multi-step execution; a complete `sigil-plan-v2` DAG is promoted directly without replanning. When the model identifies independently meaningful outcomes, the plan may also propose typed intent definitions and bind steps to provider-local aliases. These remain unaccepted suggestions until you accept the Plan card; the host then derives all runtime identities and atomically persists the accepted Intent plan with the bound Task plan. The conservative agent mode uses child agents only when you or workspace instructions request delegation. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
+`routing_policy` defaults to `auto`. An ordinary new request can answer or use
+actual tools on its first turn. The model may call `request_plan_review`,
+`start_task`, or an exact-bound Task continuation when useful. Existing Plans
+and Tasks do not take over a new turn; without an operation call, they remain
+unchanged. All tools retain write, shell, network, and merge approval.
+Setting `routing_policy = "manual"` disables automatic handoff tools for
+ordinary input; `/plan` and `/task` remain available explicitly.
+An approved Plan's full text becomes the direct Task objective. Child agents use isolated sessions, and the root model decides whether to read or integrate their results. The host does not create a second Task scheduler from Plan steps. Child writes remain subject to isolation, permissions, and merge-review authority. Role-specific model and tool restrictions are listed in [Configuration Reference](configuration-reference.md#task).
 
 ## Verification
 

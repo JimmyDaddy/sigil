@@ -55,7 +55,7 @@ V1 必须达成：
 6. answer 只能启动一次 supervised continuation；重启恢复不得 replay 产生问题的 provider turn。
 7. root 与 background agent 的问题都进入 root attention queue，保留真实 source identity。
 8. MCP 可共享 normalized form renderer，但不继承普通 agent 的 durable answer replay。
-9. secret input 保持独立 host-owned channel，模型不能声明 secret field。
+9. secret input 保持独立 host-owned channel，模型不能通过普通问题收集 secret 值。
 10. compact/aging 不得淘汰未解决 request、已接受但未 claim 的 answer 或恢复 continuation 所需 binding。
 
 ## 4. Non-goals
@@ -63,7 +63,7 @@ V1 必须达成：
 V1 不做：
 
 - 不把用户输入伪装成 approval；
-- 不让模型创建密码、token、private key 或任意 secret field；
+- 不让模型创建密码、token、private key 或任意 secret 问题；
 - 不把自由 Markdown 问句猜成 durable request；
 - 不让 UI 直接修改 agent history 或自行恢复 provider continuation；
 - 不保证 MCP server 断线后重放明文 answer；
@@ -125,20 +125,11 @@ pub enum UserInputPurposeV1 {
 ```rust
 pub struct UserInputQuestionV1 {
     pub id: String,
-    pub header: String,
     pub question: String,
     pub description: Option<String>,
     pub required: bool,
-    pub kind: UserInputFieldKindV1,
-}
-
-pub enum UserInputFieldKindV1 {
-    Text { multiline: bool, max_chars: u32 },
-    Number,
-    Integer,
-    Boolean,
-    SingleSelect { options: Vec<UserInputOptionV1>, allow_other: bool },
-    MultiSelect { options: Vec<UserInputOptionV1>, max_selected: u32 },
+    pub options: Vec<UserInputOptionV1>,
+    pub multiple: bool,
 }
 ```
 
@@ -147,15 +138,15 @@ V1 bounds：
 - 每个 request 1–3 个 question；
 - 每个 root logical run 最多 3 个 agent-owned request；Plan revision host-owned guidance 不消耗模型
   自主提问次数，但同一 revision 只允许一个 pending generation；
-- question id 1–48 ASCII 字符且 request 内唯一；header 1–32 Unicode scalar；question 1–512；
-  description 0–512；
-- select 2–12 个 option；option id 1–48 ASCII 且 field 内唯一；label 1–80；description 0–240；
-- `single_select.allow_other` 在模型请求中可省略，host 按 `false` 归一化；durable normalized request
-  始终写出显式布尔值；
-- text `max_chars` 为 1–4096；multi-select `max_selected` 为 1–options.len；
+- question id 1–48 ASCII 字符且 request 内唯一；question 1–512；description 0–512；
+- 没有 options 的问题是 bounded text；有 options 的问题是 single-select 或 `multiple=true` 的 multi-select；
+- select 2–12 个 option；option id 1–48 ASCII 且 request 内唯一；label 1–80；description 0–240；
+- agent-owned question 的 `required` 由 host 固定为 `true`；MCP external form 保留 schema 的 required 集合，
+  未填写的 optional question 从 answers 中省略；host 始终允许 single-select 的 Other 文本和 multi-select 的自由文本；
+- text 与自由文本统一受 1–4096 字符上限；
 - normalized request JSON、answer JSON 与 public projection 分别受显式 byte cap；超过上限拒绝整个请求，
   不静默截断 schema 或 answer；
-- 不支持的 field kind 返回 typed `UnsupportedFormShape`，不得降级为 text。
+- 旧字段（包括已经退休的字段）作为未知字段忽略，不参与解析语义、持久化或投影；当前契约需要的字段仍按类型和领域规则校验，模型提交的是上述扁平问题契约。
 
 ### 5.4 Actions and decisions
 
@@ -281,7 +272,7 @@ session/run、非 pending request、重复不同 decision 全部 typed reject。
 
 conversation snapshot 与 SSE 暴露 bounded `PublicUserInputRequestV1`：identity、source、purpose、prompt、
 normalized questions、allowed actions、status、source agent label 与 stale/retry fact。答案值默认不回显；
-receipt 只提供 decision、answered field ids 与 hash。
+receipt 只提供 decision、answered question ids 与 hash。
 
 SSE 顺序：
 
@@ -302,7 +293,7 @@ GET  /sessions/{session_id}/user-input/{request_id}
 ```
 
 GET 需要 `generation` 与 `expected_request_hash`，返回 immutable request schema 与最新 status，带 ETag。
-Desktop Rust client 使用 `deny_unknown_fields` DTO；Tauri IPC 只投影收窄 DTO，不暴露 bearer、session path
+Desktop Rust client 与 Tauri IPC 只投影 user-input 所需字段，未知字段被忽略，不暴露 bearer、session path
 或 generic HTTP。OpenAPI、generated TypeScript schema 与 React view model 同步更新并做 drift check。
 
 ## 10. Product surfaces
@@ -316,7 +307,7 @@ TUI 与 Desktop 只拥有 focus、cursor、scroll、draft answer 等 ephemeral s
 ### 10.2 TUI
 
 - pending request 进入 shell attention queue；foreground 与 background source 均显示真实 agent/thread；
-- 打开后支持 question/field 导航、文本编辑、select toggle、validation 与 Submit/Decline/Cancel run；
+- 打开后支持 question 导航、文本编辑、select toggle、validation 与 Submit/Decline/Cancel run；
 - `Esc` 关闭 form，`Shift-Tab` 或 attention key 重新打开；
 - printable key 只在表单字段聚焦时输入，不被 plan/global hotkey 抢占；
 - reconnect/restart 从 snapshot 重建，不能依赖旧 oneshot sender。
@@ -496,7 +487,7 @@ provider-neutral durable request/answer、exact continuation、跨重启恢复�
   value；
 - HTTP 已提供 exact detail/decision contract，detail 使用 request hash ETag；session reopen 会从私有 durable
   `DecisionAccepted` frontier 恢复同一 continuation，不依赖已经完成的旧 command receipt；
-- TUI 与 Desktop 已使用同一 public projection 展示表单；Desktop 的 accepted recovery 只显示 answered field
+- TUI 与 Desktop 已使用同一 public projection 展示表单；Desktop 的 accepted recovery 只显示 answered question
   ids 并提供 Resume，不回显私有值；TUI restore 同样恢复 exact resume action；
 - RFC-0063 Revise 已先创建 durable guidance request，提交 guidance 后才创建新的 revision attempt；失败恢复
   base plan，finalizer 只暴露 `submit_plan_draft`，非 submit tool call 不执行并产生 typed protocol violation；
@@ -548,7 +539,7 @@ provider-neutral durable request/answer、exact continuation、跨重启恢复�
 
 1. unresolved request 的 compaction property/chaos campaign、真实 TUI PTY、真实 `sigil serve` + Desktop E2E、
    real-model campaign 尚未全部执行；
-2. migration/compatibility 与 release notes/Doctor 仍需在 release closure slice 完成。
+2. 旧 session/schema 不做 migration 或 compatibility；release notes/Doctor 只需说明当前 canonical contract 与 fail-closed 行为。
 
 因此本节只记录当时事实，不把已通过定向 restart/transport 回归的能力外推为 release 全链路完成；最终
 结论以 §20 为准。
@@ -576,9 +567,8 @@ R64.0–R64.4 与 §16 的剩余验证已按同一当前源码关闭：
   renderer check 281/281 与 production build、真实 `sigil serve` strict DTO/ETag/SSE contract、生成契约
   drift check 均通过；
 - 完整 workspace tests、fmt、check、clippy、docs 与 touched-file full gate 均通过。双语 changelog 已说明
-  typed question、无 timeout、background root attention 与 exact-once resume；旧 session 不含新 facts 时
-  保持原行为，新增 public/IPC 字段按兼容投影读取，ambiguous legacy Plan lineage 由只读兼容视图与 Doctor
-  fail closed，不猜测或重写历史事实。
+  typed question、无 timeout、background root attention 与 exact-once resume；旧 session/schema 不做兼容读取，
+  当前 public/IPC 字段按 canonical contract 解码，ambiguous legacy Plan lineage 直接 fail closed，不猜测或重写历史事实。
 
 本地 PTY、session 与 live-model raw artifact 保持 `.repo-local-dev` local-only，不自动上传；持久化 session
 也不会包含 MCP live elicitation answer 或 secret value。至此 §16 的 12 项 acceptance 全部满足，RFC-0064

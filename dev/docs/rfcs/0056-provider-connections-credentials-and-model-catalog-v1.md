@@ -1274,7 +1274,7 @@ custom deployment/model IDs 可能包含内部项目命名，因此：
 
 - implicit config 只来自 per-user path；
 - explicit config 仍视为用户主动选择，但 credential env name、endpoint 和 protocol 接受 validation；
-- V2 parser `deny_unknown_fields` 应在 typed connection shell 生效，provider options 由 exact provider
+- V2 parser 只读取 typed connection shell 的当前字段，未知字段忽略，provider options 由 exact provider
   schema决定；
 - malformed connection 不阻止 Doctor 读取其他可恢复 connection，但不能进入 provider dispatch。
 

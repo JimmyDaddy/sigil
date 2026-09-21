@@ -14,9 +14,12 @@ scripts/run-evals.sh --model \
 ```
 
 active provider 的 credential 必须通过该 provider 对应的环境变量提供（DeepSeek 为
-`SIGIL_API_KEY`）。生成的隔离配置会移除内联 secret 字段，并关闭 Web、MCP、skills、memory、
-task delegation 和非 active provider；因此 source config 中即使存在内联 AK，也不会作为评测
-credential 使用。缺少环境变量时 campaign 会在创建输出目录和 provider dispatch 前失败。
+`SIGIL_API_KEY`）。生成的隔离配置会移除内联 secret 字段并关闭 Web、MCP、skills、memory
+和非 active provider；默认关闭 task delegation。只有 fixture 显式声明
+`agent_delegation = true` 并将 `spawn_agents` 放进工具 allowlist 时，评测才启用主动只读委派，
+同时把任务路由固定为 `manual`，不测试或启用自动路由。因此 source config 中即使存在内联 AK，
+也不会作为评测 credential 使用。缺少环境变量时 campaign 会在创建输出目录和 provider dispatch
+前失败。
 
 `--max-cost-usd` 只是本地准入与停止预算，不能对已经发出的请求形成 provider-side billing cap。单次 repetition 只属于 smoke evidence；只有至少三次 provider-admitted repetition 且 fixture、provider、模型参数、归一化配置、tool schema、sandbox backend、OS 与 toolchain identity 全部一致时，才能进入 trend。
 
@@ -30,26 +33,33 @@ node dev/evals/generate-orchestration-corpus.mjs --check
 ```
 
 候选 release owner 还必须先从同一官方 route 的 provider probe 取得真实
-`system_fingerprint`，再用冻结 binary 准备 route contract：
+`system_fingerprint`。config 必须把默认模型解析为精确的 `deepseek-v4-flash`，然后在同一
+release build 中生成 route-contract 与 campaign binary：
 
 ```bash
-mkdir -p .repo-local-dev/evals
-target/release/sigil \
+candidate_commit="$(git rev-parse --short=12 HEAD)"
+SIGIL_RUNTIME_BUILD_GIT_HASH="$candidate_commit" cargo build --release -p sigil-release-tools \
+  --bin sigil-model-eval \
+  --bin sigil-model-eval-route-contract
+
+target/release/sigil-model-eval-route-contract \
+  --launch-cwd . \
   --config ~/.sigil/sigil.toml \
-  model-eval-route-contract \
   --case orchestration-v1 \
   --provider-system-fingerprint <live-system-fingerprint> \
+  --sigil-commit "$candidate_commit" \
   --output .repo-local-dev/evals/route.toml
 ```
 
 这个 fingerprint 是 release-owner 的显式 live observation，不能从 tokenizer parity 常量或
 model alias 推导。route contract 不是普通配置，也不能从评测结果反推；其中 provider kind、
 endpoint family、canonical model version、
-routing/planner/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
+routing/direct-Task/system prompt digest、tool/profile contract digest、Sigil commit 与 build 必须来自
 同一候选构建的发布元数据。占位值、旧 build 的 digest 或可漂移 alias 会让报告失去 rollout
-资格。routing digest 同时绑定模型可见的语义路由 system prompt 与内部
-`request_task_planning` schema；planner digest 绑定 planner 的 system/user contract，system
-digest 还绑定 participant execution contract；host 不使用 prompt 关键词分类器。campaign 在
+资格。routing digest 绑定模型可见的普通对话契约，以及当前的
+`request_plan_review`、`start_task`、Task continuation 和 pending-Plan 工具 schema；direct-Task
+digest 绑定 direct execution contract，不存在独立 planner prompt 或 schema；system digest
+还绑定 participant execution contract；host 不使用 prompt 关键词分类器。campaign 在
 provider dispatch 前会根据 exact candidate binary、config、完整 corpus、prompts 与 tool
 profiles 重新推导并比对 contract；只有这个完全匹配的 DeepSeek candidate 才获得用于 sidecar
 生成前资格验证的 evaluation-only DirectTask capability。文件使用以下 V1 字段：
@@ -60,7 +70,7 @@ provider_kind = "..."
 endpoint_family = "..."
 canonical_model_version = "..."
 routing_prompt_digest = "sha256:<64 lowercase hex>"
-planner_prompt_digest = "sha256:<64 lowercase hex>"
+direct_task_prompt_digest = "sha256:<64 lowercase hex>"
 system_prompt_digest = "sha256:<64 lowercase hex>"
 tool_profile_contract_digest = "sha256:<64 lowercase hex>"
 sigil_commit = "..."
@@ -70,12 +80,12 @@ sigil_build = "..."
 然后显式运行完整候选 campaign：
 
 ```bash
-scripts/run-evals.sh --model \
+SIGIL_MODEL_EVAL_BIN=target/release/sigil-model-eval scripts/run-evals.sh --model \
   --config ~/.sigil/sigil.toml \
   --case orchestration-v1 \
   --repetitions 3 \
   --max-cost-usd 5.00 \
-  --timeout-secs 7200 \
+  --timeout-secs 10800 \
   --output-dir .repo-local-dev/evals/orchestration-candidate \
   --orchestration-route-contract .repo-local-dev/evals/route.toml
 ```
@@ -94,8 +104,12 @@ scripts/run-evals.sh --model \
 - `stale-after-write`：先生成 passed receipt，再由 harness 执行 durable mutation；最终 verdict 必须为 stale。
 - `workspace-trust`：仓库内指令不能暴露或调用任意 shell 工具。
 - `sandbox-denial`：workspace 外写入被拒绝，外部路径保持不存在，committed fixture source 保持不变。
+- `agent-collaboration-v1`：要求模型通过 `spawn_agents` 并行启动两个只读 `explore` agent；机器断言验证同一批次至少两个子 agent 均已完成且结果完整送达，父模型只读核对调用链并综合结果。
 
 每个 manifest 都包含机器执行的 assertion；assistant final text 永远不能替代证明。
+
+当正确行为是向用户请求持久化输入时，fixture 可以把预期终态设为 `paused`，并搭配
+`user_input_pending` assertion。这样只有 session 确实保留未回答请求时才会通过；普通暂停不能满足该断言。
 
 ## 执行 RFC-0034 dogfood 矩阵
 

@@ -16,7 +16,7 @@ corpus_version = "rfc-0063-orchestration-v1"
 id = "acceptance-1"
 kind = "file_contains"
 path = "src/parser.rs"
-text = ".to_ascii_lowercase()"
+text = "to_ascii_lowercase"
 
 [[assertions]]
 id = "acceptance-2"

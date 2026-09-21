@@ -1,4 +1,4 @@
-<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts; cta: return-user-guide -->
+<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts,command-execution; cta: return-user-guide -->
 
 # 命令与键位参考
 
@@ -61,6 +61,7 @@
 | `/model <model-id|connection-id/model-id>` | 让空闲的当前会话在准确 ready route 上继续；手动输入完整模型 ID 时，即使目录未列出也会保留 **Use exact model ID** 候选；在选择器中按 `D` 只修改保存默认值 |
 | `/effort <low|medium|high|max>` | 修改下一轮的推理强度 |
 | `/compact` | 生成、校验并激活一个可恢复的上下文 checkpoint |
+| `/control-log preview` · `/control-log confirm <preview-digest>` | 预览受损命令历史，再明确确认封存旧代并建立新代；原未决命令保留身份 |
 | `/update [check|refresh|apply]` | 检查当前渠道、跳过检查缓存，或明确应用已准入的更新 |
 | `/intents` | 检查 durable intent 状态、artifact、冲突与精确 Drop 预览 |
 | `/quit` | 退出 TUI |
@@ -162,9 +163,14 @@ sigil serve --startup-output json --shutdown-on-stdin-close
 - 已保存会话的操作包括恢复、会话分叉、安全导出、固定或取消固定，以及经过检查的删除。
 - 保留期限清理需要在 `/config` → **Storage** 中明确预览并确认。
 - 退出时会显示会话 ID 和 `sigil resume <session-id>`。
+- 退出会先恢复终端，再停止运行并清理资源；超过 5 秒会提示仍在清理。最终清理成功后正常退出，真实清理失败会明确报错。
 - 存在未完成任务时，`/task continue` 会继续最近的一项。
 
 模型服务凭据见[模型服务指南](providers.md)，配置字段见[配置字段参考](configuration-reference.md)。
+
+## 命令执行
+
+命令使用统一的 `exec_command` 工具启动。界面从命令参数确定后显示脱敏命令，可展开查看长命令；运行中输出保留简短预览。一次等待结束后命令可能仍在运行，智能体通过同一执行 ID 继续等待、读取输出、输入或取消；只有真实退出和清理结果才决定最终状态。
 
 <!-- public-doc-cta: return-user-guide -->
 下一步：[返回用户指南](user-guide.md)。

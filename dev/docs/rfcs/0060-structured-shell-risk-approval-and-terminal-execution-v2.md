@@ -4,6 +4,9 @@
 
 > RFC-0071 implementation note (2026-08-25): shell and terminal execution now consume the current-schema permission/resource binding and typed sandbox admission. Backend selection, temporary roots and enforcement receipts are no longer inferred from cwd or ambient environment; the R71.8 candidate supplies the cross-platform qualification boundary.
 
+
+> 2026-09-12 修订：本文有限命令只允许 `bash`、持久命令只允许 `terminal_start` 的分流规则由[统一命令执行与可见性](../unified-command-execution.md)替代。当前启动入口为 `exec_command`，PTY、本次等待预算和进程总时限独立；命令族不再作为拒绝有限命令持续运行的门槛。下列 R60 验收结果描述当时的历史实现，不作为新契约的验收证据。
+
 创建日期：2026-08-01
 
 依赖：

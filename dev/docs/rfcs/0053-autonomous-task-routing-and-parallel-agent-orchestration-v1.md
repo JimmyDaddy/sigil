@@ -1,6 +1,8 @@
 # RFC-0053 Autonomous Task Routing and Parallel Agent Orchestration V1
 
-状态：accepted / O0-O8d implementation complete；每个 release route 的 `auto + proactive` 激活仍由 exact-build qualified manifest 独立决定，源码与 legacy 默认保持 fail-closed
+> **历史 RFC，当前实现以 RFC-0077 为准。** 本文的 host Task scheduler、Planner/Participant/Synthesis 阶段、步骤并发配置、旧恢复协议及 pending Plan/Task 必经选择均已从生产路径退役；不对其持久化协议做恢复或迁移。当前业务编排由模型在普通工具循环中决定，host 只执行结构化授权与可靠性边界。
+
+历史状态：accepted / O0-O8d implementation complete。该完成记录不表示本文中的旧 Task scheduler 仍在当前生产路径中；当前状态见 [RFC-0077 执行计划](../../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)。
 
 创建日期：2026-07-22
 
@@ -1187,12 +1189,16 @@ spawn admission。
 - Kernel 在整批 tool calls 处理后调用 runtime join hook；runtime 先等待全部 sibling terminal，
   再由 parent 单写者逐个提交 `AgentThreadResultRecorded` / terminal projection，并按原 tool-call
   顺序注入 bounded `agent_join_results` transient context。模型不需要也不会被提示调用
-  `wait_agent`；完整正文仍只通过显式分页 `read_agent_result` 按需读取。
+  `wait_agent`；完整正文仍只通过显式分页 `read_agent_result` 按需读取。Detached/background
+  child 在有可读 final-answer ref 且 `wait_agent` 进入终态时先交付一页有界正文，只有超长结果才需要继续读取分页；缺少可读正文时保留终态状态，不再提供不可执行的 read 参数或阻塞 final answer。
+  分页交付 receipt 保持 append-only，但只在同一次 Agent run 的 transient context 内去重和续页；每次 run（包括相同 logical run 的恢复）开始时重置临时交付边界。
+  恢复后不会自动回放正文，显式 `wait_agent` 从第一页重新交付，`read_agent_result` 可按给定页读取；已完成结果的剩余分页由模型按需读取，未读正文不再触发 final blocker。
+  乱序/重叠分页由共享的 kernel coverage reducer 归并；`next_read_args` 指向第一个未读缺口，全文已覆盖后为 null。`result_fully_delivered` 与单页 `truncated` 分别描述整体覆盖和当前页边界，不能把“先读到了末页”误当成全文已交付。
+  交付提交报错可能发生在 audit receipt 已追加之后、正文返回之前；此时重置该 session 的临时交付边界，允许保守重读，不能以这条不确定的 receipt 抑制重试正文。
 - `AgentResultContinuation(Pending -> Started -> Completed)` 记录 join 注册、parent commit 与
   bounded context delivery。`Completed` 只在携带 join context 的下一 provider turn 成功返回后
-  持久化；max-turn、发送失败或发送前取消均保持未完成并继续触发 final blocker。Completed
-  continuation 可以解除旧的“必须读完整 child 正文” final blocker，但不伪造
-  `AgentThreadResultDelivered`，因此 projection 仍诚实区分 bounded host context 与完整分页正文交付。
+  持久化；max-turn、发送失败或发送前取消均保持未完成。Continuation 不伪造
+  `AgentThreadResultDelivered`，因此 projection 仍诚实区分 bounded host context 与完整分页正文交付；final blocker 只约束仍在运行且未转入后台的 join-before-final child。
 - Joined child 以受 parent settle future 所有的普通 future 并发执行，不作为可脱离 parent 的 Tokio
   task；settle 被取消时 unfinished child 随 future 一起 drop，RAII 释放全部 supervisor slot。root
   cancellation 会为全部成员追加 Interrupted/Cancelled；单成员 parent commit 失败仍会继续收口其他
@@ -1921,7 +1927,7 @@ O8d：默认切换、迁移与回滚。
 O8d implementation checkpoint（2026-07-27）：
 
 - `sigil-runtime` 从完整 qualified report 生成 path-free
-  `sigil-orchestration-rollout-v1.json`。加载器拒绝 symlink、非普通文件、超限 JSON、未知字段、
+  `sigil-orchestration-rollout-v1.json`。加载器忽略未知字段，但拒绝 symlink、非普通文件、超限 JSON、
   stale build/commit、identity digest 漂移、不完整 repetition、阈值失败与任何 hard invariant。
 - Quick Setup 只在缺少配置时计算候选 `auto + proactive` task digest，并要求 provider adapter、
   provider kind、官方 endpoint family、canonical model、build 与 digest 全部精确匹配；其他

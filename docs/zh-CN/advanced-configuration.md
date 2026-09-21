@@ -16,30 +16,28 @@
 [task]
 enabled = true
 routing_policy = "auto"
-max_plan_steps = 12
-max_replans = 2
 max_subagents = 8
-max_parallel_read_steps = 4
-max_parallel_changeset_steps = 2
-max_planning_research_agents = 3
+max_concurrent_provider_routes = 4
 multi_agent_mode = "explicit_request_only"
 allow_write_subagents = true
 ```
 
-以上数值是当前 schema 默认值。Quick Setup 保存 `auto + explicit_request_only`；匹配的 qualified release sidecar 可改为推荐 `auto + proactive`。该安装推荐要求 provider、model、endpoint、task-config digest 与 build 匹配。发布证据缺失或过期不禁用已配置的执行器；运行时依据实际 provider/tool/executor 能力和用户策略。`sigil doctor` 分别报告配置与发布评测。
+Task 使用普通模型工具循环。模型决定是否开始、怎样拆分、何时委派、并行或等待；host 负责权限、审批、预算、执行与可靠记录。这里的配置限制可用能力和并发资源，不创建 Task 步骤或替模型调度。`max_subagents` 限制子智能体数量，`max_concurrent_provider_routes` 限制同时进行的子智能体 provider 请求。
+
+Quick Setup 保存 `auto + explicit_request_only`；匹配的 qualified release sidecar 可改为推荐 `auto + proactive`。该安装推荐要求 provider、model、endpoint、task-config digest 与 build 匹配。发布证据缺失或过期不禁用已配置的执行器；运行时依据实际 provider/tool/executor 能力和用户策略。`sigil doctor` 分别报告配置与发布评测。
 
 coarse rollback 是设置 `routing_policy = "manual"` 与
 `multi_agent_mode = "explicit_request_only"`。它会关闭自动 handoff 和 proactive spawn，
 但不会删除 durable Task history。route-local 零容忍不变量会对当前 session 与 build 的
 后续输入应用同样的 effective fallback。
 
-`routing_policy` 是三路语义准入策略。当前 schema 默认值为 `auto`，普通输入会先
-进入一次独立的 routing-only 决策回合；模型只能给出一个 typed decision：
-`Chat`、`PlanReview` 或 `Task`（具体可选集合取决于 effective route capability）。
-`PlanReview` 决定会进入只读 plan review 并等待你的决定，只有被接受的计划才能创建
-durable Task；`Task` 决定会直接进入 durable planner/executor 流程；简单问题仍直接
-回答，而且路由不会绕过写文件、shell、网络或 merge 审批。设置 `routing_policy = "manual"`
-会关闭普通输入的自动路由，`/plan` 与 `/task` 仍是显式入口。已批准的 Plan 会保留稳定的 Task identity，由 materialization 独立准备 execution contract；准备受阻、工作区冲突或外部 effect 结果不确定时，系统保留可恢复的类型化状态，必须显式重试、修订、查看或取消，不能把它翻译成失败 Task 或重放未知 effect。Planner、Executor、Subagent 与最终 Synthesis transcript 均保存在隔离 child session，parent 只保留 bounded result 和一个由 host 提交的正式 final。相互独立且已证明为 shared-read-only 的 Task step 可以并发执行；`max_parallel_read_steps` 与 `max_subagents` 共同限制 fan-out，host 仍按稳定的 plan 顺序向 parent 提交终态结果。相互独立的 `ChangesetOnly` 写子智能体 step 也可以并发，受 `max_parallel_changeset_steps` 与 `max_subagents` 共同限制；同批成员绑定同一份不可变 parent workspace snapshot，只生成 proposal 而不修改 parent workspace，parent 重新校验 snapshot 后才提交 proposal/review 记录。受支持的 Git 仓库还可以整批并发运行相互独立的 physical `Worktree` writer。Sigil 会冻结 exact clean 或安全 dirty/untracked baseline，把每个 child 绑定到独立 owned checkout，提取有界 proposal，并通过 deterministic conflict graph 分配 integration lane；不冲突 lane 可以并发 apply 和 verification，但最终 promotion 仍要求 exact integration review 与 authoritative parent verification。直接或带副作用的 shared parent workspace 写入继续保持串行和独占。TUI 的 Task strip 和 info rail 会同时标出全部 active step，取消 Task 会收口整个 active batch。Planner 在接受计划前可以请求一次由 host 托管的独立只读 Explore 批次；`max_planning_research_agents` 默认是 `3`、硬上限是 `4`，设为 `0` 可关闭这个 planner-only fan-out。Host 会等待所有 probe 进入终态后自动恢复 Planner，不需要模型轮询命令。Production HTTP driver（包括 Desktop 持有的 `sigil serve` child）与 TUI 共享同一套 typed Task pause/continue、guidance、integration review、restart control 与 recovery contract。只读计划使用 `/plan`，需要确定进入多步骤执行时使用 `/task`；字段完整的 `sigil-plan-v2` DAG 会直接 promotion，不再二次规划。当模型判断请求中存在可独立审阅或移除的用户结果时，计划还可以提出 typed Intent 定义，并用 provider-local alias 绑定步骤。这些内容在用户接受“计划就绪”卡片前始终只是未授权 proposal；接受后由 host 生成全部运行时身份，并把已接受 IntentPlan 与绑定后的 TaskPlan 原子持久化。在保守的子智能体模式下，只有你或工作区指令明确要求委派时，Sigil 才会启动子智能体。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
+`routing_policy` 默认是 `auto`。普通新请求第一轮就可以回答或使用实际工具，模型也可按需调用
+`request_plan_review`、`start_task` 或 exact-bound Task continuation。没有调用转交工具时，既有
+Plan 与 Task 保持原样；存在待确认 Plan 或可继续 Task 也不会接管本轮对话。所有工具仍遵守写文件、
+shell、网络和 merge 的审批。`routing_policy = "manual"` 会关闭普通输入里的自动转交入口，
+`/plan` 与 `/task` 仍可显式使用。
+
+PlanReview 会把完整批准内容作为 Task 目标直接执行。子智能体使用独立 session，父模型可选择读取结果或决定如何整合；host 不按 Plan step 建立第二套 Task 调度队列。子智能体写入仍受 isolation、permission 与 merge-review authority 限制。不同角色使用的模型与工具限制见[配置字段参考](configuration-reference.md#任务)。
 
 ## 验证
 

@@ -33,25 +33,31 @@ node dev/evals/generate-orchestration-corpus.mjs --check
 
 The candidate release owner must also generate a route contract with the exact frozen binary. This
 is not ordinary user configuration and it must not be inferred from a model alias or evaluation
-result:
+result. The config must resolve its default model to the exact `deepseek-v4-flash` ID:
 
 ```bash
-mkdir -p .repo-local-dev/evals
-target/release/sigil \
+candidate_commit="$(git rev-parse --short=12 HEAD)"
+SIGIL_RUNTIME_BUILD_GIT_HASH="$candidate_commit" cargo build --release -p sigil-release-tools \
+  --bin sigil-model-eval \
+  --bin sigil-model-eval-route-contract
+
+target/release/sigil-model-eval-route-contract \
+  --launch-cwd . \
   --config ~/.sigil/sigil.toml \
-  model-eval-route-contract \
   --case orchestration-v1 \
   --provider-system-fingerprint <live-system-fingerprint> \
+  --sigil-commit "$candidate_commit" \
   --output .repo-local-dev/evals/route.toml
 ```
 
 The hidden release-owner command requires the complete frozen corpus, creates a new output file
 without replacing an existing candidate artifact, and currently admits only the pinned official
 DeepSeek V4 Flash route. It derives prompt and tool/profile digests from production material in the
-candidate binary. The routing digest binds both the model-visible semantic routing system prompt and
-the internal `request_task_planning` schema; the planner digest binds the planner system/user
-contract, and the system digest also binds the participant execution contract. The host does not
-use a prompt keyword classifier. The embedded CLI/runtime commit identities must agree.
+candidate binary. The routing digest binds the model-visible ordinary conversation contract and the
+current `request_plan_review`, `start_task`, continuation, and pending-Plan tool schemas. The
+direct-Task prompt digest binds the direct execution contract; there is no separate planner prompt
+or planner schema. The host does not use a prompt keyword classifier. The embedded CLI/runtime
+commit identities must agree.
 
 `<live-system-fingerprint>` must come from a release-owner provider probe against the same official
 route. It is an explicit observation, not a tokenizer-parity constant or a model-alias inference.
@@ -59,7 +65,7 @@ The campaign re-derives the complete contract from the exact candidate binary, c
 prompts, and tool profiles before provider dispatch; only that exact DeepSeek candidate receives the
 evaluation-only DirectTask capability needed to qualify a rollout before its sidecar exists.
 
-The provider kind, endpoint family, canonical model version, routing/planner/system prompt digests,
+The provider kind, endpoint family, canonical model version, routing/direct-task/system prompt digests,
 tool/profile contract digest, Sigil commit, and build must all come from the same candidate build
 metadata. Placeholder values, an older build's digests, or a drifting alias do not qualify rollout
 evidence. The V1 file has these fields:
@@ -70,7 +76,7 @@ provider_kind = "..."
 endpoint_family = "..."
 canonical_model_version = "..."
 routing_prompt_digest = "sha256:<64 lowercase hex>"
-planner_prompt_digest = "sha256:<64 lowercase hex>"
+direct_task_prompt_digest = "sha256:<64 lowercase hex>"
 system_prompt_digest = "sha256:<64 lowercase hex>"
 tool_profile_contract_digest = "sha256:<64 lowercase hex>"
 sigil_commit = "..."
@@ -80,12 +86,12 @@ sigil_build = "..."
 Run the complete candidate campaign explicitly:
 
 ```bash
-scripts/run-evals.sh --model \
+SIGIL_MODEL_EVAL_BIN=target/release/sigil-model-eval scripts/run-evals.sh --model \
   --config ~/.sigil/sigil.toml \
   --case orchestration-v1 \
   --repetitions 3 \
   --max-cost-usd 5.00 \
-  --timeout-secs 7200 \
+  --timeout-secs 10800 \
   --output-dir .repo-local-dev/evals/orchestration-candidate \
   --orchestration-route-contract .repo-local-dev/evals/route.toml
 ```
@@ -109,6 +115,8 @@ the route identity `stale` instead of silently accepting the alias.
 - `sandbox-denial`: an outside-workspace write is rejected, the external path stays absent, and committed fixture source stays unchanged.
 
 Each manifest contains machine-evaluated assertions. Assistant final text is never accepted as proof.
+
+Fixtures may expect a `paused` terminal when the correct model action is to request durable user input. Pair that terminal with the `user_input_pending` assertion so an interrupted request is accepted only when the session actually retains an unanswered request; a plain pause does not satisfy it.
 
 ## Run the RFC-0034 dogfood matrix
 

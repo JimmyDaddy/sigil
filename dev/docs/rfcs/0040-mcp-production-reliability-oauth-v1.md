@@ -380,3 +380,11 @@ CI 新增的 Linux Secret Service、macOS Keychain 与 Windows Credential Manage
   supply-chain 与隐私 canary gate 均通过；终审发现并修复 disclosure frame deadlock、OAuth modal modifier
   抢占、OSC52 raw-log secret persistence 与 post-token failure cleanup。Hosted Linux Secret Service、macOS
   Keychain、Windows Credential Manager 和两平台 reliability job 已在 CI 29623684164 全绿，RFC-0040 关闭。
+
+## Streamable HTTP 最终响应结算（2026-09-12）
+
+POST SSE 的完整 event 进入同一增量 framing/JSON-RPC 校验。HTTP status 和 session header 在 inbound dispatch 前校验；反向请求继续使用当前授权、session、schema、能力及预算边界。匹配 request ID 的完整 result/error envelope 到达后，当前 RPC 立即结算并释放其响应流，不以服务端 EOF 作为结果成立条件。GET listener 继续增量处理独立 inbound 消息，其生命周期不代表另一个 RPC 完成。
+
+每个已读取 chunk 仍计入 wire/decoded 与总 body 预算，单 event/header 限额和 response timeout 保留；取消或超时释放该请求的流与预算，不重放已经发送的工具调用。最终 response 之前的错误 ID、非法 envelope 或 session 漂移仍失败。结算后不等待未知的后续 event，也不另起无 owner 的 drain task。
+
+隔离 `cargo test -p sigil-mcp --lib` 包含：最终 response 后 HTTP body 继续开放时及时返回且下一 RPC 可用；错误 session 的反向请求不会先产生回复 POST；既有 POST/GET 增量反向请求、限额、错误 ID 与取消/超时测试继续约束同一实现。

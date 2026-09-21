@@ -149,9 +149,8 @@ const frozenCrossLayerOrder = [
   "src/parser.rs",
 ];
 
-// Planner discovery is part of the production DirectTask and PlanReview path. Keep the fixture
-// surface read-only but complete enough to enumerate and search repository evidence instead of
-// forcing agents to guess conventional paths with read_file alone.
+// Keep the current research tool surface read-only but complete enough to enumerate and search
+// repository evidence instead of forcing the model to guess conventional paths with read_file.
 const readDiscoveryTools = ["read_file", "glob", "grep"];
 const writeExecutionTools = [
   ...readDiscoveryTools,
@@ -166,8 +165,9 @@ for (const [index, prompt] of questionPrompts.entries()) {
     id: `orch-neg-question-${String(index + 1).padStart(2, "0")}`,
     caseClass: "chat",
     prompt,
-    allowedTools: ["read_file"],
+    allowedTools: readDiscoveryTools,
     sources: unchangedSources,
+    expectedTerminal: ["completed"],
     assertions: [{ kind: "workspace_source_unchanged" }],
   });
 }
@@ -177,8 +177,9 @@ for (const [index, prompt] of symbolPrompts.entries()) {
     id: `orch-neg-symbol-${String(index + 1).padStart(2, "0")}`,
     caseClass: "chat",
     prompt,
-    allowedTools: ["read_file"],
+    allowedTools: ["read_file", "grep"],
     sources: unchangedSources,
+    expectedTerminal: ["completed"],
     assertions: [{ kind: "workspace_source_unchanged" }],
   });
 }
@@ -222,7 +223,7 @@ for (let index = 1; index <= 4; index += 1) {
       {
         kind: "file_contains",
         path: "src/parser.rs",
-        text: ".to_ascii_lowercase()",
+        text: "to_ascii_lowercase",
       },
       {
         kind: "file_unchanged",
@@ -344,7 +345,7 @@ for (const item of cases) {
     `allowed_tools = [${item.allowedTools.map((value) => JSON.stringify(value)).join(", ")}]`,
     "max_turns = 16",
     "max_output_tokens = 16384",
-    'expected_terminal = ["completed"]',
+    `expected_terminal = [${(item.expectedTerminal ?? ["completed"]).map((status) => JSON.stringify(status)).join(", ")}]`,
     'expected_verification = ["passed"]',
     "",
     "[orchestration]",

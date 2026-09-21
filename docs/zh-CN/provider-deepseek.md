@@ -59,6 +59,7 @@ fim_model = "deepseek-v4-pro"
 - 认证失败：在启动 Sigil 的同一 Shell 中导出 `SIGIL_API_KEY`。
 - 模型错误：检查 `[agent].connection` 与 `[agent].model` 组成的精确路由，以及任务角色覆盖设置。
 - FIM 不可用：确认 `fim_model` 和端点都支持该能力。
+- 工具 schema 报错提到 `additionalProperties`：DeepSeek 会拒绝工具 schema 中显式写出的 `additionalProperties: true`，所以 Sigil 会在普通工具请求和带 hosted web search 的 Anthropic-compatible Messages 请求中递归省略它；JSON Schema 默认仍允许额外字段。显式 `false` 会保留，普通工具严格模式按 DeepSeek 要求发送 `false`。详见 [Anthropic-compatible API](https://api-docs.deepseek.com/guides/anthropic_api/) 与 [Tool Calls](https://api-docs.deepseek.com/guides/tool_calls/) 文档。
 - 流式响应较慢：检查网络和模型请求超时设置。
 
 <!-- public-doc-cta: return-providers -->

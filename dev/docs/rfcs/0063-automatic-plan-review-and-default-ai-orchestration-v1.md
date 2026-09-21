@@ -1,6 +1,8 @@
 # RFC-0063 Automatic Plan Review and Default AI Orchestration V1
 
-状态：implemented（R63.0–R63.7、§15 acceptance 与 2026-08-17 release qualification 已完成；见 §13.14）
+> **历史 RFC，当前实现以 RFC-0077 为准。** 本文的 routing-only microturn、旧 pending Plan/Task 必经选择、planner 编译及 Task scheduler execution contract 均已退出生产路径；旧 scheduler state 不会恢复或迁移。当前转交是模型可选的 typed tool call，普通工具循环保持开放。
+
+历史状态：implemented（R63.0–R63.7、§15 acceptance 与 2026-08-17 release qualification 已完成；见 §13.14）。该历史状态不表示其中的旧 Task scheduler 与路由协议仍是当前契约。
 
 > 2026-09-11 消融修订：本文历史的“exact-route qualification 才允许 DirectTask”运行期门槛已由
 > [Plan / Task / Execute 消融](../plan-task-execute-ablation.md) 替代。当前自动 Task 能力取决于用户策略、
@@ -1102,7 +1104,7 @@ release 复验未在本机完成，按 §15 acceptance criteria 与 §12.2 门�
 ## 13.5 Fifth audit fixes（2026-08-05）
 
 - P1：Desktop `Revise` 成功响应端到端携带 `revision_run_id`——`sigil-desktop` 的
-  `DesktopPlanDecisionCommandReceipt`（strict `deny_unknown_fields`）、Tauri IPC
+  `DesktopPlanDecisionCommandReceipt`（已知字段投影）、Tauri IPC
   `DesktopPlanDecisionSummary`、React `PlanDecisionSummary` 全部声明可选字段并投影；
   `ConversationPanel` 消费它（Revise 成功后通知 "plan revision started"）。
   契约测试 `plan_decision_revise_accepts_the_supervised_revision_run_identity`：真实 HTTP

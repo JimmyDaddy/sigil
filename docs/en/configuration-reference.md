@@ -106,14 +106,10 @@ Color-token groups are surfaces, borders, text, accents, selection/buttons, stat
 
 | Section / field | Default | Purpose |
 | --- | --- | --- |
-| `[task].enabled` | `true` | Enables task planning. |
-| `[task].routing_policy` | `"auto"` | Ordinary conversation routing: `manual` (chat-first, explicit `/plan` and `/task` only) or coordinator-owned `auto` (Chat / PlanReview / Task decisions); never grants tool permission. |
-| `[task].max_plan_steps` | `12` | Plan-step limit. |
-| `[task].max_replans` | `2` | Replanning limit. |
+| `[task].enabled` | `true` | Enables optional Task handoff from ordinary conversation. |
+| `[task].routing_policy` | `"auto"` | `manual` disables automatic Plan/Task handoff tools in ordinary conversation; `auto` exposes positive typed operations for the model to choose. The host does not classify intent or grant tool permission. |
 | `[task].max_subagents` | `8` | Active child-agent limit. |
-| `[task].max_parallel_read_steps` | `4` | Maximum independent shared-read-only Task steps launched together; terminal parent commits remain in stable plan order. |
-| `[task].max_parallel_changeset_steps` | `2` | Maximum independent `ChangesetOnly` write-subagent steps launched together; members share one immutable base snapshot and never mutate the parent workspace. |
-| `[task].max_planning_research_agents` | `3` | Planner-only read-only Explore probes per attempt; `0` disables and values above the hard limit `4` are clamped. |
+| `[task].max_concurrent_provider_routes` | `4` | Maximum simultaneous provider requests from child agents; effective minimum is `1`. |
 | `[task].multi_agent_mode` | `"explicit_request_only"` | `none`, `explicit_request_only`, or `proactive`. |
 | `[task].allow_write_subagents` | `true` | Whether an eligible child may request file-changing work. |
 | `[task.<role>].connection` / `.model` / `.reasoning_effort` | inherits `[agent]` | Optional role-specific current route. `connection` and `model` must be set together; `provider` is not a valid field. |

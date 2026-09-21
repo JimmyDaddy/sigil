@@ -1,4 +1,4 @@
-<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts; cta: return-user-guide -->
+<!-- public-doc-role: reference; authority: command-key-path-authority; sections: tui-keys,slash-commands,cli-commands,machine-output-and-local-server,config-resolution,important-paths,web-tool-inputs,approval-outcomes,session-recovery-facts,command-execution; cta: return-user-guide -->
 
 # Command And Key Reference
 
@@ -61,6 +61,7 @@ Use this page for exact user-facing commands, keys, paths, outputs, and recovery
 | `/model <model-id|connection-id/model-id>` | Continue the current idle session on an exact ready route. A typed full model ID remains available as **Use exact model ID**, even when discovery does not list it; `D` changes only the saved default |
 | `/effort <low|medium|high|max>` | Change reasoning effort for the next run |
 | `/compact` | Generate, validate, and activate one recoverable context checkpoint |
+| `/control-log preview` · `/control-log confirm <preview-digest>` | Preview damaged command history, then explicitly confirm sealing the old history and opening a new generation; original pending commands retain their identities |
 | `/update [check|refresh|apply]` | Check the current channel, bypass the cached check, or explicitly apply an admitted update |
 | `/intents` | Review durable intent status, artifacts, conflicts, and exact Drop previews |
 | `/quit` | Quit the TUI |
@@ -162,9 +163,14 @@ Both also follow `[web].network_mode`. `deny` blocks them; an unresolved `ask` c
 - Saved-session actions include resume, conversation fork, safe export, pin/unpin, and reviewed delete.
 - Retention cleanup requires an explicit preview and confirmation under `/config` → **Storage**.
 - Exiting prints the session id and `sigil resume <session-id>`.
+- Exiting restores the terminal before stopping work and cleaning up resources. After 5 seconds, Sigil reports that cleanup is still in progress. Successful cleanup exits normally; actual cleanup failures remain errors.
 - `/task continue` continues the latest unfinished task when one exists.
 
 Provider credentials belong in [Providers](providers.md); config fields belong in [Configuration Reference](configuration-reference.md).
+
+## Command Execution
+
+Commands start through the unified `exec_command` tool. The interface shows the redacted command once its arguments are complete; long commands can be expanded, with a short output preview. A command may keep running after a wait returns. The agent uses the same execution ID to wait, read output, send input, or cancel. Actual exit and cleanup determine the final state.
 
 <!-- public-doc-cta: return-user-guide -->
 Next: [Return to the User Guide](user-guide.md).

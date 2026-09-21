@@ -14,7 +14,7 @@
 
 ### P1：Desktop 的 `Revise` 会在 native client 处拒绝真实成功的 HTTP 响应
 
-证据：HTTP receipt 在 `crates/sigil-http/src/dto.rs:3697-3730` 为 `Revise` 返回 `revision_run_id`，并且 RFC 要求客户端以该 run identity 订阅和跟踪。`crates/sigil-desktop/src/dto.rs:2615-2628` 的 `DesktopPlanDecisionCommandReceipt` 使用 `deny_unknown_fields`，却没有该字段；`apps/desktop/src-tauri/src/commands.rs:1334-1348` 和 `apps/desktop/src/types.ts:787-796` 也没有投影它。于是 `DesktopClient::plan_decision` 在 `crates/sigil-desktop/src/client.rs:772-790` 反序列化服务器的成功 JSON 时会因未知 `revision_run_id` 失败。服务器已在返回 receipt 前启动 revision（`crates/sigil-http/src/production_driver.rs:2987-2998`），Desktop 却把它显示为失败。
+证据：HTTP receipt 在 `crates/sigil-http/src/dto.rs:3697-3730` 为 `Revise` 返回 `revision_run_id`，并且 RFC 要求客户端以该 run identity 订阅和跟踪。当前 DTO 采用已知字段投影，未知 `revision_run_id` 不再让 `DesktopClient::plan_decision` 反序列化失败；客户端是否展示该字段仍由对应 projection 决定。服务器已在返回 receipt 前启动 revision（`crates/sigil-http/src/production_driver.rs:2987-2998`）。
 
 影响：Desktop 的 Revise 操作不可用且会产生“失败但后台实际运行”的错误体验；用户也无法得到 child run identity 以跟踪、取消或解释该 revision。这直接违背 RFC §9.2 所要求的 typed client、React interaction 与 public run lifecycle 同步。
 

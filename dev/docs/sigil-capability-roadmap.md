@@ -32,7 +32,7 @@ Sigil 已经是一个以 Desktop 与 TUI 为并列一等产品表面的 coding a
 - Product surfaces：Desktop 与 TUI 共享 transcript、composer、approval、tool activity、config、resume、context compaction 和 provider/tool 状态语义，并按各自信息架构呈现；CLI 与 HTTP 不承担普通用户产品心智。
 - Multi-provider and MCP：runtime 支持 DeepSeek、OpenAI-compatible、Anthropic、Gemini；MCP 已具备 stdio server、lazy activation、trust、approval、resources/prompts 和 elicitation 边界。
 - Code intelligence：已有 LSP 与 Tree-sitter fallback，提供 symbols、definition、references、diagnostics、code action 和 rename 等工具。
-- Task and subagent：已有 `/task` planner/executor/subagent 角色、任务控制日志、子 agent 工具、mailbox、后台 task 和 token budget。
+- Task and subagent：Task 由 root model 通过普通工具循环执行；模型可选择子 agent 工具，host 提供任务控制日志、mailbox、后台 owner 和资源预算。
 
 下一阶段的主要问题不是继续堆命令，而是补齐三个成熟度缺口：
 
@@ -759,13 +759,18 @@ cargo test -p sigil-code-intel
 cargo test -p sigil-runtime
 ```
 
-## 9. Phase 5：Task DAG + Reviewer / Verifier
+## 9. Phase 5：Task DAG + Reviewer / Verifier（历史提案，已被 RFC-0077 替代）
+
+> 本节记录旧 Task DAG 方向，不描述当前实现，也不作为待实现路线。当前 Task 调度由模型
+> 通过普通工具循环决定；host 不根据 TaskPlan、step 状态或固定批次派发 participant。以
+> [RFC-0077](rfcs/0077-model-autonomy-and-harness-boundaries-v1.md) 和其[执行计划](../../.repo-local-dev/rfcs/0077-model-autonomy-and-harness-boundaries-v1-execution-plan.md)
+> 为准。以下内容保留作历史设计记录。
 
 目标：把 `/task` 从顺序执行器升级为可审计的任务编排器。
 
-当前问题：
+以下“当前问题”均指 RFC-0077 取代前的历史状态，不描述当前实现：
 
-- 当前 `/task` 以 `SequentialTaskOrchestrator` 为核心，按 pending steps 顺序执行。
+- 当时 `/task` 以 `SequentialTaskOrchestrator` 为核心，按 pending steps 顺序执行。
 - 一个 step 非 completed 后任务停止，等待显式 continue。
 - 普通聊天中的后台子 agent 可以并发，但 `/task` 计划执行本身还不是 DAG scheduler。
 - 配置中存在 replanning 相关字段，但 task orchestrator 还没有形成真正的 bounded replanning。
