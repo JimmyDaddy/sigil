@@ -3,9 +3,6 @@ use super::*;
 use futures::{Stream, stream};
 use sigil_kernel::{
     CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport,
-    TASK_COMPLETION_CLAIM_SCHEMA_VERSION, TaskCompletionClaimStatusV1,
-    TaskCompletionClaimSubjectV1, TaskCompletionClaimV1, TaskCompletionRequirementClaimV1,
-    TaskCompletionRequirementOutcomeV1, TaskCompletionRequirementSourceV1,
 };
 use sigil_runtime::agent_supervisor::task_role_runtime::TaskRoleProviderBuilder;
 use std::pin::Pin;
@@ -24,54 +21,6 @@ struct DirectDeliveryProvider {
     release: Arc<tokio::sync::Semaphore>,
 }
 
-fn completion_claim_call(request: &CompletionRequest) -> ToolCall {
-    let binding = request
-        .messages
-        .iter()
-        .filter_map(|message| message.content.as_deref())
-        .find(|content| content.contains("Task completion claim binding"))
-        .expect("direct task request includes completion claim binding");
-    let subject = binding
-        .lines()
-        .find_map(|line| line.strip_prefix("subject="))
-        .and_then(|value| serde_json::from_str::<TaskCompletionClaimSubjectV1>(value).ok())
-        .expect("completion claim subject binding");
-    let attempt_id = binding
-        .lines()
-        .find_map(|line| line.strip_prefix("attempt_id="))
-        .expect("completion claim attempt binding")
-        .to_owned();
-    let source = binding
-        .lines()
-        .find_map(|line| line.strip_prefix("allowed requirement source templates="))
-        .and_then(|value| {
-            serde_json::from_str::<Vec<TaskCompletionRequirementSourceV1>>(value).ok()
-        })
-        .and_then(|mut sources| sources.drain(..).next())
-        .expect("completion claim source binding");
-    let claim = TaskCompletionClaimV1 {
-        schema_version: TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-        subject,
-        attempt_id,
-        evidence_frontier: format!("sha256:{}", "0".repeat(64)),
-        status: TaskCompletionClaimStatusV1::Completed,
-        requirements: vec![TaskCompletionRequirementClaimV1 {
-            source,
-            required: true,
-            outcome: TaskCompletionRequirementOutcomeV1::Fulfilled,
-            artifact_refs: Vec::new(),
-            event_refs: Vec::new(),
-            explanation: "fixture delivered the requested file".to_owned(),
-        }],
-        artifact_refs: Vec::new(),
-        explanation: String::new(),
-    };
-    ToolCall {
-        id: "http-direct-claim".to_owned(),
-        name: "task_completion_claim".to_owned(),
-        args_json: serde_json::to_string(&claim).expect("completion claim serializes"),
-    }
-}
 #[async_trait]
 impl Provider for DirectDeliveryProvider {
     fn name(&self) -> &str {
@@ -102,6 +51,10 @@ impl Provider for DirectDeliveryProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        assert!(request.tools.iter().all(|tool| !matches!(
+            tool.name.as_str(),
+            "task_completion_claim" | "bind_direct_task_requirements"
+        )));
         let index = self.calls.fetch_add(1, Ordering::SeqCst);
         let chunks = match index {
             0 => {
@@ -127,25 +80,7 @@ impl Provider for DirectDeliveryProvider {
                     Ok(ProviderChunk::Done),
                 ]
             }
-            1 => {
-                let claim = completion_claim_call(&request);
-                vec![
-                    Ok(ProviderChunk::TextDelta(
-                        "Requested file delivered.".to_owned(),
-                    )),
-                    Ok(ProviderChunk::ToolCallStart {
-                        id: claim.id.clone(),
-                        name: claim.name.clone(),
-                    }),
-                    Ok(ProviderChunk::ToolCallArgsDelta {
-                        id: claim.id.clone(),
-                        delta: claim.args_json.clone(),
-                    }),
-                    Ok(ProviderChunk::ToolCallComplete(claim)),
-                    Ok(ProviderChunk::Done),
-                ]
-            }
-            2 => vec![
+            1 => vec![
                 Ok(ProviderChunk::TextDelta("Delivery confirmed.".to_owned())),
                 Ok(ProviderChunk::Done),
             ],
@@ -264,6 +199,22 @@ async fn production_direct_continuation_retry_and_delivery_replay_do_not_repeat_
         "gpt-test",
         JsonlSessionStore::new(&session.session_log_path)?,
     )?;
+    let draft = sigil_kernel::plan_draft_created_entry(
+        &format!("```sigil-plan-v2\n{}\n```", serde_json::json!({
+            "summary":"Write the requested file once", "steps":[{
+                "step_id":"write", "title":"Write the requested file", "role":"executor", "depends_on":[],
+                "mode":"write", "isolation":"sequential_workspace_write", "deliverables":[objective]
+            }], "target_paths":[]
+        })), sigil_kernel::PlanSourceRef::default(), 1, None,
+    )?.expect("approved artifact");
+    let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
+        task_id.clone(),
+        objective,
+        draft.plan_id.clone(),
+        draft.plan_hash.clone(),
+        1,
+    );
+    durable.append_control(ControlEntry::PlanDraftCreated(draft))?;
     durable.append_controls(vec![
         ControlEntry::TaskRun(TaskRunEntry {
             task_id: task_id.clone(),
@@ -273,15 +224,7 @@ async fn production_direct_continuation_retry_and_delivery_replay_do_not_repeat_
             status: TaskRunStatus::Paused,
             reason: None,
         }),
-        ControlEntry::TaskDirectExecutionAdmittedV1(
-            sigil_kernel::TaskDirectExecutionAdmittedV1::approved_plan(
-                task_id.clone(),
-                objective,
-                sigil_kernel::PlanId::new("http-approved")?,
-                format!("sha256:{}", "d".repeat(64)),
-                1,
-            ),
-        ),
+        ControlEntry::TaskDirectExecutionAdmittedV1(admission),
     ])?;
     drop(durable);
     let command = HttpCommandEnvelope::new(
@@ -349,7 +292,7 @@ async fn production_direct_continuation_retry_and_delivery_replay_do_not_repeat_
         }
     })
     .await??;
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         std::fs::read_to_string(temp.path().join("delivered.txt"))?,
         "written exactly once\n"
@@ -396,6 +339,6 @@ async fn production_direct_continuation_retry_and_delivery_replay_do_not_repeat_
     assert_eq!(task.status, TaskRunStatus::Completed);
     assert_eq!(task.direct_execution_attempts.len(), 1);
     assert_eq!(durable.entries().iter().filter(|entry| matches!(entry, SessionLogEntry::ToolResultV3(result) if result.call_id == "http-direct-write")).count(), 1);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     Ok(())
 }

@@ -54,6 +54,15 @@ mod direct_delivery;
 #[path = "production_plan_recovery_tests.rs"]
 mod plan_recovery;
 
+#[path = "production_control_log_recovery_tests.rs"]
+mod control_log_recovery;
+
+#[path = "production_user_input_operation_tests.rs"]
+mod user_input_operation;
+
+#[path = "production_stop_operation_tests.rs"]
+mod stop_operation;
+
 #[test]
 fn preparation_failure_projects_typed_route_recovery_without_string_parsing() {
     let error = anyhow::Error::new(
@@ -364,7 +373,30 @@ async fn production_driver_attaches_the_shared_application_task_executor() {
 #[tokio::test]
 async fn production_http_application_client_uses_runtime_projection_page_and_reservation() {
     let temp = tempfile::tempdir().expect("temporary directory should exist");
-    let driver = production_queue_driver(&temp, "application-port");
+    let config_path = temp.path().join("sigil.toml");
+    write_production_test_config(&config_path, ".");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-application-port.json"), 16)
+            .expect("application-port protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-application-port.json"),
+            16,
+        )
+        .expect("application-port disclosure journal should initialize"),
+    );
+    let driver = Arc::new(
+        HttpProductionRunDriver::new_with_preparer(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+            Arc::new(FailingTaskPreparation::default()),
+        )
+        .expect("application-port driver should initialize"),
+    );
     let registry = driver
         .build_registry(Arc::new(
             HttpDurableCommandStore::open(temp.path().join("commands-application.json"), 16)
@@ -391,16 +423,18 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                 .page(None, 1)
                 .expect("application page should use the same frontier");
             let receipt = client
-                .execute(
+                .execute_in_journal(
                     "application-unsupported-command",
+                    None,
                     ApplicationCommand::Mcp(McpCommand::Refresh {
                         binding: "test-server".to_owned(),
                     }),
                 )
                 .expect("unsupported command should receive a typed rejection");
             let start_receipt = client
-                .execute(
+                .execute_in_journal(
                     "application-start-test",
+                    None,
                     ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
                         prompt: Some(
                             SafeText::new("start through application port").expect("prompt"),
@@ -419,8 +453,9 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                 )
                 .expect("run start should receive a durable uncertain receipt");
             let queue_receipt = client
-                .execute(
+                .execute_in_journal(
                     "application-queue-test",
+                    None,
                     ApplicationCommand::Conversation(ConversationCommand::Queue {
                         expected_generation: SafeText::new(queue_generation).expect("generation"),
                         action: ApplicationQueueAction::Enqueue {
@@ -432,10 +467,11 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
                         },
                     }),
                 )
-                .expect("queue mutation should receive a durable uncertain receipt");
+                .expect("queue mutation should receive its durable domain receipt");
             let recovery_receipt = client
-                .execute(
+                .execute_in_journal(
                     "application-recovery-test",
+                    None,
                     ApplicationCommand::Conversation(ConversationCommand::Recovery {
                         action: ApplicationRecoveryAction::PrepareCompaction {
                             preview_id: SafeText::new("preview").expect("preview"),
@@ -472,17 +508,25 @@ async fn production_http_application_client_uses_runtime_projection_page_and_res
         start_receipt.recovery.phase,
         sigil_application::CommandLifecyclePhase::EffectStarted
     );
-    let ApplicationCommandReceipt::Uncertain(queue_receipt) = queue_receipt else {
-        panic!("queue mutation should be represented as an uncertain application receipt");
+    let ApplicationCommandReceipt::Settled(queue_receipt) = queue_receipt else {
+        panic!("queue mutation should settle from its actual domain commit");
     };
+    assert_eq!(queue_receipt.command_id.as_str(), "application-queue-test");
     assert_eq!(
-        queue_receipt.recovery.key.command_id.as_str(),
-        "application-queue-test"
+        queue_receipt
+            .domain_commit
+            .source_session_scope_id
+            .as_deref(),
+        projection
+            .scope
+            .session
+            .as_ref()
+            .map(|scope| scope.as_str())
     );
-    assert_eq!(
-        queue_receipt.recovery.phase,
-        sigil_application::CommandLifecyclePhase::EffectStarted
-    );
+    queue_receipt
+        .domain_commit
+        .validate()
+        .expect("settled queue receipt should reference a complete domain commit");
     let ApplicationCommandReceipt::Rejected(recovery_rejection) = recovery_receipt else {
         panic!("invalid recovery binding should be represented as a typed rejection");
     };
@@ -509,6 +553,7 @@ async fn production_http_urgent_command_does_not_require_projection_refresh() {
     let receipt = tokio::task::spawn_blocking(move || {
         client.execute_without_refresh(
             "urgent-command-projection-free",
+            None,
             ApplicationCommand::Mcp(McpCommand::Refresh {
                 binding: "test-server".to_owned(),
             }),
@@ -886,6 +931,410 @@ enabled = true
         requests[0].expected_session_scope_id,
         session.durable_session_scope_id
     );
+}
+
+#[tokio::test]
+async fn http_background_monitor_resumes_only_the_exact_durable_direct_task() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[workspace]
+root = "."
+
+{storage}
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = {{ source = "none" }}
+
+[task]
+enabled = true
+"#
+        ),
+    )
+    .expect("Task continuation config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-bg-task.json"), 16)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(temp.path().join("disclosures-bg-task.json"), 16)
+            .expect("disclosure journal should initialize"),
+    );
+    let preparer = Arc::new(FailingTaskPreparation::default());
+    let driver = Arc::new(
+        HttpProductionRunDriver::new_with_preparer(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+            preparer.clone(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-bg-task.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let task_id = append_direct_task_background_fixture(
+        std::path::Path::new(&session.session_log_path),
+        false,
+    )
+    .expect("durable Direct Task fixture should append");
+    let durable = sigil_kernel::Session::load_from_store(
+        "http-background-monitor-test",
+        "unknown",
+        JsonlSessionStore::new(&session.session_log_path).expect("session store should open"),
+    )
+    .expect("durable Task projection should load");
+    assert_eq!(
+        sigil_runtime::application_run::ready_direct_task_background_continuations(&durable),
+        vec![task_id.clone()]
+    );
+
+    let attachment = driver
+        .acquire_session_attachment(&session)
+        .expect("HTTP session attachment should acquire");
+    let sender = driver
+        .bind_background_agent_monitor(&session, &attachment, &registry)
+        .expect("HTTP background monitor should bind");
+    sender
+        .send(HttpBackgroundAgentSignal::Rescan)
+        .expect("background monitor should accept a durable rescan");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if preparer
+                .requests
+                .lock()
+                .expect("Task request recorder should not be poisoned")
+                .len()
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable result should start a Task continuation");
+
+    let requests = preparer
+        .requests
+        .lock()
+        .expect("Task request recorder should not be poisoned");
+    assert_eq!(requests[0].task_id, task_id);
+    assert_eq!(requests[0].guidance, None);
+    let run_ids = registry
+        .get_session(&session.id)
+        .expect("session should remain visible")
+        .run_ids;
+    assert_eq!(run_ids.len(), 1);
+    assert_eq!(
+        registry
+            .get_run(&run_ids[0])
+            .expect("automatic continuation should remain visible")
+            .permission_mode,
+        HttpPermissionMode::Manual
+    );
+}
+
+#[tokio::test]
+async fn http_background_monitor_does_not_restart_an_ownerless_child_after_reopen() {
+    let temp = tempfile::tempdir().expect("temporary directory should exist");
+    let config_path = temp.path().join("sigil.toml");
+    let storage = isolated_storage_toml(&config_path);
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"config_version = 2
+
+[workspace]
+root = "."
+
+{storage}
+
+[agent]
+connection = "local-test"
+model = "gpt-test"
+
+[connections.local-test]
+label = "Local test"
+provider = "custom"
+protocol = "chat_completions"
+base_url = "http://127.0.0.1:1"
+credential = {{ source = "none" }}
+
+[task]
+enabled = true
+"#
+        ),
+    )
+    .expect("Task continuation config should write");
+    let protocol_journal = Arc::new(
+        HttpDurableProtocolJournal::open(temp.path().join("protocol-bg-recovery.json"), 16)
+            .expect("protocol journal should initialize"),
+    );
+    let event_bus = Arc::new(HttpLiveEventBus::with_durable_journal(16, protocol_journal));
+    let disclosure_journal = Arc::new(
+        HttpDurableEgressDisclosureJournal::open(
+            temp.path().join("disclosures-bg-recovery.json"),
+            16,
+        )
+        .expect("disclosure journal should initialize"),
+    );
+    let preparer = Arc::new(FailingTaskPreparation::default());
+    let driver = Arc::new(
+        HttpProductionRunDriver::new_with_preparer(
+            HttpProductionRunDriverOptions::new(&config_path, temp.path()),
+            disclosure_journal,
+            event_bus,
+            tokio::runtime::Handle::current(),
+            preparer.clone(),
+        )
+        .expect("production driver should initialize"),
+    );
+    let registry = driver
+        .build_registry(Arc::new(
+            HttpDurableCommandStore::open(temp.path().join("commands-bg-recovery.json"), 16)
+                .expect("command store should initialize"),
+        ))
+        .expect("production registry should attach");
+    let session = registry
+        .create_session(HttpSessionCreateRequest::default())
+        .expect("session should bind");
+    let task_id = append_direct_task_background_fixture(
+        std::path::Path::new(&session.session_log_path),
+        true,
+    )
+    .expect("ownerless running-child fixture should append");
+
+    let attachment = driver
+        .acquire_session_attachment(&session)
+        .expect("HTTP session attachment should acquire without a child owner");
+    let sender = driver
+        .bind_background_agent_monitor(&session, &attachment, &registry)
+        .expect("HTTP background monitor should bind");
+    sender
+        .send(HttpBackgroundAgentSignal::Rescan)
+        .expect("background monitor should accept a durable rescan");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let restored = sigil_kernel::Session::load_from_store(
+                "http-background-recovery-test",
+                "unknown",
+                JsonlSessionStore::new(&session.session_log_path)
+                    .expect("session store should reopen"),
+            )
+            .expect("ownerless session recovery should succeed");
+            if restored
+                .task_state_projection()
+                .tasks
+                .get(&task_id)
+                .is_some_and(|task| task.status == TaskRunStatus::Interrupted)
+            {
+                assert_eq!(
+                    restored
+                        .agent_thread_state_projection()
+                        .threads
+                        .get(
+                            &sigil_kernel::AgentThreadId::new("agent_http_background")
+                                .expect("fixture agent thread id should be valid"),
+                        )
+                        .expect("orphaned child should remain visible")
+                        .status,
+                    sigil_kernel::AgentThreadStatus::Interrupted
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ownerless child recovery should durably interrupt its Task");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        preparer
+            .requests
+            .lock()
+            .expect("Task request recorder should not be poisoned")
+            .is_empty(),
+        "an ownerless child without a durable result must never be re-executed"
+    );
+    assert!(
+        registry
+            .get_session(&session.id)
+            .expect("session should remain visible")
+            .run_ids
+            .is_empty()
+    );
+}
+
+fn append_direct_task_background_fixture(
+    path: &std::path::Path,
+    orphaned_child: bool,
+) -> anyhow::Result<TaskId> {
+    let store = JsonlSessionStore::new(path)?;
+    let mut session = sigil_kernel::Session::load_from_store("fixture", "unknown", store)?;
+    let task_id = TaskId::new("task_http_background")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_http_background")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_agent_http_background")?;
+    let objective = "continue after the persisted background result";
+    let admission =
+        sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(task_id.clone(), objective, 1);
+    let mut attempt = sigil_kernel::TaskDirectExecutionAttemptV1::started(&admission, 1);
+    attempt.status = sigil_kernel::TaskExecutionAttemptStatus::Completed;
+    attempt.final_message_id = Some("message_http_direct_task_final".to_owned());
+    attempt.output_hash = Some(format!("sha256:{}", "a".repeat(64)));
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: objective.to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(attempt))?;
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: None,
+            batch_id: None,
+            batch_member_key: None,
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: SessionRef::new_relative("children/agent_http_background.jsonl")?,
+            profile_id: profile_id.clone(),
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "fixture".to_owned(),
+                model: "fixture-model".to_owned(),
+                model_ref: None,
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
+                effective_tool_scope_hash: String::new(),
+                effective_permission_policy_hash: String::new(),
+                effective_mcp_scope_hash: String::new(),
+                provider_capability_hash: String::new(),
+                model_visible_agent_index_hash: None,
+                budget_policy_hash: String::new(),
+                provider_background_handle_ref: None,
+            },
+            objective: "inspect the child result".to_owned(),
+            prompt_hash: "sha256:child-prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: sigil_kernel::AgentInvocationSource::Task,
+            display_name: None,
+            created_at_ms: None,
+        },
+    ))?;
+    let grant = sigil_kernel::AgentInvocationGrantRecord {
+        grant_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        source: sigil_kernel::AgentInvocationGrantSource::DirectTask {
+            task_id: task_id.clone(),
+        },
+        authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+            task_id: task_id.clone(),
+        },
+        profile_id: profile_id.clone(),
+        role: AgentRole::SubagentRead,
+        isolation: sigil_kernel::TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        network_upper_bound: sigil_kernel::NetworkPolicy::Deny,
+        tool_contract_fingerprint: format!("sha256:{}", "d".repeat(64)),
+        workspace_snapshot_id: None,
+        root_run_fingerprint: format!("sha256:{}", "e".repeat(64)),
+        root_cancellation_scope_fingerprint: format!("sha256:{}", "f".repeat(64)),
+        expires_at_ms: u64::MAX,
+    };
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: thread_id.clone(),
+            profile_id,
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: sigil_kernel::AgentInvocationSource::Task,
+            authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                task_id: task_id.clone(),
+            },
+            objective_hash: format!("sha256:{}", "1".repeat(64)),
+            tool_contract_fingerprint: grant.tool_contract_fingerprint.clone(),
+            invocation_grant: Some(grant),
+            admitted_at_ms: Some(2),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: if orphaned_child {
+                sigil_kernel::AgentThreadStatus::Running
+            } else {
+                sigil_kernel::AgentThreadStatus::Completed
+            },
+            reason: None,
+            updated_at_ms: Some(3),
+        },
+    ))?;
+    if orphaned_child {
+        return Ok(task_id);
+    }
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id,
+                session_ref: SessionRef::new_relative("children/agent_http_background.jsonl")?,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: "persisted background result".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:result".to_owned(),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+    Ok(task_id)
 }
 
 fn production_queue_session_named(temp: &tempfile::TempDir, name: &str) -> HttpSessionSnapshot {
@@ -1353,6 +1802,7 @@ fn queue_command(
     HttpConversationQueueDriverCommand {
         command_id: command_id.to_owned(),
         client_id: "desktop-client-1".to_owned(),
+        application_operation: None,
         request: HttpConversationQueueCommandRequest {
             expected_generation,
             action,
@@ -2768,7 +3218,8 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
     let receipt = registry
         .command_conversation_queue(&session.id, command)
         .expect("queue scheduler enqueue should commit before admission");
-    assert_eq!(receipt.queue.total_items, 1);
+    assert_eq!(receipt.command_id, "scheduler-enqueue-1");
+    assert_ne!(receipt.generation, receipt.expected_generation);
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -2793,6 +3244,19 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
         tokio::task::yield_now().await;
     }
     assert_eq!(preparer.queued_calls.load(Ordering::SeqCst), 1);
+    let entries = JsonlSessionStore::read_entries(&session.session_log_path)
+        .expect("settled queue history should remain readable");
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputQueued(_))
+            ))
+            .count(),
+        1,
+        "enqueue must commit exactly once even when the scheduler drains it before return"
+    );
     let run_ids = registry
         .get_session(&session.id)
         .expect("queue scheduler session should remain bound")
@@ -2810,12 +3274,13 @@ async fn production_queue_scheduler_uses_supervisor_and_terminalizes_preparation
 #[test]
 fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
     let broker = Arc::new(HttpApprovalBroker::default());
+    let identity = approval_identity();
     let pending = broker
         .register(
-            "run-1",
+            &identity.session_id,
             &call(),
             &spec(ToolAccess::Read, None),
-            &approval_identity(),
+            &identity,
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
@@ -2839,7 +3304,7 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
         )
         .expect("decision should resolve");
     let outcome = broker
-        .wait_for_decision("call-1", &pending.approval_request_id)
+        .wait_for_decision("call-1", &identity)
         .expect("resolved wait should finish");
 
     assert!(matches!(
@@ -2854,12 +3319,13 @@ fn approval_broker_routes_one_explicit_decision_with_stable_guards() {
 #[test]
 fn approval_broker_keeps_an_idle_request_pending_until_an_explicit_decision() {
     let broker = HttpApprovalBroker::default();
+    let identity = approval_identity();
     let pending = broker
         .register(
-            "run-1",
+            &identity.session_id,
             &call(),
             &spec(ToolAccess::Read, None),
-            &approval_identity(),
+            &identity,
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
@@ -2888,7 +3354,7 @@ fn approval_broker_keeps_an_idle_request_pending_until_an_explicit_decision() {
         )
         .expect("explicit decision should resolve");
     let outcome = broker
-        .wait_for_decision("call-1", &pending.approval_request_id)
+        .wait_for_decision("call-1", &identity)
         .expect("explicit decision should end the wait");
     assert!(matches!(
         outcome.decision,
@@ -2902,12 +3368,14 @@ fn approval_broker_keeps_an_idle_request_pending_until_an_explicit_decision() {
 #[test]
 fn approval_handler_only_resolves_explicit_broker_decisions() {
     let broker = Arc::new(HttpApprovalBroker::default());
+    let mut identity = approval_identity();
+    identity.run_id = "task-direct-execution-attempt-1".to_owned();
     let pending = broker
         .register(
-            "run-1",
+            &identity.session_id,
             &call(),
             &spec(ToolAccess::Write, None),
-            &approval_identity(),
+            &identity,
             false,
             unavailable_session_grant_reason(),
             crate::HttpPendingApprovalDisplay::default(),
@@ -2926,18 +3394,13 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
             },
         )
         .expect("decision should resolve");
-    let mut handler = HttpProductionApprovalHandler {
-        run_id: "run-1".to_owned(),
-        broker,
-    };
+    let mut handler = HttpProductionApprovalHandler { broker };
+    let mut context = approval_context();
+    context.identity = identity;
 
     assert!(matches!(
         handler
-            .approve_tool_call_with_context(
-                &call(),
-                &spec(ToolAccess::Write, None),
-                &approval_context(),
-            )
+            .approve_tool_call_with_context(&call(), &spec(ToolAccess::Write, None), &context,)
             .expect("explicit decision should resolve"),
         ToolApproval::Approve
     ));
@@ -2947,12 +3410,13 @@ fn approval_handler_only_resolves_explicit_broker_decisions() {
 #[test]
 fn approval_handler_preserves_bounded_session_decisions() {
     let broker = Arc::new(HttpApprovalBroker::default());
+    let identity = approval_identity();
     let pending = broker
         .register(
-            "run-1",
+            &identity.session_id,
             &call(),
             &spec(ToolAccess::Read, None),
-            &approval_identity(),
+            &identity,
             true,
             None,
             crate::HttpPendingApprovalDisplay::default(),
@@ -2972,17 +3436,17 @@ fn approval_handler_preserves_bounded_session_decisions() {
             },
         )
         .expect("session decision should resolve");
-    let mut handler = HttpProductionApprovalHandler {
-        run_id: "run-1".to_owned(),
-        broker,
-    };
+    let mut handler = HttpProductionApprovalHandler { broker };
 
     assert!(matches!(
         handler
             .approve_tool_call_with_context(
                 &call(),
                 &spec(ToolAccess::Read, None),
-                &approval_context(),
+                &ToolApprovalContext {
+                    identity,
+                    ..approval_context()
+                },
             )
             .expect("session decision should reach the kernel"),
         ToolApproval::ApproveForSession
@@ -3703,7 +4167,8 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
     let bus = HttpLiveEventBus::new(8);
     let call = call();
     let spec = spec(ToolAccess::Write, None);
-    let identity = approval_identity();
+    let mut identity = approval_identity();
+    identity.run_id = "task-direct-execution-attempt-1".to_owned();
     let pending = HttpPendingApproval {
         call_id: call.id.clone(),
         tool_name: spec.name.clone(),
@@ -3723,6 +4188,7 @@ fn approval_protocol_event_exposes_the_exact_guard_required_by_the_endpoint() {
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            display_call_id: None,
             approval_identity: identity,
             session_grant_available: false,
             session_grant_unavailable_reason: unavailable_session_grant_reason(),
@@ -3770,6 +4236,7 @@ fn approval_protocol_event_rejects_guard_for_another_call() {
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            display_call_id: None,
             approval_identity: identity.clone(),
             session_grant_available: false,
             session_grant_unavailable_reason: unavailable_session_grant_reason(),
@@ -4161,7 +4628,10 @@ fn plan_review_revision_handler_binds_only_its_actual_live_source() -> Result<()
     let updates = reader.poll_updates()?;
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].preview.as_str(), "revision preview");
-    assert_eq!(updates[0].attempt_id, "revision-physical-attempt");
+    assert_eq!(
+        updates[0].attempt_id.as_deref(),
+        Some("revision-physical-attempt")
+    );
     handler.run_id = "another-revision".to_owned();
     assert!(
         handler
@@ -5329,11 +5799,6 @@ fn revision_receipt_failure_still_reconciles_the_registered_terminal_run() -> an
         explicit_objective: Some("base plan".to_owned()),
         route_decision_id: None,
         child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: Some(sigil_kernel::plan_review_finalizer_session_ref(
-            &review_id,
-            &attempt_id,
-            1,
-        )),
         revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
             "revision-receipt-failure-request",
         )?),
@@ -5574,7 +6039,6 @@ fn attachment_reconcile_keeps_a_durable_revision_waiting_checkpoint_resumable() 
         explicit_objective: Some("Original objective".to_owned()),
         route_decision_id: None,
         child_session_ref: sigil_kernel::plan_review_child_session_ref(&review_id, &attempt_id),
-        finalizer_session_ref: None,
         revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
             "waiting-attachment-guidance",
         )?),
@@ -5621,14 +6085,11 @@ fn attachment_reconcile_keeps_a_durable_revision_waiting_checkpoint_resumable() 
             prompt: "Which scope?".to_owned(),
             questions: vec![sigil_kernel::UserInputQuestionV1 {
                 id: "scope".to_owned(),
-                header: "Scope".to_owned(),
                 question: "Which scope?".to_owned(),
                 description: None,
                 required: true,
-                field: sigil_kernel::UserInputFieldKindV1::Text {
-                    multiline: false,
-                    max_chars: 256,
-                },
+                options: Vec::new(),
+                multiple: false,
             }],
             allowed_actions: vec![sigil_kernel::UserInputActionV1::Submit],
             requested_at_unix_ms: 3,
@@ -6145,9 +6606,9 @@ async fn production_task_pause_returns_only_after_supervisor_acknowledges_activa
                 projection_owner: Arc::new(Mutex::new(None)),
             }),
         );
-    let request = TaskPauseRequest::new(
+    let request = TaskPauseRequest::direct(
         TaskId::new("task-http-pause").expect("Task id should be valid"),
-        3,
+        "admission-http-pause",
     );
     let expected = request.clone();
     let (finished, finished_rx) = std_mpsc::channel();
@@ -6771,28 +7232,31 @@ credential = {{ source = "none" }}
     let answer_registry = Arc::clone(&registry);
     let answer_session_id = session.id.clone();
     let answer_request_id = guidance.identity.request_id.as_str().to_owned();
+    let retry_request_id = answer_request_id.clone();
+    let retry_command = HttpCommandEnvelope::new(
+        "revision-dup-1",
+        "client-1",
+        &session.id,
+        HttpUserInputDecisionRequest {
+            generation: guidance.identity.generation,
+            expected_request_hash: guidance.request_hash.clone(),
+            decision: sigil_kernel::UserInputDecisionV1::Submitted {
+                answers: vec![sigil_kernel::UserInputAnswerV1 {
+                    question_id: "revision_guidance".to_owned(),
+                    value: sigil_kernel::UserInputAnswerValueV1::Text {
+                        value: "Preserve the existing compatibility boundary.".to_owned(),
+                    },
+                }],
+            },
+            permission_mode: None,
+        },
+    );
+    let answer_command = retry_command.clone();
     let error = tokio::task::spawn_blocking(move || {
         answer_registry.user_input_decision_command(
             &answer_session_id,
             &answer_request_id,
-            HttpCommandEnvelope::new(
-                "revision-dup-1",
-                "client-1",
-                &answer_session_id,
-                HttpUserInputDecisionRequest {
-                    generation: guidance.identity.generation,
-                    expected_request_hash: guidance.request_hash.clone(),
-                    decision: sigil_kernel::UserInputDecisionV1::Submitted {
-                        answers: vec![sigil_kernel::UserInputAnswerV1 {
-                            question_id: "revision_guidance".to_owned(),
-                            value: sigil_kernel::UserInputAnswerValueV1::Text {
-                                value: "Preserve the existing compatibility boundary.".to_owned(),
-                            },
-                        }],
-                    },
-                    permission_mode: None,
-                },
-            ),
+            answer_command,
         )
     })
     .await
@@ -6802,6 +7266,31 @@ credential = {{ source = "none" }}
         error.to_string().contains("already active"),
         "rejection must name the duplicate run: {error}"
     );
+
+    let before_replay = std::fs::read(&session.session_log_path).expect("read accepted answer");
+    let retry_registry = Arc::clone(&registry);
+    let retry_session_id = session.id.clone();
+    let replay = tokio::task::spawn_blocking(move || {
+        retry_registry.user_input_decision_command(
+            &retry_session_id,
+            &retry_request_id,
+            retry_command,
+        )
+    })
+    .await
+    .expect("original command retry should join")
+    .expect("a rebuilt client must query the original answer without inheriting a call error");
+    assert!(replay.replayed);
+    assert!(
+        replay.continuation_run_id.is_none(),
+        "an accepted answer cannot stand in for an unregistered child run"
+    );
+    assert_eq!(
+        std::fs::read(&session.session_log_path).expect("read replayed answer"),
+        before_replay,
+        "the original command must not dispatch or append another accepted answer"
+    );
+    assert!(registry.get_run(&revision_run_id).is_err());
 
     // The session is NOT blocked: the foreground slot was never claimed, so later durable
     // mutations remain possible despite the persisted RevisionRequested decision.
@@ -7918,7 +8407,7 @@ async fn production_plan_review_waiting_input_resumes_same_run_without_a_termina
                 let call_index = provider_call.fetch_add(1, Ordering::SeqCst);
                 let body = if call_index == 0 {
                     concat!(
-                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-question-call\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose the migration boundary\\\",\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"header\\\":\\\"Scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\",\\\"required\\\":true,\\\"field\\\":{\\\"kind\\\":\\\"text\\\",\\\"multiline\\\":false,\\\"max_chars\\\":120}}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-question-call\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\"}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 } else {
@@ -8336,7 +8825,7 @@ async fn production_plan_review_waiting_cancel_scenario(recover_accepted_child: 
             let mut buffer = vec![0; 16384];
             let _read = socket.read(&mut buffer).await.unwrap_or(0);
             let body = concat!(
-                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-cancel-question\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"prompt\\\":\\\"Choose the migration boundary\\\",\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"header\\\":\\\"Scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\",\\\"required\\\":true,\\\"field\\\":{\\\"kind\\\":\\\"text\\\",\\\"multiline\\\":false,\\\"max_chars\\\":120}}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"revision-cancel-question\",\"type\":\"function\",\"function\":{\"name\":\"request_user_input\",\"arguments\":\"{\\\"questions\\\":[{\\\"id\\\":\\\"scope\\\",\\\"question\\\":\\\"Which module should be migrated first?\\\"}]}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                 "data: [DONE]\n\n"
             );
             let _ = socket

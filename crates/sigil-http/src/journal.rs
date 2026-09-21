@@ -831,7 +831,7 @@ impl HttpProtocolStreamKey {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct HttpProtocolJournalFile {
     schema_version: u32,
     events: Vec<HttpProtocolEvent>,
@@ -979,7 +979,7 @@ impl HttpProtocolJournalFile {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct HttpProtocolJournalWatermark {
     session_id: String,
     run_id: String,

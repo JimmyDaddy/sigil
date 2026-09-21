@@ -148,7 +148,7 @@ impl From<SupportDoctorStatus> for HttpSupportStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportSummary {
     pub overall_status: HttpSupportStatus,
     pub ok: usize,
@@ -157,7 +157,7 @@ pub struct HttpSupportSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportCheck {
     pub status: HttpSupportStatus,
     pub name: String,
@@ -178,7 +178,7 @@ impl From<SupportDoctorCheckV1> for HttpSupportCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportEnvironment {
     pub os: String,
     pub architecture: String,
@@ -204,7 +204,7 @@ impl From<SupportEnvironmentV1> for HttpSupportEnvironment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportPrivacy {
     pub included: Vec<String>,
     pub excluded: Vec<String>,
@@ -223,7 +223,7 @@ impl From<SupportPrivacyV1> for HttpSupportPrivacy {
 
 /// Path-free diagnostic projection returned to an authenticated desktop client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportDoctorReport {
     pub generated_at_unix_ms: u64,
     pub version: String,
@@ -261,7 +261,7 @@ impl From<DoctorSupportReportV1> for HttpSupportDoctorReport {
 
 /// Bounded private support JSON handed only to the native desktop save boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSupportBundleExport {
     pub suggested_file_name: String,
     pub generated_at_unix_ms: u64,
@@ -278,7 +278,7 @@ pub enum HttpProviderConfigMode {
 
 /// Compound connection/model identity used by settings surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderModelRef {
     pub connection_id: String,
     pub model_id: String,
@@ -307,7 +307,7 @@ pub enum HttpProviderConnectionReadiness {
 
 /// Bounded, stable issue projection that contains neither paths nor provider response bodies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderConnectionIssue {
     pub code: String,
     pub message: String,
@@ -315,7 +315,7 @@ pub struct HttpProviderConnectionIssue {
 
 /// One secret-free connection row for a native settings owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderConnectionEntry {
     pub id: String,
     pub label: String,
@@ -333,7 +333,7 @@ pub struct HttpProviderConnectionEntry {
 
 /// Full secret-free inventory shared by Doctor, TUI runtime ownership, and Desktop native code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderConnectionInventory {
     pub config_mode: HttpProviderConfigMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -374,7 +374,7 @@ pub enum HttpProviderSetupProtocol {
 ///
 /// Deliberately does not implement `Debug`, `Clone`, or `Serialize`.
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderSetupCatalogRequest {
     pub template: HttpProviderSetupTemplate,
     #[serde(default)]
@@ -390,7 +390,7 @@ pub struct HttpProviderSetupCatalogRequest {
 
 /// Secret-free model row returned by the setup catalog boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderSetupModel {
     pub model_id: String,
     pub display_name: String,
@@ -403,7 +403,7 @@ pub struct HttpProviderSetupModel {
 
 /// Exact connection-scoped catalog view used by a first-run or settings wizard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderSetupCatalog {
     pub connection_id: String,
     pub provider_label: String,
@@ -418,7 +418,7 @@ pub struct HttpProviderSetupCatalog {
 
 /// Secret-free automatic-orchestration summary shown by setup and settings surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpOrchestrationRolloutSummary {
     pub status: String,
     pub routing_policy: String,
@@ -432,7 +432,7 @@ pub struct HttpOrchestrationRolloutSummary {
 ///
 /// Deliberately does not implement `Debug`, `Clone`, or `Serialize`.
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderSetupSaveRequest {
     pub template: HttpProviderSetupTemplate,
     #[serde(default)]
@@ -453,7 +453,7 @@ pub struct HttpProviderSetupSaveRequest {
 
 /// Secret-free result after atomically publishing one connection and saved default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderSetupSaveResult {
     pub default_model: HttpProviderModelRef,
     pub inventory: HttpProviderConnectionInventory,
@@ -462,7 +462,7 @@ pub struct HttpProviderSetupSaveResult {
 
 /// Existing exact route and optional context limit selected as the shared default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderDefaultModelSaveRequest {
     pub model_ref: HttpProviderModelRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -471,7 +471,7 @@ pub struct HttpProviderDefaultModelSaveRequest {
 
 /// Secret-free result after atomically changing the saved default and optional model limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpProviderDefaultModelSaveResult {
     pub default_model: HttpProviderModelRef,
     pub inventory: HttpProviderConnectionInventory,
@@ -535,7 +535,7 @@ pub struct HttpSessionCreateRequest {
 
 /// Request body for reopening one durable workspace session as a live adapter handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionOpenRequest {
     /// Relative direct-child reference returned by the historical session catalog.
     pub session_ref: String,
@@ -551,7 +551,7 @@ pub struct HttpSessionOpenRequest {
 
 /// Exact durable catalog identity and new bounded display name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionRenameRequest {
     pub session_ref: String,
     pub session_id: String,
@@ -560,7 +560,7 @@ pub struct HttpSessionRenameRequest {
 
 /// Exact durable catalog identity selected for confirmed deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionDeleteRequest {
     pub session_ref: String,
     pub session_id: String,
@@ -568,7 +568,7 @@ pub struct HttpSessionDeleteRequest {
 
 /// Exact unavailable catalog source fingerprint selected for quarantine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionQuarantineRequest {
     pub session_ref: String,
     pub source_bytes: u64,
@@ -577,7 +577,7 @@ pub struct HttpSessionQuarantineRequest {
 
 /// Exact unavailable catalog source fingerprint selected for permanent deletion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionInvalidSourceDeleteRequest {
     pub session_ref: String,
     pub source_bytes: u64,
@@ -595,7 +595,7 @@ pub enum HttpSessionCatalogBatchAction {
 
 /// One exact catalog identity selected by an interactive client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionCatalogBatchItem {
     pub session_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,7 +608,7 @@ pub struct HttpSessionCatalogBatchItem {
 
 /// Exact selected set submitted for a read-only batch preflight.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionCatalogBatchPlanRequest {
     pub action: HttpSessionCatalogBatchAction,
     pub items: Vec<HttpSessionCatalogBatchItem>,
@@ -616,7 +616,7 @@ pub struct HttpSessionCatalogBatchPlanRequest {
 
 /// The same selected set plus the opaque plan digest confirmed by the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionCatalogBatchExecuteRequest {
     pub plan_id: String,
     pub action: HttpSessionCatalogBatchAction,
@@ -795,7 +795,7 @@ pub enum HttpSessionRouteTransitionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionRouteTransitionView {
     pub kind: HttpSessionRouteTransitionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -807,7 +807,7 @@ pub struct HttpSessionRouteTransitionView {
 
 /// Read-only durable frontier revalidated for one bound session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpDurableSessionFrontier {
     /// Highest durable session-stream sequence visible to this probe.
     pub through_stream_sequence: u64,
@@ -815,7 +815,7 @@ pub struct HttpDurableSessionFrontier {
 
 /// Exact process-local foreground owner returned by one fresh continuity probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpForegroundRunOwner {
     /// Active run that owns this adapter session.
     pub run_id: String,
@@ -836,7 +836,7 @@ pub enum HttpContinuityRecoveryAction {
 
 /// Fresh continuity proof for one process-local adapter session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpSessionContinuityView {
     /// Durable scope revalidated by the runtime. Native IPC must not project this field.
     pub durable_session_scope_id: String,
@@ -925,7 +925,7 @@ pub struct HttpSessionTranscriptPage {
 ///
 /// The stream sequence is encoded as decimal text so JavaScript clients cannot lose precision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationDisplayOrder {
     pub session_stream_sequence: String,
     pub subindex: u32,
@@ -960,6 +960,7 @@ pub enum HttpConversationDisplaySource {
 pub enum HttpConversationDisplayStatus {
     Recorded,
     Requested,
+    Running,
     WaitingForApproval,
     Approved,
     Denied,
@@ -992,7 +993,7 @@ pub enum HttpConversationDisplayAssistantPhase {
 
 /// User-selected skill bound to one durable prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationDisplaySkillReference {
     pub id: String,
     pub name: String,
@@ -1030,7 +1031,7 @@ pub enum HttpConversationDisplayCheckpointConflictReason {
 
 /// Typed, secret-safe content carried by one canonical display item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum HttpConversationDisplayContent {
     Message {
         role: HttpConversationDisplayMessageRole,
@@ -1056,6 +1057,14 @@ pub enum HttpConversationDisplayContent {
         tool_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_started_at_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_updated_at_ms: Option<u64>,
         truncated: bool,
         original_content_bytes: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1104,7 +1113,7 @@ pub enum HttpConversationDisplayContent {
 
 /// One canonical, durable display item safe for authenticated local clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationDisplayItem {
     pub schema_version: u16,
     pub display_id: String,
@@ -1124,7 +1133,7 @@ pub struct HttpConversationDisplayItem {
 
 /// Latest proven terminal boundary at the page's fixed durable frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationTerminalFrontier {
     pub run_id: String,
     pub session_stream_sequence: String,
@@ -1133,7 +1142,7 @@ pub struct HttpConversationTerminalFrontier {
 
 /// Gap fact retained for clients without exposing journal or filesystem details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationDisplayGapFact {
     pub kind: HttpConversationDisplayGapKind,
     pub after_session_stream_sequence: String,
@@ -1151,7 +1160,7 @@ pub enum HttpConversationDisplayGapKind {
 ///
 /// This anchor is explicitly provisional and never supplies durable display order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationLiveProvisionalAnchor {
     pub durable_frontier: String,
     pub run_id: String,
@@ -1160,7 +1169,7 @@ pub struct HttpConversationLiveProvisionalAnchor {
 
 /// Bounded durable plan-step state used to restore application Task controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationTaskPlanStep {
     pub step_id: String,
     pub title: String,
@@ -1188,7 +1197,7 @@ impl From<ConversationTaskPlanStepV1> for HttpConversationTaskPlanStep {
 
 /// Bounded durable integration-lane state with no private workspace or ref.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationTaskLane {
     pub lane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1211,7 +1220,7 @@ impl From<ConversationTaskLaneV1> for HttpConversationTaskLane {
 
 /// Current durable Task control state at the canonical display frontier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationTaskControl {
     pub schema_version: u16,
     pub task_id: String,
@@ -1259,7 +1268,7 @@ impl From<ConversationTaskControlV1> for HttpConversationTaskControl {
 
 /// Opaque-cursor page over canonical durable conversation display items.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationDisplayPage {
     pub schema_version: u16,
     /// Process-local adapter session id; the raw durable scope is intentionally omitted.
@@ -1319,7 +1328,6 @@ pub struct HttpPlanReview {
 pub enum HttpPlanReviewStatus {
     Started,
     WaitingForInput,
-    Finalizing,
     DraftReady,
     CompileFailed,
     CompletedWithoutDraft,
@@ -1333,10 +1341,8 @@ pub enum HttpPlanReviewStatus {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpTaskExecutionPhase {
-    Preparing,
     Ready,
     Running,
-    Blocked,
     Paused,
     Completed,
     Failed,
@@ -1347,10 +1353,8 @@ pub enum HttpTaskExecutionPhase {
 impl From<sigil_kernel::TaskExecutionPhaseV1> for HttpTaskExecutionPhase {
     fn from(phase: sigil_kernel::TaskExecutionPhaseV1) -> Self {
         match phase {
-            sigil_kernel::TaskExecutionPhaseV1::Preparing => Self::Preparing,
             sigil_kernel::TaskExecutionPhaseV1::Ready => Self::Ready,
             sigil_kernel::TaskExecutionPhaseV1::Running => Self::Running,
-            sigil_kernel::TaskExecutionPhaseV1::Blocked => Self::Blocked,
             sigil_kernel::TaskExecutionPhaseV1::Paused => Self::Paused,
             sigil_kernel::TaskExecutionPhaseV1::Completed => Self::Completed,
             sigil_kernel::TaskExecutionPhaseV1::Failed => Self::Failed,
@@ -1401,7 +1405,7 @@ impl HttpConversationDisplayPage {
 
 /// Typed, bounded selector accepted by the authenticated display artifact endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HttpToolArtifactSelector {
     ByteSlice {
         offset: u64,
@@ -1413,10 +1417,17 @@ pub enum HttpToolArtifactSelector {
     },
     SearchLiteral {
         query: String,
+        #[serde(default)]
         start_offset: u64,
-        max_matches: u16,
+        #[serde(default = "default_artifact_search_matches")]
+        max_matches: u64,
+        #[serde(default)]
         context_lines: u16,
     },
+}
+
+fn default_artifact_search_matches() -> u64 {
+    sigil_kernel::session::TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES
 }
 
 impl HttpToolArtifactSelector {
@@ -1496,7 +1507,7 @@ impl From<ToolArtifactSelectorV1> for HttpToolArtifactSelector {
 
 /// Authenticated request for one display-safe artifact page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpToolArtifactReadRequest {
     /// Opaque session-scoped artifact reference. This is never a physical path.
     pub artifact_ref: String,
@@ -1528,7 +1539,7 @@ pub enum HttpToolArtifactPageEncoding {
 
 /// One bounded artifact page safe for authenticated local display clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpToolArtifactPage {
     pub schema_version: u16,
     /// Process-local adapter session id; the durable scope and physical path are omitted.
@@ -1581,7 +1592,7 @@ impl HttpToolArtifactPage {
             || match &self.selector {
                 HttpToolArtifactSelector::ByteSlice { limit, .. } => self.returned_bytes > *limit,
                 HttpToolArtifactSelector::SearchLiteral { max_matches, .. } => {
-                    self.match_count > *max_matches
+                    u64::from(self.match_count) > *max_matches
                 }
                 HttpToolArtifactSelector::LinePage { .. } => false,
             }
@@ -1753,6 +1764,10 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 call_id,
                 tool_name,
                 output,
+                input,
+                execution_id,
+                execution_started_at_ms,
+                execution_updated_at_ms,
                 truncated,
                 original_content_bytes,
                 artifact_ref,
@@ -1767,6 +1782,10 @@ impl From<ConversationDisplayContentV1> for HttpConversationDisplayContent {
                 call_id,
                 tool_name,
                 output,
+                input,
+                execution_id,
+                execution_started_at_ms,
+                execution_updated_at_ms,
                 truncated,
                 original_content_bytes: usize_as_u64(original_content_bytes),
                 artifact_ref,
@@ -1837,7 +1856,7 @@ map_enum!(ConversationDisplaySourceV1 => HttpConversationDisplaySource {
     DurableTranscript, DurableRunEvent, LiveTransient
 });
 map_enum!(ConversationDisplayStatusV1 => HttpConversationDisplayStatus {
-    Recorded, Requested, WaitingForApproval, Approved, Denied, Completed, Succeeded, Failed,
+    Recorded, Requested, Running, WaitingForApproval, Approved, Denied, Completed, Succeeded, Failed,
     Cancelled, Interrupted, Paused, Blocked, AwaitingUserInput
 });
 map_enum!(ConversationDisplayMessageRoleV1 => HttpConversationDisplayMessageRole {
@@ -2002,7 +2021,7 @@ pub struct HttpRunCancelRequest {
 
 /// Exact stale-safe request for cancelling one persistent terminal task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpTerminalTaskCancelRequest {
     /// Exact task id rendered from the latest bounded lifecycle projection.
     pub task_id: String,
@@ -2076,7 +2095,7 @@ pub enum HttpApplicationClientAction {
 
 /// Exact read-only target used to generate one current Intent Drop preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpIntentDropPreviewRequest {
     pub intent_ref: IntentVersionRef,
 }
@@ -2095,7 +2114,7 @@ pub type HttpIntentDropExecution = IntentOperationExecutionV1;
 
 /// Receipt for one idempotent exact Intent Drop command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpIntentDropCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2142,7 +2161,7 @@ pub struct HttpApplicationSkillBinding {
 
 /// Exact immutable binding for one user-invoked agent profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpApplicationAgentBinding {
     pub profile_id: String,
     pub snapshot_id: String,
@@ -2260,7 +2279,7 @@ pub struct HttpRunContextView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpApplicationCacheUsage {
     pub cache_read_tokens: u64,
     pub cache_miss_tokens: u64,
@@ -2502,7 +2521,7 @@ pub enum HttpApprovalLifecycleState {
 
 /// Bounded request identity and lifecycle state safe for local application recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpApprovalLifecycleView {
     pub approval: HttpPendingApproval,
     pub state: HttpApprovalLifecycleState,
@@ -2622,7 +2641,7 @@ pub enum HttpConversationQueueBlockedReason {
 
 /// One bounded, secret-free queue row. Exact prompt material and prompt hashes are excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationQueueItem {
     pub entry_id: String,
     pub order: u32,
@@ -2642,7 +2661,7 @@ pub struct HttpConversationQueueItem {
 
 /// Bounded queue projection for one exact application session scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationQueueView {
     pub schema_version: u16,
     pub session_id: String,
@@ -2670,7 +2689,7 @@ pub enum HttpConversationQueueCommandActionKind {
 
 /// Exact queue mutation submitted inside the existing idempotent command envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "action", rename_all = "snake_case")]
 pub enum HttpConversationQueueCommandAction {
     Enqueue {
         prompt: String,
@@ -2720,7 +2739,7 @@ impl HttpConversationQueueCommandAction {
 
 /// Queue-specific compare-and-swap payload carried by `HttpCommandEnvelope`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationQueueCommandRequest {
     pub expected_generation: HttpConversationQueueGeneration,
     pub action: HttpConversationQueueCommandAction,
@@ -2728,7 +2747,7 @@ pub struct HttpConversationQueueCommandRequest {
 
 /// Durable queue mutation receipt. Exact prompt material is never echoed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationQueueCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -2771,7 +2790,7 @@ pub enum HttpCheckpointFileAvailability {
 
 /// Bounded renderer-safe file binding for one checkpoint row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointFileView {
     pub path: String,
     pub restore_kind: HttpCheckpointRestoreKind,
@@ -2780,7 +2799,7 @@ pub struct HttpCheckpointFileView {
 
 /// Exact renderer-safe checkpoint binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointView {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -2794,7 +2813,7 @@ pub struct HttpCheckpointView {
 
 /// Exact finalized-turn binding available for a conversation-only fork.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationForkPointView {
     pub source_turn_index: usize,
     pub source_turn_digest: String,
@@ -2804,7 +2823,7 @@ pub struct HttpConversationForkPointView {
 
 /// Durable checkpoint/fork projection for one bound adapter session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationRecoveryView {
     pub checkpoints: Vec<HttpCheckpointView>,
     pub fork_points: Vec<HttpConversationForkPointView>,
@@ -2813,7 +2832,7 @@ pub struct HttpConversationRecoveryView {
 
 /// Exact token economics shown before explicit portable compaction apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCompactionEconomics {
     pub before_input_tokens: u64,
     pub target_input_tokens: u64,
@@ -2833,7 +2852,7 @@ pub struct HttpCompactionEconomics {
 
 /// Typed portable-compaction admission returned before activation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HttpCompactionAdmission {
     Prepared {
         standalone_tool_output_shrink_available: bool,
@@ -2852,7 +2871,7 @@ pub enum HttpCompactionAdmission {
 
 /// Exact pre-activation compaction review. `preview_id` is process-local and required for apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCompactionReview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_id: Option<String>,
@@ -2973,7 +2992,7 @@ impl From<ApplicationConversationRecoveryView> for HttpConversationRecoveryView 
 
 /// Exact checkpoint binding submitted for read-only restore preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointRestoreRequest {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -3003,7 +3022,7 @@ pub enum HttpCheckpointRestoreConflictReason {
 
 /// Fresh file preflight for one checkpoint restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointRestorePreviewFile {
     pub path: String,
     pub restore_kind: HttpCheckpointRestoreKind,
@@ -3017,7 +3036,7 @@ pub struct HttpCheckpointRestorePreviewFile {
 
 /// Bounded reverse diff captured for one controlled checkpoint file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointReverseDiff {
     pub path: String,
     pub diff: String,
@@ -3027,7 +3046,7 @@ pub struct HttpCheckpointReverseDiff {
 
 /// Exact restore review returned without mutating durable or workspace truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointRestoreReview {
     pub checkpoint_id: String,
     pub checkpoint_digest: String,
@@ -3101,7 +3120,7 @@ impl From<ApplicationCheckpointRestoreReview> for HttpCheckpointRestoreReview {
 
 /// Exact recovery mutation requested under an envelope command id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HttpConversationRecoveryCommandAction {
     PrepareCompaction {
         preview_id: String,
@@ -3158,7 +3177,7 @@ impl HttpConversationRecoveryCommandAction {
 
 /// Durable portable-compaction receipt fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCompactionReceipt {
     pub compaction_id: String,
     pub attempt_id: String,
@@ -3171,7 +3190,7 @@ pub struct HttpCompactionReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpToolOutputShrinkReceipt {
     pub context_epoch_id: String,
     pub projected_output_count: usize,
@@ -3179,7 +3198,7 @@ pub struct HttpToolOutputShrinkReceipt {
 
 /// Durable restore-specific receipt fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpCheckpointRestoreReceipt {
     pub checkpoint_id: String,
     pub batch_id: String,
@@ -3189,7 +3208,7 @@ pub struct HttpCheckpointRestoreReceipt {
 
 /// Durable fork-specific receipt fields. The returned reference must be reopened explicitly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationForkReceipt {
     pub session_ref: String,
     pub session_id: String,
@@ -3199,7 +3218,7 @@ pub struct HttpConversationForkReceipt {
 
 /// Durable idempotent receipt for one restore or conversation-fork command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpConversationRecoveryCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -3255,7 +3274,7 @@ pub struct HttpPendingApproval {
 
 /// Bounded approval facts safe for run snapshots and local UI recovery.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpPendingApprovalDisplay {
     /// Sequence of the durable approval request event.
     pub event_sequence: u64,
@@ -3287,7 +3306,7 @@ pub struct HttpPendingApprovalDisplay {
 
 /// One path-safe approval subject. External identities are represented only by kind and scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpPendingApprovalSubject {
     pub kind: String,
     pub scope: String,
@@ -3600,7 +3619,7 @@ impl From<ApplicationIntegrationLaneCandidateKind> for HttpIntegrationLaneCandid
 
 /// Bounded, private-ref-free provenance for one reviewed integration lane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpTaskIntegrationLaneView {
     pub lane_id: String,
     pub candidate_kind: HttpIntegrationLaneCandidateKind,
@@ -3610,7 +3629,7 @@ pub struct HttpTaskIntegrationLaneView {
 
 /// Exact current integration review returned to an authenticated application client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpTaskIntegrationReviewView {
     pub schema_version: u16,
     pub request: HttpTaskIntegrationReviewRequest,
@@ -3658,7 +3677,7 @@ impl From<ApplicationTaskIntegrationReviewView> for HttpTaskIntegrationReviewVie
 
 /// Terminal, renderer-safe result of accepting one exact integration review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpTaskIntegrationAcceptanceView {
     pub request: HttpTaskIntegrationReviewRequest,
     pub promotion_status: sigil_kernel::IntegrationPromotionStatus,
@@ -3686,7 +3705,7 @@ impl From<ApplicationTaskIntegrationAcceptanceView> for HttpTaskIntegrationAccep
 
 /// Receipt for an idempotent exact integration acceptance command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpTaskIntegrationAcceptanceCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -3730,7 +3749,6 @@ impl From<sigil_kernel::PublicPlanReviewStatus> for HttpPlanReviewStatus {
         match status {
             sigil_kernel::PublicPlanReviewStatus::Started => Self::Started,
             sigil_kernel::PublicPlanReviewStatus::WaitingForInput => Self::WaitingForInput,
-            sigil_kernel::PublicPlanReviewStatus::Finalizing => Self::Finalizing,
             sigil_kernel::PublicPlanReviewStatus::DraftReady => Self::DraftReady,
             sigil_kernel::PublicPlanReviewStatus::CompileFailed => Self::CompileFailed,
             sigil_kernel::PublicPlanReviewStatus::CompletedWithoutDraft => {
@@ -3771,7 +3789,7 @@ impl From<sigil_kernel::PublicPlanReviewSource> for HttpPlanReviewSource {
 
 /// Typed authenticated plan decision command.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpPlanDecisionRequest {
     pub plan_id: String,
     pub expected_plan_hash: String,
@@ -3839,9 +3857,6 @@ pub struct HttpPlanDecisionCommandReceipt {
     /// RFC-0067: durable Task phase right after admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_phase: Option<HttpTaskExecutionPhase>,
-    /// RFC-0067: typed blocker when admission held the Task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_blocker: Option<Box<sigil_kernel::TaskBlockerV1>>,
     /// Run identity of the supervised revision plan review executed for a `Revise` action, so the
     /// client can subscribe to and track the child run's event stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3859,7 +3874,7 @@ pub type HttpPlanReviewDetail = sigil_kernel::PlanReviewDetailV1;
 /// Answer values are never included in this projection; after submission only the bounded
 /// answer receipt (hash plus answered question identities) remains visible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpUserInputRequest {
     pub identity: sigil_kernel::UserInputIdentityV1,
     pub request_hash: String,
@@ -3896,7 +3911,7 @@ impl From<sigil_kernel::PublicUserInputRequestV1> for HttpUserInputRequest {
 
 /// Typed decision for one exact durable user-input request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpUserInputDecisionRequest {
     pub generation: u32,
     pub expected_request_hash: String,
@@ -3907,7 +3922,7 @@ pub struct HttpUserInputDecisionRequest {
 
 /// Idempotent receipt for one exact user-input decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpUserInputDecisionCommandReceipt {
     pub command_id: String,
     pub client_id: String,
@@ -3961,7 +3976,6 @@ impl From<sigil_runtime::ApplicationPlanDecisionReceipt> for HttpPlanDecisionCom
             task_title: receipt.task_title,
             candidate_hash: receipt.candidate_hash,
             task_phase: receipt.task_phase.map(Into::into),
-            task_blocker: receipt.task_blocker.map(Box::new),
             revision_run_id,
             user_input_request: receipt.user_input_request.map(Into::into),
             replayed: false,

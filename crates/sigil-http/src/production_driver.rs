@@ -342,7 +342,6 @@ pub struct HttpProductionRunDriver {
     runtime: Handle,
     registry: OnceLock<Weak<HttpSessionRunRegistry>>,
     application_reservations: OnceLock<Arc<sigil_runtime::ManagedApplicationReservationStore>>,
-    application_command_frontiers: Arc<crate::application_bridge::HttpCommandFrontiers>,
     application_delivery_acks:
         Mutex<BTreeMap<String, Arc<sigil_runtime::RuntimeApplicationDeliveryAckStore>>>,
     active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
@@ -430,7 +429,6 @@ fn revision_attempt_is_exact_waiting_input(
         && attempt.source_turn == request.source_turn
         && attempt.route_decision_id == request.route_decision_id
         && attempt.child_session_ref == request.child_session_ref
-        && attempt.finalizer_session_ref.as_ref() == Some(&request.finalizer_session_ref)
         && attempt.revision_request_id == request.revision_request_id
         && attempt.attempt_ordinal == request.attempt_ordinal
         && attempt.base_plan_id == request.base_plan_id
@@ -457,6 +455,52 @@ struct HttpAttachedSession {
     attachment:
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     projection_owner: Option<HttpBoundProjectionOwner>,
+    background_agent_monitor: Option<HttpBackgroundAgentMonitor>,
+}
+
+struct HttpBackgroundAgentMonitor {
+    sender: tokio::sync::mpsc::UnboundedSender<HttpBackgroundAgentSignal>,
+    _worker: tokio::task::JoinHandle<()>,
+}
+
+enum HttpBackgroundAgentSignal {
+    Completion(sigil_kernel::AgentThreadId),
+    Rescan,
+}
+
+struct HttpBackgroundAgentEventSink {
+    sender: tokio::sync::mpsc::UnboundedSender<HttpBackgroundAgentSignal>,
+}
+
+impl sigil_runtime::AgentToolBackgroundEventSink for HttpBackgroundAgentEventSink {
+    fn handle_agent_event(
+        &self,
+        _thread_id: &sigil_kernel::AgentThreadId,
+        _event: sigil_kernel::RunEvent,
+    ) {
+    }
+
+    fn handle_agent_status(
+        &self,
+        _thread_id: &sigil_kernel::AgentThreadId,
+        _status: sigil_kernel::AgentThreadStatus,
+        _reason: Option<String>,
+    ) {
+    }
+
+    fn handle_agent_completion_ready(&self, thread_id: &sigil_kernel::AgentThreadId) {
+        let _ = self
+            .sender
+            .send(HttpBackgroundAgentSignal::Completion(thread_id.clone()));
+    }
+}
+
+struct HttpBackgroundAgentEventHandler;
+
+impl sigil_kernel::EventHandler for HttpBackgroundAgentEventHandler {
+    fn handle(&mut self, _event: sigil_kernel::RunEvent) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -479,6 +523,120 @@ impl HttpBoundProjectionOwner {
             ));
         }
         Ok(self.owner.clone())
+    }
+}
+
+async fn run_http_background_agent_monitor(
+    session: crate::HttpSessionSnapshot,
+    attachment: Weak<
+        sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+    >,
+    registry: Weak<HttpSessionRunRegistry>,
+    active_runs: Arc<Mutex<BTreeMap<String, Arc<HttpProductionActiveRun>>>>,
+    active_runs_ready: Arc<Condvar>,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<HttpBackgroundAgentSignal>,
+) {
+    while let Some(signal) = receiver.recv().await {
+        let _completion_thread_id = match signal {
+            HttpBackgroundAgentSignal::Completion(thread_id) => Some(thread_id),
+            HttpBackgroundAgentSignal::Rescan => None,
+        };
+        let Some(attachment) = attachment.upgrade() else {
+            return;
+        };
+        let session_id = session.id.clone();
+        let active_runs_to_wait = Arc::clone(&active_runs);
+        let active_runs_ready_to_wait = Arc::clone(&active_runs_ready);
+        let idle = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut runs = active_runs_to_wait
+                .lock()
+                .map_err(|_| anyhow::anyhow!("HTTP active-run state poisoned"))?;
+            while runs.values().any(|run| run.session_id == session_id) {
+                let (next, _) = active_runs_ready_to_wait
+                    .wait_timeout(runs, Duration::from_secs(30))
+                    .map_err(|_| anyhow::anyhow!("HTTP active-run wait state poisoned"))?;
+                runs = next;
+            }
+            Ok(())
+        })
+        .await;
+        let idle = match idle {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::Error::new(error)),
+        };
+        if let Err(error) = idle {
+            tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not wait for session idle");
+            continue;
+        }
+
+        let background_runs = match attachment.agent_tool_background_runs() {
+            Ok(owner) => owner,
+            Err(error) => {
+                tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not read its owner");
+                continue;
+            }
+        };
+        let live_threads = match background_runs.thread_ids() {
+            Ok(threads) => threads,
+            Err(error) => {
+                tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not enumerate owned threads");
+                continue;
+            }
+        };
+        let store = match JsonlSessionStore::new(Path::new(&session.session_log_path)) {
+            Ok(store) => store.with_live_background_agent_threads(live_threads),
+            Err(error) => {
+                tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not open the session store");
+                continue;
+            }
+        };
+        let mut durable_session = match sigil_kernel::Session::load_from_store(
+            "http-background-agent-monitor",
+            "unknown",
+            store,
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not restore the session");
+                continue;
+            }
+        };
+        let mut event_handler = HttpBackgroundAgentEventHandler;
+        if let Err(error) = background_runs
+            .collect_finished_background_runs(&mut durable_session, &mut event_handler)
+            .await
+        {
+            tracing::warn!(session_id = %session.durable_session_scope_id, %error, "background agent monitor could not durably collect child results");
+            continue;
+        }
+        let Some(task_id) =
+            sigil_runtime::application_run::ready_direct_task_background_continuations(
+                &durable_session,
+            )
+            .into_iter()
+            .next()
+        else {
+            continue;
+        };
+        let Some(registry) = registry.upgrade() else {
+            return;
+        };
+        let request = crate::HttpRunStartRequest {
+            permission_mode: Some(crate::HttpPermissionMode::Manual),
+            task_continuation: Some(crate::HttpTaskContinuationRequest {
+                task_id: task_id.as_str().to_owned(),
+                guidance: None,
+            }),
+            ..crate::HttpRunStartRequest::default()
+        };
+        if let Err(error) = registry.start_run(&session.id, request) {
+            tracing::warn!(
+                session_id = %session.durable_session_scope_id,
+                task_id = %task_id.as_str(),
+                %error,
+                "ready Direct Task background result could not auto-continue"
+            );
+        }
     }
 }
 
@@ -1398,7 +1556,6 @@ impl HttpProductionRunDriver {
             runtime,
             registry: OnceLock::new(),
             application_reservations: OnceLock::new(),
-            application_command_frontiers: Arc::default(),
             application_delivery_acks: Mutex::new(BTreeMap::new()),
             active_runs: Arc::new(Mutex::new(BTreeMap::new())),
             active_runs_ready: Arc::new(Condvar::new()),
@@ -1624,7 +1781,6 @@ impl HttpProductionRunDriver {
             registry,
             runtime: self.runtime.clone(),
             projection_owner,
-            command_frontiers: Arc::clone(&self.application_command_frontiers),
         })
     }
 
@@ -2067,6 +2223,9 @@ impl HttpProductionRunDriver {
             .acquire_session_attachment(&start.session)
             .map_err(|error| HttpRunDriverError::new(error.to_string()))?;
         let registry = self.attached_registry()?;
+        let background_agent_events =
+            self.bind_background_agent_monitor(&start.session, &session_attachment, &registry)?;
+        let scan_existing_direct_task_results = start.task_continuation.is_none();
         let broker = Arc::new(HttpApprovalBroker::default());
         let (cancel_sender, cancel_receiver) = mpsc::unbounded_channel();
         let active = Arc::new(HttpProductionActiveRun {
@@ -2088,6 +2247,9 @@ impl HttpProductionRunDriver {
                 )));
             }
             runs.insert(start.run.id.clone(), active);
+        }
+        if scan_existing_direct_task_results {
+            let _ = background_agent_events.send(HttpBackgroundAgentSignal::Rescan);
         }
 
         let queued_terminal = queued.as_ref().map(|queued| HttpQueuedRunTerminalContext {
@@ -2230,6 +2392,61 @@ impl HttpProductionRunDriver {
 }
 
 impl HttpProductionRunDriver {
+    fn bind_background_agent_monitor(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        attachment: &Arc<
+            sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease,
+        >,
+        registry: &Arc<HttpSessionRunRegistry>,
+    ) -> Result<tokio::sync::mpsc::UnboundedSender<HttpBackgroundAgentSignal>, HttpRunDriverError>
+    {
+        let sender = {
+            let mut attachments = self
+                .session_attachments
+                .lock()
+                .map_err(|_| HttpRunDriverError::new("application session owner unavailable"))?;
+            let attached = attachments
+                .get_mut(&session.durable_session_scope_id)
+                .filter(|attached| Arc::ptr_eq(&attached.attachment, attachment))
+                .ok_or_else(|| HttpRunDriverError::new("session attachment owner changed"))?;
+            if attached.background_agent_monitor.is_none() {
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                let worker = self.runtime.spawn(run_http_background_agent_monitor(
+                    session.clone(),
+                    Arc::downgrade(attachment),
+                    Arc::downgrade(registry),
+                    Arc::clone(&self.active_runs),
+                    Arc::clone(&self.active_runs_ready),
+                    receiver,
+                ));
+                attached.background_agent_monitor = Some(HttpBackgroundAgentMonitor {
+                    sender,
+                    _worker: worker,
+                });
+            }
+            attached
+                .background_agent_monitor
+                .as_ref()
+                .expect("HTTP background monitor was installed")
+                .sender
+                .clone()
+        };
+        attachment
+            .agent_tool_background_runs()
+            .and_then(|owner| {
+                owner.set_event_sink(Arc::new(HttpBackgroundAgentEventSink {
+                    sender: sender.clone(),
+                }))
+            })
+            .map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "background-agent monitor binding failed: {error:#}"
+                ))
+            })?;
+        Ok(sender)
+    }
+
     fn install_session_attachment(
         &self,
         durable_session_scope_id: &str,
@@ -2270,10 +2487,14 @@ impl HttpProductionRunDriver {
             .session_attachments
             .lock()
             .map_err(|_| HttpRunAdmissionError::Unavailable)?;
-        let previous_owner = attachments
-            .get(durable_session_scope_id)
-            .filter(|attached| attached.attachment.session_path() == canonical_session_path)
+        let previous = attachments
+            .remove(durable_session_scope_id)
+            .filter(|attached| attached.attachment.session_path() == canonical_session_path);
+        let previous_owner = previous
+            .as_ref()
             .and_then(|attached| attached.projection_owner.clone());
+        let background_agent_monitor =
+            previous.and_then(|attached| attached.background_agent_monitor);
         let projection_owner = projection_owner
             .map(|owner| HttpBoundProjectionOwner {
                 durable_session_scope_id: durable_session_scope_id.to_owned(),
@@ -2287,6 +2508,7 @@ impl HttpProductionRunDriver {
             HttpAttachedSession {
                 attachment: Arc::clone(&attachment),
                 projection_owner,
+                background_agent_monitor,
             },
         );
         Ok(attachment)
@@ -2574,6 +2796,117 @@ impl AuthorityArtifactStoreLease {
 }
 
 impl HttpRunDriver for HttpProductionRunDriver {
+    fn application_operation_owner(
+        &self,
+        session: &HttpSessionSnapshot,
+    ) -> Result<crate::driver::HttpApplicationOperationOwner, HttpRunDriverError> {
+        let attachment = self.acquire_session_attachment(session).map_err(|_| {
+            HttpRunDriverError::new("application session attachment is unavailable")
+        })?;
+        let owner = attachment
+            .application_operation_owner()
+            .ok_or_else(|| HttpRunDriverError::new("session has not issued its operation owner"))?;
+        Ok(crate::driver::HttpApplicationOperationOwner {
+            owner,
+            _attachment: attachment,
+        })
+    }
+
+    fn prepare_application_operation(
+        &self,
+        session: &HttpSessionSnapshot,
+        binding: &sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<crate::driver::HttpApplicationOperationOwner, HttpRunDriverError> {
+        let owner = self.application_operation_owner(session)?;
+        let parent = owner.owner.attach_for_control().map_err(|error| {
+            HttpRunDriverError::new(format!("application parent owner unavailable: {error}"))
+        })?;
+        let research =
+            sigil_runtime::PlanReviewCoordinator::is_managed_research_application_target(
+                &parent,
+                &binding.target,
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application domain binding invalid: {error}"))
+            })?;
+        if research {
+            let provisioner = self
+                .services
+                .authority_composition()
+                .ok_or_else(|| {
+                    HttpRunDriverError::new("application operation resource authority unavailable")
+                })?
+                .plan_review_child_resource_provisioner();
+            sigil_runtime::PlanReviewCoordinator::prepare_managed_research_application_operation(
+                &parent,
+                binding,
+                provisioner.as_ref(),
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("research operation preparation failed: {error}"))
+            })?
+            .ok_or_else(|| HttpRunDriverError::new("research application target disappeared"))?;
+        } else {
+            owner.owner.prepare(binding).map_err(|error| {
+                HttpRunDriverError::new(format!(
+                    "application operation preparation failed: {error}"
+                ))
+            })?;
+        }
+        Ok(owner)
+    }
+
+    fn query_application_operation(
+        &self,
+        session: &HttpSessionSnapshot,
+        binding: &sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<crate::driver::HttpApplicationOperationResolution, HttpRunDriverError> {
+        let attachment = self.application_operation_owner(session)?;
+        let parent = attachment.owner.attach_for_observation().map_err(|error| {
+            HttpRunDriverError::new(format!("application parent owner unavailable: {error}"))
+        })?;
+        let research =
+            sigil_runtime::PlanReviewCoordinator::is_managed_research_application_target(
+                &parent,
+                &binding.target,
+            )
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application domain binding invalid: {error}"))
+            })?;
+        if research {
+            let provisioner = self
+                .services
+                .authority_composition()
+                .ok_or_else(|| {
+                    HttpRunDriverError::new("application operation resource authority unavailable")
+                })?
+                .plan_review_child_resource_provisioner();
+            let (binding, proof) =
+                sigil_runtime::PlanReviewCoordinator::query_managed_research_application_operation(
+                    &parent,
+                    binding,
+                    provisioner.as_ref(),
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!("research operation query failed: {error}"))
+                })?
+                .ok_or_else(|| {
+                    HttpRunDriverError::new("research application target disappeared")
+                })?;
+            return Ok(crate::driver::HttpApplicationOperationResolution { binding, proof });
+        }
+        let (binding, reader) = attachment
+            .owner
+            .observe_operation(binding)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application domain owner unavailable: {error}"))
+            })?;
+        let proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application operation query failed: {error}"))
+            })?;
+        Ok(crate::driver::HttpApplicationOperationResolution { binding, proof })
+    }
     fn requires_run_release_barrier(&self) -> bool {
         true
     }
@@ -2837,6 +3170,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
             return Ok(None);
         };
         Ok(Some(HttpUserInputDecisionDriverCommand {
+            application_operation: None,
             command_id: command.command_id.as_str().to_owned(),
             client_id: "session-recovery".to_owned(),
             request_id: command.identity.request_id.as_str().to_owned(),
@@ -3971,7 +4305,8 @@ impl HttpRunDriver for HttpProductionRunDriver {
         foreground_owner: Option<&crate::HttpForegroundRunOwner>,
         command: &HttpConversationQueueDriverCommand,
     ) -> Result<HttpConversationQueueView, HttpConversationQueueDriverError> {
-        self.acquire_session_attachment(session)
+        let attachment = self
+            .acquire_session_attachment(session)
             .map_err(|error| match error {
                 HttpRunAdmissionError::SessionAlreadyActive { .. }
                 | HttpRunAdmissionError::RouteRecovery(_) => {
@@ -4123,15 +4458,21 @@ impl HttpRunDriver for HttpProductionRunDriver {
             .lock()
             .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
         validate_http_exact_queue_cache_capacity(&exact_prompts, cache_update.as_ref())?;
-        let store = JsonlSessionStore::new(&session.session_log_path)
-            .map_err(|_| HttpConversationQueueDriverError::Unavailable)?;
-        if store
-            .append_conversation_queue_mutation(ConversationQueueMutationCommand {
-                expected_queue_revision,
-                mutation,
-            })
-            .is_err()
-        {
+        let mutation = ConversationQueueMutationCommand {
+            expected_queue_revision,
+            mutation,
+        };
+        let result = if let Some(binding) = command.application_operation.as_ref() {
+            attachment
+                .application_operation_owner()
+                .ok_or(HttpConversationQueueDriverError::Unavailable)?
+                .append_queue_mutation(binding, mutation)
+        } else {
+            JsonlSessionStore::new(&session.session_log_path)
+                .map_err(|_| HttpConversationQueueDriverError::Unavailable)?
+                .append_conversation_queue_mutation(mutation)
+        };
+        if result.is_err() {
             let latest = read_http_durable_queue_state(session)?;
             return if http_queue_generation(latest.projection.current_revision())
                 != current_generation
@@ -4395,6 +4736,76 @@ impl HttpRunDriver for HttpProductionRunDriver {
         })
     }
 
+    fn user_input_continuation_run(
+        &self,
+        session: &crate::HttpSessionSnapshot,
+        request: &HttpUserInputRequest,
+    ) -> Result<Option<String>, HttpRunDriverError> {
+        let attachment = self.application_operation_owner(session)?;
+        let parent = attachment.owner.attach_for_observation().map_err(|error| {
+            HttpRunDriverError::new(format!("continuation parent observation failed: {error:#}"))
+        })?;
+        let candidate = match &request.source {
+            sigil_kernel::UserInputSourceV1::PlanRevision { .. } => {
+                sigil_runtime::PlanReviewCoordinator::accepted_revision_child_run_id(
+                    &parent,
+                    &request.identity,
+                    &request.request_hash,
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!(
+                        "revision continuation observation failed: {error:#}"
+                    ))
+                })?
+            }
+            sigil_kernel::UserInputSourceV1::PlanReviewResearch {
+                plan_review_id,
+                attempt_id,
+            } => {
+                // The immutable parent mirror authenticates this exact child question even
+                // after its latest attempt no longer projects WaitingForInput.
+                let mirrored = parent.entries().iter().any(|entry| matches!(entry,
+                    sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanReviewAttempt(attempt))
+                    if &attempt.plan_review_id == plan_review_id && &attempt.attempt_id == attempt_id
+                        && attempt.pending_user_input.as_ref().is_some_and(|pending|
+                            pending.identity == request.identity && pending.request_hash == request.request_hash)
+                ));
+                if !mirrored {
+                    return Err(HttpRunDriverError::new(
+                        "research continuation has no exact parent mirror",
+                    ));
+                }
+                Some(format!(
+                    "plan-review-{}-{}",
+                    plan_review_id.as_str(),
+                    attempt_id.as_str()
+                ))
+            }
+            _ => Some(
+                sigil_kernel::user_input_continuation_logical_run_id(
+                    &request.identity,
+                    &request.request_hash,
+                )
+                .map_err(|error| {
+                    HttpRunDriverError::new(format!("continuation identity failed: {error}"))
+                })?
+                .as_str()
+                .to_owned(),
+            ),
+        };
+        let Some(run_id) = candidate else {
+            return Ok(None);
+        };
+        let registry = self.attached_registry()?;
+        match registry.get_run(&run_id) {
+            Ok(run) if run.session_id == session.id => Ok(Some(run.id)),
+            Ok(_) => Err(HttpRunDriverError::new(
+                "continuation run belongs to another HTTP session",
+            )),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn user_input_decision(
         &self,
         session: &crate::HttpSessionSnapshot,
@@ -4432,6 +4843,7 @@ impl HttpRunDriver for HttpProductionRunDriver {
                 terminal_owners: Arc::clone(&self.terminal_owners),
             }));
         let request = ApplicationUserInputDecisionRequest {
+            application_operation: command.application_operation.clone(),
             config_path: self.options.config_path.clone(),
             launch_cwd: self.options.launch_cwd.clone(),
             session_path: PathBuf::from(&session.session_log_path),
@@ -5662,7 +6074,6 @@ impl HttpRunSupervisor {
             event_bus: Arc::clone(&self.event_bus),
         };
         let approval_handler = HttpProductionApprovalHandler {
-            run_id: self.start.run.id.clone(),
             broker: Arc::clone(&self.broker),
         };
         let mut execution = Box::pin(execution.execute_on_owned_blocking(
@@ -7028,7 +7439,7 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
                 let pending = self
                     .broker
                     .register(
-                        &self.run_id,
+                        &self.durable_session_scope_id,
                         call,
                         spec,
                         approval_identity,
@@ -7108,7 +7519,6 @@ impl ApplicationRunEventHandler for HttpProductionEventHandler {
 }
 
 struct HttpProductionApprovalHandler {
-    run_id: String,
     broker: Arc<HttpApprovalBroker>,
 }
 
@@ -7125,12 +7535,10 @@ impl ApprovalHandler for HttpProductionApprovalHandler {
         _spec: &ToolSpec,
         context: &ToolApprovalContext,
     ) -> Result<ToolApproval> {
-        if context.identity.run_id != self.run_id || context.identity.call_id != call.id {
+        if context.identity.call_id != call.id {
             return Err(anyhow!("production HTTP approval identity changed"));
         }
-        let outcome = self
-            .broker
-            .wait_for_decision(&call.id, &context.identity.approval_request_id)?;
+        let outcome = self.broker.wait_for_decision(&call.id, &context.identity)?;
         match outcome.decision {
             Some(HttpApprovalDecisionRecord {
                 decision: ToolApprovalUserDecision::Approved,
@@ -7166,7 +7574,7 @@ struct HttpApprovalBroker {
 impl HttpApprovalBroker {
     fn register(
         &self,
-        run_id: &str,
+        session_id: &str,
         call: &ToolCall,
         spec: &ToolSpec,
         identity: &ApprovalRequestIdentityV2,
@@ -7176,7 +7584,10 @@ impl HttpApprovalBroker {
         >,
         display: HttpPendingApprovalDisplay,
     ) -> Result<HttpPendingApproval> {
-        if identity.run_id != run_id || identity.call_id != call.id {
+        if identity.session_id != session_id
+            || identity.run_id.trim().is_empty()
+            || identity.call_id != call.id
+        {
             return Err(anyhow!("production approval registration identity changed"));
         }
         if session_grant_available != session_grant_unavailable_reason.is_none() {
@@ -7187,6 +7598,7 @@ impl HttpApprovalBroker {
         let tool_call_hash = tool_call_hash(call)?;
         let slot = Arc::new(HttpApprovalSlot {
             call_id: call.id.clone(),
+            identity: identity.clone(),
             state: Mutex::new(HttpApprovalSlotState::Waiting),
             changed: Condvar::new(),
         });
@@ -7251,19 +7663,17 @@ impl HttpApprovalBroker {
     fn wait_for_decision(
         &self,
         call_id: &str,
-        approval_request_id: &str,
+        identity: &ApprovalRequestIdentityV2,
     ) -> Result<HttpApprovalWaitOutcome> {
         let slot = self
             .pending
             .lock()
             .map_err(|_| anyhow!("production approval broker is unavailable"))?
-            .get(approval_request_id)
+            .get(&identity.approval_request_id)
             .cloned()
             .ok_or_else(|| anyhow!("production approval slot is missing"))?;
-        if slot.call_id != call_id {
-            return Err(anyhow!(
-                "production approval request belongs to another tool call"
-            ));
+        if slot.call_id != call_id || slot.identity != *identity {
+            return Err(anyhow!("production approval request identity changed"));
         }
         let mut state = slot
             .state
@@ -7274,14 +7684,14 @@ impl HttpApprovalBroker {
                 HttpApprovalSlotState::Resolved(decision) => {
                     let decision = decision.clone();
                     drop(state);
-                    self.remove(approval_request_id, &slot);
+                    self.remove(&identity.approval_request_id, &slot);
                     return Ok(HttpApprovalWaitOutcome {
                         decision: Some(decision),
                     });
                 }
                 HttpApprovalSlotState::Cancelled => {
                     drop(state);
-                    self.remove(approval_request_id, &slot);
+                    self.remove(&identity.approval_request_id, &slot);
                     return Err(anyhow!("production approval wait was cancelled"));
                 }
                 HttpApprovalSlotState::Waiting => {}
@@ -7335,6 +7745,7 @@ impl HttpApprovalBroker {
 
 struct HttpApprovalSlot {
     call_id: String,
+    identity: ApprovalRequestIdentityV2,
     state: Mutex<HttpApprovalSlotState>,
     changed: Condvar,
 }
@@ -8034,7 +8445,7 @@ fn is_durable_revision_waiting_outbox(
 }
 
 /// A PlanReview attempt can close the HTTP registry only when both durable sides agree on one
-/// final revision outcome. `WaitingForInput`, `Started`, and `Finalizing` are deliberately not
+/// final revision outcome. `WaitingForInput` and `Started` are deliberately not
 /// terminal registry facts.
 fn is_durable_revision_terminal_outbox(
     attempt: &sigil_kernel::PlanReviewAttemptEntry,

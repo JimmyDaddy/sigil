@@ -52,7 +52,6 @@ use crate::{
 };
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PrivateBorrowedConfigurationRequest<T> {
     schema_version: u16,
     capsule_id: sigil_kernel::resource::OpaqueRegistrationCapsuleId,
@@ -1124,6 +1123,62 @@ fn route_http_request(
         };
     }
 
+    if request.method == "GET"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/application/command-journal-binding"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Some(client_id) = request.header(HTTP_APPLICATION_CLIENT_ID_HEADER) else {
+            return http_error_response(
+                400,
+                "application_client_id_required",
+                "command intent binding requires x-sigil-application-client-id",
+            );
+        };
+        return match registry.application_client(session_id, client_id) {
+            Ok(client) => match client.command_journal_binding() {
+                Ok(binding) => json_response(200, json!(binding)),
+                Err(error) => application_error_response(error),
+            },
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if request.method == "POST"
+        && let Some(session_id) = request
+            .path
+            .strip_prefix("/sessions/")
+            .and_then(|suffix| suffix.strip_suffix("/application/control-log/recovery"))
+            .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Some(client_id) = request.header(HTTP_APPLICATION_CLIENT_ID_HEADER) else {
+            return http_error_response(
+                400,
+                "application_client_id_required",
+                "control log recovery requires x-sigil-application-client-id",
+            );
+        };
+        let Ok(action) =
+            parse_json_body::<sigil_application::ControlLogRecoveryAction>(&request.body)
+        else {
+            return http_error_response(
+                400,
+                "invalid_control_log_recovery",
+                "provide Preview or SealAndRotate with its exact preview",
+            );
+        };
+        let client = match registry.application_client(session_id, client_id) {
+            Ok(client) => client,
+            Err(error) => return registry_error_response(error),
+        };
+        return match client.recover_control_log(action) {
+            Ok(outcome) => json_response(200, json!(outcome)),
+            Err(error) => application_error_response(error),
+        };
+    }
+
     if request.method == "POST"
         && let Some(session_id) = request
             .path
@@ -1149,10 +1204,36 @@ fn route_http_request(
             Ok(client) => client,
             Err(error) => return registry_error_response(error),
         };
-        if let Err(error) = client.refresh() {
-            return application_error_response(error);
-        }
-        return match client.execute(&body.command_id, body.command) {
+        let exact_stop_run = match &body.command {
+            sigil_application::ApplicationCommand::Run(sigil_application::RunCommand::Cancel {
+                binding,
+                ..
+            }) => Some(binding.as_str()),
+            sigil_application::ApplicationCommand::Run(
+                sigil_application::RunCommand::CancelTerminalTask { identity },
+            ) => Some(identity.run_id.as_str()),
+            _ => None,
+        };
+        let result = if let Some(run_id) = exact_stop_run {
+            // A scope mismatch is known before any effect. Check the exact registry owner
+            // without loading configuration or projection, including in the unrecorded lane.
+            let run = match registry.get_run(run_id) {
+                Ok(run) => run,
+                Err(error) => return registry_error_response(error),
+            };
+            if run.session_id != session_id {
+                return application_error_response(
+                    sigil_application::ApplicationError::ScopeMismatch,
+                );
+            }
+            client.execute_without_refresh(&body.command_id, body.command_journal, body.command)
+        } else {
+            if let Err(error) = client.refresh() {
+                return application_error_response(error);
+            }
+            client.execute_in_journal(&body.command_id, body.command_journal, body.command)
+        };
+        return match result {
             Ok(receipt) => json_response(200, json!(receipt)),
             Err(error) => application_error_response(error),
         };

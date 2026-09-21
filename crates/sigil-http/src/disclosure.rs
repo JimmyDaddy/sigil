@@ -53,7 +53,7 @@ impl HttpEgressDisclosureEvent {
 
 /// Replayable production disclosure record acknowledged only after durable publication.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpDurableEgressDisclosureRecord {
     /// Schema version for this dedicated replay record.
     pub schema_version: u32,
@@ -427,7 +427,7 @@ impl HttpDurableDisclosureState {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct HttpDurableDisclosureFile {
     schema_version: u32,
     next_sequence: u64,

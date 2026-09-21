@@ -518,6 +518,38 @@ pub fn http_openapi_document() -> Value {
                     }
                 }
             },
+            "/sessions/{session_id}/application/control-log/recovery": {
+                "post": {
+                    "summary": "Preview or resume recovery of a damaged command journal",
+                    "description": "Authenticated restricted recovery, independent of ordinary command admission and projection refresh. SealAndRotate must echo the exact physical preview. Old history is retained, and only a durable Activated successor accepts new commands.",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/SessionId" },
+                        { "$ref": "#/components/parameters/ApplicationClientId" }
+                    ],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlLogRecoveryAction" } } } },
+                    "responses": {
+                        "200": { "description": "Exact preview or durable activation", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ControlLogRecoveryOutcome" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/application/command-journal-binding": {
+                "get": {
+                    "summary": "Obtain the command journal binding for a new intent",
+                    "description": "Freeze this binding when creating the command envelope. Retries retain the original envelope. Missing bindings denote legacy generation zero.",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }, { "$ref": "#/components/parameters/ApplicationClientId" }],
+                    "responses": {
+                        "200": { "description": "Current host-issued accepting domain", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CommandJournalBinding" } } } },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "503": { "$ref": "#/components/responses/Unavailable" }
+                    }
+                }
+            },
             "/sessions/{session_id}/continuity": {
                 "get": {
                     "summary": "Probe durable frontier and current foreground ownership",
@@ -1291,7 +1323,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ServerInfo": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "protocol_version", "server_version", "workspace_id", "bind_addr", "authentication", "shutdown_on_stdin_close", "capabilities"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": HTTP_SERVER_INFO_SCHEMA_VERSION },
@@ -1306,7 +1337,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ServerCapabilities": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_catalog", "durable_session_reopen", "bounded_transcript_replay", "canonical_conversation_display", "typed_tool_artifact_retrieval", "conversation_recovery", "durable_event_replay", "live_events", "approval", "durable_user_input", "cancellation", "task_pause", "terminal_task_cancel", "verification", "task_integration", "intent_stack", "run_context", "agent_activity", "support_diagnostics", "provider_connections", "provider_setup"],
                     "properties": {
                         "session_catalog": { "type": "boolean" },
@@ -1338,7 +1368,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderModelRef": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["connection_id", "model_id"],
                     "properties": {
                         "connection_id": { "type": "string" },
@@ -1355,7 +1384,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderConnectionIssue": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["code", "message"],
                     "properties": {
                         "code": { "type": "string" },
@@ -1364,7 +1392,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderConnectionEntry": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["id", "label", "provider_label", "protocol_label", "endpoint_display", "credential_source", "readiness", "model_context_windows"],
                     "properties": {
                         "id": { "type": "string" },
@@ -1394,7 +1421,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderConnectionInventory": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["config_mode", "connections", "issues"],
                     "properties": {
                         "config_mode": { "$ref": "#/components/schemas/ProviderConfigMode" },
@@ -1428,7 +1454,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderSetupCatalogRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["template", "credential_source"],
                     "properties": {
                         "template": { "$ref": "#/components/schemas/ProviderSetupTemplate" },
@@ -1446,7 +1471,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderSetupModel": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["model_id", "display_name", "availability", "recommended", "provenance"],
                     "properties": {
                         "model_id": { "type": "string" },
@@ -1459,7 +1483,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderSetupCatalog": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["connection_id", "provider_label", "state", "models", "manual_entry_allowed"],
                     "properties": {
                         "connection_id": { "type": "string" },
@@ -1475,7 +1498,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderSetupSaveRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["template", "credential_source", "model_id"],
                     "properties": {
                         "template": { "$ref": "#/components/schemas/ProviderSetupTemplate" },
@@ -1496,7 +1518,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderSetupSaveResult": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["default_model", "inventory", "save_warning"],
                     "properties": {
                         "default_model": { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -1506,7 +1527,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderDefaultModelSaveRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["model_ref"],
                     "properties": {
                         "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -1515,7 +1535,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ProviderDefaultModelSaveResult": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["default_model", "inventory", "save_warning"],
                     "properties": {
                         "default_model": { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -1529,7 +1548,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportSummary": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["overall_status", "ok", "warn", "error"],
                     "properties": {
                         "overall_status": { "$ref": "#/components/schemas/SupportStatus" },
@@ -1540,7 +1558,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportCheck": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["status", "name", "summary"],
                     "properties": {
                         "status": { "$ref": "#/components/schemas/SupportStatus" },
@@ -1551,7 +1568,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportEnvironment": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["os", "architecture", "terminal_family"],
                     "properties": {
                         "os": { "type": "string" },
@@ -1561,7 +1577,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportPrivacy": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["included", "excluded", "review_before_sharing"],
                     "properties": {
                         "included": { "type": "array", "items": { "type": "string" } },
@@ -1571,7 +1586,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportDoctorReport": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["generated_at_unix_ms", "version", "commit", "target", "profile", "environment", "cutover", "summary", "checks", "privacy"],
                     "properties": {
                         "generated_at_unix_ms": { "type": "integer", "format": "uint64" },
@@ -1588,7 +1602,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CutoverSurfaceStatus": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "epoch", "authority", "blockers"],
                     "properties": {
                         "schema_version": { "type": "integer", "format": "uint16" },
@@ -1599,7 +1612,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CutoverBlocker": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["code"],
                     "properties": {
                         "code": { "type": "string", "enum": ["manifest_corrupt", "missing_readiness_probe", "adapter_not_ready"] },
@@ -1608,7 +1620,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SupportBundleExport": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["suggested_file_name", "generated_at_unix_ms", "content"],
                     "properties": {
                         "suggested_file_name": { "type": "string" },
@@ -1625,7 +1636,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionOpenRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "session_id"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 512, "pattern": "^[^/\\\\]+\\.jsonl$" },
@@ -1636,7 +1646,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionRenameRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "session_id", "display_name"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
@@ -1646,7 +1655,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionDeleteRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "session_id"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
@@ -1655,7 +1663,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionQuarantineRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "source_bytes", "source_modified_at_unix_ms"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
@@ -1665,7 +1672,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionInvalidSourceDeleteRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "source_bytes", "source_modified_at_unix_ms"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+\\.jsonl$" },
@@ -1675,7 +1681,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionMutationReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "session_id", "operation_id"],
                     "properties": {
                         "session_ref": { "type": "string" },
@@ -1686,7 +1691,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionQuarantineReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "operation_id", "quarantine_name"],
                     "properties": {
                         "session_ref": { "type": "string" },
@@ -1697,7 +1701,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionInvalidSourceDeleteReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "operation_id"],
                     "properties": {
                         "session_ref": { "type": "string" },
@@ -1720,9 +1723,9 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationCommandRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "command"],
                     "properties": {
+                        "command_journal": { "anyOf": [{ "$ref": "#/components/schemas/CommandJournalBinding" }, { "type": "null" }] },
                         "command_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                         "command": {
                             "description": "Versioned grouped application command. The server validates its schema and host binding.",
@@ -1730,20 +1733,288 @@ pub fn http_openapi_document() -> Value {
                         }
                     }
                 },
+                "CommandJournalBinding": {
+                    "type": "object", "required": ["logical_journal_id", "command_generation"],
+                    "properties": {
+                        "logical_journal_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                        "command_generation": { "type": "integer", "format": "uint64", "minimum": 0 }
+                    }
+                },
+                "ControlLogRecoveryScope": {
+                    "type": "object",
+                    "required": [
+                        "scope_digest",
+                        "session_id",
+                        "workspace_id"
+                    ],
+                    "properties": {
+                        "scope_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "session_id": {
+                            "type": [
+                                "string",
+                                "null"
+                            ]
+                        },
+                        "workspace_id": {
+                            "type": [
+                                "string",
+                                "null"
+                            ]
+                        }
+                    }
+                },
+                "ControlLogUnresolvedCommand": {
+                    "type": "object",
+                    "required": [
+                        "key_digest",
+                        "scope_digest",
+                        "command_id",
+                        "command_kind",
+                        "phase"
+                    ],
+                    "properties": {
+                        "key_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "scope_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "command_id": {
+                            "type": "string"
+                        },
+                        "command_kind": {
+                            "type": "string"
+                        },
+                        "phase": {
+                            "type": "string",
+                            "enum": [
+                                "Reserved",
+                                "DispatchStarted",
+                                "EffectStarted",
+                                "DomainCommitted",
+                                "Settled",
+                                "Uncertain",
+                                "ConfirmedNoEffect"
+                            ]
+                        }
+                    }
+                },
+                "ControlLogRecoveryImpact": {
+                    "type": "object",
+                    "required": [
+                        "verified_prefix_bytes",
+                        "verified_record_count",
+                        "verified_prefix_digest",
+                        "known_command_count",
+                        "affected_scope_count",
+                        "affected_scopes",
+                        "scopes_truncated",
+                        "known_unresolved_count",
+                        "unresolved_commands",
+                        "commands_truncated",
+                        "unparsed_tail_bytes",
+                        "tail_command_count_unknown"
+                    ],
+                    "properties": {
+                        "verified_prefix_bytes": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "verified_record_count": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "verified_prefix_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "known_command_count": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "affected_scope_count": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "affected_scopes": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "items": {
+                                "$ref": "#/components/schemas/ControlLogRecoveryScope"
+                            }
+                        },
+                        "scopes_truncated": {
+                            "type": "boolean"
+                        },
+                        "known_unresolved_count": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "unresolved_commands": {
+                            "type": "array",
+                            "maxItems": 32,
+                            "items": {
+                                "$ref": "#/components/schemas/ControlLogUnresolvedCommand"
+                            }
+                        },
+                        "commands_truncated": {
+                            "type": "boolean"
+                        },
+                        "unparsed_tail_bytes": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "tail_command_count_unknown": {
+                            "type": "boolean"
+                        }
+                    }
+                },
+                "ControlLogRecoveryAuthorityPreview": {
+                    "type": "object",
+                    "required": [
+                        "request",
+                        "old_namespace_hash",
+                        "successor_namespace_hash",
+                        "old_byte_length",
+                        "old_content_digest",
+                        "old_file_identity",
+                        "preview_digest"
+                    ],
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "required": [
+                                "logical_journal_id",
+                                "operation_id",
+                                "from_generation",
+                                "successor_generation",
+                                "header_digest",
+                                "owner_context_digest"
+                            ],
+                            "properties": {
+                                "logical_journal_id": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$"
+                                },
+                                "operation_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                },
+                                "from_generation": {
+                                    "type": "integer",
+                                    "format": "uint64",
+                                    "minimum": 0
+                                },
+                                "successor_generation": {
+                                    "type": "integer",
+                                    "format": "uint64",
+                                    "minimum": 1
+                                },
+                                "header_digest": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$"
+                                },
+                                "owner_context_digest": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$"
+                                }
+                            }
+                        },
+                        "old_namespace_hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "successor_namespace_hash": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "old_byte_length": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "minimum": 0
+                        },
+                        "old_content_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "old_file_identity": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "preview_digest": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                        }
+                    }
+                },
+                "ControlLogRecoveryPreview": {
+                    "type": "object",
+                    "required": [
+                        "authority",
+                        "impact"
+                    ],
+                    "properties": {
+                        "authority": {
+                            "$ref": "#/components/schemas/ControlLogRecoveryAuthorityPreview"
+                        },
+                        "impact": {
+                            "$ref": "#/components/schemas/ControlLogRecoveryImpact"
+                        }
+                    }
+                },
+                "ControlLogRecoveryAction": {
+                    "oneOf": [
+                        { "type": "string", "enum": ["Preview"] },
+                        { "type": "object", "required": ["SealAndRotate"], "properties": {
+                            "SealAndRotate": { "type": "object", "required": ["preview"], "properties": {
+                                "preview": { "$ref": "#/components/schemas/ControlLogRecoveryPreview" }
+                            } }
+                        } }
+                    ]
+                },
+                "ControlLogRecoveryOutcome": {
+                    "oneOf": [
+                        { "type": "object", "required": ["Preview"], "properties": {
+                            "Preview": { "$ref": "#/components/schemas/ControlLogRecoveryPreview" }
+                        } },
+                        { "type": "object", "required": ["Activated"], "properties": {
+                            "Activated": { "type": "object", "required": ["logical_journal_id", "command_generation"], "properties": {
+                                "logical_journal_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                                "command_generation": { "type": "integer", "minimum": 1 }
+                            } }
+                        } }
+                    ]
+                },
                 "ApplicationCommandReceipt": {
                     "description": "Typed settlement, replay, rejection, conflict, in-flight, or uncertain application outcome.",
                     "oneOf": [
-                        { "type": "object", "required": ["settled"] },
-                        { "type": "object", "required": ["replayed"] },
-                        { "type": "object", "required": ["rejected"] },
-                        { "type": "object", "required": ["payload_conflict"] },
-                        { "type": "object", "required": ["in_flight"] },
-                        { "type": "object", "required": ["uncertain"] }
+                        { "type": "object", "required": ["Settled"], "properties": { "Settled": { "type": "object" } } },
+                        { "type": "object", "required": ["Replayed"], "properties": { "Replayed": { "type": "object" } } },
+                        { "type": "object", "required": ["Rejected"], "properties": { "Rejected": { "type": "object" } } },
+                        { "type": "object", "required": ["PayloadConflict"], "properties": { "PayloadConflict": { "type": "object" } } },
+                        { "type": "object", "required": ["InFlight"], "properties": { "InFlight": { "type": "object" } } },
+                        { "type": "object", "required": ["Uncertain"], "properties": { "Uncertain": { "type": "object" } } },
+                        { "type": "object", "required": ["ReplayedUncertain"], "properties": { "ReplayedUncertain": { "type": "object" } } },
+                        { "type": "object", "required": ["ConfirmedNoEffect"], "properties": { "ConfirmedNoEffect": { "type": "object" } } },
+                        { "type": "object", "required": ["SafetyStopRequestedButUnrecorded"], "properties": { "SafetyStopRequestedButUnrecorded": { "type": "object" } } }
                     ]
                 },
                 "ApplicationProjection": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "scope", "writer_generation", "stream_generation", "observer_generation", "frontier", "session", "conversation", "run", "plan_task", "agents", "approval", "user_input", "capabilities", "configuration", "attention"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -1767,7 +2038,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationProjectionPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["request_id", "scope", "source_generation", "at_frontier", "query", "before", "after", "total", "items"],
                     "properties": {
                         "request_id": { "type": "string" },
@@ -1783,7 +2053,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionRouteTransitionView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "remote_context_reset"],
                     "properties": {
                         "kind": { "type": "string", "enum": ["exact", "rebound", "explicitly_confirmed"] },
@@ -1794,7 +2063,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "DurableSessionFrontier": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["through_stream_sequence"],
                     "properties": {
                         "through_stream_sequence": { "type": "integer", "format": "uint64" }
@@ -1802,7 +2070,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ForegroundRunOwner": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["run_id", "owner_revision"],
                     "properties": {
                         "run_id": { "type": "string" },
@@ -1815,7 +2082,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionContinuityView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["durable_session_scope_id", "durable_frontier", "retained_terminal_runs", "recovery_actions"],
                     "properties": {
                         "durable_session_scope_id": { "type": "string" },
@@ -1851,7 +2117,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionTranscriptPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_scope_id", "total_messages", "messages"],
                     "properties": {
                         "session_scope_id": { "type": "string" },
@@ -1866,7 +2131,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "MessageContentPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["display_id", "message_id", "content_version", "offset", "next_offset", "total_bytes", "text"],
                     "properties": {
                         "display_id": { "type": "string" },
@@ -1881,7 +2145,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionTranscriptMessage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["ordinal", "message_id", "role", "image_attachment_count", "truncated", "original_content_bytes"],
                     "properties": {
                         "ordinal": { "type": "integer", "format": "uint64", "minimum": 1 },
@@ -1900,7 +2163,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplayOrder": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_stream_sequence", "subindex"],
                     "properties": {
                         "session_stream_sequence": { "$ref": "#/components/schemas/DecimalSequence" },
@@ -1921,7 +2183,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplaySkillReference": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["id", "name"],
                     "properties": {
                         "id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -1932,7 +2193,6 @@ pub fn http_openapi_document() -> Value {
                     "oneOf": [
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "role", "image_attachment_count", "truncated", "original_content_bytes"],
                             "properties": {
                                 "type": { "const": "message" },
@@ -1952,7 +2212,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "text", "truncated", "original_content_bytes"],
                             "properties": {
                                 "type": { "const": "reasoning" },
@@ -1963,7 +2222,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "truncated", "original_content_bytes", "has_more", "preview_truncated"],
                             "properties": {
                                 "type": { "const": "tool" },
@@ -1984,7 +2242,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "call_id", "tool_name"],
                             "properties": {
                                 "type": { "const": "approval" },
@@ -1995,7 +2252,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "outcome"],
                             "properties": {
                                 "type": { "const": "checkpoint" },
@@ -2006,7 +2262,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "text", "truncated", "original_content_bytes"],
                             "properties": {
                                 "type": { "const": "notice" },
@@ -2017,7 +2272,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["type", "summary_truncated"],
                             "properties": {
                                 "type": { "const": "terminal" },
@@ -2030,7 +2284,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplayItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "display_id", "display_order", "source_event_id", "kind", "source", "status", "content"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -2048,7 +2301,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationTerminalFrontier": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["run_id", "session_stream_sequence", "status"],
                     "properties": {
                         "run_id": { "type": "string", "maxLength": 512 },
@@ -2062,7 +2314,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplayGapFact": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "after_session_stream_sequence"],
                     "properties": {
                         "kind": { "$ref": "#/components/schemas/ConversationDisplayGapKind" },
@@ -2071,7 +2322,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationLiveProvisionalAnchor": {
                     "type": "object",
-                    "additionalProperties": false,
                     "description": "Process-local observation only; never a durable display order.",
                     "required": ["durable_frontier", "run_id", "run_sequence"],
                     "properties": {
@@ -2082,7 +2332,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationTaskPlanStep": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["step_id", "title", "role", "depends_on", "mode", "isolation"],
                     "properties": {
                         "step_id": { "type": "string", "maxLength": 512 },
@@ -2096,7 +2345,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationTaskLane": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["lane_id", "status", "conflicts"],
                     "properties": {
                         "lane_id": { "type": "string", "maxLength": 512 },
@@ -2107,7 +2355,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationTaskControl": {
                     "type": "object",
-                    "additionalProperties": false,
                     "description": "Bounded durable Task controls without objective, prompt, transcript, path, ref, or mutation authority.",
                     "required": ["schema_version", "task_id", "phase", "status", "steps", "steps_truncated", "checklist", "active_children", "completed_children", "failed_children", "lanes", "lanes_truncated", "can_continue"],
                     "properties": {
@@ -2131,7 +2378,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationDisplayPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "request_scope", "through_session_stream_sequence", "total_items", "items", "has_more", "gap_facts"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -2152,12 +2398,11 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanReview": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "status", "summary_truncated", "allowed_actions", "source", "stale"],
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
                         "plan_hash": { "type": ["string", "null"], "maxLength": 128 },
-                        "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "compile_failed", "completed_without_draft", "blocked", "paused", "failed", "interrupted", "cancelled"] },
+                        "status": { "type": "string", "enum": ["started", "waiting_for_input", "draft_ready", "compile_failed", "completed_without_draft", "blocked", "paused", "failed", "interrupted", "cancelled"] },
                         "summary": { "type": ["string", "null"], "maxLength": 512 },
                         "summary_truncated": { "type": "boolean" },
                         "step_count": { "type": ["integer", "null"], "minimum": 0 },
@@ -2169,7 +2414,7 @@ pub fn http_openapi_document() -> Value {
                         "stale": { "type": "boolean" },
                         "candidate": {
                             "oneOf": [
-                                { "type": "object", "additionalProperties": false, "required": ["content_hash", "content", "completeness"], "properties": {
+                                { "type": "object", "required": ["content_hash", "content", "completeness"], "properties": {
                                     "content_hash": { "type": "string", "maxLength": 128 },
                                     "content": { "type": "string", "maxLength": 65536 },
                                     "completeness": { "type": "string", "enum": ["complete", "partial", "unknown"] }
@@ -2181,13 +2426,12 @@ pub fn http_openapi_document() -> Value {
                             "oneOf": [
                                 {
                                     "type": "object",
-                                    "additionalProperties": false,
                                     "required": ["request_id", "status"],
                                     "properties": {
                                         "request_id": { "type": "string" },
                                         "attempt_id": { "type": ["string", "null"] },
                                         "attempt_ordinal": { "type": ["integer", "null"], "minimum": 1 },
-                                        "status": { "type": "string", "enum": ["awaiting_guidance", "queued", "researching", "waiting_for_input", "finalizing", "failed", "cancelled", "succeeded"] },
+                                        "status": { "type": "string", "enum": ["awaiting_guidance", "queued", "researching", "waiting_for_input", "failed", "cancelled", "succeeded"] },
                                         "terminal_reason": { "type": ["string", "null"] }
                                     }
                                 },
@@ -2198,13 +2442,11 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanSuggestedCheck": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["check_spec_id", "command", "effect"],
                     "properties": {
                         "check_spec_id": { "type": "string", "minLength": 1, "maxLength": 512 },
                         "command": {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["command", "args"],
                             "properties": {
                                 "command": { "type": "string", "minLength": 1, "maxLength": 4096 },
@@ -2218,7 +2460,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanReviewStepDetail": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["step_id", "title", "depends_on", "target_paths", "suggested_checks", "notes"],
                     "properties": {
                         "step_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -2237,7 +2478,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanLineage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["source", "created_at_ms"],
                     "properties": {
                         "source": { "type": "object" },
@@ -2248,7 +2488,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanReviewDetail": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "plan_hash", "source", "summary", "steps", "target_paths", "suggested_checks", "notes", "lineage"],
                     "properties": {
                         "plan_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -2267,7 +2506,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanDecisionCommand": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["protocol_version", "command_id", "client_id", "session_id", "payload"],
                     "properties": {
                         "protocol_version": { "type": "integer", "const": 2 },
@@ -2281,7 +2519,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanDecisionRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "expected_plan_hash", "action"],
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
@@ -2293,7 +2530,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "PlanDecisionCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "plan_id", "plan_hash", "action", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -2306,7 +2542,6 @@ pub fn http_openapi_document() -> Value {
                         "task_title": { "type": ["string", "null"] },
                         "candidate_hash": { "type": ["string", "null"] },
                         "task_phase": { "oneOf": [{ "$ref": "#/components/schemas/TaskExecutionPhase" }, { "type": "null" }] },
-                        "task_blocker": { "oneOf": [{ "$ref": "#/components/schemas/TaskBlocker" }, { "type": "null" }] },
                         "revision_run_id": { "type": ["string", "null"] },
                         "user_input_request": { "oneOf": [{ "$ref": "#/components/schemas/UserInputRequest" }, { "type": "null" }] },
                         "replayed": { "type": "boolean" }
@@ -2314,31 +2549,7 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskExecutionPhase": {
                     "type": "string",
-                    "enum": ["preparing", "ready", "running", "blocked", "paused", "completed", "failed", "cancelled", "interrupted"]
-                },
-                "TaskBlocker": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["reason_code", "summary", "retryable", "evidence_digest", "created_at_ms"],
-                    "properties": {
-                        "reason_code": { "$ref": "#/components/schemas/TaskBlockerReasonCode" },
-                        "summary": { "type": "string" },
-                        "affected_step": { "oneOf": [{ "$ref": "#/components/schemas/TaskStepId" }, { "type": "null" }] },
-                        "affected_capability": { "oneOf": [{ "$ref": "#/components/schemas/TaskCapability" }, { "type": "null" }] },
-                        "retryable": { "type": "boolean" },
-                        "available_actions": { "type": "array", "items": { "$ref": "#/components/schemas/TaskBlockerAction" } },
-                        "evidence_digest": { "type": "string" },
-                        "created_at_ms": { "type": "integer", "format": "uint64" },
-                        "resolved_at_ms": { "type": ["integer", "null"], "format": "uint64" }
-                    }
-                },
-                "TaskBlockerReasonCode": {
-                    "type": "string",
-                    "enum": ["workspace_changed", "workspace_snapshot_unavailable", "missing_required_capability", "provider_unavailable", "credential_unavailable", "permission_required", "workspace_trust_required", "external_writer_active", "isolation_unavailable", "disk_space_exhausted", "artifact_storage_unavailable", "session_storage_degraded", "verification_runner_unavailable", "route_rebind_required", "contract_recompile_required"]
-                },
-                "TaskBlockerAction": {
-                    "type": "string",
-                    "enum": ["retry_admission", "replan", "cancel", "rebind_route", "grant_permission", "resume"]
+                    "enum": ["ready", "running", "paused", "completed", "failed", "cancelled", "interrupted"]
                 },
                 "TaskCapability": {
                     "type": "string",
@@ -2355,7 +2566,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "UserInputIdentity": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_scope_id", "root_logical_run_id", "source_thread_id", "request_id", "generation", "source_binding_hash"],
                     "properties": {
                         "session_scope_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -2368,7 +2578,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "UserInputOption": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["id", "label"],
                     "properties": {
                         "id": { "type": "string", "minLength": 1, "maxLength": 48 },
@@ -2376,42 +2585,30 @@ pub fn http_openapi_document() -> Value {
                         "description": { "type": ["string", "null"], "maxLength": 240 }
                     }
                 },
-                "UserInputField": {
-                    "oneOf": [
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "multiline", "max_chars"], "properties": { "kind": { "const": "text" }, "multiline": { "type": "boolean" }, "max_chars": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 4096 } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "number" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "integer" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "boolean" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "options", "allow_other"], "properties": { "kind": { "const": "single_select" }, "options": { "type": "array", "minItems": 2, "maxItems": 12, "items": { "$ref": "#/components/schemas/UserInputOption" } }, "allow_other": { "type": "boolean" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "options", "max_selected"], "properties": { "kind": { "const": "multi_select" }, "options": { "type": "array", "minItems": 2, "maxItems": 12, "items": { "$ref": "#/components/schemas/UserInputOption" } }, "max_selected": { "type": "integer", "format": "uint32", "minimum": 1, "maximum": 12 } } }
-                    ]
-                },
                 "UserInputQuestion": {
                     "type": "object",
-                    "additionalProperties": false,
-                    "required": ["id", "header", "question", "required", "field"],
+                    "required": ["id", "question"],
                     "properties": {
                         "id": { "type": "string", "minLength": 1, "maxLength": 48 },
-                        "header": { "type": "string", "minLength": 1, "maxLength": 32 },
                         "question": { "type": "string", "minLength": 1, "maxLength": 512 },
                         "description": { "type": ["string", "null"], "maxLength": 512 },
                         "required": { "type": "boolean" },
-                        "field": { "$ref": "#/components/schemas/UserInputField" }
+                        "options": { "type": "array", "maxItems": 12, "items": { "$ref": "#/components/schemas/UserInputOption" } },
+                        "multiple": { "type": "boolean" }
                     }
                 },
                 "UserInputRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["identity", "request_hash", "source", "purpose", "prompt", "questions", "allowed_actions", "requested_at_unix_ms", "status"],
                     "properties": {
                         "identity": { "$ref": "#/components/schemas/UserInputIdentity" },
                         "request_hash": { "$ref": "#/components/schemas/Sha256" },
                         "source": { "oneOf": [
                             { "type": "string", "enum": ["agent"] },
-                            { "type": "object", "additionalProperties": false, "required": ["plan_review_research"], "properties": { "plan_review_research": { "type": "object", "additionalProperties": false, "required": ["plan_review_id", "attempt_id"], "properties": { "plan_review_id": { "type": "string" }, "attempt_id": { "type": "string" } } } } },
-                            { "type": "object", "additionalProperties": false, "required": ["plan_revision"], "properties": { "plan_revision": { "type": "object", "additionalProperties": false, "required": ["base_plan_id", "base_plan_hash"], "properties": { "base_plan_id": { "type": "string" }, "base_plan_hash": { "$ref": "#/components/schemas/Sha256" } } } } },
-                            { "type": "object", "additionalProperties": false, "required": ["planner"], "properties": { "planner": { "type": "object", "additionalProperties": false, "required": ["task_id"], "properties": { "task_id": { "type": "string" } } } } },
-                            { "type": "object", "additionalProperties": false, "required": ["mcp"], "properties": { "mcp": { "type": "object", "additionalProperties": false, "required": ["server_id", "call_id"], "properties": { "server_id": { "type": "string" }, "call_id": { "type": "string" } } } } }
+                            { "type": "object", "required": ["plan_review_research"], "properties": { "plan_review_research": { "type": "object", "required": ["plan_review_id", "attempt_id"], "properties": { "plan_review_id": { "type": "string" }, "attempt_id": { "type": "string" } } } } },
+                            { "type": "object", "required": ["plan_revision"], "properties": { "plan_revision": { "type": "object", "required": ["base_plan_id", "base_plan_hash"], "properties": { "base_plan_id": { "type": "string" }, "base_plan_hash": { "$ref": "#/components/schemas/Sha256" } } } } },
+                            { "type": "object", "required": ["planner"], "properties": { "planner": { "type": "object", "required": ["task_id"], "properties": { "task_id": { "type": "string" } } } } },
+                            { "type": "object", "required": ["mcp"], "properties": { "mcp": { "type": "object", "required": ["server_id", "call_id"], "properties": { "server_id": { "type": "string" }, "call_id": { "type": "string" } } } } }
                         ] },
                         "purpose": { "type": "string", "enum": ["clarification", "choice", "missing_constraint", "revision_guidance", "external_elicitation"] },
                         "prompt": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -2422,14 +2619,13 @@ pub fn http_openapi_document() -> Value {
                         "answer_receipt": { "oneOf": [{ "$ref": "#/components/schemas/UserInputAnswerReceipt" }, { "type": "null" }] },
                         "resolution": { "oneOf": [
                             { "type": "string", "enum": ["consumed", "declined", "run_cancelled"] },
-                            { "type": "object", "additionalProperties": false, "required": ["failed"], "properties": { "failed": { "type": "object", "additionalProperties": false, "required": ["failure_class", "retryable"], "properties": { "failure_class": { "type": "string", "maxLength": 128 }, "retryable": { "type": "boolean" } } } } },
+                            { "type": "object", "required": ["failed"], "properties": { "failed": { "type": "object", "required": ["failure_class", "retryable"], "properties": { "failure_class": { "type": "string", "maxLength": 128 }, "retryable": { "type": "boolean" } } } } },
                             { "type": "null" }
                         ] }
                     }
                 },
                 "UserInputAnswerReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "decision"],
                     "properties": {
                         "command_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -2440,19 +2636,15 @@ pub fn http_openapi_document() -> Value {
                 },
                 "UserInputAnswerValue": {
                     "oneOf": [
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "text" }, "value": { "type": "string", "maxLength": 4096 } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "number" }, "value": { "type": "string", "maxLength": 64 } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "integer" }, "value": { "type": "integer", "format": "int64" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": { "kind": { "const": "boolean" }, "value": { "type": "boolean" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "single_select" }, "option_id": { "type": ["string", "null"], "maxLength": 48 }, "other": { "type": ["string", "null"], "maxLength": 512 } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind", "option_ids"], "properties": { "kind": { "const": "multi_select" }, "option_ids": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 48 } } } }
+                        { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "text" }, "value": { "type": "string", "maxLength": 4096 } } },
+                        { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "single_select" }, "option_id": { "type": ["string", "null"], "maxLength": 48 }, "other": { "type": ["string", "null"], "maxLength": 512 } } },
+                        { "type": "object", "required": ["kind", "option_ids"], "properties": { "kind": { "const": "multi_select" }, "option_ids": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 48 } }, "other": { "type": ["string", "null"], "maxLength": 4096 } } }
                     ]
                 },
                 "UserInputDecision": {
                     "oneOf": [
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "answers"],
                             "properties": {
                                 "kind": { "const": "submitted" },
@@ -2461,7 +2653,6 @@ pub fn http_openapi_document() -> Value {
                                     "maxItems": 3,
                                     "items": {
                                         "type": "object",
-                                        "additionalProperties": false,
                                         "required": ["question_id", "value"],
                                         "properties": {
                                             "question_id": { "type": "string" },
@@ -2471,13 +2662,12 @@ pub fn http_openapi_document() -> Value {
                                 }
                             }
                         },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "declined" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "run_cancelled" } } }
+                        { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "declined" } } },
+                        { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "run_cancelled" } } }
                     ]
                 },
                 "UserInputDecisionRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["generation", "expected_request_hash", "decision"],
                     "properties": {
                         "generation": { "type": "integer", "format": "uint32", "minimum": 1 },
@@ -2488,7 +2678,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "UserInputDecisionCommand": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["protocol_version", "command_id", "client_id", "session_id", "payload"],
                     "properties": {
                         "protocol_version": { "type": "integer", "const": 2 },
@@ -2502,7 +2691,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "UserInputDecisionCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "request", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -2517,7 +2705,6 @@ pub fn http_openapi_document() -> Value {
                     "oneOf": [
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "offset", "limit"],
                             "properties": {
                                 "kind": { "type": "string", "const": "byte_slice" },
@@ -2527,7 +2714,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "start_line", "line_count"],
                             "properties": {
                                 "kind": { "type": "string", "const": "line_page" },
@@ -2537,21 +2723,19 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
-                            "required": ["kind", "query", "start_offset", "max_matches", "context_lines"],
+                            "required": ["kind", "query"],
                             "properties": {
                                 "kind": { "type": "string", "const": "search_literal" },
                                 "query": { "type": "string", "minLength": 1, "maxLength": 512 },
-                                "start_offset": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 16777216 },
-                                "max_matches": { "type": "integer", "format": "uint16", "minimum": 1, "maximum": 20 },
-                                "context_lines": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 3 }
+                                "start_offset": { "type": "integer", "format": "uint64", "minimum": 0, "maximum": 16777216, "default": 0 },
+                                "max_matches": { "type": "integer", "format": "uint64", "minimum": 1, "default": sigil_kernel::session::TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES },
+                                "context_lines": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 3, "default": 0 }
                             }
                         }
                     ]
                 },
                 "ToolArtifactReadRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["artifact_ref", "selector"],
                     "properties": {
                         "artifact_ref": { "type": "string", "pattern": "^ta1_[0-9a-fA-F]{32}$" },
@@ -2564,7 +2748,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ToolArtifactPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "request_scope", "artifact_ref", "selector", "body", "body_encoding", "returned_bytes", "page_sha256", "artifact_sha256", "eof", "match_count"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -2577,7 +2760,7 @@ pub fn http_openapi_document() -> Value {
                         "page_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
                         "artifact_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
                         "eof": { "type": "boolean" },
-                        "match_count": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": 20 },
+                        "match_count": { "type": "integer", "format": "uint16", "minimum": 0, "maximum": sigil_kernel::session::TOOL_ARTIFACT_SEARCH_MAX_MATCHES },
                         "next_selector": { "oneOf": [{ "$ref": "#/components/schemas/ToolArtifactSelector" }, { "type": "null" }] }
                     }
                 },
@@ -2606,7 +2789,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["entry_id", "order", "kind", "status", "prompt_preview", "prompt_preview_truncated", "prompt_material", "dispatchable"],
                     "properties": {
                         "entry_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -2624,7 +2806,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "session_id", "generation", "paused", "total_items", "items", "truncated"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": HTTP_CONVERSATION_QUEUE_SCHEMA_VERSION },
@@ -2639,7 +2820,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueEnqueueAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "prompt", "kind"],
                     "properties": {
                         "action": { "type": "string", "const": "enqueue" },
@@ -2650,7 +2830,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueEditAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "entry_id", "prompt"],
                     "properties": {
                         "action": { "type": "string", "const": "edit" },
@@ -2661,7 +2840,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueRemoveAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "entry_id"],
                     "properties": {
                         "action": { "type": "string", "const": "remove" },
@@ -2670,7 +2848,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueReorderAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "entry_id"],
                     "properties": {
                         "action": { "type": "string", "const": "reorder" },
@@ -2680,19 +2857,16 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueuePauseAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action"],
                     "properties": { "action": { "type": "string", "const": "pause" } }
                 },
                 "ConversationQueueResumeAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action"],
                     "properties": { "action": { "type": "string", "const": "resume" } }
                 },
                 "ConversationQueueInterruptAndRunNextAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "foreground_run_id", "foreground_owner_revision"],
                     "properties": {
                         "action": { "type": "string", "const": "interrupt_and_run_next" },
@@ -2717,7 +2891,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueCommandRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["expected_generation", "action"],
                     "properties": {
                         "expected_generation": { "$ref": "#/components/schemas/ConversationQueueGeneration" },
@@ -2738,7 +2911,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationQueueCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "action", "expected_generation", "generation", "queue", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -2768,7 +2940,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointFileView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["path", "restore_kind", "availability"],
                     "properties": {
                         "path": { "type": "string", "maxLength": 4096 },
@@ -2778,7 +2949,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["checkpoint_id", "checkpoint_digest", "turn_index", "files", "unknown_mutation_count", "fully_restorable"],
                     "properties": {
                         "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -2792,7 +2962,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationForkPointView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["source_turn_index", "source_turn_digest", "source_boundary_stream_sequence", "source_finalized_stream_sequence"],
                     "properties": {
                         "source_turn_index": { "type": "integer", "format": "uint64", "minimum": 1 },
@@ -2803,7 +2972,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["checkpoints", "fork_points", "through_stream_sequence"],
                     "properties": {
                         "checkpoints": { "type": "array", "maxItems": 256, "items": { "$ref": "#/components/schemas/CheckpointView" } },
@@ -2813,7 +2981,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointRestoreRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["checkpoint_id", "checkpoint_digest"],
                     "properties": {
                         "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -2822,7 +2989,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionEconomics": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["before_input_tokens", "target_input_tokens", "context_window_tokens", "output_tokens", "safety_buffer_tokens", "savings_tokens", "savings_ratio_ppm", "minimum_savings_tokens", "minimum_savings_ratio_ppm", "summary_cache_read_tokens", "summary_uncached_input_tokens", "summary_output_tokens"],
                     "properties": {
                         "before_input_tokens": { "type": "integer", "format": "uint64", "minimum": 0 },
@@ -2842,7 +3008,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionAdmissionReady": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "economics"],
                     "properties": {
                         "kind": { "type": "string", "const": "ready" },
@@ -2851,7 +3016,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionAdmissionPrepared": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "standalone_tool_output_shrink_available"],
                     "properties": {
                         "kind": { "type": "string", "const": "prepared" },
@@ -2860,7 +3024,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionAdmissionNoHistory": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "durable_message_count", "minimum_tail_turn_count"],
                     "properties": {
                         "kind": { "type": "string", "const": "no_foldable_history" },
@@ -2870,7 +3033,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionAdmissionUnavailable": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "reason"],
                     "properties": {
                         "kind": { "type": "string", "const": "unavailable" },
@@ -2879,7 +3041,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionPolicy": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["strategy", "phase", "native_carrier_available"],
                     "properties": {
                         "strategy": { "type": "string", "const": "cache_aware_v3" },
@@ -2897,7 +3058,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionConstraint": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["text", "source_event_id", "source_field_path"],
                     "properties": {
                         "text": { "type": "string", "minLength": 1, "maxLength": 16384 },
@@ -2907,7 +3067,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionToolArtifact": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": [
                         "source_event_id",
                         "content_sha256",
@@ -2937,7 +3096,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionDetails": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": [
                         "active_objective",
                         "objective_source_event_id",
@@ -2983,7 +3141,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionReview": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["folded_event_count", "retained_event_count", "policy", "admission"],
                     "properties": {
                         "preview_id": { "type": ["string", "null"], "maxLength": 512 },
@@ -3008,7 +3165,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointRestorePreviewFile": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["path", "restore_kind"],
                     "properties": {
                         "path": { "type": "string", "maxLength": 4096 },
@@ -3020,7 +3176,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointReverseDiff": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["path", "diff", "truncated", "original_line_count"],
                     "properties": {
                         "path": { "type": "string", "maxLength": 4096 },
@@ -3031,7 +3186,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointRestoreReview": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["checkpoint_id", "checkpoint_digest", "files", "reverse_diffs", "unknown_mutation_count", "ready"],
                     "properties": {
                         "checkpoint_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -3044,7 +3198,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryRestoreAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "checkpoint_id", "checkpoint_digest"],
                     "properties": {
                         "kind": { "type": "string", "const": "restore_checkpoint" },
@@ -3054,7 +3207,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryCompactionAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "preview_id"],
                     "properties": {
                         "kind": { "type": "string", "const": "apply_compaction" },
@@ -3063,7 +3215,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryPrepareCompactionAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "preview_id"],
                     "properties": {
                         "kind": { "type": "string", "const": "prepare_compaction" },
@@ -3072,7 +3223,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryToolOutputShrinkAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "preview_id"],
                     "properties": {
                         "kind": { "type": "string", "const": "apply_standalone_tool_output_shrink" },
@@ -3081,7 +3231,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryForkAction": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["kind", "source_turn_digest", "model_ref"],
                     "properties": {
                         "kind": { "type": "string", "const": "fork_conversation" },
@@ -3110,7 +3259,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CheckpointRestoreReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["checkpoint_id", "batch_id", "restored_file_count", "verification_stale"],
                     "properties": {
                         "checkpoint_id": { "type": "string" },
@@ -3121,7 +3269,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "CompactionReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["compaction_id", "attempt_id", "task_memory_id", "folded_event_count", "tool_output_projection_recorded", "native_carrier_materialized"],
                     "properties": {
                         "compaction_id": { "type": "string", "maxLength": 512 },
@@ -3135,7 +3282,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ToolOutputShrinkReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["context_epoch_id", "projected_output_count"],
                     "properties": {
                         "context_epoch_id": { "type": "string", "maxLength": 512 },
@@ -3144,7 +3290,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationForkReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "session_id", "copied_message_count", "copied_external_provenance_count"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 512 },
@@ -3155,7 +3300,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ConversationRecoveryCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "action", "recovery", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -3187,7 +3331,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "AgentUsageSummary": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["input_tokens", "output_tokens", "total_tokens"],
                     "properties": {
                         "input_tokens": { "type": "integer", "format": "uint64" },
@@ -3198,7 +3341,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "AgentActivityItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["thread_id", "objective", "status", "handoff_status", "result_summary_truncated"],
                     "properties": {
                         "thread_id": { "type": "string" },
@@ -3215,7 +3357,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "AgentActivityView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["total_agents", "active_agents", "terminal_agents", "items"],
                     "properties": {
                         "total_agents": { "type": "integer", "format": "uint64" },
@@ -3226,7 +3367,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogPage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["workspace_id", "generation", "reconciled_at_unix_ms", "degraded_source_count", "identity_conflict_count", "truncated_source_count", "entries"],
                     "properties": {
                         "workspace_id": { "type": "string" },
@@ -3244,7 +3384,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogEntry": {
                     "type": "object",
-                    "additionalProperties": false,
                     "description": "Compact historical metadata only; message and tool bodies are absent.",
                     "required": ["workspace_id", "session_ref", "source_state", "source_bytes", "source_modified_at_unix_ms", "user_message_count", "assistant_message_count", "tool_result_count", "control_entry_count", "pinned", "indexed_at_unix_ms"],
                     "properties": {
@@ -3278,7 +3417,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref"],
                     "properties": {
                         "session_ref": { "type": "string", "maxLength": 512 },
@@ -3289,7 +3427,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchPlanRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["action", "items"],
                     "properties": {
                         "action": { "$ref": "#/components/schemas/SessionCatalogBatchAction" },
@@ -3298,7 +3435,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchExecuteRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "action", "items"],
                     "properties": {
                         "plan_id": { "type": "string", "maxLength": 128 },
@@ -3308,7 +3444,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchPlanItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "status"],
                     "properties": {
                         "session_ref": { "type": "string" },
@@ -3318,7 +3453,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchPlan": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "action", "generation", "total", "executable", "blocked", "items"],
                     "properties": {
                         "plan_id": { "type": "string" },
@@ -3332,7 +3466,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchReceiptItem": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["session_ref", "outcome"],
                     "properties": {
                         "session_ref": { "type": "string" },
@@ -3345,7 +3478,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionCatalogBatchReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["plan_id", "action", "total", "completed", "failed", "skipped", "items"],
                     "properties": {
                         "plan_id": { "type": "string" },
@@ -3375,6 +3507,7 @@ pub fn http_openapi_document() -> Value {
                         "command_id": { "type": "string" },
                         "client_id": { "type": "string" },
                         "session_id": { "type": "string" },
+                        "command_journal": { "anyOf": [{ "$ref": "#/components/schemas/CommandJournalBinding" }, { "type": "null" }] },
                         "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
                         "correlation_id": { "type": ["string", "null"] }
                     }
@@ -3409,7 +3542,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskContinuationRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["task_id"],
                     "properties": {
                         "task_id": { "type": "string", "minLength": 1 },
@@ -3426,7 +3558,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationModelOption": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["model_ref", "display_name", "availability", "recommendation", "provenance", "model_name", "available_reasoning_efforts"],
                     "properties": {
                         "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -3446,7 +3577,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationCacheUsage": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["cache_read_tokens", "cache_miss_tokens", "provider_miss_without_local_mutation"],
                     "properties": {
                         "cache_read_tokens": { "type": "integer", "format": "uint64" },
@@ -3461,7 +3591,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunContextView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["model_ref", "provider_name", "model_name", "model_options", "model_selection", "model_selection_binding", "default_permission_mode", "available_permission_modes", "available_reasoning_efforts", "context_window_source", "extension_catalog"],
                     "properties": {
                         "model_ref": { "$ref": "#/components/schemas/ProviderModelRef" },
@@ -3498,7 +3627,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "SessionRouteRecoveryView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["code", "allowed_actions", "recovery_binding", "retryable"],
                     "properties": {
                         "code": {
@@ -3519,7 +3647,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationExtensionCatalog": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["commands", "skills", "agents"],
                     "properties": {
                         "commands": { "type": "array", "items": { "$ref": "#/components/schemas/ApplicationCommandCatalogEntry" } },
@@ -3533,7 +3660,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationCommandCatalogEntry": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["canonical", "aliases", "label", "description", "completes_with_space", "available"],
                     "properties": {
                         "canonical": { "type": "string" },
@@ -3549,7 +3675,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationSkillBinding": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["skill_id", "skill_sha256", "index_fingerprint"],
                     "properties": {
                         "skill_id": { "type": "string" },
@@ -3559,7 +3684,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationSkillCatalogEntry": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["id", "invocation_token", "name", "description", "source", "run_mode", "trust", "available"],
                     "properties": {
                         "id": { "type": "string" },
@@ -3576,7 +3700,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationAgentBinding": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["profile_id", "snapshot_id"],
                     "properties": {
                         "profile_id": { "type": "string" },
@@ -3585,7 +3708,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "ApplicationAgentCatalogEntry": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["id", "invocation_token", "description", "source", "kind", "trust", "enabled", "user_invocable", "available"],
                     "properties": {
                         "id": { "type": "string" },
@@ -3666,7 +3788,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TerminalTaskCancelRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["task_id", "expected_generation"],
                     "properties": {
                         "task_id": { "type": "string" },
@@ -3675,7 +3796,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TerminalTaskCancelCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "run_id", "terminal_task", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -3702,7 +3822,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskPauseRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["request_id", "task_id", "execution"],
                     "properties": {
                         "request_id": { "type": "string" },
@@ -3711,26 +3830,12 @@ pub fn http_openapi_document() -> Value {
                     }
                 },
                 "TaskExecutionBinding": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["kind", "plan_version"],
-                            "properties": {
-                                "kind": { "type": "string", "const": "plan" },
-                                "plan_version": { "type": "integer", "format": "uint32", "minimum": 1 }
-                            }
-                        },
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["kind", "admission_id"],
-                            "properties": {
-                                "kind": { "type": "string", "const": "direct" },
-                                "admission_id": { "type": "string", "minLength": 1, "maxLength": 256 }
-                            }
-                        }
-                    ]
+                    "type": "object",
+                    "required": ["kind", "admission_id"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "direct" },
+                        "admission_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+                    }
                 },
                 "TaskPauseCommandReceipt": {
                     "type": "object",
@@ -3768,26 +3873,25 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TerminalTaskStatus": {
                     "oneOf": [
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "starting" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "running" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "exited" }, "exit_code": { "type": ["integer", "null"], "format": "int32" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": { "state": { "const": "failed" }, "reason": { "type": "string" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "cancelled" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "interrupted" } } }
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "starting" } } },
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "running" } } },
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "exited" }, "exit_code": { "type": ["integer", "null"], "format": "int32" } } },
+                        { "type": "object", "required": ["state", "reason"], "properties": { "state": { "const": "failed" }, "reason": { "type": "string" } } },
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "cancelled" } } },
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "interrupted" } } }
                     ]
                 },
                 "TerminalReadinessStatus": {
                     "oneOf": [
-                        { "type": "object", "additionalProperties": false, "required": ["state"], "properties": { "state": { "const": "none" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state", "kind"], "properties": { "state": { "const": "waiting" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state", "kind", "ready_at_ms"], "properties": { "state": { "const": "ready" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "ready_at_ms": { "type": "integer", "format": "uint64" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state", "kind", "reason"], "properties": { "state": { "const": "failed" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "reason": { "type": "string" } } },
-                        { "type": "object", "additionalProperties": false, "required": ["state", "kind"], "properties": { "state": { "const": "timed_out" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } }
+                        { "type": "object", "required": ["state"], "properties": { "state": { "const": "none" } } },
+                        { "type": "object", "required": ["state", "kind"], "properties": { "state": { "const": "waiting" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } },
+                        { "type": "object", "required": ["state", "kind", "ready_at_ms"], "properties": { "state": { "const": "ready" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "ready_at_ms": { "type": "integer", "format": "uint64" } } },
+                        { "type": "object", "required": ["state", "kind", "reason"], "properties": { "state": { "const": "failed" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" }, "reason": { "type": "string" } } },
+                        { "type": "object", "required": ["state", "kind"], "properties": { "state": { "const": "timed_out" }, "kind": { "$ref": "#/components/schemas/TerminalReadinessKind" } } }
                     ]
                 },
                 "TerminalLifecycle": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["task_id", "generation", "status", "readiness", "total_output_bytes", "emitted_at_ms"],
                     "properties": {
                         "task_id": { "type": "string" },
@@ -3865,7 +3969,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentVersionRef": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["intent_id", "version"],
                     "properties": {
                         "intent_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -3874,7 +3977,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentAcceptanceCriterion": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["criterion_id", "statement", "required"],
                     "properties": {
                         "criterion_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -3958,7 +4060,6 @@ pub fn http_openapi_document() -> Value {
                     "oneOf": [
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "source_turn_id"],
                             "properties": {
                                 "kind": { "type": "string", "const": "user_turn" },
@@ -3967,7 +4068,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "source_turn_id"],
                             "properties": {
                                 "kind": { "type": "string", "const": "accepted_suggestion" },
@@ -3976,7 +4076,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["kind", "safe_source_label"],
                             "properties": {
                                 "kind": { "type": "string", "const": "trusted_spec" },
@@ -3987,7 +4086,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentArtifactSummary": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["artifact_id", "artifact_kind", "ownership", "availability"],
                     "properties": {
                         "artifact_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -3999,7 +4097,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentConflict": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["code", "safe_reason"],
                     "properties": {
                         "code": { "$ref": "#/components/schemas/IntentOperationErrorCode" },
@@ -4010,7 +4107,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "Intent": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": [
                         "intent_ref",
                         "title",
@@ -4052,7 +4148,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentStack": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "stack_id", "stack_version", "authority_state", "plan_digest", "intents", "conflicts"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -4068,7 +4163,6 @@ pub fn http_openapi_document() -> Value {
                     "oneOf": [
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["status", "schema_version", "stack"],
                             "properties": {
                                 "status": { "type": "string", "const": "available" },
@@ -4078,7 +4172,6 @@ pub fn http_openapi_document() -> Value {
                         },
                         {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["status", "schema_version", "safe_message"],
                             "properties": {
                                 "status": { "type": "string", "const": "not_created" },
@@ -4090,7 +4183,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentDropPreviewRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["intent_ref"],
                     "properties": {
                         "intent_ref": { "$ref": "#/components/schemas/IntentVersionRef" }
@@ -4098,7 +4190,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentOperationFileSummary": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["normalized_relative_path", "action", "artifact_ids"],
                     "properties": {
                         "normalized_relative_path": { "type": "string", "maxLength": 4096 },
@@ -4108,7 +4199,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentVerificationImpactSummary": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["receipt_id", "impact"],
                     "properties": {
                         "receipt_id": { "type": "string", "maxLength": 512 },
@@ -4117,7 +4207,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentOperationPreview": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "operation_id", "operation_kind", "stack_id", "stack_version", "target_intents", "target_is_leaf", "workspace_revision", "file_effects", "retained_intents", "verification_impacts", "conflicts", "preview_digest"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -4138,7 +4227,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentDropRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["operation_id", "stack_version", "preview_digest"],
                     "properties": {
                         "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
@@ -4160,7 +4248,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentOperationExecution": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["preview", "resolution", "mutation_batch_id", "committed_operation_ids", "result_snapshot_id", "error_code"],
                     "properties": {
                         "preview": { "$ref": "#/components/schemas/IntentOperationPreview" },
@@ -4173,7 +4260,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "IntentDropCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "execution", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -4198,7 +4284,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "VerificationRerunRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["request_id", "task_id", "plan_version", "step_id", "check_spec_id", "check_spec_hash", "policy_hash", "workspace_snapshot_id"],
                     "properties": {
                         "request_id": { "type": "string", "pattern": "^verification-rerun-[0-9a-f]{64}$" },
@@ -4225,7 +4310,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskIntegrationReviewRequest": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["request_id", "task_id", "plan_id", "plan_version", "preview_digest"],
                     "properties": {
                         "request_id": { "type": "string", "minLength": 1, "maxLength": 512 },
@@ -4245,7 +4329,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskIntegrationLaneView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["lane_id", "candidate_kind", "proposal_count", "verification_receipt_count"],
                     "properties": {
                         "lane_id": { "type": "string" },
@@ -4256,7 +4339,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskIntegrationReviewView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["schema_version", "request", "aggregate_diff", "aggregate_diff_digest", "preview_digest", "policy_digest", "target_kind", "lanes", "child_verification_receipt_count", "lane_verification_receipt_count", "conflict_reasons", "verification_invalidation_count", "parent_verification_pending"],
                     "properties": {
                         "schema_version": { "type": "integer", "const": 1 },
@@ -4295,7 +4377,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskIntegrationAcceptanceView": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["request", "promotion_status", "can_continue"],
                     "properties": {
                         "request": { "$ref": "#/components/schemas/TaskIntegrationReviewRequest" },
@@ -4308,7 +4389,6 @@ pub fn http_openapi_document() -> Value {
                 },
                 "TaskIntegrationAcceptanceCommandReceipt": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["command_id", "client_id", "session_id", "acceptance", "replayed"],
                     "properties": {
                         "command_id": { "type": "string" },
@@ -4414,12 +4494,10 @@ pub fn http_openapi_document() -> Value {
                 },
                 "RunAdmissionErrorResponse": {
                     "type": "object",
-                    "additionalProperties": false,
                     "required": ["error"],
                     "properties": {
                         "error": {
                             "type": "object",
-                            "additionalProperties": false,
                             "required": ["code", "message", "route_recovery"],
                             "properties": {
                                 "code": {
@@ -4448,7 +4526,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "ProtocolEvent".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["schema_version", "event_class"],
             "oneOf": [
                 { "required": ["run_event"], "not": { "required": ["live_update"] } },
@@ -4473,8 +4550,7 @@ fn public_event_schemas() -> Map<String, Value> {
         }),
     );
     schemas.insert("LiveRunUpdate".to_owned(), json!({
-        "type": "object", "additionalProperties": false,
-        "required": ["schema_version", "session_id", "run_id", "attempt_id", "slot_id", "live_revision", "base_durable_sequence", "kind", "preview"],
+        "type": "object", "required": ["schema_version", "session_id", "run_id", "attempt_id", "slot_id", "live_revision", "base_durable_sequence", "kind", "preview"],
         "properties": {
             "schema_version": { "type": "integer", "const": sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION },
             "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
@@ -4487,8 +4563,7 @@ fn public_event_schemas() -> Map<String, Value> {
             "preview": { "type": "string", "minLength": 1, "maxLength": sigil_application::MAX_SAFE_TEXT_BYTES, "description": "replacement snapshot bounded to 64 KiB of UTF-8" },
             "truncated": { "type": "boolean" },
             "tool_progress": {
-                "type": "object", "additionalProperties": false,
-                "required": ["execution_id", "call_id", "tool_name", "status", "total_bytes", "updated_at_ms"],
+                "type": "object", "required": ["execution_id", "call_id", "tool_name", "status", "total_bytes", "updated_at_ms"],
                 "properties": {
                     "execution_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                     "call_id": { "type": "string", "minLength": 1, "maxLength": 256 },
@@ -4525,7 +4600,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "SessionGrantUnavailableReason".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["code"],
             "properties": {
                 "code": { "$ref": "#/components/schemas/SessionGrantUnavailableReasonCode" }
@@ -4536,7 +4610,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PendingApproval".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["call_id", "tool_name", "approval_request_id", "tool_call_hash", "policy_version", "expires_at_ms", "session_grant_available", "session_grant_unavailable_reason", "display"],
             "properties": {
                 "call_id": { "type": "string" },
@@ -4560,7 +4633,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PendingApprovalDisplay".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["event_sequence", "effects", "subjects", "analysis_status", "analysis_reason_codes", "analysis_reasons", "containment", "decision_reasons", "safe_summary_title", "safe_summary_detail", "snapshot_required"],
             "properties": {
                 "event_sequence": { "type": "integer", "format": "uint64", "minimum": 1 },
@@ -4584,7 +4656,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PendingApprovalSubject".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["kind", "scope"],
             "properties": {
                 "kind": { "type": "string", "maxLength": 2048 },
@@ -4597,7 +4668,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PublicRunEvent".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["schema_version", "session_id", "run_id", "sequence", "event"],
             "properties": {
                 "schema_version": { "type": "integer", "const": sigil_kernel::PUBLIC_RUN_EVENT_SCHEMA_VERSION },
@@ -4623,14 +4693,13 @@ fn public_event_schemas() -> Map<String, Value> {
         "PublicTaskPhase".to_owned(),
         json!({
             "type": "string",
-            "enum": ["routing", "planning", "execution", "integration", "synthesis", "terminal"]
+            "enum": ["routing", "planning", "execution", "integration", "terminal"]
         }),
     );
     schemas.insert(
         "PublicSessionRouteTransitionView".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["kind", "connection_id", "model_id", "remote_context_reset"],
             "properties": {
                 "kind": { "type": "string", "enum": ["exact", "rebound", "explicitly_confirmed"] },
@@ -4644,7 +4713,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PublicTaskPlanStep".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["step_id", "title", "role", "depends_on", "mode", "isolation"],
             "properties": {
                 "step_id": { "type": "string", "maxLength": 512 },
@@ -4660,7 +4728,6 @@ fn public_event_schemas() -> Map<String, Value> {
         "PublicTaskChecklistItem".to_owned(),
         json!({
             "type": "object",
-            "additionalProperties": false,
             "required": ["item_id", "text", "status"],
             "properties": {
                 "item_id": { "type": "string", "maxLength": 256 },
@@ -4860,7 +4927,7 @@ fn public_event_variants() -> Vec<(&'static str, Value)> {
                 json_properties(json!({
                     "plan_review_id": { "type": "string", "maxLength": 512 },
                     "plan_id": { "type": "string", "maxLength": 512 },
-                    "status": { "type": "string", "enum": ["started", "waiting_for_input", "finalizing", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] }
+                    "status": { "type": "string", "enum": ["started", "waiting_for_input", "draft_ready", "completed_without_draft", "failed", "interrupted", "cancelled"] }
                 })),
                 true,
             ),
@@ -5265,7 +5332,7 @@ fn public_event_variant(
     event_type: &str,
     required_fields: &[&str],
     mut properties: Map<String, Value>,
-    exact: bool,
+    _exact: bool,
 ) -> Value {
     properties.insert(
         "type".to_owned(),
@@ -5279,7 +5346,7 @@ fn public_event_variant(
     );
     json!({
         "type": "object",
-        "additionalProperties": !exact,
+        "additionalProperties": true,
         "required": required,
         "properties": properties
     })

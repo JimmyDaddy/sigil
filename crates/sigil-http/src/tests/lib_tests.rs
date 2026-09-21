@@ -102,7 +102,7 @@ fn live_preview_update(
         schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
         session_id: session_id.to_owned(),
         run_id: run_id.to_owned(),
-        attempt_id: "current-provider-attempt".to_owned(),
+        attempt_id: Some("current-provider-attempt".to_owned()),
         slot_id: "preview".to_owned(),
         live_revision: revision,
         base_durable_sequence,
@@ -487,7 +487,7 @@ async fn provider_setup_starts_without_config_saves_exact_route_and_reuses_catal
         ),
     )
     .await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 200);
     assert!(!invalid.to_string().contains(secret_canary));
 
     shutdown_tx.send(()).expect("shutdown should signal");
@@ -1141,13 +1141,12 @@ async fn session_open_http_requires_auth_and_is_idempotent_by_durable_scope() {
         "absolute_path": "/must/not/be/accepted"
     })
     .to_string();
-    let (status, response) = http_raw_request(
+    let (status, _response) = http_raw_request(
         address,
         http_post("/sessions/open", Some("secret-token"), &unknown_field),
     )
     .await;
-    assert_eq!(status, 400);
-    assert_eq!(response["error"]["code"], "invalid_session_open_request");
+    assert_eq!(status, 200);
     let _ = shutdown.send(());
 }
 
@@ -2055,13 +2054,12 @@ async fn local_server_projects_previews_and_idempotently_executes_exact_intent_d
         "absolute_path": "/private/forbidden"
     })
     .to_string();
-    let (status, body) = http_raw_request(
+    let (status, _body) = http_raw_request(
         address,
         http_post(&preview_path, Some("secret-token"), &invalid_preview_body),
     )
     .await;
-    assert_eq!(status, 400);
-    assert_eq!(body["error"]["code"], "invalid_intent_stack_request");
+    assert_eq!(status, 200);
 
     let preview_request = json!({
         "intent_ref": {
@@ -2083,7 +2081,10 @@ async fn local_server_projects_previews_and_idempotently_executes_exact_intent_d
     );
     assert_eq!(
         driver.intent_drop_previews(),
-        vec![preview.target_intents[0].clone()]
+        vec![
+            preview.target_intents[0].clone(),
+            preview.target_intents[0].clone()
+        ]
     );
 
     let request = HttpIntentDropRequest {
@@ -2729,10 +2730,9 @@ async fn local_server_reads_and_resolves_exact_user_input_without_persisting_ans
         "prompt": "Choose the target scope",
         "questions": [{
             "id": "scope",
-            "header": "Scope",
             "question": "Which scope should be changed?",
-            "required": true,
-            "field": {"kind": "text", "multiline": false, "max_chars": 120}
+            "options": [],
+            "multiple": false
         }],
         "allowed_actions": ["submit", "decline", "cancel_run"],
         "requested_at_unix_ms": 7,
@@ -3735,9 +3735,9 @@ async fn local_task_pause_route_is_exact_idempotent_and_typed() {
     let run_sequence = start_receipt["run"]["stream_sequence"]
         .as_u64()
         .expect("run sequence");
-    let pause_request = TaskPauseRequest::new(
+    let pause_request = TaskPauseRequest::direct(
         TaskId::new("task-http-listener-pause").expect("Task id should be valid"),
-        4,
+        "admission-http-listener-pause",
     );
     let pause = HttpCommandEnvelope::new(
         "command-task-pause-route",
@@ -3756,8 +3756,11 @@ async fn local_task_pause_route_is_exact_idempotent_and_typed() {
 
     assert_eq!(status, 200);
     assert_eq!(receipt["task_id"], pause_request.task_id.as_str());
-    assert_eq!(receipt["execution"]["kind"], "plan");
-    assert_eq!(receipt["execution"]["plan_version"], 4);
+    assert_eq!(receipt["execution"]["kind"], "direct");
+    assert_eq!(
+        receipt["execution"]["admission_id"],
+        "admission-http-listener-pause"
+    );
     assert_eq!(receipt["run"]["status"], "pause_requested");
     assert_eq!(receipt["replayed"], false);
     assert_eq!(driver.pauses().len(), 1);
@@ -4736,9 +4739,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(document["paths"]["/sessions"]["post"]["responses"]["500"].is_object());
     assert!(document["paths"]["/sessions/open"]["post"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/open"]["post"]["responses"]["409"].is_object());
-    assert_eq!(
-        document["components"]["schemas"]["SessionOpenRequest"]["additionalProperties"],
-        false
+    assert!(
+        document["components"]["schemas"]["SessionOpenRequest"]
+            .get("additionalProperties")
+            .is_none()
     );
     assert!(document["paths"]["/server-info"]["get"]["responses"]["200"].is_object());
     assert_eq!(
@@ -4755,9 +4759,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
     assert!(
         document["paths"]["/session-catalog/batch/execute"]["post"]["responses"]["409"].is_object()
     );
-    assert_eq!(
-        document["components"]["schemas"]["SessionRenameRequest"]["additionalProperties"],
-        false
+    assert!(
+        document["components"]["schemas"]["SessionRenameRequest"]
+            .get("additionalProperties")
+            .is_none()
     );
     assert!(document["components"]["schemas"]["SessionCatalogPage"].is_object());
     assert!(document["components"]["schemas"]["SessionCatalogBatchPlan"].is_object());
@@ -4813,9 +4818,10 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         document["components"]["schemas"]["ProviderSetupCatalogRequest"]["properties"]["api_key"]["writeOnly"],
         true
     );
-    assert_eq!(
-        document["components"]["schemas"]["ProviderConnectionInventory"]["additionalProperties"],
-        false
+    assert!(
+        document["components"]["schemas"]["ProviderConnectionInventory"]
+            .get("additionalProperties")
+            .is_none()
     );
     assert!(document["paths"]["/disclosures"]["get"]["responses"]["200"].is_object());
     assert!(document["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"].is_object());
@@ -4871,10 +4877,16 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
             ["maximum"],
         16_384
     );
+    let search = &document["components"]["schemas"]["ToolArtifactSelector"]["oneOf"][2];
+    assert_eq!(search["required"], json!(["kind", "query"]));
+    assert_eq!(search["properties"]["max_matches"]["format"], "uint64");
+    assert_eq!(search["properties"]["max_matches"]["default"], 50);
+    assert!(search["properties"]["max_matches"].get("maximum").is_none());
+    assert_eq!(search["properties"]["start_offset"]["default"], 0);
+    assert_eq!(search["properties"]["context_lines"]["default"], 0);
     assert_eq!(
-        document["components"]["schemas"]["ToolArtifactSelector"]["oneOf"][2]["properties"]["max_matches"]
-            ["maximum"],
-        20
+        document["components"]["schemas"]["ToolArtifactPage"]["properties"]["match_count"]["maximum"],
+        sigil_kernel::session::TOOL_ARTIFACT_SEARCH_MAX_MATCHES
     );
     assert_eq!(
         document["components"]["schemas"]["ToolArtifactPage"]["properties"]["returned_bytes"]["maximum"],
@@ -5189,7 +5201,7 @@ fn openapi_document_covers_current_command_surface_and_approval_guards() {
         );
         assert_eq!(
             document["components"]["schemas"][component]["additionalProperties"],
-            false
+            true
         );
     }
     assert!(
@@ -5333,7 +5345,7 @@ fn openapi_plan_decision_receipt_exposes_optional_task_admission_fields() {
     let document = http_openapi_document();
     let receipt = &document["components"]["schemas"]["PlanDecisionCommandReceipt"];
 
-    for field in ["task_title", "candidate_hash", "task_phase", "task_blocker"] {
+    for field in ["task_title", "candidate_hash", "task_phase"] {
         assert!(
             receipt["properties"][field].is_object(),
             "missing plan decision receipt field {field}"
@@ -5358,20 +5370,15 @@ fn openapi_plan_decision_receipt_exposes_optional_task_admission_fields() {
         "#/components/schemas/TaskExecutionPhase"
     );
     assert_eq!(
-        receipt["properties"]["task_blocker"]["oneOf"][0]["$ref"],
-        "#/components/schemas/TaskBlocker"
+        receipt["properties"]["task_phase"]["oneOf"][1]["type"],
+        "null"
     );
-    for field in ["task_phase", "task_blocker"] {
-        assert_eq!(receipt["properties"][field]["oneOf"][1]["type"], "null");
-    }
 
     assert_eq!(
         document["components"]["schemas"]["TaskExecutionPhase"]["enum"],
         json!([
-            "preparing",
             "ready",
             "running",
-            "blocked",
             "paused",
             "completed",
             "failed",
@@ -5379,33 +5386,10 @@ fn openapi_plan_decision_receipt_exposes_optional_task_admission_fields() {
             "interrupted"
         ])
     );
-    let blocker = &document["components"]["schemas"]["TaskBlocker"];
-    assert_eq!(blocker["additionalProperties"], false);
-    assert_eq!(
-        blocker["required"],
-        json!([
-            "reason_code",
-            "summary",
-            "retryable",
-            "evidence_digest",
-            "created_at_ms"
-        ])
-    );
-    assert_eq!(
-        blocker["properties"]["reason_code"]["$ref"],
-        "#/components/schemas/TaskBlockerReasonCode"
-    );
-    assert_eq!(
-        blocker["properties"]["affected_step"]["oneOf"][0]["$ref"],
-        "#/components/schemas/TaskStepId"
-    );
-    assert_eq!(
-        blocker["properties"]["affected_capability"]["oneOf"][0]["$ref"],
-        "#/components/schemas/TaskCapability"
-    );
-    assert_eq!(
-        blocker["properties"]["available_actions"]["items"]["$ref"],
-        "#/components/schemas/TaskBlockerAction"
+    assert!(
+        document["components"]["schemas"]
+            .get("TaskBlocker")
+            .is_none()
     );
 }
 
@@ -7060,7 +7044,7 @@ async fn live_event_bus_preserves_typed_live_revision_separate_from_durable_repl
         schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
         session_id: "session-live".to_owned(),
         run_id: "run-live".to_owned(),
-        attempt_id: "physical-attempt-1".to_owned(),
+        attempt_id: Some("physical-attempt-1".to_owned()),
         slot_id: "assistant".to_owned(),
         live_revision: 7,
         base_durable_sequence: 3,
@@ -7097,11 +7081,14 @@ async fn live_event_bus_treats_tool_progress_as_transient() {
         call_id: "call-1".to_owned(),
         tool_name: "terminal_start".to_owned(),
         status: "running".to_owned(),
+        preview_is_output: false,
+        started_at_ms: None,
         total_bytes: Some(64),
         updated_at_ms: Some(10),
     };
     let update = LiveRunUpdate {
-        slot_id: progress.call_id.clone(),
+        attempt_id: None,
+        slot_id: progress.execution_id.clone(),
         tool_progress: Some(progress.clone()),
         ..live_preview_update(
             "session-1",
@@ -7290,6 +7277,7 @@ fn live_event_bus_binds_approval_display_to_the_exact_public_sequence() {
         "run-1",
         2,
         PublicRunEventKind::ApprovalRequested {
+            display_call_id: None,
             approval_identity: ApprovalRequestIdentityV2 {
                 session_id: "session-1".to_owned(),
                 run_id: "run-1".to_owned(),
@@ -7838,10 +7826,9 @@ fn session_open_retries_one_accepted_user_input_through_the_exact_command_path()
         "prompt": "Choose the recovery scope",
         "questions": [{
             "id": "scope",
-            "header": "Scope",
             "question": "Which scope?",
-            "required": true,
-            "field": {"kind": "text", "multiline": false, "max_chars": 128}
+            "options": [],
+            "multiple": false
         }],
         "allowed_actions": ["submit", "decline", "cancel_run"],
         "requested_at_unix_ms": 1,
@@ -7856,6 +7843,7 @@ fn session_open_retries_one_accepted_user_input_through_the_exact_command_path()
     .expect("accepted request fixture should decode");
     driver.set_user_input_request(request);
     let recovery = HttpUserInputDecisionDriverCommand {
+        application_operation: None,
         command_id: "accepted-command-1".to_owned(),
         client_id: "session-recovery".to_owned(),
         request_id: "request-recovery-1".to_owned(),
@@ -8697,9 +8685,9 @@ fn exact_task_pause_routes_once_and_rejection_restores_the_run() {
             run_start("pause exact Task", HttpPermissionMode::Manual),
         )
         .expect("driver should accept run");
-    let request = TaskPauseRequest::new(
+    let request = TaskPauseRequest::direct(
         TaskId::new("task-http-registry-pause").expect("Task id should be valid"),
-        2,
+        "admission-http-registry-pause",
     );
     let command = HttpCommandEnvelope::new(
         "command-task-pause",
@@ -8779,9 +8767,9 @@ fn malformed_task_pause_identity_fails_before_driver_routing() {
             run_start("reject malformed pause", HttpPermissionMode::Manual),
         )
         .expect("run should start");
-    let mut request = TaskPauseRequest::new(
+    let mut request = TaskPauseRequest::direct(
         TaskId::new("task-http-malformed-pause").expect("Task id should be valid"),
-        1,
+        "admission-http-malformed-pause",
     );
     request.request_id = "forged".to_owned();
 
@@ -10454,7 +10442,6 @@ impl HttpRunDriver for RecordingRunDriver {
             task_title: None,
             candidate_hash: None,
             task_phase: None,
-            task_blocker: None,
             revision_run_id: None,
             user_input_request: None,
             replayed: false,
@@ -11232,4 +11219,55 @@ fn approve_for_family_fails_closed_without_a_pattern_or_config_path() {
         )
         .expect("pending approval must survive the failed family persist");
     assert_eq!(retry.decision, ToolApprovalUserDecision::Approved);
+}
+
+#[test]
+fn http_artifact_search_defaults_and_large_requests_match_kernel_contract() -> anyhow::Result<()> {
+    let default: HttpToolArtifactSelector = serde_json::from_value(json!({
+        "kind": "search_literal", "query": "needle", "retired_field": true
+    }))?;
+    assert_eq!(
+        default,
+        HttpToolArtifactSelector::SearchLiteral {
+            query: "needle".into(),
+            start_offset: 0,
+            max_matches: 50,
+            context_lines: 0,
+        }
+    );
+    default.validate()?;
+    for max_matches in [100, 65536, u64::MAX] {
+        let selector: HttpToolArtifactSelector = serde_json::from_value(json!({
+            "kind": "search_literal", "query": "needle", "max_matches": max_matches
+        }))?;
+        selector.validate()?;
+        let kernel: sigil_kernel::ToolArtifactSelectorV1 = selector.clone().into();
+        kernel.validate()?;
+        assert_eq!(HttpToolArtifactSelector::from(kernel), selector);
+        let request = HttpToolArtifactReadRequest {
+            artifact_ref: format!("ta1_{}", "a".repeat(32)),
+            selector: selector.clone(),
+        };
+        let body = "needle\n".repeat(100);
+        let page = HttpToolArtifactPage {
+            schema_version: HTTP_TOOL_ARTIFACT_PAGE_SCHEMA_VERSION,
+            request_scope: "search-fixture".into(),
+            artifact_ref: request.artifact_ref.clone(),
+            selector,
+            returned_bytes: body.len() as u32,
+            page_sha256: sigil_kernel::stable_event_hash(body.as_bytes()),
+            artifact_sha256: sigil_kernel::stable_event_hash(body.as_bytes()),
+            body,
+            body_encoding: HttpToolArtifactPageEncoding::Utf8,
+            eof: true,
+            match_count: 100,
+            next_selector: None,
+        };
+        page.validate("search-fixture", &request)?;
+    }
+    let zero: HttpToolArtifactSelector = serde_json::from_value(json!({
+        "kind": "search_literal", "query": "needle", "max_matches": 0
+    }))?;
+    assert!(zero.validate().is_err());
+    Ok(())
 }

@@ -311,7 +311,10 @@ impl HttpProtocolEvent {
                     && approval.policy_version == approval_identity.policy_version
                     && approval.expires_at_ms == approval_identity.expires_at_ms
                     && approval_identity.session_id == run_event.session_id
-                    && approval_identity.run_id == run_event.run_id
+                    // The public run id owns the durable application lifecycle. A model-owned
+                    // Task or participant loop may issue the exact approval under its own
+                    // logical run id while the HTTP approval route remains attached to the root.
+                    && !approval_identity.run_id.trim().is_empty()
                     && approval_identity.call_id == call.id
                     && approval_guard_is_persistence_safe(approval)
                     && approval.display.event_sequence == run_event.sequence
@@ -523,23 +526,12 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
             request.prompt = safe_persistence_text(&request.prompt);
             for question in &mut request.questions {
                 question.id = safe_persistence_text(&question.id);
-                question.header = safe_persistence_text(&question.header);
                 question.question = safe_persistence_text(&question.question);
                 question.description = question.description.as_deref().map(safe_persistence_text);
-                let options = match &mut question.field {
-                    sigil_kernel::UserInputFieldKindV1::SingleSelect { options, .. }
-                    | sigil_kernel::UserInputFieldKindV1::MultiSelect { options, .. } => {
-                        Some(options)
-                    }
-                    _ => None,
-                };
-                if let Some(options) = options {
-                    for option in options {
-                        option.id = safe_persistence_text(&option.id);
-                        option.label = safe_persistence_text(&option.label);
-                        option.description =
-                            option.description.as_deref().map(safe_persistence_text);
-                    }
+                for option in &mut question.options {
+                    option.id = safe_persistence_text(&option.id);
+                    option.label = safe_persistence_text(&option.label);
+                    option.description = option.description.as_deref().map(safe_persistence_text);
                 }
             }
         }
@@ -551,9 +543,8 @@ fn project_durable_text_for_persistence(event: &mut PublicRunEventKind) {
         }
         PublicRunEventKind::TaskExecutionAdmitted { task_id, execution } => {
             *task_id = safe_persistence_text(task_id);
-            if let sigil_kernel::TaskExecutionBindingV1::Direct { admission_id } = execution {
-                *admission_id = safe_persistence_text(admission_id);
-            }
+            let sigil_kernel::TaskExecutionBindingV1::Direct { admission_id } = execution;
+            *admission_id = safe_persistence_text(admission_id);
         }
         PublicRunEventKind::TaskPlanUpdated {
             task_id,

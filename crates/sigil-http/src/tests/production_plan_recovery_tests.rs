@@ -4,25 +4,27 @@ struct ManagedPlanRecoveryFixture {
     driver: Arc<HttpProductionRunDriver>,
     registry: Arc<HttpSessionRunRegistry>,
     provider_calls: Arc<AtomicUsize>,
-    finalizer_started: Arc<tokio::sync::Semaphore>,
-    finalizer_release: Arc<tokio::sync::Semaphore>,
+    provider_response_started: Arc<tokio::sync::Semaphore>,
+    provider_response_release: Arc<tokio::sync::Semaphore>,
     provider_server: tokio::task::JoinHandle<()>,
 }
 
 async fn managed_plan_recovery_fixture(
     temp: &tempfile::TempDir,
-    pause_finalizer: bool,
+    pause_provider_response: bool,
 ) -> ManagedPlanRecoveryFixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("local provider should bind");
     let address = listener.local_addr().expect("provider address");
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let finalizer_started = Arc::new(tokio::sync::Semaphore::new(0));
-    let finalizer_release = Arc::new(tokio::sync::Semaphore::new(usize::from(!pause_finalizer)));
+    let provider_response_started = Arc::new(tokio::sync::Semaphore::new(0));
+    let provider_response_release = Arc::new(tokio::sync::Semaphore::new(usize::from(
+        !pause_provider_response,
+    )));
     let calls = Arc::clone(&provider_calls);
-    let started = Arc::clone(&finalizer_started);
-    let release = Arc::clone(&finalizer_release);
+    let started = Arc::clone(&provider_response_started);
+    let release = Arc::clone(&provider_response_release);
     let provider_server = tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut request = Vec::new();
@@ -54,32 +56,32 @@ async fn managed_plan_recovery_fixture(
                 }
             }
             let ordinal = calls.fetch_add(1, Ordering::SeqCst);
-            if ordinal == 1 {
+            if ordinal == 0 {
                 started.add_permits(1);
-                release.acquire().await.expect("finalizer release").forget();
+                release
+                    .acquire()
+                    .await
+                    .expect("provider response release")
+                    .forget();
             }
-            let delta = if ordinal == 0 {
-                serde_json::json!({"content": "The bounded repository review is complete."})
-            } else {
-                serde_json::json!({"tool_calls": [{
-                    "index": 0,
-                    "id": "managed-recovered-draft",
-                    "type": "function",
-                    "function": {
-                        "name": sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME,
-                        "arguments": serde_json::json!({
-                            "schema_version": 1,
-                            "outcome": "draft",
-                            "content": "# Recovered managed Plan\n\n1. Preserve the public contract."
-                        }).to_string()
-                    }
-                }]})
-            };
+            let delta = serde_json::json!({"tool_calls": [{
+                "index": 0,
+                "id": format!("managed-recovered-draft-{ordinal}"),
+                "type": "function",
+                "function": {
+                    "name": sigil_kernel::PLAN_REVIEW_RESULT_TOOL_NAME,
+                    "arguments": serde_json::json!({
+                        "schema_version": 1,
+                        "outcome": "draft",
+                        "content": "# Recovered managed Plan\n\n1. Preserve the public contract."
+                    }).to_string()
+                }
+            }]});
             let body = format!(
                 "data: {}\n\ndata: [DONE]\n\n",
                 serde_json::json!({"choices": [{
                     "delta": delta,
-                    "finish_reason": if ordinal == 0 { "stop" } else { "tool_calls" }
+                    "finish_reason": "tool_calls"
                 }]})
             );
             socket.write_all(format!(
@@ -131,8 +133,8 @@ async fn managed_plan_recovery_fixture(
         driver,
         registry,
         provider_calls,
-        finalizer_started,
-        finalizer_release,
+        provider_response_started,
+        provider_response_release,
         provider_server,
     }
 }
@@ -265,13 +267,13 @@ async fn assert_production_reopen_recovers_managed_plan_draft(retry_attachment: 
     let sigil_runtime::PlanReviewRunOutcome::DraftReady { draft } = outcome else {
         panic!("the real provider must complete a typed draft before the crash boundary");
     };
-    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         sigil_kernel::PlanReviewProjection::from_entries(parent.entries())
             .latest_attempt(&request.plan_review_id)
             .expect("active parent attempt")
             .status,
-        sigil_kernel::PlanReviewAttemptStatus::Finalizing,
+        sigil_kernel::PlanReviewAttemptStatus::Started,
     );
     assert!(
         !parent
@@ -358,7 +360,7 @@ async fn assert_production_reopen_recovers_managed_plan_draft(retry_attachment: 
     );
     assert_eq!(
         fixture.provider_calls.load(Ordering::SeqCst),
-        2,
+        1,
         "recovery must not call the provider"
     );
 }
@@ -405,11 +407,14 @@ async fn production_session_reopen_preserves_active_plan_and_parent_log() {
     .expect("guidance caller should join")
     .expect("real HTTP revision should start");
     let run_id = receipt.continuation_run_id.expect("revision run identity");
-    tokio::time::timeout(Duration::from_secs(15), fixture.finalizer_started.acquire())
-        .await
-        .expect("the real revision should reach its finalizer")
-        .expect("finalizer signal")
-        .forget();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        fixture.provider_response_started.acquire(),
+    )
+    .await
+    .expect("the revision should reach its ordinary provider response")
+    .expect("provider response signal")
+    .forget();
     let before = std::fs::read(&session.session_log_path).expect("live parent bytes");
     let open_request = managed_plan_recovery_open_request(&fixture.driver, &session);
     let opened = fixture
@@ -437,7 +442,7 @@ async fn production_session_reopen_preserves_active_plan_and_parent_log() {
             .expect("active-run state")
             .contains_key(&run_id)
     );
-    fixture.finalizer_release.add_permits(1);
+    fixture.provider_response_release.add_permits(1);
     let driver = Arc::clone(&fixture.driver);
     tokio::task::spawn_blocking(move || driver.wait_for_idle(Duration::from_secs(15)))
         .await
@@ -451,7 +456,7 @@ async fn production_session_reopen_preserves_active_plan_and_parent_log() {
             .status,
         HttpRunStatus::Finished
     );
-    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
     fixture.provider_server.abort();
 }
 

@@ -459,7 +459,7 @@ impl HttpCommandStoreError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct HttpStoredCommandKey {
     pub(crate) session_id: String,
     pub(crate) client_id: String,
@@ -467,7 +467,7 @@ pub(crate) struct HttpStoredCommandKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub(crate) struct HttpStoredCommandIdentity {
     pub(crate) key: HttpStoredCommandKey,
     pub(crate) kind: String,
@@ -552,7 +552,7 @@ struct HttpStoredCommandEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct HttpCommandStoreFile {
     schema_version: u32,
     server_epoch: u64,
@@ -737,7 +737,7 @@ fn validate_completion(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 struct HttpCommandStoreFileEntry {
     identity: HttpStoredCommandIdentity,
     completion: HttpStoredCommandCompletion,

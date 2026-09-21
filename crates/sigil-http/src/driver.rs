@@ -25,6 +25,8 @@ use crate::dto::{
 /// Exact user-input command identity delivered to the runtime-owned durable mutation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpUserInputDecisionDriverCommand {
+    /// Host-issued original application identity, never accepted from the wire payload.
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
     pub command_id: String,
     pub client_id: String,
     pub request_id: String,
@@ -168,6 +170,21 @@ pub struct HttpConversationQueueDriverCommand {
     pub client_id: String,
     /// Exact queue generation and requested mutation.
     pub request: HttpConversationQueueCommandRequest,
+    /// Bound by the actual Session owner before dispatch; never accepted from HTTP JSON.
+    pub application_operation: Option<sigil_kernel::ApplicationOperationBindingV1>,
+}
+
+/// Operation preparation retains the exact attachment until owner dispatch returns.
+pub struct HttpApplicationOperationOwner {
+    pub(crate) owner: sigil_kernel::SessionApplicationOperationOwner,
+    pub(crate) _attachment:
+        Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
+}
+
+/// A domain owner query keeps physical readers private and returns only authenticated facts.
+pub struct HttpApplicationOperationResolution {
+    pub(crate) binding: sigil_kernel::ApplicationOperationBindingV1,
+    pub(crate) proof: Option<sigil_kernel::session::ApplicationOperationCommitProofV1>,
 }
 
 /// Idempotent identity and exact payload for one durable conversation recovery command.
@@ -194,6 +211,45 @@ pub struct HttpConversationRecoveryDriverOutput {
 /// The registry owns IDs and routing state. The driver owns actual agent execution,
 /// cancellation, and approval delivery so this crate does not duplicate the agent loop.
 pub trait HttpRunDriver: Send + Sync {
+    fn application_operation_owner(
+        &self,
+        _session: &HttpSessionSnapshot,
+    ) -> Result<HttpApplicationOperationOwner, HttpRunDriverError> {
+        Err(HttpRunDriverError::new(
+            "application operation owner is unavailable",
+        ))
+    }
+
+    fn prepare_application_operation(
+        &self,
+        session: &HttpSessionSnapshot,
+        binding: &sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<HttpApplicationOperationOwner, HttpRunDriverError> {
+        let owner = self.application_operation_owner(session)?;
+        owner.owner.prepare(binding).map_err(|error| {
+            HttpRunDriverError::new(format!("application operation preparation failed: {error}"))
+        })?;
+        Ok(owner)
+    }
+
+    fn query_application_operation(
+        &self,
+        session: &HttpSessionSnapshot,
+        binding: &sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<HttpApplicationOperationResolution, HttpRunDriverError> {
+        let attachment = self.application_operation_owner(session)?;
+        let (binding, reader) = attachment
+            .owner
+            .observe_operation(binding)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application domain owner unavailable: {error}"))
+            })?;
+        let proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)
+            .map_err(|error| {
+                HttpRunDriverError::new(format!("application operation query failed: {error}"))
+            })?;
+        Ok(HttpApplicationOperationResolution { binding, proof })
+    }
     /// Whether terminal registry state must retain an admission barrier until the driver reports
     /// that its process-local supervisor and runtime session lease have both been released.
     fn requires_run_release_barrier(&self) -> bool {
@@ -692,6 +748,21 @@ pub trait HttpRunDriver: Send + Sync {
         Err(HttpRunDriverError::new(
             "User input decision is unavailable",
         ))
+    }
+
+    /// Observes a continuation already owned by this driver after the answer itself settled.
+    /// An answer commit is not evidence that a child was registered or started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source identity or existing continuation owner cannot be read
+    /// consistently. An absent registration returns `None` without starting a run.
+    fn user_input_continuation_run(
+        &self,
+        _session: &HttpSessionSnapshot,
+        _request: &HttpUserInputRequest,
+    ) -> Result<Option<String>, HttpRunDriverError> {
+        Ok(None)
     }
 
     /// Waits until every driver-owned run supervisor has completed cleanup.

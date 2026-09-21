@@ -6,16 +6,10 @@
 //! adapter mapping are rejected by the typed application executor until their host semantics are
 //! migrated.
 //!
-//! Rebuilt clients retain the first expected frontier per full command reservation key within
-//! the same production driver. This bounded transport metadata holds no command/receipt body;
-//! the managed journal remains the sole replay/conflict authority. Driver restart discards this
-//! metadata and does not promise response-lost replay across a changed durable frontier.
+//! Rebuilt clients recover the original expected frontier from the canonical command journal.
+//! Transport restarts do not create a new reservation identity or discard replay history.
 
-use std::{
-    collections::BTreeMap,
-    num::NonZeroUsize,
-    sync::{Arc, Mutex},
-};
+use std::{num::NonZeroUsize, sync::Arc};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -49,8 +43,11 @@ use crate::{
 /// than by this payload.  The server therefore injects the admission principal, epoch, and live
 /// connection instance instead of trusting a caller-provided authority scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub struct HttpApplicationCommandRequest {
+    /// Frozen when the caller creates a new intent. Omission denotes legacy generation zero.
+    #[serde(default)]
+    pub command_journal: Option<sigil_application::CommandJournalBinding>,
     /// Caller-retained command identity used for response-lost retries.
     pub command_id: String,
     /// Transport-neutral grouped command.
@@ -68,48 +65,6 @@ pub(crate) struct HttpApplicationContext {
     pub(crate) registry: Arc<HttpSessionRunRegistry>,
     pub(crate) runtime: Handle,
     pub(crate) projection_owner: Option<sigil_runtime::RuntimeSessionProjectionOwner>,
-    pub(crate) command_frontiers: Arc<HttpCommandFrontiers>,
-}
-
-// Matches the managed reservation journal's existing entry bound. This transport metadata
-// retains neither command bodies nor outcomes and cannot grant reservation/effect authority.
-const MAX_HTTP_COMMAND_FRONTIERS: usize = 4096;
-
-/// Original command frontiers retained for response-lost retries within one driver lifetime.
-/// A restarted driver still relies on the durable reservation owner's conflict/recovery rules.
-#[derive(Default)]
-pub(crate) struct HttpCommandFrontiers {
-    entries: Mutex<
-        BTreeMap<sigil_application::CommandReservationKey, sigil_application::ExpectedFrontier>,
-    >,
-}
-
-impl HttpCommandFrontiers {
-    fn retain_original(
-        &self,
-        request: &mut ApplicationCommandRequest,
-    ) -> Result<(), ApplicationError> {
-        let key = request
-            .admission
-            .reservation_key(&request.envelope.command_id);
-        key.validate()?;
-        if request.envelope.expected_frontier.scope != key.authority_scope {
-            return Err(ApplicationError::ScopeMismatch);
-        }
-        let mut entries = self
-            .entries
-            .lock()
-            .map_err(|_| ApplicationError::Unavailable)?;
-        if let Some(original) = entries.get(&key) {
-            request.envelope.expected_frontier = original.clone();
-        } else {
-            if entries.len() >= MAX_HTTP_COMMAND_FRONTIERS {
-                return Err(ApplicationError::Unavailable);
-            }
-            entries.insert(key, request.envelope.expected_frontier.clone());
-        }
-        Ok(())
-    }
 }
 
 pub(crate) fn application_scope(
@@ -136,14 +91,65 @@ pub(crate) fn application_scope(
 
 /// HTTP-local client facade used by the listener and production integration tests.
 pub struct HttpApplicationClient {
+    journal_store: Arc<ManagedApplicationReservationStore>,
     client: ApplicationClient,
     runtime: Handle,
     source_generation: u64,
-    command_frontiers: Arc<HttpCommandFrontiers>,
     urgent_frontier: sigil_application::ExpectedFrontier,
+    dispatch_observation: Arc<std::sync::Mutex<Option<UserInputDispatchObservation>>>,
+    observation_execution: std::sync::Mutex<()>,
+}
+
+/// Call-local diagnostics only. Domain settlement and replay never consume this observation.
+struct UserInputDispatchObservation {
+    key: sigil_application::CommandReservationKey,
+    fingerprint: String,
+    error: Option<crate::HttpRegistryError>,
+}
+
+impl UserInputDispatchObservation {
+    fn record_failure(
+        &mut self,
+        request: &ApplicationCommandRequest,
+        error: crate::HttpRegistryError,
+    ) -> Result<(), ApplicationError> {
+        if self.key
+            == request
+                .admission
+                .reservation_key(&request.envelope.command_id)
+            && self.fingerprint == sigil_application::command_fingerprint(request)?
+        {
+            self.error = Some(error);
+        }
+        Ok(())
+    }
+}
+
+struct DispatchObservationGuard(Arc<std::sync::Mutex<Option<UserInputDispatchObservation>>>);
+
+impl Drop for DispatchObservationGuard {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
 }
 
 impl HttpApplicationClient {
+    pub(crate) fn command_journal_binding(
+        &self,
+    ) -> Result<sigil_application::CommandJournalBinding, ApplicationError> {
+        self.journal_store
+            .command_journal_binding()?
+            .ok_or(ApplicationError::Unavailable)
+    }
+    pub(crate) fn recover_control_log(
+        &self,
+        action: sigil_application::ControlLogRecoveryAction,
+    ) -> Result<sigil_application::ControlLogRecoveryOutcome, ApplicationError> {
+        self.block_on(self.client.recover_control_log(action))
+    }
     fn block_on<T>(&self, future: impl std::future::Future<Output = T>) -> T {
         if let Ok(handle) = Handle::try_current()
             && matches!(handle.runtime_flavor(), RuntimeFlavor::MultiThread)
@@ -160,15 +166,71 @@ impl HttpApplicationClient {
         self.block_on(self.client.refresh())
     }
 
-    pub(crate) fn execute(
+    pub(crate) fn execute_in_journal(
         &self,
         command_id: &str,
+        journal: Option<sigil_application::CommandJournalBinding>,
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.execute_with_observation(command_id, journal, command)
+            .map(|(receipt, _)| receipt)
+    }
+
+    pub(crate) fn execute_user_input_in_journal(
+        &self,
+        command_id: &str,
+        journal: Option<sigil_application::CommandJournalBinding>,
+        command: ApplicationCommand,
+    ) -> Result<ApplicationCommandReceipt, crate::HttpRegistryError> {
+        let (receipt, error) = self
+            .execute_with_observation(command_id, journal, command)
+            .map_err(crate::registry::application_registry_error)?;
+        match error {
+            Some(error) => Err(error),
+            None => Ok(receipt),
+        }
+    }
+
+    fn execute_with_observation(
+        &self,
+        command_id: &str,
+        journal: Option<sigil_application::CommandJournalBinding>,
+        command: ApplicationCommand,
+    ) -> Result<(ApplicationCommandReceipt, Option<crate::HttpRegistryError>), ApplicationError>
+    {
+        // Serialize only this client's normal invocation observation. Urgent stop retains its
+        // separate nonwaiting lane; other clients own independent slots.
+        let _execution = self
+            .observation_execution
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
         let command_id = ApplicationCommandId::new(command_id.to_owned())?;
         let mut request = self.client.prepare_command(command_id, command)?;
-        self.command_frontiers.retain_original(&mut request)?;
-        self.block_on(self.client.execute_prepared(request))
+        request.admission.command_journal = journal;
+        self.block_on(self.client.restore_original_command_context(&mut request))?;
+        let key = request
+            .admission
+            .reservation_key(&request.envelope.command_id);
+        let fingerprint = sigil_application::command_fingerprint(&request)?;
+        let _observation = DispatchObservationGuard(Arc::clone(&self.dispatch_observation));
+        *self
+            .dispatch_observation
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)? = Some(UserInputDispatchObservation {
+            key: key.clone(),
+            fingerprint: fingerprint.clone(),
+            error: None,
+        });
+        let receipt = self.block_on(self.client.execute_prepared(request))?;
+        let observation = self
+            .dispatch_observation
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .take();
+        let error = observation
+            .filter(|observation| observation.key == key && observation.fingerprint == fingerprint)
+            .and_then(|observation| observation.error);
+        Ok((receipt, error))
     }
 
     /// Executes an urgent command using the host-bound baseline frontier without opening the
@@ -177,6 +239,7 @@ impl HttpApplicationClient {
     pub(crate) fn execute_without_refresh(
         &self,
         command_id: &str,
+        journal: Option<sigil_application::CommandJournalBinding>,
         command: ApplicationCommand,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         let command_id = ApplicationCommandId::new(command_id.to_owned())?;
@@ -185,7 +248,9 @@ impl HttpApplicationClient {
             command,
             self.urgent_frontier.clone(),
         )?;
-        self.command_frontiers.retain_original(&mut request)?;
+        request.admission.command_journal = journal;
+        // An unavailable command journal must not block the exact-owner safety-stop lane.
+        let _ = self.block_on(self.client.restore_original_command_context(&mut request));
         self.block_on(self.client.execute_prepared(request))
     }
 
@@ -253,10 +318,14 @@ pub(crate) fn build_client(
     } else {
         projection
     };
+    let dispatch_observation = Arc::new(std::sync::Mutex::new(None));
     let executor = Arc::new(HttpApplicationCommandExecutor {
         registry: Arc::clone(&context.registry),
         session_id: session.id.clone(),
         client_id: client_id.to_owned(),
+        projection: projection.clone(),
+        operation_owners: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        dispatch_observation: Arc::clone(&dispatch_observation),
     });
     let service: Arc<dyn ApplicationPort> = Arc::new(RuntimeApplicationService::new(
         Arc::new(projection),
@@ -276,11 +345,13 @@ pub(crate) fn build_client(
     let client = ApplicationClient::new(service, scope, 1, client_epoch, connection_instance)
         .map_err(application_driver_error)?;
     Ok(HttpApplicationClient {
+        journal_store: Arc::clone(&context.reservations),
         client,
         runtime: context.runtime.clone(),
         source_generation: context.application_generation,
-        command_frontiers: Arc::clone(&context.command_frontiers),
         urgent_frontier,
+        dispatch_observation,
+        observation_execution: std::sync::Mutex::new(()),
     })
 }
 
@@ -478,6 +549,7 @@ fn application_recovery_domain_commit(
         ));
     }
     Ok(sigil_application::ApplicationDomainCommitRef {
+        source_session_scope_id: None,
         source_event_id: format!(
             "http-recovery-domain:{}:{}",
             receipt.session_id, source_sequence
@@ -512,15 +584,70 @@ struct HttpApplicationCommandExecutor {
     registry: Arc<HttpSessionRunRegistry>,
     session_id: String,
     client_id: String,
+    projection: sigil_runtime::RuntimeSessionProjectionBinding,
+    dispatch_observation: Arc<std::sync::Mutex<Option<UserInputDispatchObservation>>>,
+    operation_owners: std::sync::Mutex<
+        std::collections::BTreeMap<String, crate::driver::HttpApplicationOperationOwner>,
+    >,
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommandExecutor {
+    fn reconcile(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<Option<RuntimeApplicationDispatch>, ApplicationError>> {
+        let projection = self.projection.clone();
+        let registry = Arc::clone(&self.registry);
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            let Some(binding) =
+                sigil_runtime::application_operation_owner::application_operation_binding(
+                    &request,
+                )?
+            else {
+                return Ok(None);
+            };
+            let resolved = registry
+                .query_application_operation(&session_id, &binding)
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let Some(proof) = resolved.proof else {
+                return Ok(None);
+            };
+            let frontier = projection.durable_frontier().await?;
+            sigil_runtime::application_operation_owner::application_operation_receipt_from_proof(
+                &request,
+                &resolved.binding,
+                &proof,
+                &frontier,
+            )
+            .map(Some)
+        })
+    }
     fn bind_effect(
         &self,
         request: ApplicationCommandRequest,
         key: sigil_application::CommandReservationKey,
         fingerprint: String,
     ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let prepared: Result<Option<String>, ApplicationError> = (|| {
+            let Some(operation) =
+                sigil_runtime::application_operation_owner::application_operation_binding(
+                    &request,
+                )?
+            else {
+                return Ok(None);
+            };
+            let owner = self
+                .registry
+                .prepare_application_operation(&self.session_id, &operation)
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let identity = operation.operation_id.clone();
+            self.operation_owners
+                .lock()
+                .map_err(|_| ApplicationError::Unavailable)?
+                .insert(identity.clone(), owner);
+            Ok(Some(identity))
+        })();
         let binding = CommandEffectBinding {
             command_id: request.envelope.command_id.clone(),
             command_kind: request.envelope.command.kind().to_owned(),
@@ -529,9 +656,12 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
                 key,
                 phase: CommandLifecyclePhase::EffectStarted,
             },
-            owner_effect_id: format!("http-command:{}", request.envelope.command_id),
+            owner_effect_id: String::new(),
         };
         Box::pin(async move {
+            let mut binding = binding;
+            binding.owner_effect_id = prepared?
+                .unwrap_or_else(|| format!("http-command:{}", request.envelope.command_id));
             binding.validate()?;
             Ok(binding)
         })
@@ -555,7 +685,21 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
         } else {
             self.dispatch_sync(&request)
         };
-        Box::pin(async move { result })
+        if let Ok(Some(operation)) =
+            sigil_runtime::application_operation_owner::application_operation_binding(&request)
+            && let Ok(mut owners) = self.operation_owners.lock()
+        {
+            owners.remove(&operation.operation_id);
+        }
+        let reconciliation = self.reconcile(request);
+        Box::pin(async move {
+            if matches!(result, Ok(RuntimeApplicationDispatch::Uncertain(_)))
+                && let Ok(Some(settled)) = reconciliation.await
+            {
+                return Ok(settled);
+            }
+            result
+        })
     }
 
     fn request_safety_stop(
@@ -564,6 +708,15 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
     ) -> BoxFuture<'static, Result<sigil_application::SafetyStopDisposition, ApplicationError>>
     {
         let result = (|| {
+            if let ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) =
+                &request.envelope.command
+            {
+                self.cancel_bound_run(binding, reason.as_ref())?;
+                // The production cancellation call waits for its supervisor to acknowledge
+                // activation of the cancellation token, closing forward execution admission.
+                // It does not claim that provider/process cleanup has already completed.
+                return Ok(sigil_application::SafetyStopDisposition::ForwardGateClosed);
+            }
             let ApplicationCommand::Run(RunCommand::CancelTerminalTask { identity }) =
                 &request.envelope.command
             else {
@@ -599,6 +752,29 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for HttpApplicationCommand
 }
 
 impl HttpApplicationCommandExecutor {
+    fn cancel_bound_run(
+        &self,
+        binding: &str,
+        reason: Option<&sigil_application::SafeText>,
+    ) -> Result<(), ApplicationError> {
+        if binding.trim().is_empty() {
+            return Err(ApplicationError::InvalidRequest(
+                "run cancellation binding is empty".to_owned(),
+            ));
+        }
+        let run = self
+            .registry
+            .get_run(binding)
+            .map_err(|_| ApplicationError::NotFound)?;
+        if run.session_id != self.session_id {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        self.registry
+            .cancel_run_with_reason(binding, reason.map(|reason| reason.as_str().to_owned()))
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(())
+    }
+
     fn dispatch_sync(
         &self,
         request: &ApplicationCommandRequest,
@@ -652,15 +828,17 @@ impl HttpApplicationCommandExecutor {
                         .correlation_id
                         .as_ref()
                         .map(|id| id.to_string()),
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?,
                 ) {
                     Ok(queue) => queue,
-                    Err(error) => {
-                        return confirmed_no_effect(
+                    Err(_) => {
+                        // An I/O failure may follow the domain commit. Only the causal owner
+                        // can settle it; a driver error is not proof that no mutation happened.
+                        return uncertain_dispatch(
                             request,
-                            sigil_application::CommandRejection {
-                                kind: "http_conversation_queue_rejected".to_owned(),
-                                reason: error.to_string(),
-                            },
+                            "http-queue-owner-query-required".to_owned(),
                         );
                     }
                 };
@@ -722,26 +900,30 @@ impl HttpApplicationCommandExecutor {
                 ))
             }
             ApplicationCommand::Run(RunCommand::Cancel { binding, reason }) => {
-                if binding.trim().is_empty() {
-                    return Err(ApplicationError::InvalidRequest(
-                        "run cancellation binding is empty".to_owned(),
-                    ));
-                }
-                let run = self
-                    .registry
-                    .get_run(binding)
-                    .map_err(|_| ApplicationError::NotFound)?;
-                if run.session_id != self.session_id {
-                    return Err(ApplicationError::ScopeMismatch);
-                }
-                let _run = self
-                    .registry
-                    .cancel_run_with_reason(
-                        binding,
-                        reason.as_ref().map(|reason| reason.as_str().to_owned()),
-                    )
-                    .map_err(|_| ApplicationError::Unavailable)?;
+                self.cancel_bound_run(binding, reason.as_ref())?;
                 uncertain_dispatch(request, format!("http-run-cancel:{}", binding))
+            }
+            ApplicationCommand::Run(RunCommand::CancelTerminalTask { identity }) => {
+                let command = HttpCommandEnvelope::new(
+                    request.envelope.command_id.as_str(),
+                    &self.client_id,
+                    &self.session_id,
+                    HttpTerminalTaskCancelRequest {
+                        task_id: identity.task_id.as_str().to_owned(),
+                        expected_generation: identity.expected_generation,
+                    },
+                );
+                self.registry
+                    .cancel_terminal_task_command(identity.run_id.as_str(), command)
+                    .map_err(|_| ApplicationError::Unavailable)?;
+                uncertain_dispatch(
+                    request,
+                    format!(
+                        "http-terminal-cancel:{}:{}",
+                        identity.run_id.as_str(),
+                        identity.task_id.as_str()
+                    ),
+                )
             }
             ApplicationCommand::Approval(sigil_application::ApprovalCommand::Resolve {
                 binding,
@@ -849,15 +1031,23 @@ impl HttpApplicationCommandExecutor {
                             }
                         }),
                     },
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?,
                 ) {
                     Ok(receipt) => receipt,
-                    Err(crate::HttpRegistryError::DriverRejected { message, .. }) => {
-                        return confirmed_no_effect(
+                    Err(error @ crate::HttpRegistryError::DriverRejected { .. }) => {
+                        // A preparation/driver error may follow a durable answer. Only the
+                        // original owner can reconcile that boundary; an adapter error is not
+                        // evidence that no decision was committed.
+                        if let Ok(mut observation) = self.dispatch_observation.lock()
+                            && let Some(observation) = observation.as_mut()
+                        {
+                            observation.record_failure(request, error)?;
+                        }
+                        return uncertain_dispatch(
                             request,
-                            sigil_application::CommandRejection {
-                                kind: "http_user_input_rejected".to_owned(),
-                                reason: message,
-                            },
+                            format!("http-user-input:{}:", hex_binding_component(binding)),
                         );
                     }
                     Err(crate::HttpRegistryError::UserInputStale) => {

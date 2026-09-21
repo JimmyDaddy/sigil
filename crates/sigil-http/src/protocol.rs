@@ -13,6 +13,8 @@ pub struct HttpCommandEnvelope<T> {
     pub client_id: String,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_journal: Option<sigil_application::CommandJournalBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_stream_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
@@ -33,6 +35,7 @@ impl<T> HttpCommandEnvelope<T> {
             command_id: command_id.into(),
             client_id: client_id.into(),
             session_id: session_id.into(),
+            command_journal: None,
             expected_stream_sequence: None,
             correlation_id: None,
             payload,

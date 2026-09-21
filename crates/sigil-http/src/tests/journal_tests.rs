@@ -277,7 +277,7 @@ fn live_preview_update(
         schema_version: sigil_application::APPLICATION_CONTRACT_SCHEMA_VERSION,
         session_id: session_id.to_owned(),
         run_id: run_id.to_owned(),
-        attempt_id: "current-provider-attempt".to_owned(),
+        attempt_id: Some("current-provider-attempt".to_owned()),
         slot_id: "assistant".to_owned(),
         live_revision: revision,
         base_durable_sequence,
@@ -381,6 +381,7 @@ fn approval_event() -> HttpProtocolEvent {
         "run-1",
         1,
         PublicRunEventKind::ApprovalRequested {
+            display_call_id: None,
             approval_identity: approval_identity(),
             session_grant_available: false,
             session_grant_unavailable_reason: unavailable_session_grant_reason(),
@@ -1457,6 +1458,7 @@ fn durable_approval_projection_sanitizes_subjects_and_file_diffs() {
     let path = temp.path().join("journal.json");
     let journal = HttpDurableProtocolJournal::open(&path, 8).expect("journal should initialize");
     let event = PublicRunEventKind::ApprovalRequested {
+        display_call_id: None,
         approval_identity: approval_identity(),
         session_grant_available: false,
         session_grant_unavailable_reason: unavailable_session_grant_reason(),
