@@ -10,7 +10,8 @@ use crate::app::{
         CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT, child_tool_event_scope, format_child_pending_tool_card,
     },
     formatting::{
-        format_tool_progress_block_redacted_with_call, format_tool_result_block_redacted_with_call,
+        format_tool_call_block_redacted, format_tool_progress_block_redacted_with_call,
+        format_tool_result_block_redacted_with_call,
     },
     state::ChildToolCardOccurrence,
 };
@@ -148,25 +149,60 @@ impl AppState {
                     "Discarded incomplete provider response before recovery".to_owned(),
                 )
             }
-            RunEvent::ToolApprovalRequested { call, .. } => self.push_live_child_entry(
-                TimelineRole::Notice,
-                format!("Approve {} in child agent", call.name),
-            ),
+            RunEvent::ToolApprovalRequested {
+                call,
+                display_call_id,
+                ..
+            } => {
+                self.update_child_call_state(
+                    child_scope,
+                    display_call_id.as_deref().unwrap_or(&call.id),
+                    "approval",
+                );
+                self.push_live_child_entry(
+                    TimelineRole::Notice,
+                    format!("Approve {} in child agent", call.name),
+                )
+            }
             RunEvent::ToolApprovalResolved {
-                call_id, approved, ..
-            } => self.push_live_child_entry(
-                TimelineRole::Notice,
-                format!(
-                    "Approval {} for {}",
-                    if approved { "allowed" } else { "denied" },
-                    call_id
-                ),
-            ),
+                call_id,
+                display_call_id,
+                approved,
+                ..
+            } => {
+                self.update_child_call_state(
+                    child_scope,
+                    display_call_id.as_deref().unwrap_or(&call_id),
+                    if approved { "pending" } else { "denied" },
+                );
+                self.push_live_child_entry(
+                    TimelineRole::Notice,
+                    format!(
+                        "Approval {} for {}",
+                        if approved { "allowed" } else { "denied" },
+                        call_id
+                    ),
+                )
+            }
+            RunEvent::Control(sigil_kernel::ControlEntry::ToolExecution(execution))
+                if execution.status == sigil_kernel::ToolExecutionStatus::Started =>
+            {
+                self.update_child_call_state(child_scope, &execution.call_id, "running")
+            }
             RunEvent::ToolCallArgsDelta { .. }
             | RunEvent::Usage(_)
             | RunEvent::ContinuationState(_)
             | RunEvent::Control(_) => false,
         }
+    }
+
+    fn update_child_call_state(&mut self, child_scope: &str, call_id: &str, status: &str) -> bool {
+        let key = child_tool_event_key(child_scope, call_id);
+        let Some(call) = self.agent_panel.safe_child_tool_calls.get(&key) else {
+            return false;
+        };
+        let rendered = format_tool_call_block_redacted(call, status, &self.secret_redactor);
+        self.replace_or_push_live_child_tool_card(key, rendered, false)
     }
 
     fn append_live_child_delta(&mut self, role: TimelineRole, delta: String) -> bool {

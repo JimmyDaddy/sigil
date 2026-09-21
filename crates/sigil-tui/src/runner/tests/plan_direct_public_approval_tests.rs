@@ -50,7 +50,14 @@ fn approved_direct_task_publishes_approval_and_accepts_the_real_application_comm
             as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>,
         sigil_tools_builtin::BuiltinToolSelection::core(),
         Some(scratch),
-        || panic!("this fixture does not select persistent terminal tools"),
+        || sigil_tools_builtin::BuiltinTerminalOptions {
+            execution_config: sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                &config.execution,
+            ),
+            lifecycle_route: None,
+            executor: Arc::clone(&authority.command_execution)
+                as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>,
+        },
     );
     let draft = serde_json::json!({
         "schema_version": 1, "outcome": "draft",
@@ -181,6 +188,25 @@ fn approved_direct_task_publishes_approval_and_accepts_the_real_application_comm
         bail!("Direct Task did not finish: {terminal:?}")
     };
     assert_eq!(status, TaskRunStatus::Completed);
+    let admission_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(_))
+            )
+        })
+        .context("the approved Plan must have durable direct execution authority")?;
+    let write_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry,
+                SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                    if execution.call_id == "direct-write"
+            )
+        })
+        .context("the approved write must have an execution audit")?;
+    assert!(admission_index < write_index);
     assert_eq!(
         fs::read_to_string(workspace.join("approval-note.txt"))?,
         "approved direct write\n"

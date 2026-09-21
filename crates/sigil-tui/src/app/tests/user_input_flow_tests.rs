@@ -24,14 +24,11 @@ fn revision_request() -> Result<sigil_kernel::PublicUserInputRequestV1> {
         prompt: "What should change in this plan?".to_owned(),
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "revision_guidance".to_owned(),
-            header: "Revision request".to_owned(),
             question: "Describe the change.".to_owned(),
             description: None,
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: true,
-                max_chars: 2_000,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![
             sigil_kernel::UserInputActionV1::Submit,
@@ -261,7 +258,7 @@ fn plan_revision_duplicate_request_preserves_a_closed_draft() -> Result<()> {
 }
 
 #[test]
-fn ordinary_multiline_form_keeps_enter_and_control_enter_semantics() -> Result<()> {
+fn ordinary_text_form_uses_enter_to_focus_actions() -> Result<()> {
     let mut app = revision_app()?;
     app.clear_pending_user_input();
     let mut request = revision_request()?;
@@ -270,8 +267,6 @@ fn ordinary_multiline_form_keeps_enter_and_control_enter_semantics() -> Result<(
     app.set_pending_user_input(request);
     press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE)?;
     assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_none());
-    assert_eq!(text(&app), "x\n");
-    assert!(press(&mut app, KeyCode::Enter, KeyModifiers::CONTROL)?.is_none());
     assert!(app.pending_user_input().expect("form").focus_actions);
     assert!(press(&mut app, KeyCode::Enter, KeyModifiers::NONE)?.is_some());
     assert!(
@@ -292,9 +287,7 @@ fn routed_attention_fixture() -> Result<(
     let requested = sigil_kernel::UserInputRequestedV1::new(sigil_kernel::UserInputRequestV1 {
         schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
         identity: public.identity,
-        source: sigil_kernel::UserInputSourceV1::Planner {
-            task_id: task_id.clone(),
-        },
+        source: sigil_kernel::UserInputSourceV1::Agent,
         purpose: public.purpose,
         prompt: public.prompt,
         questions: public.questions,
@@ -325,7 +318,7 @@ fn routed_attention_fixture() -> Result<(
         route_id: sigil_kernel::AgentRouteId::new("attention-route")?,
         source_thread_id: command.identity.source_thread_id.clone(),
         source_attempt_id: sigil_kernel::AgentRunAttemptId::new("attention-attempt")?,
-        profile_id: sigil_kernel::AgentProfileId::new("planner")?,
+        profile_id: sigil_kernel::AgentProfileId::new("agent")?,
         parent_thread_id: sigil_kernel::AgentThreadId::new("root")?,
         batch_id: None,
         budget_scope_id: task_id,

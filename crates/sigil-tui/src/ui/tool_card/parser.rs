@@ -231,6 +231,14 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
         bytes: object.get("bytes").and_then(Value::as_u64),
         returned_bytes: object.get("returned_bytes").and_then(Value::as_u64),
         duration_ms: object.get("duration_ms").and_then(Value::as_u64),
+        execution_started_at_ms: details
+            .and_then(|value| value.get("started_at_ms"))
+            .or_else(|| terminal_context.and_then(|value| value.get("started_at_ms")))
+            .and_then(Value::as_u64),
+        execution_updated_at_ms: terminal_context
+            .and_then(|value| value.get("updated_at_ms"))
+            .or_else(|| details.and_then(|value| value.get("updated_at_ms")))
+            .and_then(Value::as_u64),
         exit_code: object.get("exit_code").and_then(Value::as_i64),
         returned_lines: object.get("returned_lines").and_then(Value::as_u64),
         total_lines: object.get("total_lines").and_then(Value::as_u64),
@@ -368,7 +376,13 @@ pub(super) fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(Value::as_str)
             .map(str::to_owned),
         terminal_task_id: terminal_context
-            .and_then(|details| details.get("task_id"))
+            .and_then(|details| {
+                details.get("task_id").or_else(|| {
+                    details
+                        .get("status")
+                        .and_then(|_| details.get("execution_id"))
+                })
+            })
             .and_then(Value::as_str)
             .map(str::to_owned),
         terminal_status: terminal_context

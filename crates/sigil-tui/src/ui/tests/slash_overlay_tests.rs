@@ -101,6 +101,8 @@ fn render_slash_selector_overlay_marks_selected_command() -> anyhow::Result<()> 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.slash_selector_selected_index(), Some(1));
+    let rows = app.slash_selector_rows();
     let backend = TestBackend::new(96, 24);
     let mut terminal = Terminal::new(backend)?;
 
@@ -120,9 +122,8 @@ fn render_slash_selector_overlay_marks_selected_command() -> anyhow::Result<()> 
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("› "));
-    assert!(rendered.contains("config"));
-    assert!(rendered.contains("new"));
+    assert!(rendered.contains(&format!("› {}", rows[1].0)));
+    assert!(rendered.contains(&rows[0].0));
     Ok(())
 }
 

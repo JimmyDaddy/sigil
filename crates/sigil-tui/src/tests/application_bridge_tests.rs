@@ -20,6 +20,74 @@ use sigil_application::{
 
 use super::*;
 
+/// A transport-only actor acknowledges real dispatch but never invents domain completion.
+pub(crate) fn acknowledged_test_channel(
+    owner: Option<sigil_kernel::SessionApplicationOperationOwner>,
+) -> (WorkerCommandSender, mpsc::Receiver<WorkerCommand>) {
+    let (sender, receiver) = WorkerCommandSender::test_channel();
+    let (observed, observations) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(command) = receiver.recv() {
+            match command {
+                WorkerCommand::QueryApplicationOperation { binding, reply } => {
+                    let result = owner
+                        .as_ref()
+                        .ok_or_else(|| "fixture has no domain owner".to_owned())
+                        .and_then(|owner| {
+                            let (binding, reader) = owner
+                                .observe_operation(&binding)
+                                .map_err(|error| error.to_string())?;
+                            let proof = sigil_kernel::session::reconcile_application_operation(
+                                &reader, &binding,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            Ok((binding, proof))
+                        });
+                    let _ = reply.send(result);
+                }
+                WorkerCommand::FindCommittedApplicationOperation {
+                    target,
+                    key_digest,
+                    reply,
+                } => {
+                    let result = owner
+                        .as_ref()
+                        .ok_or_else(|| "fixture has no domain owner".to_owned())
+                        .and_then(|owner| {
+                            let (scope, reader) = owner
+                                .observe_target(&target)
+                                .map_err(|error| error.to_string())?;
+                            sigil_kernel::session::committed_application_operation(
+                                &reader,
+                                &scope,
+                                &key_digest,
+                            )
+                            .map_err(|error| error.to_string())
+                        });
+                    let _ = reply.send(result);
+                }
+                WorkerCommand::PrepareApplicationOperation { binding, reply } => {
+                    let result = owner
+                        .as_ref()
+                        .ok_or_else(|| "fixture has no domain owner".to_owned())
+                        .and_then(|owner| {
+                            owner.prepare(&binding).map_err(|error| error.to_string())
+                        });
+                    let _ = reply.send(result);
+                }
+                WorkerCommand::ApplicationDispatch { command, reply, .. } => {
+                    let _ = observed.send(*command);
+                    let _ = reply.send(Ok(()));
+                }
+                command => {
+                    let _ = observed.send(command);
+                }
+            }
+        }
+    });
+    (sender, observations)
+}
+
 /// Connects the shipping application executor and durable projection to a real test worker.
 /// This fixture changes only boot assembly; command admission, projection, reservations and
 /// observer acknowledgements all use their production implementations.
@@ -58,8 +126,10 @@ pub(crate) fn connect_real_worker(
         )?
         .with_owner(projection_owner),
     );
+    let endpoint = TuiWorkerEndpoint::new(worker_tx);
     let executor = Arc::new(TuiWorkerCommandExecutor {
-        worker_tx,
+        endpoint: Arc::clone(&endpoint),
+        projection_binding: Some(Arc::clone(&projection)),
         reasoning_effort: ReasoningEffort::Max,
         session_id: session_id.to_owned(),
         session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
@@ -83,7 +153,11 @@ pub(crate) fn connect_real_worker(
                 1,
             )?),
         ));
-    session_with_projection_binding(service, scope, projection)
+    let mut application = session_with_projection_binding(service, scope, projection)?;
+    // Resume looks up the original K through the client endpoint before preparing a new
+    // command. It must use the same actual worker as the service executor, as production does.
+    application.endpoint = endpoint;
+    Ok(application)
 }
 
 struct StaticProjectionSource {
@@ -401,11 +475,16 @@ async fn tui_projection_commit_precedes_the_exact_durable_public_outbox_ack() ->
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
-        &[Channel::ApplicationControlLog],
+        &[
+            Channel::ApplicationControlLog,
+            Channel::ApplicationCommandIndex,
+            Channel::ApplicationControlRecovery,
+        ],
     )?;
-    let (worker_tx, _worker_rx) = WorkerCommandSender::test_channel();
+    let (worker_tx, _worker_rx) = acknowledged_test_channel(None);
     let executor = Arc::new(TuiWorkerCommandExecutor {
-        worker_tx,
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
         reasoning_effort: ReasoningEffort::Medium,
         session_id: session_scope_id,
         session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
@@ -477,19 +556,31 @@ fn tui_application_session_replays_uncertain_input_without_reenqueuing_the_worke
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
-        &[Channel::ApplicationControlLog],
+        &[
+            Channel::ApplicationControlLog,
+            Channel::ApplicationCommandIndex,
+            Channel::ApplicationControlRecovery,
+        ],
     )?;
+    let mut owner_session = sigil_kernel::Session::new("test", "model").with_store(
+        sigil_kernel::JsonlSessionStore::new(temp.path().join("domain.jsonl"))?,
+    );
+    owner_session.append_user_message(sigil_kernel::ModelMessage::user("domain owner"))?;
+    let owner = owner_session.application_operation_owner()?;
     let scope = ApplicationScope {
         application_instance: sigil_application::ApplicationInstanceId::new("tui-recovery")?,
         authenticated_subject: AuthenticatedSubject::new("local-user")?,
         workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
-        session: Some(sigil_application::SessionScopeId::new("session")?),
+        session: Some(sigil_application::SessionScopeId::new(
+            owner_session.session_scope_id(),
+        )?),
     };
-    let (worker_tx, worker_rx) = WorkerCommandSender::test_channel();
+    let (worker_tx, worker_rx) = acknowledged_test_channel(Some(owner));
     let executor = Arc::new(TuiWorkerCommandExecutor {
-        worker_tx,
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
         reasoning_effort: ReasoningEffort::Medium,
-        session_id: "session".to_owned(),
+        session_id: owner_session.session_scope_id().to_owned(),
         session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
         session_maintenance_bindings: Arc::new(Mutex::new(BTreeMap::new())),
         provider_route_bindings: Arc::new(Mutex::new(BTreeMap::new())),
@@ -523,10 +614,12 @@ fn tui_application_session_replays_uncertain_input_without_reenqueuing_the_worke
     let ApplicationCommandReceipt::Uncertain(original) = first else {
         panic!("first managed application reservation must be uncertain");
     };
-    assert_eq!(
-        original.owner_recovery_binding.as_deref(),
-        Some("tui-worker:managed-plan-review-recovery-command"),
-        "an asynchronous worker enqueue must retain the exact owner recovery identity"
+    assert!(
+        original
+            .owner_recovery_binding
+            .as_ref()
+            .is_some_and(|binding| !binding.starts_with("tui-worker:")),
+        "uncertain receipt must retain the actual prepared operation identity"
     );
     assert!(matches!(
         worker_rx.recv_timeout(Duration::from_secs(1))?,
@@ -587,7 +680,11 @@ fn approval_application_bridge_preserves_durable_scope_and_replays_without_reenq
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
-        &[Channel::ApplicationControlLog],
+        &[
+            Channel::ApplicationControlLog,
+            Channel::ApplicationCommandIndex,
+            Channel::ApplicationControlRecovery,
+        ],
     )?;
     let scope = ApplicationScope {
         application_instance: sigil_application::ApplicationInstanceId::new("tui-approval")?,
@@ -595,9 +692,10 @@ fn approval_application_bridge_preserves_durable_scope_and_replays_without_reenq
         workspace: Some(sigil_application::WorkspaceScopeId::new("workspace")?),
         session: Some(sigil_application::SessionScopeId::new(&session_id)?),
     };
-    let (worker_tx, worker_rx) = WorkerCommandSender::test_channel();
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
     let executor = Arc::new(TuiWorkerCommandExecutor {
-        worker_tx,
+        endpoint: TuiWorkerEndpoint::new(worker_tx),
+        projection_binding: None,
         reasoning_effort: ReasoningEffort::Medium,
         session_id: session_id.clone(),
         session_bindings: Arc::new(Mutex::new(BTreeMap::new())),
@@ -714,7 +812,7 @@ fn application_factory_rejects_before_boot_cutover_without_dispatching_a_worker_
         .expect("fixture owner");
     let config = crate::app::tests::common::test_config();
     let app = crate::app::AppState::from_root_config(Path::new("sigil.toml"), &config);
-    let (worker_tx, worker_rx) = WorkerCommandSender::test_channel();
+    let (worker_tx, worker_rx) = acknowledged_test_channel(None);
 
     let error = build_for_worker(
         &app,
@@ -726,7 +824,7 @@ fn application_factory_rejects_before_boot_cutover_without_dispatching_a_worker_
     assert!(
         error
             .to_string()
-            .contains("application port requires the published boot cutover")
+            .contains("application requires boot cutover")
     );
     assert!(
         matches!(

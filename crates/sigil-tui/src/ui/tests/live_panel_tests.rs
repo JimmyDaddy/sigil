@@ -95,7 +95,6 @@ fn plan_revision_status_matches_live_card_and_full_review_without_empty_counts()
             "revision waiting for input",
             true,
         ),
-        (RevisionStatus::Finalizing, "revision finalizing", true),
         (RevisionStatus::Failed, "revision failed", false),
         (RevisionStatus::Cancelled, "revision cancelled", false),
         (RevisionStatus::Succeeded, "revision succeeded", false),
@@ -683,147 +682,6 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
 }
 
 #[test]
-fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> {
-    let view_model = LivePanelViewModel {
-        phase: crate::timeline::RunPhase::Thinking,
-        queue_rows: Vec::new(),
-        queue_paused: false,
-        queue_panel_focused: false,
-        queue_action_buttons: Vec::new(),
-        progress: Some(LiveProgressViewModel {
-            title: "Thinking".to_owned(),
-            detail: "reasoning with deepseek-v4-pro".to_owned(),
-        }),
-        plan_approval: None,
-        task_strip: Some(TaskStripViewModel {
-            task_id: "task_1".to_owned(),
-            verification: None,
-            title: "Improve task status display".to_owned(),
-            detail: "running · v1 · 1/2 done".to_owned(),
-            route_diagnostics: vec![
-                "subagent-read×2 → deepseek/deepseek-v4-pro · 2 model requests running · concurrency limit 4".to_owned(),
-            ],
-            completion_progress: vec![
-                "read batch v1 · 1/2 arrived · commits follow request order".to_owned(),
-                "arrival #1 → commit #2 · inspect layout · ok".to_owned(),
-            ],
-            rows: vec![
-                TaskStripRowViewModel {
-                    kind: crate::ui::StatusKind::Success,
-                    label: "1. inspect layout".to_owned(),
-                    active: false,
-                },
-                TaskStripRowViewModel {
-                    kind: crate::ui::StatusKind::Pending,
-                    label: "2. update status band".to_owned(),
-                    active: true,
-                },
-            ],
-            expanded: false,
-        }),
-        transcript_lines: vec![Line::from("visible tail")],
-    };
-    let backend = TestBackend::new(104, 11);
-    let mut terminal = Terminal::new(backend)?;
-
-    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
-
-    let rendered = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(rendered.contains("visible tail"));
-    assert!(rendered.contains("Thinking..."));
-    assert!(rendered.contains("Improve task status display"));
-    assert!(rendered.contains("running · v1 · 1/2 done"));
-    assert!(rendered.contains("Route subagent-read×2"));
-    assert!(rendered.contains("2 model requests running"));
-    assert!(rendered.contains("Batch read batch v1"));
-    assert!(rendered.contains("arrival #1"));
-    assert!(rendered.contains("commit #2"));
-    assert!(rendered.contains("✓ 1. inspect layout"));
-    assert!(rendered.contains("◇ 2. update status band"));
-    assert!(rendered.contains("▌"));
-    assert!(!rendered.contains("status:"));
-    Ok(())
-}
-
-#[test]
-fn render_live_panel_keeps_progress_and_task_rows_single_line_on_narrow_width() -> anyhow::Result<()>
-{
-    let view_model = LivePanelViewModel {
-        phase: crate::timeline::RunPhase::Thinking,
-        queue_rows: Vec::new(),
-        queue_paused: false,
-        queue_panel_focused: false,
-        queue_action_buttons: Vec::new(),
-        progress: Some(LiveProgressViewModel {
-            title: "Thinking through a very long operation name".to_owned(),
-            detail: "progress detail that must remain on exactly one physical row".to_owned(),
-        }),
-        plan_approval: None,
-        task_strip: Some(TaskStripViewModel {
-            task_id: "task_1".to_owned(),
-            verification: None,
-            title: "Task task_1".to_owned(),
-            detail: "running with a deliberately long status description".to_owned(),
-            route_diagnostics: vec![
-                "subagent-read → provider/model with additional route diagnostics".to_owned(),
-            ],
-            completion_progress: vec![
-                "read batch v1 with a deliberately long completion summary".to_owned(),
-            ],
-            rows: vec![TaskStripRowViewModel {
-                kind: StatusKind::Running,
-                label: "1. implement a deliberately long task label".to_owned(),
-                active: true,
-            }],
-            expanded: false,
-        }),
-        transcript_lines: vec![Line::from("visible tail")],
-    };
-    let backend = TestBackend::new(38, 10);
-    let mut terminal = Terminal::new(backend)?;
-
-    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
-
-    let rows = rendered_rows(&terminal);
-    let thinking = rows
-        .iter()
-        .position(|row| row.contains("Thinking"))
-        .expect("progress title should render");
-    let progress_detail = rows
-        .iter()
-        .position(|row| row.contains("progress detail"))
-        .expect("progress detail should render");
-    let task = rows
-        .iter()
-        .position(|row| row.contains("Task task_1"))
-        .expect("task header should render");
-    let route = rows
-        .iter()
-        .position(|row| row.contains("Route subagent-read"))
-        .expect("route row should render");
-    let batch = rows
-        .iter()
-        .position(|row| row.contains("Batch read batch"))
-        .expect("batch row should render");
-    let task_row = rows
-        .iter()
-        .position(|row| row.contains("1. implement"))
-        .expect("task row should render");
-    assert_eq!(progress_detail, thinking + 1);
-    assert_eq!(task, progress_detail + 1);
-    assert_eq!(route, task + 1);
-    assert_eq!(batch, route + 1);
-    assert_eq!(task_row, batch + 1);
-    Ok(())
-}
-
-#[test]
 fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
@@ -838,7 +696,6 @@ fn render_live_panel_shows_focused_verification_card_and_evidence() -> anyhow::R
             title: "Task task_1".to_owned(),
             detail: "paused · check failed".to_owned(),
             route_diagnostics: Vec::new(),
-            completion_progress: Vec::new(),
             verification: Some(VerificationCardViewModel {
                 title: "Verification".to_owned(),
                 status: "check failed".to_owned(),
@@ -1332,7 +1189,6 @@ fn render_live_panel_reserves_stacked_surface_action_rows_before_optional_detail
             title: "Task task_1".to_owned(),
             detail: "running".to_owned(),
             route_diagnostics: vec!["route detail".to_owned()],
-            completion_progress: Vec::new(),
             rows: vec![TaskStripRowViewModel {
                 kind: StatusKind::Running,
                 label: "1. implement".to_owned(),
@@ -1372,7 +1228,6 @@ fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),
             route_diagnostics: Vec::new(),
-            completion_progress: Vec::new(),
             rows: vec![TaskStripRowViewModel {
                 kind: crate::ui::StatusKind::Running,
                 label: "1. 输出一个冷笑话2、解释一下这个冷笑话为什么好笑".to_owned(),
@@ -1429,7 +1284,6 @@ fn render_live_panel_task_strip_expands_all_rows_and_keeps_active_row_visible_wh
             title: "Twelve task items".to_owned(),
             detail: "running · 7/12 done".to_owned(),
             route_diagnostics: Vec::new(),
-            completion_progress: Vec::new(),
             rows,
             expanded: false,
         }),

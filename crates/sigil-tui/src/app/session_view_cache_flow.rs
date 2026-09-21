@@ -107,9 +107,6 @@ impl AppState {
         lines.extend(super::task_sidebar::task_provider_route_sidebar_lines(
             &self.runtime.task_provider_route_diagnostics,
         ));
-        lines.extend(super::task_sidebar::task_completion_progress_sidebar_lines(
-            &self.runtime.task_completion_progress,
-        ));
         lines
     }
 

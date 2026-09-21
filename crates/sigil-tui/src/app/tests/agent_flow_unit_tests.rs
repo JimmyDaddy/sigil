@@ -90,6 +90,7 @@ fn test_thread(
         result_delivered: false,
         result_fully_delivered: false,
         result_delivered_chars: 0,
+        result_delivery_coverage: Default::default(),
         result_delivery_call_ids: Vec::new(),
         attempts: BTreeMap::new(),
         merge_safe_points: Vec::new(),

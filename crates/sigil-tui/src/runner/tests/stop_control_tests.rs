@@ -158,10 +158,8 @@ fn failed_unpublished_admission_does_not_leave_an_idle_stop_target() -> anyhow::
 }
 
 #[test]
-fn shutdown_preserves_incomplete_prior_owners_and_the_first_shared_deadline() -> anyhow::Result<()>
-{
+fn repeated_shutdown_preserves_incomplete_prior_owners() -> anyhow::Result<()> {
     use crate::runner::protocol::WorkerShutdownStage;
-    use std::time::{Duration, Instant};
     let (sender, _) = WorkerCommandSender::test_channel();
     let first = RunCancellationOwner::new();
     let first_task = first.handle().register_task()?;
@@ -170,10 +168,8 @@ fn shutdown_preserves_incomplete_prior_owners_and_the_first_shared_deadline() ->
     let second = RunCancellationOwner::new();
     let second_task = second.handle().register_task()?;
     sender.stop_control().bind(&second);
-    let deadline = Instant::now() + Duration::from_millis(50);
-    sender.begin_shutdown_until(deadline);
-    sender.begin_shutdown_until(deadline + Duration::from_secs(10));
-    assert_eq!(sender.stop_control().shutdown_deadline(), Some(deadline));
+    sender.begin_shutdown();
+    sender.begin_shutdown();
     sender
         .stop_control()
         .stage(WorkerShutdownStage::RunQuiescence);
@@ -186,5 +182,63 @@ fn shutdown_preserves_incomplete_prior_owners_and_the_first_shared_deadline() ->
     assert!(!sender.cleanup_complete());
     drop(first_task);
     assert!(sender.cleanup_complete());
+    Ok(())
+}
+
+#[test]
+fn normal_shutdown_requires_cleanup_and_thread_joins() -> anyhow::Result<()> {
+    let (sender, _) = WorkerCommandSender::test_channel();
+    let owner = RunCancellationOwner::new();
+    let task = owner.handle().register_task()?;
+    sender.stop_control().bind(&owner);
+    sender.begin_shutdown();
+    sender.reserve_stop(true);
+    owner.activate_reserved_cancel();
+    assert!(!sender.cleanup_complete());
+    assert!(
+        sender
+            .shutdown_diagnostic("worker")
+            .contains("active_tasks=1")
+    );
+    drop(task);
+    assert!(sender.cleanup_complete());
+    assert!(
+        sender
+            .shutdown_diagnostic("worker")
+            .contains("cleanup_complete=false"),
+        "run cleanup alone cannot claim the owned threads have joined"
+    );
+    sender.record_shutdown_joins_complete();
+    assert!(
+        sender
+            .shutdown_diagnostic("worker")
+            .contains("cleanup_complete=true")
+    );
+    Ok(())
+}
+
+#[test]
+fn stage_progress_does_not_fail_but_real_failure_survives_later_join() -> anyhow::Result<()> {
+    use crate::runner::protocol::WorkerShutdownStage;
+    let (sender, _) = WorkerCommandSender::test_channel();
+    sender.begin_shutdown();
+    sender
+        .stop_control()
+        .stage(WorkerShutdownStage::RunQuiescence);
+    sender.stop_control().stage(WorkerShutdownStage::Runtime);
+    assert!(
+        sender.cleanup_complete(),
+        "advancing the observed stage is not cleanup failure"
+    );
+    sender
+        .stop_control()
+        .fail_stage(WorkerShutdownStage::CancellationFinalization);
+    sender.record_shutdown_joins_complete();
+    assert!(!sender.cleanup_complete());
+    let diagnostic = sender.shutdown_diagnostic("worker");
+    assert!(diagnostic.contains("stage=cancellation-finalization-persist"));
+    assert!(diagnostic.contains("stage_timings=["));
+    assert!(diagnostic.contains("run-quiescence:"));
+    assert!(diagnostic.contains("cleanup_complete=false"));
     Ok(())
 }

@@ -38,6 +38,29 @@ pub(in crate::runner) struct WorkerCommandContext<'a, P> {
     pub(in crate::runner) state: &'a mut WorkerLoopState,
 }
 
+impl<P> WorkerCommandContext<'_, P> {
+    fn reborrow(&mut self) -> WorkerCommandContext<'_, P> {
+        WorkerCommandContext {
+            runtime: self.runtime,
+            agent: self.agent,
+            root_config: self.root_config,
+            config_path: self.config_path,
+            provider_capabilities: self.provider_capabilities,
+            workspace_root: self.workspace_root,
+            options: self.options,
+            permission_mode_override: self.permission_mode_override,
+            message_tx: self.message_tx,
+            elicitation_handler: self.elicitation_handler,
+            mcp_event_handler: self.mcp_event_handler,
+            role_provider_builder: self.role_provider_builder,
+            context_resolver: self.context_resolver,
+            managed_extension_execution: self.managed_extension_execution,
+            managed_verification_execution: self.managed_verification_execution,
+            state: self.state,
+        }
+    }
+}
+
 mod agent_task;
 mod intent_stack;
 mod maintenance;
@@ -48,9 +71,7 @@ mod session;
 mod verification_checkpoint;
 
 #[cfg(test)]
-pub(in crate::runner) use run_plan::{
-    preserve_revision_result_after_audit, validate_task_pause_request,
-};
+pub(in crate::runner) use run_plan::preserve_revision_result_after_audit;
 #[cfg(test)]
 pub(in crate::runner) use session::read_tool_artifact_page_for_display;
 
@@ -375,6 +396,13 @@ pub(in crate::runner) fn classify_worker_command(
     command: WorkerCommand,
 ) -> ClassifiedWorkerCommand {
     match command {
+        WorkerCommand::QueryApplicationOperation { .. }
+        | WorkerCommand::FindCommittedApplicationOperation { .. }
+        | WorkerCommand::PrepareApplicationOperation { .. }
+        | WorkerCommand::ResumeCommittedUserInput { .. }
+        | WorkerCommand::ApplicationDispatch { .. } => {
+            unreachable!("application envelopes are handled before domain classification")
+        }
         WorkerCommand::SubmitPrompt {
             prompt,
             reasoning_effort,
@@ -819,13 +847,259 @@ pub(in crate::runner) fn classify_worker_command(
     }
 }
 
+fn managed_research_operation_parent(
+    owner: &sigil_kernel::SessionApplicationOperationOwner,
+    target: &sigil_kernel::ApplicationOperationTargetV1,
+    observe_only: bool,
+) -> anyhow::Result<Option<Session>> {
+    if !matches!(
+        target,
+        sigil_kernel::ApplicationOperationTargetV1::UserInputDecision { .. }
+            | sigil_kernel::ApplicationOperationTargetV1::UserInputContinuation { .. }
+    ) {
+        return Ok(None);
+    }
+    let parent = if observe_only {
+        owner.attach_for_observation()?
+    } else {
+        owner.attach_for_control()?
+    };
+    Ok(
+        sigil_runtime::PlanReviewCoordinator::is_managed_research_application_target(
+            &parent, target,
+        )?
+        .then_some(parent),
+    )
+}
+
+fn query_worker_application_operation(
+    state: &WorkerLoopState,
+    binding: &sigil_kernel::ApplicationOperationBindingV1,
+) -> anyhow::Result<(
+    sigil_kernel::ApplicationOperationBindingV1,
+    Option<sigil_kernel::session::ApplicationOperationCommitProofV1>,
+)> {
+    let owner = state
+        .session
+        .application_operation_owner
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("application operation owner unavailable"))?;
+    if let Some(parent) = managed_research_operation_parent(owner, &binding.target, true)? {
+        let provisioner = state
+            .managed_plan_review_child_resources
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("managed research operation owner unavailable"))?;
+        return sigil_runtime::PlanReviewCoordinator::query_managed_research_application_operation(
+            &parent,
+            binding,
+            provisioner,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("managed research target changed"));
+    }
+    let (binding, reader) = owner.observe_operation(binding)?;
+    let proof = sigil_kernel::session::reconcile_application_operation(&reader, &binding)?;
+    Ok((binding, proof))
+}
+
 pub(in crate::runner) fn dispatch_worker_command<P>(
-    context: WorkerCommandContext<'_, P>,
+    mut context: WorkerCommandContext<'_, P>,
     command: WorkerCommand,
 ) -> WorkerCommandDispatchControl
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    let command = match command {
+        WorkerCommand::ResumeCommittedUserInput { original_operation } => {
+            let recovered = (|| -> anyhow::Result<WorkerCommand> {
+                query_worker_application_operation(context.state, &original_operation)?
+                    .1
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("input continuation lacks its original committed decision")
+                    })?;
+                let sigil_kernel::ApplicationOperationTargetV1::UserInputDecision {
+                    request_id,
+                    generation,
+                    request_hash,
+                    command_id,
+                } = &original_operation.target
+                else {
+                    anyhow::bail!("continuation does not target a user input decision");
+                };
+                Ok(WorkerCommand::ResumeRecoveredUserInput {
+                    command_id: command_id.clone(),
+                    request_id: request_id.clone(),
+                    generation: *generation,
+                    expected_request_hash: request_hash.clone(),
+                })
+            })();
+            match recovered {
+                Ok(command) => return dispatch_worker_command(context, command),
+                Err(error) => {
+                    let _ = context.message_tx.send(WorkerMessage::Notice(format!(
+                        "user input continuation unavailable: {error:#}"
+                    )));
+                    return WorkerCommandDispatchControl::Continue;
+                }
+            }
+        }
+        WorkerCommand::QueryApplicationOperation { binding, reply } => {
+            let result = query_worker_application_operation(context.state, &binding);
+            let _ = reply.send(result.map_err(|error| format!("{error:#}")));
+            return WorkerCommandDispatchControl::Continue;
+        }
+        WorkerCommand::FindCommittedApplicationOperation {
+            target,
+            key_digest,
+            reply,
+        } => {
+            let result = (|| -> anyhow::Result<_> {
+                let owner = context
+                    .state
+                    .session
+                    .application_operation_owner
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("application operation owner unavailable"))?;
+                if let Some(parent) = managed_research_operation_parent(owner, &target, true)? {
+                    let provisioner = context
+                        .state
+                        .managed_plan_review_child_resources
+                        .as_deref()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("managed research operation owner unavailable")
+                        })?;
+                    return sigil_runtime::PlanReviewCoordinator::committed_managed_research_application_operation(
+                        &parent, &target, &key_digest, provisioner,
+                    )?.ok_or_else(|| anyhow::anyhow!("managed research target changed"));
+                }
+                let (scope, reader) = owner.observe_target(&target)?;
+                sigil_kernel::session::committed_application_operation(&reader, &scope, &key_digest)
+            })();
+            let _ = reply.send(result.map_err(|error| format!("{error:#}")));
+            return WorkerCommandDispatchControl::Continue;
+        }
+        WorkerCommand::PrepareApplicationOperation { binding, reply } => {
+            let result = (|| -> anyhow::Result<()> {
+                let owner = context
+                    .state
+                    .session
+                    .application_operation_owner
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("application operation session owner is unavailable")
+                    })?;
+                if let Some(parent) =
+                    managed_research_operation_parent(owner, &binding.target, false)?
+                {
+                    let provisioner = context
+                        .state
+                        .managed_plan_review_child_resources
+                        .as_deref()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("managed research operation owner unavailable")
+                        })?;
+                    sigil_runtime::PlanReviewCoordinator::prepare_managed_research_application_operation(
+                        &parent, &binding, provisioner,
+                    )?.ok_or_else(|| anyhow::anyhow!("managed research target changed"))?;
+                    return Ok(());
+                }
+                owner.prepare(&binding)?;
+                let (_, binding) = owner.resolve_operation(&binding)?;
+                if binding.domain_session_scope_id() != binding.session_scope_id {
+                    return Ok(());
+                }
+                let entry = ControlEntry::ApplicationOperationPreparedV1(binding);
+                if let Some(session) = context.state.session.current.as_mut() {
+                    if !session.entries().iter().any(|existing| matches!(existing,SessionLogEntry::Control(ControlEntry::ApplicationOperationPreparedV1(prior)) if matches!(&entry,ControlEntry::ApplicationOperationPreparedV1(current) if prior==current))) {
+                        session.record_durably_appended_controls([entry]);
+                    }
+                } else {
+                    context.state.session.detached_durable_controls.push(entry);
+                }
+                Ok(())
+            })();
+            let _ = reply.send(result.map_err(|error| format!("{error:#}")));
+            return WorkerCommandDispatchControl::Continue;
+        }
+        WorkerCommand::ApplicationDispatch {
+            binding,
+            command,
+            reply,
+        } => {
+            let detached = context.state.session.current.is_none();
+            let mut initial_entry_count = 0;
+            if let Some(binding) = binding {
+                let bound = (|| -> anyhow::Result<()> {
+                    if context.state.session.current.is_none() {
+                        let owner = context
+                            .state
+                            .session
+                            .application_operation_owner
+                            .as_ref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "application operation session owner is unavailable"
+                                )
+                            })?;
+                        context.state.session.current = Some(owner.attach_for_control()?);
+                    }
+                    let session = context.state.session.current.as_mut().ok_or_else(|| {
+                        anyhow::anyhow!("application operation attachment is unavailable")
+                    })?;
+                    initial_entry_count = session.entries().len();
+                    if sigil_runtime::PlanReviewCoordinator::is_managed_research_application_target(
+                        session,
+                        &binding.target,
+                    )? {
+                        let provisioner = context
+                            .state
+                            .managed_plan_review_child_resources
+                            .as_deref()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("managed research operation owner unavailable")
+                            })?;
+                        if !sigil_runtime::PlanReviewCoordinator::bind_managed_research_application_operation(
+                            session, &binding, provisioner,
+                        )? { anyhow::bail!("managed research target changed"); }
+                        Ok(())
+                    } else {
+                        session.bind_application_operation(*binding)
+                    }
+                })();
+                if let Err(error) = bound {
+                    if detached {
+                        context.state.session.current = None;
+                    }
+                    let _ = reply.send(Err(format!("{error:#}")));
+                    return WorkerCommandDispatchControl::Continue;
+                }
+            }
+            let control = dispatch_worker_command(context.reborrow(), *command);
+            if let Some(session) = context.state.session.current.as_mut() {
+                session.clear_application_operation();
+            }
+            if detached
+                && initial_entry_count > 0
+                && let Some(session) = context.state.session.current.take()
+            {
+                context.state.session.detached_durable_controls.extend(
+                    session.entries()[initial_entry_count..]
+                        .iter()
+                        .filter_map(|entry| {
+                            if let SessionLogEntry::Control(control) = entry {
+                                Some(control.clone())
+                            } else {
+                                None
+                            }
+                        }),
+                );
+            }
+            // This acknowledges actual owner dispatch. The application still requires a causal
+            // durable receipt before reporting a committed command.
+            let _ = reply.send(Ok(()));
+            return control;
+        }
+        command => command,
+    };
     context.state.defer_startup_artifact_gc = false;
     if let WorkerCommand::UpdateActiveRunPermissionMode { mode } = command {
         context.permission_mode_override.set(mode);

@@ -17,25 +17,25 @@ use sigil_kernel::{
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    EvidenceScope, ExecutionMutationProfile, ImageAttachmentResolver, JsonlSessionStore,
-    MemoryConfig, ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    DirectTaskRequest, DirectTaskRuntime, EvidenceScope, ExecutionMutationProfile,
+    ImageAttachmentResolver, JsonlSessionStore, MemoryConfig, ModelMessage,
+    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalPermission,
     PlanDecisionRecordedEntry, PlanDraftCreatedEntry, PlanId, PlanSourceRef, PlanTaskStartMode,
     ProviderCapabilities, ReasoningEffort, RootConfig, RunCancellationFinalizedEntry,
     RunCancellationHandle, RunCancellationOwner, RunCancellationRecorder,
     RunCancellationRequestedEntry, RunCancellationTarget, RunCancellationTerminalOutcome, RunEvent,
-    RunQuiescenceOutcome, RunTaskGuard, RuntimeContextCandidates, SecretString,
-    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    RunTaskGuard, RuntimeContextCandidates, SecretString, Session, SessionLogEntry, SessionRef,
     SkillDescriptor, SkillRunMode, StartDurableTaskAction, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskPlanStatus, TaskRouteId,
-    TaskRouteStatus, TaskRunProjection, TaskRunStatus, TaskStepId, TaskStepSpec,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval,
-    ToolArtifactReadBudgetV1, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
-    ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    default_user_config_dir, discover_candidate_checks_with_user_config,
-    plain_text_plan_draft_entry, plan_draft_created_entry, rerun_task_verification_check,
-    saturating_elapsed, stable_event_uuid, stable_workspace_id,
+    TaskChildSessionStatus, TaskGuidancePromotedEntry, TaskId, TaskRouteId, TaskRouteStatus,
+    TaskRunProjection, TaskRunStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskId, ToolApproval, ToolArtifactReadBudgetV1, ToolCall, ToolContext, ToolErrorKind,
+    ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolSubject, ToolSubjectAudit, UserUrlCapabilityRegistrar, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, default_user_config_dir,
+    discover_candidate_checks_with_user_config, plain_text_plan_draft_entry,
+    plan_draft_created_entry, rerun_task_verification_check, saturating_elapsed, stable_event_uuid,
+    stable_workspace_id,
 };
 
 use sigil_kernel::session::{
@@ -64,6 +64,7 @@ use super::{
     session_flow::{
         load_routed_session_with_runtime_attachments, load_session,
         load_session_with_runtime_attachments,
+        load_session_with_runtime_attachments_and_background_owner,
     },
     terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
     worker_event::{
@@ -165,8 +166,7 @@ pub(in crate::runner) use advancement::{
 };
 #[cfg(test)]
 pub(in crate::runner) use advancement::{
-    changed_task_completion_progress, changed_task_provider_route_diagnostics,
-    pending_agent_continuations_from_active_projection, task_completion_progress_for_active_task,
+    changed_task_provider_route_diagnostics, pending_agent_continuations_from_active_projection,
 };
 #[cfg(test)]
 pub(in crate::runner) use agent_runtime::PlanReviewExecutionResult;
@@ -199,7 +199,6 @@ pub(in crate::runner) use command_dispatch::{
 #[cfg(test)]
 pub(in crate::runner) use command_dispatch::{
     WorkerCommandDomain, classify_worker_command, read_tool_artifact_page_for_display,
-    validate_task_pause_request,
 };
 pub(in crate::runner) use compaction_runtime::{
     IdleAutoCompactionPreflightDecision, IdleAutoCompactionPreparation,
@@ -266,16 +265,15 @@ pub(in crate::runner) use session_transition::{
 pub(in crate::runner) use state::{WorkerLoopState, register_worker_active_projection_observer};
 pub(in crate::runner) use task_runtime::{
     AdmittedTaskRunOrchestration, RejectPlanRequest, RoutedTaskContinuationOrchestration,
-    SkillChildRunSpawn, TaskContinueSpawn, TaskPlannerInputSpawn, TaskRunSpawn,
-    VerificationCheckPromotionKind, VerificationCheckPromotionOutcome, adopt_plan_run,
-    append_plan_draft, clean_mutation_artifacts, continue_routed_task_to_root_terminal,
-    delete_mutation_artifact, ensure_session_workspace_trust,
-    format_mutation_artifact_cleanup_report, format_mutation_artifact_delete_report,
-    load_worker_skill, next_task_id, plan_mode_transient_context,
-    promote_workspace_verification_check, reject_plan, resolve_continue_task, revise_plan,
-    run_admitted_task_to_root_terminal, session_ref_for_log_path, session_workspace_is_trusted,
-    skill_child_session_objective, skill_invocation_prompt, spawn_skill_child_run,
-    spawn_task_continue, spawn_task_planner_input, spawn_task_run,
+    SkillChildRunSpawn, TaskContinueSpawn, TaskRunSpawn, VerificationCheckPromotionKind,
+    VerificationCheckPromotionOutcome, adopt_plan_run, append_plan_draft, clean_mutation_artifacts,
+    continue_routed_task_to_root_terminal, delete_mutation_artifact,
+    ensure_session_workspace_trust, format_mutation_artifact_cleanup_report,
+    format_mutation_artifact_delete_report, load_worker_skill, next_task_id,
+    plan_mode_transient_context, promote_workspace_verification_check, reject_plan,
+    resolve_continue_task, revise_plan, run_admitted_task_to_root_terminal,
+    session_ref_for_log_path, session_workspace_is_trusted, skill_child_session_objective,
+    skill_invocation_prompt, spawn_skill_child_run, spawn_task_continue, spawn_task_run,
 };
 #[cfg(test)]
 pub(in crate::runner) use terminal_control::durable_terminal_tool_result_metadata;
@@ -288,16 +286,18 @@ pub(in crate::runner) use agent_runtime::chat_agent_run_input_with_repo_context;
 pub(in crate::runner) use agent_runtime::{
     append_mcp_elicitation_audits, partition_agent_result_continuations,
     pending_agent_result_continuations_from_session, queued_background_ready_transient_context,
+    ready_direct_task_background_continuations,
 };
+#[cfg(test)]
+pub(in crate::runner) use sigil_runtime::agent_supervisor::task_role_runtime::configured_provider_route_concurrency_limit;
 pub(in crate::runner) use sigil_runtime::agent_supervisor::task_role_runtime::{
     RuntimeTaskRoleProviderBuilder, TaskRoleProviderBuilder, TaskRoleRuntime,
 };
 pub(in crate::runner) use task_runtime::{append_interrupted_task_state, append_paused_task_state};
 #[cfg(test)]
 pub(in crate::runner) use task_runtime::{
-    configured_max_parallel_changeset_steps, configured_max_parallel_read_steps,
-    configured_provider_route_concurrency_limit, materialize_task_verification_config,
-    plan_handoff_workspace_snapshot_id, skill_child_agent_role,
+    materialize_task_verification_config, plan_handoff_workspace_snapshot_id,
+    skill_child_agent_role,
 };
 
 const MCP_REFRESH_RETRY_INTERVAL: Duration = Duration::from_millis(250);

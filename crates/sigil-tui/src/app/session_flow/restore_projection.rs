@@ -48,9 +48,6 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::ToolResultV3(result) => {
-                if internal_conversation_route_tool(&result.tool_name) {
-                    continue;
-                }
                 let execution = restored_tools.executions.get(&entry_index);
                 let preview = restored_tools.previews.get(&entry_index);
                 let tool_call = restored_tools.calls.get(&entry_index);
@@ -76,11 +73,10 @@ pub(super) fn restored_timeline_entries_from_session_entries(
                 }
             }
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if !internal_conversation_route_tool(&execution.tool_name)
-                    && should_render_restored_tool_execution(
-                        entry_index,
-                        &restored_tools.orphan_execution_indices,
-                    ) =>
+                if should_render_restored_tool_execution(
+                    entry_index,
+                    &restored_tools.orphan_execution_indices,
+                ) =>
             {
                 let preview = restored_tools.previews.get(&entry_index);
                 let tool_call = restored_tools.calls.get(&entry_index);
@@ -115,16 +111,6 @@ pub(super) fn restored_timeline_entries_from_session_entries(
     timeline
 }
 
-fn internal_conversation_route_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME
-            | sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME
-            | sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME
-            | sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME
-    )
-}
-
 fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, text: String) {
     let Some(current_key) = durable_tool_card_replacement_key(&text) else {
         timeline.push(crate::timeline::TimelineEntry {
@@ -150,7 +136,8 @@ fn push_restored_tool_card(timeline: &mut Vec<crate::timeline::TimelineEntry>, t
         });
         return;
     };
-    timeline[keep_index].text = text;
+    timeline[keep_index].text =
+        crate::app::worker_bridge::preserve_command_card_input(&timeline[keep_index].text, text);
     matching_indices.remove(0);
     for index in matching_indices.into_iter().rev() {
         timeline.remove(index);

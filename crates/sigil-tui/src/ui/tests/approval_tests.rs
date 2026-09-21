@@ -708,6 +708,7 @@ fn approval_diff_line_kind_maps_every_variant() {
 fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-approval"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -780,6 +781,7 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
     config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-themed-approval"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -850,6 +852,7 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
 fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-remote"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -911,6 +914,7 @@ fn render_shell_approval_prioritizes_command_without_internal_identity_or_empty_
 -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-shell-internal"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,

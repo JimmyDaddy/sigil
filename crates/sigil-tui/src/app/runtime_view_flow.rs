@@ -101,6 +101,19 @@ impl AppState {
         }
     }
 
+    /// Publishes the configuration actually used by the worker after durable activation.
+    pub(crate) fn apply_activated_session_route(
+        &mut self,
+        runtime_config: RootConfig,
+        provider_name: String,
+        route: sigil_kernel::ResolvedModelRoute,
+    ) {
+        self.runtime.provider_name = provider_name;
+        self.runtime.model_name = route.model_ref.model_id.clone();
+        self.runtime.model_route = Some(route);
+        self.session_runtime_config = Some(runtime_config);
+    }
+
     pub(crate) fn pending_session_route_recovery_binding(&self) -> Option<&str> {
         self.runtime
             .pending_session_route_recovery_binding
@@ -184,7 +197,11 @@ impl AppState {
         &self,
         saved_config: RootConfig,
     ) -> anyhow::Result<Option<RootConfig>> {
-        let Some(route) = self.runtime.model_route.as_ref() else {
+        let Some(route) = self
+            .pending_session_route_selection()
+            .map(|(_, route)| route)
+            .or(self.runtime.model_route.as_ref())
+        else {
             return Ok(None);
         };
         self.runtime_config_for_session_route(saved_config, route)

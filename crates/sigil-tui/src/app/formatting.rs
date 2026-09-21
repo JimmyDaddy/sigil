@@ -304,6 +304,24 @@ pub(super) fn format_tool_progress_block_redacted_with_call(
     format_tool_result_block_redacted_with_call_status(result, tool_call, None, redactor, "running")
 }
 
+pub(super) fn command_tool_name(name: &str) -> bool {
+    matches!(name, "bash" | "exec_command" | "terminal_start")
+}
+
+pub(super) fn format_tool_call_block_redacted(
+    call: &ToolCall,
+    status: &str,
+    redactor: &SecretRedactor,
+) -> String {
+    let result = ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        String::new(),
+        ToolResultMeta::default(),
+    );
+    format_tool_result_block_redacted_with_call_status(&result, Some(call), None, redactor, status)
+}
+
 fn format_tool_result_block_redacted_with_call_status(
     result: &ToolResult,
     tool_call: Option<&ToolCall>,
@@ -374,9 +392,8 @@ pub(super) fn format_terminal_task_block_redacted(
         "ok"
     };
     let summary = format!(
-        "{} · terminal {} · cwd {}",
+        "{} · cwd {}",
         terminal_task_summary_status(&entry.status),
-        entry.handle.task_id.as_str(),
         redactor.redact_text(&entry.handle.cwd_label)
     );
     let object = serde_json::json!({
@@ -464,6 +481,14 @@ fn format_tool_preview_payload(
     redactor: &SecretRedactor,
     artifact: Option<serde_json::Value>,
 ) -> String {
+    let content = if tool_name.starts_with("exec_") {
+        metadata
+            .and_then(|metadata| metadata.details.get("output_preview"))
+            .map(|preview| preview.as_str().unwrap_or(""))
+            .unwrap_or(content)
+    } else {
+        content
+    };
     let original_bytes = content.len() as u64;
     let (display_content, display_truncated) = bounded_tool_display_content(content);
     let content = redactor.redact_text(display_content.as_ref());
@@ -767,7 +792,7 @@ fn restored_tool_metadata(
             .and_then(project_model_meta_to_tool_result_meta)
     };
     if let Some(tool_call) = tool_call
-        && matches!(tool_call.name.as_str(), "bash" | "read_file")
+        && (command_tool_name(&tool_call.name) || tool_call.name == "read_file")
     {
         let metadata = metadata.get_or_insert_with(ToolResultMeta::default);
         enrich_tool_metadata_from_safe_call(metadata, tool_call);
@@ -776,7 +801,7 @@ fn restored_tool_metadata(
 }
 
 fn enrich_tool_metadata_from_safe_call(metadata: &mut ToolResultMeta, tool_call: &ToolCall) {
-    if !matches!(tool_call.name.as_str(), "bash" | "read_file") {
+    if !command_tool_name(&tool_call.name) && tool_call.name != "read_file" {
         return;
     }
     let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.args_json) else {
@@ -790,7 +815,7 @@ fn enrich_tool_metadata_from_safe_call(metadata: &mut ToolResultMeta, tool_call:
         .entry("call".to_owned())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let Some(call_object) = call_details.as_object_mut() {
-        if tool_call.name == "bash" {
+        if command_tool_name(&tool_call.name) {
             if let Some(command) = args_object
                 .get("command")
                 .and_then(serde_json::Value::as_str)

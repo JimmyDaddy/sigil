@@ -8,8 +8,7 @@ use sigil_kernel::{
     McpServerStartup, PlanApprovalPermission, PlanArtifactProjection, PlanDecision,
     PlanTaskStartMode, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor,
     SkillRunMode, SkillSource, SkillTrustState, TaskId, TaskRunStatus, TaskStepId,
-    TaskVerificationRerunRequest, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry,
-    ToolResultStatus,
+    TaskVerificationRerunRequest, ToolCall, ToolErrorKind, ToolRegistry, ToolResultStatus,
 };
 use tempfile::tempdir;
 
@@ -294,7 +293,7 @@ fn image_attachment_command_is_never_queued_while_a_run_is_active() -> Result<()
 }
 
 #[test]
-fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -> Result<()> {
+fn submit_plan_prompt_rejects_write_tool_under_readonly_permissions() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-plan.jsonl");
@@ -337,33 +336,78 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
         prompt: "inspect first".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    recv_live_source_before_started(&worker)?;
-    let started = worker.recv()?;
+    let source_message = worker.recv_until_with_timeout_diagnostic(
+        "plan live preview source",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::LivePreviewSource { .. }),
+    )?;
+    let WorkerMessage::LivePreviewSource { source } = source_message else {
+        unreachable!("the wait predicate selects the live source");
+    };
+    let frontier = worker.recv_until_with_timeout_diagnostic(
+        "plan startup frontier",
+        Duration::from_secs(10),
+        |message| {
+            matches!(
+                message,
+                WorkerMessage::LivePreviewDurableFrontier { session_id, run_id, sequence }
+                    if session_id == source.session_id()
+                        && run_id == source.run_id()
+                        && *sequence > 0
+            )
+        },
+    )?;
+    assert!(matches!(
+        frontier,
+        WorkerMessage::LivePreviewDurableFrontier { .. }
+    ));
+    let started = worker.recv_until_with_timeout_diagnostic(
+        "plan run start",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::PlanRunStarted { .. }),
+    )?;
     assert!(matches!(
         started,
         WorkerMessage::PlanRunStarted { ref prompt } if prompt == "inspect first"
     ));
 
-    let tool_result = worker.recv_until(|message| {
-        matches!(
-            message,
-            WorkerMessage::Event(event)
-                if matches!(event.as_ref(), RunEvent::ToolResult(result)
-                    if result.tool_name == "write_file"
-                        && result.content.contains("not available in this role scope"))
-        )
-    })?;
+    let tool_result = worker.recv_until_with_timeout_diagnostic(
+        "read-only permission denial for write_file",
+        Duration::from_secs(10),
+        |message| {
+            matches!(
+                message,
+                WorkerMessage::Event(event)
+                    if matches!(event.as_ref(), RunEvent::ToolResult(result)
+                        if result.tool_name == "write_file"
+                            && matches!(
+                                &result.status,
+                                ToolResultStatus::Error(error)
+                                    if error.kind == ToolErrorKind::PermissionDenied
+                                        && result.content.contains("denied by permission policy")
+                            ))
+            )
+        },
+    )?;
     assert!(matches!(
         tool_result,
         WorkerMessage::Event(event)
             if matches!(event.as_ref(), RunEvent::ToolResult(result)
                 if result.tool_name == "write_file"
                     && result.is_error()
-                    && result.content.contains("not available in this role scope"))
+                    && matches!(
+                        &result.status,
+                        ToolResultStatus::Error(error)
+                            if error.kind == ToolErrorKind::PermissionDenied
+                                && result.content.contains("denied by permission policy")
+                    ))
     ));
 
-    let finished =
-        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let finished = worker.recv_until_with_timeout_diagnostic(
+        "plan run terminal",
+        Duration::from_secs(10),
+        |message| matches!(message, WorkerMessage::PlanRunFinished { .. }),
+    )?;
     let WorkerMessage::PlanRunFinished { result, entries } = finished else {
         unreachable!("recv_until only returns PlanRunFinished");
     };
@@ -395,9 +439,16 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
     let child_entries = JsonlSessionStore::read_entries(child_session_path)?;
     assert!(child_entries.iter().any(|entry| matches!(
         entry,
+        SessionLogEntry::ToolResultV3(result)
+            if result.tool_name == "write_file"
+                && result.facts.error.as_ref().is_some_and(|error|
+                    error.kind == ToolErrorKind::PermissionDenied
+                )
+    )));
+    assert!(!child_entries.iter().any(|entry| matches!(
+        entry,
         SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
             if execution.tool_name == "write_file"
-                && execution.status == ToolExecutionStatus::Failed
     )));
     assert!(entries.iter().any(|entry| matches!(
         entry,
@@ -469,14 +520,7 @@ fn create_task_from_plan_command_appends_paused_task_handoff_entries() -> Result
     assert_eq!(entry.plan_id, draft.plan_id);
     assert_eq!(entry.plan_hash, draft.plan_hash);
     // Approval atomically persists the stable Task and first-class direct execution authority.
-    assert_eq!(entry.task_plan_version, 0);
-    assert!(entry.stale_reason.is_none());
-    assert!(entry.step_mapping.is_empty());
     let created_task_id = entry.task_id.clone();
-    assert!(!entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
-    )));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
     let task = tasks
         .tasks
@@ -594,7 +638,7 @@ fn create_task_from_plan_run_now_starts_direct_executor_without_model_dag() -> R
         .path()
         .join(".sigil/sessions/session-plan-task-run-now.jsonl");
     // The honest admission probes require a resolvable route without depending on the
-    // process-global API key; the planner participant runs on the planned role provider.
+    // process-global API key; the task participant runs on the configured role provider.
     let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     let provider = PlannedProvider::new(vec![
         StreamPlan::Chunks(plan_review_result_tool_chunks(
@@ -648,32 +692,16 @@ fn create_task_from_plan_run_now_starts_direct_executor_without_model_dag() -> R
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
     assert_eq!(start_mode, PlanTaskStartMode::CreateAndRun);
-    assert_eq!(entry.task_plan_version, 0);
-    assert!(entry.step_mapping.is_empty());
-    assert!(entry.stale_reason.is_none());
-    assert!(!entries.iter().any(|entry| matches!(
-        entry,
-        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
-    )));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
     let task = tasks.tasks.get(&entry.task_id).expect("direct task");
     assert!(task.latest_plan_version.is_none());
     assert!(task.plans.is_empty());
     assert!(task.direct_execution_admission.is_some());
 
-    let started = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::TaskRunStarted { .. })
-            || matches!(message, WorkerMessage::TaskAdmissionBlocked { .. })
-    })?;
-    let WorkerMessage::TaskRunStarted { objective, .. } = started else {
-        let WorkerMessage::TaskAdmissionBlocked { blocker, .. } = started else {
-            unreachable!();
-        };
-        panic!(
-            "admission blocked the task instead of running it: {}: {}",
-            blocker.reason_code.as_str(),
-            blocker.summary
-        );
+    let WorkerMessage::TaskRunStarted { objective, .. } =
+        worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?
+    else {
+        unreachable!("recv_until only returns TaskRunStarted");
     };
     assert!(objective.contains("Execute the following user-approved Plan"));
     assert!(objective.contains("Update the approved README typo"));
@@ -735,12 +763,8 @@ fn create_task_from_plan_after_workspace_change_starts_direct_execution() -> Res
     let WorkerMessage::TaskCreatedFromPlan { entry, entries, .. } = created else {
         unreachable!("recv_until only returns TaskCreatedFromPlan");
     };
-    assert_eq!(entry.task_plan_version, 0);
-    assert!(entry.stale_reason.is_none());
-    let started = worker.recv_until(|message| {
-        matches!(message, WorkerMessage::TaskRunStarted { .. })
-            || matches!(message, WorkerMessage::TaskAdmissionBlocked { .. })
-    })?;
+    let started =
+        worker.recv_until(|message| matches!(message, WorkerMessage::TaskRunStarted { .. }))?;
     assert!(matches!(started, WorkerMessage::TaskRunStarted { .. }));
     let tasks = sigil_kernel::TaskStateProjection::from_entries(&entries);
     assert_eq!(

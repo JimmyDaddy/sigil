@@ -34,9 +34,10 @@ impl PendingUserInputForm {
             && matches!(
                 self.view.questions.as_slice(),
                 [sigil_kernel::UserInputQuestionV1 {
-                    field: sigil_kernel::UserInputFieldKindV1::Text { .. },
+                    options,
+                    multiple: false,
                     ..
-                }]
+                }] if options.is_empty()
             )
     }
 }

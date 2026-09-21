@@ -29,16 +29,13 @@ fn revision_form() -> PendingUserInputForm {
         prompt: "What should change in this plan?".to_owned(),
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "revision_guidance".to_owned(),
-            header: "Revision guidance".to_owned(),
             question: "Describe the changes you want before a new plan is prepared.".to_owned(),
             description: Some(
                 "The original plan remains available until a revised draft succeeds.".to_owned(),
             ),
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: true,
-                max_chars: 2_000,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![
             sigil_kernel::UserInputActionV1::Submit,

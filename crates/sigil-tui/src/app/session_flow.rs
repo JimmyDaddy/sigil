@@ -59,97 +59,6 @@ use restore_projection::{
     suppressed_reasoning_trace_indices,
 };
 impl AppState {
-    /// Reopens the exact approved Plan when post-approval materialization is blocked.
-    ///
-    /// The Task shell is already durable at this point, so this must not create a new Plan or
-    /// infer permissions from display data. The canonical plan-review projection grants the
-    /// surface its action authority; the durable materialization blocker then narrows that set to
-    /// the actions that can actually repair this Task.
-    pub(super) fn reopen_plan_workbench_for_task_blocker(
-        &mut self,
-        task_id: &str,
-        blocker: &sigil_kernel::TaskBlockerV1,
-    ) -> bool {
-        let Ok(task_id) = sigil_kernel::TaskId::new(task_id.to_owned()) else {
-            return false;
-        };
-        let plans = sigil_kernel::PlanArtifactProjection::from_entries(
-            &self.session_browser.current_entries,
-        );
-        let Some(materialization) = plans.materialization_blocker_for_task(&task_id) else {
-            return false;
-        };
-        if materialization.blocker != *blocker {
-            return false;
-        }
-        let Some(link) = plans
-            .tasks_created
-            .values()
-            .flat_map(|links| links.iter())
-            .find(|link| link.task_id == task_id && link.plan_hash == materialization.plan_hash)
-        else {
-            return false;
-        };
-        let current_snapshot = self.session_auxiliary.workspace_snapshot.clone();
-        let Ok(detail) = sigil_kernel::plan_review_detail_from_entries(
-            &self.session_browser.current_entries,
-            &link.plan_id,
-            &link.plan_hash,
-        ) else {
-            return false;
-        };
-        let review = match sigil_runtime::conversation_display::public_plan_review_from_entries(
-            &self.session_browser.current_entries,
-            current_snapshot.as_deref(),
-        ) {
-            Ok(Some(review)) => review,
-            Ok(None) => return false,
-            Err(error) => {
-                self.last_notice = Some(format!("plan review recovery unavailable: {error}"));
-                return false;
-            }
-        };
-        if review.plan_id != link.plan_id.as_str()
-            || review.plan_hash.as_deref() != Some(link.plan_hash.as_str())
-        {
-            return false;
-        }
-
-        self.set_pending_plan_approval_from_detail(&detail, current_snapshot.as_deref());
-        self.apply_pending_plan_public_review(&review);
-        let Some(pending) = self.composer.pending_plan_approval.as_mut() else {
-            return false;
-        };
-        let retry_preparation = materialization
-            .blocker
-            .available_actions
-            .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission);
-        let revise_plan = materialization
-            .blocker
-            .available_actions
-            .contains(&sigil_kernel::TaskBlockerActionV1::Replan);
-        pending.allowed_actions.retain(|action| match action {
-            sigil_kernel::PublicPlanAction::Run => retry_preparation,
-            sigil_kernel::PublicPlanAction::Revise => revise_plan,
-            sigil_kernel::PublicPlanAction::Save | sigil_kernel::PublicPlanAction::Reject => false,
-            sigil_kernel::PublicPlanAction::AdoptCandidate => false,
-            sigil_kernel::PublicPlanAction::RetryReview => false,
-        });
-        if pending.allowed_actions.is_empty() {
-            self.clear_pending_plan_approval();
-            return false;
-        }
-        pending.last_run_failure = Some(materialization.blocker.summary.clone());
-        pending.retrying_materialization = true;
-        pending.workbench_open = true;
-        pending.selected_action = if pending.action_allowed(super::PlanWorkbenchAction::Run) {
-            super::PlanWorkbenchAction::Run
-        } else {
-            super::PlanWorkbenchAction::Revise
-        };
-        true
-    }
-
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         if let Err(error) = self.load_session_history_before_terminal() {
             self.last_notice = Some(format!("session history unavailable: {error}"));
@@ -469,18 +378,6 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
-        let current_task_id =
-            sigil_kernel::TaskStateProjection::from_entries(&self.session_browser.current_entries)
-                .current_task_id
-                .clone();
-        if let Some((task_id, blocker)) = current_task_id.and_then(|task_id| {
-            plans
-                .materialization_blocker_for_task(&task_id)
-                .map(|blocked| (task_id, blocked.blocker.clone()))
-        }) && self.reopen_plan_workbench_for_task_blocker(task_id.as_str(), &blocker)
-        {
-            return;
-        }
         let current_snapshot = self.session_auxiliary.workspace_snapshot.clone();
         let public_review =
             match sigil_runtime::conversation_display::public_plan_review_from_entries(
@@ -643,19 +540,18 @@ impl AppState {
             &self.session_log_dir,
             &self.workspace_root,
         )
+        .unwrap_or(false)
     }
 
     pub(crate) fn start_bootstrap_session_cleanup(
         &self,
-    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    ) -> std::io::Result<std::thread::JoinHandle<Result<bool>>> {
         let path = self.session_log_path.clone();
         let directory = self.session_log_dir.clone();
         let workspace = self.workspace_root.clone();
         std::thread::Builder::new()
             .name("sigil-tui-bootstrap-cleanup".to_owned())
-            .spawn(move || {
-                let _ = discard_bootstrap_session(&path, &directory, &workspace);
-            })
+            .spawn(move || discard_bootstrap_session(&path, &directory, &workspace))
     }
 
     pub(crate) fn current_session_has_resumable_activity(&self) -> bool {
@@ -848,6 +744,8 @@ impl AppState {
         self.safe_tool_calls.clear();
         self.tool_progress_execution_ids.clear();
         self.tool_progress_entry_indices.clear();
+        self.tool_call_entry_indices.clear();
+        self.command_approval_request_ids.clear();
         self.timeline_state.tool_activity_cache.clear();
         self.timeline_state.tool_activity_visible_rows.clear();
         self.timeline_state.expanded_thinking_entry_indices.clear();
@@ -1108,12 +1006,10 @@ fn discard_bootstrap_session(
     session_log_path: &std::path::Path,
     session_log_dir: &std::path::Path,
     workspace_root: &std::path::Path,
-) -> bool {
-    let Ok(entries) = JsonlSessionStore::read_entries(session_log_path) else {
-        return false;
-    };
+) -> Result<bool> {
+    let entries = JsonlSessionStore::read_entries(session_log_path)?;
     if session_entries_have_resumable_activity(&entries) {
-        return false;
+        return Ok(false);
     }
 
     let current_holds_workspace_trust = entries.iter().rev().find_map(|entry| match entry {
@@ -1125,10 +1021,13 @@ fn discard_bootstrap_session(
     if current_holds_workspace_trust
         && !another_session_holds_workspace_trust(session_log_path, session_log_dir, workspace_root)
     {
-        return false;
+        return Ok(false);
     }
 
-    discard_bootstrap_only_session_file(session_log_path, session_log_dir).unwrap_or(false)
+    Ok(discard_bootstrap_only_session_file(
+        session_log_path,
+        session_log_dir,
+    )?)
 }
 
 fn another_session_holds_workspace_trust(

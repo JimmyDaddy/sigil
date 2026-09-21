@@ -414,7 +414,6 @@ pub(crate) struct TaskStripViewModel {
     pub title: String,
     pub detail: String,
     pub route_diagnostics: Vec<String>,
-    pub completion_progress: Vec<String>,
     pub verification: Option<VerificationCardViewModel>,
     pub rows: Vec<TaskStripRowViewModel>,
     pub expanded: bool,
@@ -436,7 +435,6 @@ impl TaskStripViewModel {
             title: view.title,
             detail: view.detail,
             route_diagnostics: Vec::new(),
-            completion_progress: Vec::new(),
             verification: view.verification.map(|verification| {
                 let action_label = verification.action.as_ref().map(|action| match action {
                     crate::app::task_sidebar::VerificationCardAction::ReviewIntegration(_) => {
@@ -1163,10 +1161,6 @@ impl LivePanelViewModel {
                     crate::app::task_sidebar::task_provider_route_live_lines(
                         &app.runtime.task_provider_route_diagnostics,
                     );
-                task_strip.completion_progress =
-                    crate::app::task_sidebar::task_completion_progress_live_lines(
-                        &app.runtime.task_completion_progress,
-                    );
                 task_strip
             }),
             transcript_lines: app.transcript_lines(transcript_rows),
@@ -1230,6 +1224,7 @@ impl LiveProgressViewModel {
         let title = match label {
             "thinking" => "Thinking".to_owned(),
             "tool" => tool_progress_title(detail),
+            "command" => "Command".to_owned(),
             "mcp" => "MCP".to_owned(),
             "streaming" => "Replying".to_owned(),
             "approval" => "Approval".to_owned(),
@@ -1251,6 +1246,8 @@ fn tool_progress_title(detail: &str) -> String {
         .unwrap_or("tool");
     match tool_name {
         "bash" => "Bash".to_owned(),
+        "exec_command" | "exec_read" | "exec_wait" | "exec_input" | "exec_resize"
+        | "exec_cancel" => "Command".to_owned(),
         "read_file" => "Read".to_owned(),
         "write_file" => "Write".to_owned(),
         "edit_file" => "Edit".to_owned(),

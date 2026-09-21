@@ -49,8 +49,8 @@ pub(in crate::runner) fn cancel_terminal_task(
         .with_mutation_recorder(mutation_recorder.clone());
     let call = ToolCall {
         id: format!("tui-terminal-cancel-{task_id}"),
-        name: "terminal_cancel".to_owned(),
-        args_json: serde_json::json!({ "task_id": task_id }).to_string(),
+        name: "exec_cancel".to_owned(),
+        args_json: serde_json::json!({ "execution_id": task_id }).to_string(),
     };
     let permission_plan = registry
         .permission_plan(&tool_context, &call)
@@ -215,7 +215,10 @@ pub(in crate::runner) fn terminal_start_execution_profile_for_task(
         let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
             continue;
         };
-        if execution.tool_name != "terminal_start" {
+        if !matches!(
+            execution.tool_name.as_str(),
+            "exec_command" | "terminal_start"
+        ) {
             continue;
         }
         if execution.status == ToolExecutionStatus::Started
@@ -250,7 +253,8 @@ pub(in crate::runner) fn terminal_task_id_from_tool_metadata(
 ) -> Option<String> {
     metadata
         .details
-        .get("task_id")
+        .get("execution_id")
+        .or_else(|| metadata.details.get("task_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
 }
@@ -279,7 +283,7 @@ pub(in crate::runner) fn append_terminal_cancel_execution_audit(
     } else {
         let mut details = serde_json::json!({
             "call": {
-                "summary": format!("task_id={}", terminal_cancel_task_id_from_call(call))
+                "summary": format!("execution_id={}", terminal_cancel_task_id_from_call(call))
             }
         });
         if let Some(profile) = execution_mutation_profile {
@@ -336,7 +340,7 @@ pub(in crate::runner) fn durable_terminal_tool_result_metadata(
         "task_id",
         "updated_at_ms",
     ];
-    let details = metadata.details.as_object().map_or_else(
+    let mut details = metadata.details.as_object().map_or_else(
         || serde_json::Value::Object(serde_json::Map::new()),
         |object| {
             serde_json::Value::Object(
@@ -355,6 +359,12 @@ pub(in crate::runner) fn durable_terminal_tool_result_metadata(
             )
         },
     );
+    // ToolExecution keeps its existing durable schema. Project the new public execution ID
+    // into that schema's task_id instead of adding an unsupported field to historical records.
+    if let Some(task_id) = terminal_task_id_from_tool_metadata(metadata) {
+        details["task_id"] =
+            sigil_kernel::safe_persistence_json_value(serde_json::Value::String(task_id));
+    }
     ToolResultMeta {
         details,
         ..ToolResultMeta::default()
@@ -366,7 +376,8 @@ pub(in crate::runner) fn terminal_cancel_task_id_from_call(call: &ToolCall) -> S
         .ok()
         .and_then(|value| {
             value
-                .get("task_id")
+                .get("execution_id")
+                .or_else(|| value.get("task_id"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         })

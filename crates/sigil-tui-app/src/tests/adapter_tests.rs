@@ -312,3 +312,58 @@ fn delivery_waits_for_explicit_renderer_consumption_and_drains_once() {
             .is_empty()
     );
 }
+#[test]
+fn adapter_reservation_key_binds_command_identity_client_epoch_and_scope() {
+    let port = Arc::new(Port::new());
+    let adapter = adapter(Arc::clone(&port), "attachment");
+    let command = ApplicationCommandId::new("reservation-interaction").expect("id");
+    let other = ApplicationCommandId::new("other-interaction").expect("id");
+    let first = adapter.reservation_key(command.clone());
+    let replay = adapter.reservation_key(command.clone());
+    let distinct = adapter.reservation_key(other);
+    assert_eq!(first.command_id, command);
+    assert_eq!(first.command_id, replay.command_id);
+    assert_eq!(first.client_epoch, replay.client_epoch);
+    assert_ne!(first.command_id, distinct.command_id);
+    assert_eq!(first.application_instance, scope().application_instance);
+    assert_eq!(first.authority_scope, scope());
+    first
+        .validate()
+        .expect("reservation key must validate against its scope");
+}
+
+#[test]
+fn adapter_surfaces_unavailable_control_log_recovery_instead_of_activating() {
+    let port = Arc::new(Port::new());
+    let adapter = adapter(Arc::clone(&port), "attachment");
+    let outcome = block_on(adapter.recover_control_log(ControlLogRecoveryAction::Preview));
+    assert!(
+        !matches!(outcome, Ok(ControlLogRecoveryOutcome::Activated(_))),
+        "a port without control-log recovery must not yield an activated binding"
+    );
+}
+
+#[test]
+fn adapter_resumes_runtime_transition_only_through_the_application_port() {
+    let port = Arc::new(Port::new());
+    let adapter = adapter(Arc::clone(&port), "attachment");
+    block_on(adapter.refresh()).expect("initial view");
+    let request = adapter
+        .prepare_command(
+            ApplicationCommandId::new("runtime-resume").expect("id"),
+            ApplicationCommand::Conversation(ConversationCommand::SubmitPrompt {
+                prompt: Some(SafeText::new("resume the retained transition").expect("prompt")),
+                options: None,
+            }),
+        )
+        .expect("prepare");
+    let resumed = block_on(adapter.resume_session_runtime_transition(request));
+    assert!(
+        resumed.is_err() || matches!(resumed, Ok(ApplicationCommandReceipt::Replayed(_))),
+        "runtime resume must be answered by the port instead of synthesized by the adapter"
+    );
+    assert!(
+        port.commands.lock().expect("commands").is_empty(),
+        "the adapter must not dispatch a command of its own"
+    );
+}

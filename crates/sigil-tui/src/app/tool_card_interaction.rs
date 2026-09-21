@@ -193,7 +193,7 @@ impl AppState {
             ToolArtifactSelectorV1::SearchLiteral {
                 query: query.to_owned(),
                 start_offset: 0,
-                max_matches: 20,
+                max_matches: sigil_kernel::session::TOOL_ARTIFACT_SEARCH_DEFAULT_MATCHES,
                 context_lines: 2,
             },
         )

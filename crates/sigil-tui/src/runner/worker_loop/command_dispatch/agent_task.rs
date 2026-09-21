@@ -228,7 +228,7 @@ where
                 }
                 if !root_config.task.enabled {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "task planning is disabled in config".to_owned(),
+                        "durable Task execution is disabled in config".to_owned(),
                     ));
                     continue;
                 }
@@ -374,7 +374,7 @@ where
                 }
                 if !root_config.task.enabled {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "task planning is disabled in config".to_owned(),
+                        "durable Task execution is disabled in config".to_owned(),
                     ));
                     continue;
                 }
@@ -532,7 +532,7 @@ where
                 }
                 if !root_config.task.enabled {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "task planning is disabled in config".to_owned(),
+                        "durable Task execution is disabled in config".to_owned(),
                     ));
                     continue;
                 }
@@ -545,7 +545,7 @@ where
                 };
                 let tool_artifact_read_budget =
                     state.session.begin_root_tool_artifact_read_budget();
-                let (task_id, task_id_value, objective, needs_planning) =
+                let (task_id, task_id_value, objective) =
                     match resolve_continue_task(&run_session, task_id) {
                         Ok(resolved) => resolved,
                         Err(error) => {
@@ -554,14 +554,6 @@ where
                             continue;
                         }
                     };
-                if needs_planning && guidance.is_some() {
-                    state.session.current = Some(run_session);
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "recovered task has no accepted plan; continue it without guidance to rerun the planner"
-                            .to_owned(),
-                    ));
-                    continue;
-                }
                 let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
                     Ok(reference) => reference,
                     Err(error) => {
@@ -788,7 +780,7 @@ where
                 }
                 if !root_config.task.enabled {
                     let _ = message_tx.send(failure(
-                        "task planning is disabled in config".to_owned(),
+                        "durable Task execution is disabled in config".to_owned(),
                         None,
                     ));
                     continue;
@@ -827,15 +819,6 @@ where
                 if start_mode == PlanTaskStartMode::CreatePaused {
                     continue;
                 }
-                if let sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker) = &adopted.admission {
-                    let _ = message_tx.send(WorkerMessage::TaskAdmissionBlocked {
-                        task_id: adopted.receipt.task_id.as_str().to_owned(),
-                        blocker: blocker.clone(),
-                        entries: adopted.entries.clone(),
-                    });
-                    continue;
-                }
-
                 let Some(mut run_session) = state.session.current.take() else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "session state is unavailable".to_owned(),

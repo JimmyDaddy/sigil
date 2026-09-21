@@ -210,6 +210,32 @@ impl AppState {
             self.push_event("slash", sigil_kernel::safe_persistence_text(&prompt));
         }
         match command.canonical.as_str() {
+            "/control-log" => {
+                let arguments = command.arg.split_whitespace().collect::<Vec<_>>();
+                let action = match arguments.as_slice() {
+                    [] | ["preview"] => Some(sigil_application::ControlLogRecoveryAction::Preview),
+                    ["confirm", digest] => self
+                        .control_log_recovery
+                        .preview
+                        .as_ref()
+                        .filter(|preview| preview.preview_digest.to_hex() == *digest)
+                        .map(|preview| {
+                            sigil_application::ControlLogRecoveryAction::SealAndRotate {
+                                preview: Box::new(preview.clone()),
+                            }
+                        }),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    Ok(Some(AppAction::RecoverControlLog(action)))
+                } else {
+                    self.last_notice = Some(
+                        "Use /control-log preview, then confirm its exact preview digest."
+                            .to_owned(),
+                    );
+                    Ok(None)
+                }
+            }
             "/compact" => {
                 if self.runtime.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; compact later");

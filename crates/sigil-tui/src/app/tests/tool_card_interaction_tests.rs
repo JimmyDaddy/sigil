@@ -317,7 +317,7 @@ fn tool_artifact_next_page_and_literal_search_emit_typed_worker_commands() -> Re
             selector: sigil_kernel::ToolArtifactSelectorV1::SearchLiteral {
                 query,
                 start_offset: 0,
-                max_matches: 20,
+                max_matches: 50,
                 context_lines: 2,
             },
             ..

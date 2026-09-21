@@ -173,6 +173,15 @@ fn tool_name_matches(tool_name: &str, expected: &str) -> bool {
     tool_name == expected || tool_name.ends_with(&format!("_{expected}"))
 }
 
+fn command_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "bash")
+        || matches!(
+            summary.tool_name.as_str(),
+            "exec_command" | "terminal_start"
+        )
+        || terminal_task_tool(summary)
+}
+
 #[derive(Clone)]
 struct ToolCardRender {
     call_id: Option<String>,
@@ -258,6 +267,8 @@ struct ToolCardMetadata {
     bytes: Option<u64>,
     returned_bytes: Option<u64>,
     duration_ms: Option<u64>,
+    execution_started_at_ms: Option<u64>,
+    execution_updated_at_ms: Option<u64>,
     exit_code: Option<i64>,
     returned_lines: Option<u64>,
     total_lines: Option<u64>,
@@ -485,7 +496,7 @@ fn tool_result_presentation(summary: &ToolCardRender) -> ToolResultPresentation 
     if tool_name_matches(&summary.tool_name, "grep") {
         return ToolResultPresentation::SearchMatches;
     }
-    if tool_name_matches(&summary.tool_name, "bash") || terminal_task_tool(summary) {
+    if command_tool(summary) {
         return ToolResultPresentation::TerminalOutput;
     }
     if summary.diff.is_some() {

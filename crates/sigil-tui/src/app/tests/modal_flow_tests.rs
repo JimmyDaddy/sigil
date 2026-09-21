@@ -925,7 +925,7 @@ fn text_input_modal_rejects_invalid_characters_for_numeric_fields() {
 }
 
 #[test]
-fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
+fn mcp_elicitation_validates_required_text_fields() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -937,8 +937,8 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "title": "Path" },
-                    "retries": { "type": "integer", "title": "Retries" },
-                    "threshold": { "type": "number", "title": "Threshold" },
+                    "retries": { "type": "string", "title": "Retries" },
+                    "threshold": { "type": "string", "title": "Threshold" },
                     "mode": { "type": "string", "enum": ["safe", "fast"], "title": "Mode" }
                 },
                 "required": ["path"]
@@ -976,45 +976,30 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
         .iter()
         .position(|question| question.id == "retries")
         .expect("retries field should exist");
-    form.drafts[retries] = UserInputDraftValue::Integer("abc".to_owned());
-
-    assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
-            .is_none()
-    );
-    assert_eq!(app.last_notice(), Some("Retries must be an integer"));
+    form.drafts[retries] = UserInputDraftValue::Text("abc".to_owned());
 
     let form = app
         .composer
         .pending_user_input
         .as_mut()
         .expect("MCP form should exist");
-    form.drafts[retries] = UserInputDraftValue::Integer("3".to_owned());
+    form.drafts[retries] = UserInputDraftValue::Text("3".to_owned());
     let threshold = form
         .view
         .questions
         .iter()
         .position(|question| question.id == "threshold")
         .expect("threshold field should exist");
-    form.drafts[threshold] = UserInputDraftValue::Number("1e999".to_owned());
+    form.drafts[threshold] = UserInputDraftValue::Text("1e999".to_owned());
 
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))?
+            .is_none()
+    );
     assert!(
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
             .is_none()
     );
-    assert_eq!(app.last_notice(), Some("Threshold must be a finite number"));
-
-    app.composer
-        .pending_user_input
-        .as_mut()
-        .expect("MCP form should exist")
-        .drafts[threshold] = UserInputDraftValue::Number("0.25".to_owned());
-
-    assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
-            .is_none()
-    );
-    assert!(app.pending_user_input().is_none());
     assert_eq!(app.last_notice(), Some("submitted MCP input to filesystem"));
 
     let response = futures::executor::block_on(response_rx)?;
@@ -1024,8 +1009,8 @@ fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
         Some(json!({
             "mode": "safe",
             "path": "src/lib.rs",
-            "retries": 3,
-            "threshold": 0.25
+            "retries": "3",
+            "threshold": "1e999"
         }))
     );
     Ok(())
@@ -1073,7 +1058,10 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
     );
     assert!(matches!(
         app.pending_user_input().expect("MCP form").drafts[0],
-        UserInputDraftValue::Boolean(Some(true))
+        UserInputDraftValue::SingleSelect {
+            selected: Some(0),
+            ..
+        }
     ));
 
     assert!(
@@ -1121,7 +1109,7 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
     assert_eq!(
         response.content,
         Some(json!({
-            "confirm": true,
+            "confirm": "true",
             "mode": "safe"
         }))
     );
@@ -1164,7 +1152,7 @@ fn mcp_elicitation_renders_and_submits_multi_select_values() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
     assert!(matches!(
         &app.pending_user_input().expect("MCP form").drafts[0],
-        UserInputDraftValue::MultiSelect { cursor: 1, selected } if selected == &["tests"]
+        UserInputDraftValue::MultiSelect { cursor: 1, selected, .. } if selected == &["tests"]
     ));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;

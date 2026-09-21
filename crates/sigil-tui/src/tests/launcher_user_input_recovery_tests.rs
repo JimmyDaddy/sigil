@@ -3,41 +3,34 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_application::ApplicationCommandReceipt;
 use sigil_kernel::{
-    AgentThreadId, JsonlSessionStore, LogicalRunId, Session, SessionScopeId, TaskId,
-    UserInputActionV1, UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId,
-    UserInputContinuationBindingV1, UserInputDecisionCommandV1, UserInputDecisionV1,
-    UserInputFieldKindV1, UserInputIdentityV1, UserInputLifecycleEntryV1, UserInputPurposeV1,
-    UserInputQuestionV1, UserInputRequestId, UserInputRequestV1, UserInputRequestedV1,
-    UserInputSourceV1,
+    AgentThreadId, JsonlSessionStore, LogicalRunId, Session, SessionScopeId, UserInputActionV1,
+    UserInputAnswerV1, UserInputAnswerValueV1, UserInputCommandId, UserInputContinuationBindingV1,
+    UserInputDecisionCommandV1, UserInputDecisionV1, UserInputIdentityV1,
+    UserInputLifecycleEntryV1, UserInputPurposeV1, UserInputQuestionV1, UserInputRequestId,
+    UserInputRequestV1, UserInputRequestedV1, UserInputSourceV1,
 };
 
 use super::{WorkerRuntime, process_app_action};
 use crate::{
     app::{AppAction, AppState},
-    runner::{WorkerCommand, WorkerCommandSender, WorkerMessage},
+    runner::{WorkerCommand, WorkerMessage},
 };
 
 #[test]
-fn launcher_resumes_agent_input_past_the_original_uncertain_application_receipt() -> Result<()> {
-    assert_launcher_recovery_bypasses_only_cached_dispatch(UserInputSourceV1::Agent)
+fn launcher_resumes_agent_input_with_a_new_causally_bound_operation() -> Result<()> {
+    assert_launcher_recovery_uses_new_key_bound_to_committed_decision(UserInputSourceV1::Agent)
 }
 
-#[test]
-fn launcher_resumes_planner_input_past_the_original_uncertain_application_receipt() -> Result<()> {
-    assert_launcher_recovery_bypasses_only_cached_dispatch(UserInputSourceV1::Planner {
-        task_id: TaskId::new("launcher-recovery-task")?,
-    })
-}
-
-fn assert_launcher_recovery_bypasses_only_cached_dispatch(source: UserInputSourceV1) -> Result<()> {
+fn assert_launcher_recovery_uses_new_key_bound_to_committed_decision(
+    source: UserInputSourceV1,
+) -> Result<()> {
     use sigil_runtime::managed_storage_writer::StorageWriterChannelV1 as Channel;
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let _runtime_guard = runtime.enter();
     let fixture = tempfile::tempdir()?;
     let config_path = fixture.path().join("sigil.toml");
     let session_path = fixture.path().join("session.jsonl");
@@ -93,9 +86,15 @@ fn assert_launcher_recovery_bypasses_only_cached_dispatch(source: UserInputSourc
         Arc::new(sigil_runtime::r71_shadow_planner::ShadowPlannerV1::new(
             sigil_runtime::r71_shadow_planner::ShadowPlannerConfigV1::default(),
         )),
-        &[Channel::ApplicationControlLog],
+        &[
+            Channel::ApplicationControlLog,
+            Channel::ApplicationCommandIndex,
+            Channel::ApplicationControlRecovery,
+        ],
     )?;
-    let (worker_tx, command_rx) = WorkerCommandSender::test_channel();
+    let (worker_tx, command_rx) = crate::application_bridge::tests::acknowledged_test_channel(
+        Some(durable_session.application_operation_owner()?),
+    );
     let application = Arc::new(crate::application_bridge::tests::connect_real_worker(
         &config_path,
         fixture.path(),
@@ -106,16 +105,15 @@ fn assert_launcher_recovery_bypasses_only_cached_dispatch(source: UserInputSourc
         sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
     )?);
     runtime.block_on(application.refresh())?;
-    let first = application
-        .try_execute_action(&action, None, None)?
-        .expect("the shipping application bridge must admit the original answer");
-    let ApplicationCommandReceipt::Uncertain(original_receipt) = first else {
-        panic!("an asynchronous worker enqueue must retain an uncertain receipt");
-    };
-    assert_eq!(
-        original_receipt.owner_recovery_binding.as_deref(),
-        Some("tui-worker:launcher-accepted-input-command")
-    );
+    let original_request = application
+        .prepare_action(&action, None, None)?
+        .expect("original answer request");
+    let operation = sigil_runtime::application_operation_owner::application_operation_binding(
+        &original_request,
+    )?
+    .expect("user input operation");
+    let first = runtime.block_on(application.execute_prepared(original_request.clone()))?;
+    assert!(matches!(first, ApplicationCommandReceipt::Uncertain(_)));
     assert!(matches!(
         command_rx.recv_timeout(Duration::from_secs(1))?,
         WorkerCommand::SubmitUserInputDecision {
@@ -127,19 +125,48 @@ fn assert_launcher_recovery_bypasses_only_cached_dispatch(source: UserInputSourc
             && decision == command.decision
     ));
 
-    // Model the worker accepting the answer durably before its continuation is dispatched.
-    // The application enqueue reservation remains Uncertain across that independent write.
+    // The actual owner commits its accepted decision and causal marker in one batch; losing the
+    // transport response cannot require another answer dispatch under the original key.
+    durable_session.bind_application_operation(operation.clone())?;
     sigil_kernel::accept_user_input_decision(&mut durable_session, command.clone(), 20)?;
-    let replay = application
-        .try_execute_action(&action, None, None)?
-        .expect("the exact original application command must replay");
-    assert!(matches!(replay,
-        ApplicationCommandReceipt::ReplayedUncertain(receipt) if receipt == original_receipt
+    // The fixture commits directly through its owner, so publish the same fresh projection
+    // that the production worker delivers before the user creates a new Resume intent.
+    runtime.block_on(application.refresh())?;
+    // Reconcile on the production admission thread after the caller's runtime has gone away.
+    // A domain proof makes this path read the real durable frontier via Tokio spawn_blocking;
+    // polling only on the test runtime, or returning no proof, hides a missing thread runtime.
+    drop(runtime);
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let mut pending = super::PendingApplicationAdmission {
+        application: Arc::clone(&application),
+        request: Arc::new(std::sync::Mutex::new(Some(original_request.clone()))),
+        action,
+        receiver: None,
+        handle: None,
+        retryable: true,
+        receipt_resolved: false,
+        reconcile_requested: false,
+    };
+    pending.start()?;
+    let received = pending
+        .receiver
+        .as_ref()
+        .expect("admission receipt receiver")
+        .recv_timeout(Duration::from_secs(5));
+    super::wait_for_owned_thread(
+        &mut pending.handle,
+        std::time::Instant::now() + Duration::from_secs(5),
+    )?;
+    let replay = received??;
+    assert!(matches!(
+        replay,
+        ApplicationCommandReceipt::Replayed(_) | ApplicationCommandReceipt::Settled(_)
     ));
-    assert!(
-        matches!(command_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
-        "a cached application receipt must not enqueue a second answer"
-    );
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    let runtime = tokio::runtime::Runtime::new()?;
 
     let mut app = AppState::from_root_config(&config_path, &config);
     app.session_log_path = session_path;
@@ -167,47 +194,62 @@ fn assert_launcher_recovery_bypasses_only_cached_dispatch(source: UserInputSourc
         worker_rx,
         ready: true,
     });
-    // The ordinary launcher application branch is disabled under cfg(test). The calls above
-    // establish the real service/cache boundary directly; this call exercises only the shipping
-    // private recovery branch, which must run before ordinary application admission.
+    assert!(matches!(
+        &resume,
+        AppAction::ResumeCommittedUserInput { .. }
+    ));
     process_app_action(&mut app, &mut worker, resume)?;
-    assert!(
-        matches!(
-            command_rx.recv_timeout(Duration::from_secs(1))?,
-            WorkerCommand::ResumeRecoveredUserInput {
-                command_id, request_id, generation, expected_request_hash,
-            } if command_id == command.command_id.as_str()
-                && request_id == command.identity.request_id.as_str()
-                && generation == command.identity.generation
-                && expected_request_hash == command.request_hash
-        ),
-        "launcher recovery must reach the worker through the no-answer private command"
+    assert!(matches!(
+        command_rx.recv_timeout(Duration::from_secs(5)).with_context(|| {
+            format!(
+                "resume was not dispatched; admission result: {:?}",
+                worker.as_ref().and_then(|worker| worker.pending_interactions.first())
+                    .and_then(|pending| pending.receiver.as_ref())
+                    .map(mpsc::Receiver::try_recv)
+            )
+        })?,
+        WorkerCommand::ResumeCommittedUserInput { original_operation } if *original_operation == operation
+    ));
+    let pending = &worker
+        .as_ref()
+        .expect("attached worker")
+        .pending_interactions[0];
+    let pending_request = pending
+        .request
+        .lock()
+        .expect("request mutex")
+        .clone()
+        .expect("frozen continuation request");
+    assert_ne!(
+        pending_request.envelope.command_id,
+        original_request.envelope.command_id
     );
+    let sigil_application::ApplicationCommand::UserInput(
+        sigil_application::UserInputCommand::ResumeCommittedUserInput {
+            original_key,
+            original_fingerprint,
+            original_operation_id,
+            ..
+        },
+    ) = &pending_request.envelope.command
+    else {
+        panic!("typed continuation command");
+    };
+    assert_eq!(
+        **original_key,
+        original_request
+            .admission
+            .reservation_key(&original_request.envelope.command_id)
+    );
+    assert_eq!(*original_fingerprint, operation.fingerprint);
+    assert_eq!(*original_operation_id, operation.operation_id);
+    let unchanged = runtime.block_on(application.execute_prepared(original_request))?;
+    assert!(matches!(unchanged, ApplicationCommandReceipt::Replayed(_)));
     assert!(matches!(
         command_rx.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    assert!(
-        worker
-            .as_ref()
-            .expect("worker remains attached")
-            .pending_interactions
-            .is_empty()
-    );
-
-    let unchanged = application
-        .try_execute_action(&action, None, None)?
-        .expect("the original application reservation must still exist");
-    assert!(
-        matches!(unchanged,
-            ApplicationCommandReceipt::ReplayedUncertain(receipt) if receipt == original_receipt
-        ),
-        "private recovery must not reopen or replace the application reservation"
-    );
-    assert!(matches!(
-        command_rx.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
-    ));
+    super::shutdown_and_join_worker(&mut worker)?;
     Ok(())
 }
 
@@ -227,14 +269,11 @@ fn recovery_request(session: &Session, source: UserInputSourceV1) -> Result<User
         prompt: "Choose the scope before continuing".to_owned(),
         questions: vec![UserInputQuestionV1 {
             id: "scope".to_owned(),
-            header: "Scope".to_owned(),
             question: "Which module should be changed?".to_owned(),
             description: None,
             required: true,
-            field: UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 128,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![UserInputActionV1::Submit, UserInputActionV1::CancelRun],
         requested_at_unix_ms: 10,

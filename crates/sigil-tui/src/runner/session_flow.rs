@@ -80,12 +80,29 @@ pub(super) fn load_session_with_runtime_attachments(
     session_log_path: &Path,
     previous_session: Option<&Session>,
 ) -> Result<Session> {
+    load_session_with_runtime_attachments_and_background_owner(
+        provider_name,
+        model_name,
+        session_log_path,
+        previous_session,
+        None,
+    )
+}
+
+pub(super) fn load_session_with_runtime_attachments_and_background_owner(
+    provider_name: &str,
+    model_name: &str,
+    session_log_path: &Path,
+    previous_session: Option<&Session>,
+    background_owner: Option<&sigil_runtime::AgentToolBackgroundRuns>,
+) -> Result<Session> {
     let runtime_attachments = CapturedSessionRuntimeAttachments::from_session(previous_session);
-    load_session_with_captured_runtime_attachments(
+    load_session_with_captured_runtime_attachments_and_background_owner(
         provider_name,
         model_name,
         session_log_path,
         &runtime_attachments,
+        background_owner,
     )
 }
 
@@ -99,7 +116,9 @@ pub(super) fn load_routed_session_with_runtime_attachments(
     let (_, fallback_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(root_config)
             .map_err(anyhow::Error::new)?;
-    let store = JsonlSessionStore::new(session_log_path)?;
+    let background_owner = attachment.agent_tool_background_runs()?;
+    let store = JsonlSessionStore::new(session_log_path)?
+        .with_live_background_agent_threads(background_owner.thread_ids()?);
     let inspected = sigil_runtime::provider_connections::inspect_session_for_route_resume(
         root_config,
         &fallback_route,
@@ -107,7 +126,7 @@ pub(super) fn load_routed_session_with_runtime_attachments(
     )
     .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
     sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
-    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+    let mut session = sigil_runtime::provider_connections::load_session_for_route(
         root_config,
         &fallback_route,
         store,
@@ -120,13 +139,35 @@ pub(super) fn load_routed_session_with_runtime_attachments(
     Ok(session)
 }
 
+#[cfg(test)]
 pub(super) fn load_session_with_captured_runtime_attachments(
     provider_name: &str,
     model_name: &str,
     session_log_path: &Path,
     runtime_attachments: &CapturedSessionRuntimeAttachments,
 ) -> Result<Session> {
-    let mut session = load_session(provider_name, model_name, session_log_path)?;
+    load_session_with_captured_runtime_attachments_and_background_owner(
+        provider_name,
+        model_name,
+        session_log_path,
+        runtime_attachments,
+        None,
+    )
+}
+
+fn load_session_with_captured_runtime_attachments_and_background_owner(
+    provider_name: &str,
+    model_name: &str,
+    session_log_path: &Path,
+    runtime_attachments: &CapturedSessionRuntimeAttachments,
+    background_owner: Option<&sigil_runtime::AgentToolBackgroundRuns>,
+) -> Result<Session> {
+    let mut store = JsonlSessionStore::new(session_log_path)?;
+    if let Some(background_owner) = background_owner {
+        store = store.with_live_background_agent_threads(background_owner.thread_ids()?);
+    }
+    let mut session =
+        Session::load_from_store(provider_name.to_owned(), model_name.to_owned(), store)?;
     attach_captured_runtime_attachments(&mut session, runtime_attachments)?;
     Ok(session)
 }

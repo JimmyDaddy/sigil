@@ -25,13 +25,16 @@ impl AppState {
             ));
             return None;
         }
-        let request = if let Some(plan_version) = task.latest_plan_version {
-            sigil_kernel::TaskPauseRequest::new(task.task_id.clone(), plan_version)
-        } else if let Some(admission) = task.direct_execution_admission.as_ref() {
+        let request = if let Some(admission) = task.direct_execution_admission.as_ref() {
             sigil_kernel::TaskPauseRequest::direct(
                 task.task_id.clone(),
                 admission.admission_id.clone(),
             )
+        } else if task.latest_plan_version.is_some() {
+            self.last_notice = Some(
+                "task has no direct execution authority; start a direct Task instead".to_owned(),
+            );
+            return None;
         } else {
             self.last_notice =
                 Some("task execution has not been admitted yet; use Ctrl-C to cancel".to_owned());

@@ -622,9 +622,8 @@ fn append_setup_startup_recovery_lines(lines: &mut Vec<String>, state: &SetupSta
     };
     lines.push(String::new());
     if state.valid_config_boot_retry_required() {
-        lines.push(format!(
-            "current configuration is valid; a later startup phase failed: {error}"
-        ));
+        lines.push("current configuration is valid; a later startup phase failed:".to_owned());
+        lines.push(error.clone());
         if state.authority_boot_retry_required() {
             lines.push("Resolve the reported startup failure, then choose Retry Start.".to_owned());
         } else {

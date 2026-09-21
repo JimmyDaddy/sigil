@@ -16,8 +16,7 @@ use tempfile::tempdir;
 use super::{
     super::{WorkerCommand, WorkerMessage},
     common::{
-        PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config,
-        scripted_completion_claim_chunks, spawn_test_worker,
+        PlannedProvider, StreamPlan, routed_unauthenticated_test_root_config, spawn_test_worker,
         spawn_test_worker_with_role_provider_builder, submit_plan_review_result_chunks,
         test_root_config,
     },
@@ -144,7 +143,6 @@ impl Provider for IntentDogfoodRoleProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let completion_claim = || scripted_completion_claim_chunks(&request, "intent-completion");
         let latest_user_prompt = request
             .messages
             .iter()
@@ -153,9 +151,6 @@ impl Provider for IntentDogfoodRoleProvider {
             .and_then(|message| message.content.as_deref())
             .unwrap_or_default();
         if latest_user_prompt.contains("Produce the single user-visible final answer") {
-            if let Some(claim) = completion_claim() {
-                return Ok(chunks(claim));
-            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta("Intent Stack dogfood task complete.".to_owned()),
                 ProviderChunk::Done,
@@ -164,9 +159,6 @@ impl Provider for IntentDogfoodRoleProvider {
         if latest_user_prompt
             .contains("Execute the following complete, user-approved Task objective now")
         {
-            if let Some(claim) = completion_claim() {
-                return Ok(chunks(claim));
-            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta(
                     "Direct executor received the complete approved Plan.".to_owned(),
@@ -205,9 +197,6 @@ impl Provider for IntentDogfoodRoleProvider {
             .iter()
             .any(|message| message.role == MessageRole::Tool);
         if tool_used {
-            if let Some(claim) = completion_claim() {
-                return Ok(chunks(claim));
-            }
             return Ok(chunks(vec![
                 ProviderChunk::TextDelta(format!("{step_id} completed")),
                 ProviderChunk::Done,
@@ -270,7 +259,7 @@ fn approved_plan_intent_proposals_do_not_become_execution_authority() -> Result<
         }),
     ))?;
     let mut root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
-    root_config.task.max_parallel_changeset_steps = 3;
+    root_config.task.max_concurrent_provider_routes = 3;
     root_config.task.max_subagents = 8;
 
     let plan_args = r##"{
@@ -369,9 +358,21 @@ fn approved_plan_intent_proposals_do_not_become_execution_authority() -> Result<
         unreachable!("terminal task message checked above");
     };
     assert_eq!(status, TaskRunStatus::Completed);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission))
+                    if admission.task_id == created_task.task_id
+            ))
+            .count(),
+        1,
+        "the approved Plan admits direct execution exactly once without creating an Intent"
+    );
     assert!(!entries.iter().any(|entry| matches!(
         entry,
-        SessionLogEntry::Control(ControlEntry::TaskMaterializationPreparedV1(_))
+        SessionLogEntry::Control(ControlEntry::TaskDirectRequirementsBoundV1(_))
     )));
     assert!(matches!(
         sigil_kernel::Session::load_from_store(

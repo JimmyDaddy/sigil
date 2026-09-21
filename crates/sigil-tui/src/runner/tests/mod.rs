@@ -19,4 +19,6 @@ mod verification_e2e_tests;
 mod worker_loop_state_tests;
 mod worker_loop_tests;
 
+mod cancellation_settlement_tests;
+mod shutdown_real_execution_tests;
 mod stop_control_tests;

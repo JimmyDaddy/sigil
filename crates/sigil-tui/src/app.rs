@@ -14,6 +14,7 @@ mod agent_flow;
 mod approval_flow;
 mod checkpoint_flow;
 mod command_dispatch;
+mod command_elapsed;
 mod compaction_flow;
 pub(crate) mod config_flow;
 mod conversation_queue_flow;
@@ -293,7 +294,6 @@ pub(crate) struct PendingPlanApproval {
     pub(crate) stale_reason: Option<String>,
     pub(crate) last_run_failure: Option<String>,
     /// This workbench is resuming the existing approved Task shell, not approving a new Plan.
-    pub(crate) retrying_materialization: bool,
     pub(crate) allowed_actions: Vec<sigil_kernel::PublicPlanAction>,
     pub(crate) status: Option<sigil_kernel::PublicPlanReviewStatus>,
     pub(crate) revision: Option<sigil_kernel::PublicPlanRevisionSummaryV1>,
@@ -414,16 +414,15 @@ impl UserInputFormAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UserInputDraftValue {
     Text(String),
-    Number(String),
-    Integer(String),
-    Boolean(Option<bool>),
     SingleSelect {
         selected: Option<usize>,
         other: String,
+        selected_by_user: bool,
     },
     MultiSelect {
         cursor: usize,
         selected: Vec<String>,
+        other: String,
     },
 }
 
@@ -505,7 +504,6 @@ impl PendingPlanApproval {
             stale: false,
             stale_reason: None,
             last_run_failure: None,
-            retrying_materialization: false,
             allowed_actions: vec![
                 sigil_kernel::PublicPlanAction::Run,
                 sigil_kernel::PublicPlanAction::Save,
@@ -534,12 +532,6 @@ impl PendingPlanApproval {
                     created_at_ms: 0,
                 },
                 legacy_markdown: Some(plan_text.to_owned()),
-                compile: sigil_kernel::PlanCompileDetailV1 {
-                    state: sigil_kernel::PlanReadyStateV1::Ready,
-                    candidate_hash: None,
-                    compiler_version: None,
-                    failure: None,
-                },
             },
             workbench_open: false,
             workbench_scroll: 0,
@@ -590,6 +582,7 @@ pub(crate) enum MutationArtifactRetentionPreview {
 
 #[derive(Debug)]
 pub struct AppState {
+    pub(crate) control_log_recovery: crate::launcher::control_log_recovery::RecoveryUiState,
     session_auxiliary: session_auxiliary::SessionAuxiliaryState,
     live_preview: live_preview_flow::LivePreviewState,
     pub config_path: PathBuf,
@@ -609,6 +602,8 @@ pub struct AppState {
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub session_id: String,
+    pub(crate) runtime_transition: Option<crate::launcher::RuntimeTransitionOwner>,
+    pub(crate) runtime_maintenance: Option<crate::launcher::RuntimeMaintenanceOwner>,
     pending_worker_session_attachment: std::cell::RefCell<
         Option<(
             PathBuf,
@@ -655,6 +650,8 @@ pub struct AppState {
     tool_progress_execution_ids: HashMap<String, String>,
     // Tracks the exact live card occurrence for an active execution.
     tool_progress_entry_indices: HashMap<String, usize>,
+    tool_call_entry_indices: HashMap<String, usize>,
+    command_approval_request_ids: HashMap<String, String>,
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
@@ -678,6 +675,7 @@ pub struct AppState {
 
 #[derive(Debug, Clone)]
 pub enum AppAction {
+    RecoverControlLog(sigil_application::ControlLogRecoveryAction),
     SubmitPrompt(String),
     SubmitPromptWithAttachments {
         prompt: String,
@@ -734,6 +732,12 @@ pub enum AppAction {
     RetryPlanReview {
         plan_id: String,
         expected_candidate_hash: Option<String>,
+    },
+    ResumeCommittedUserInput {
+        original_command_id: String,
+        request_id: String,
+        generation: u32,
+        expected_request_hash: String,
     },
     SubmitUserInputDecision {
         command_id: Option<String>,
@@ -1119,16 +1123,6 @@ impl AppState {
         changed
     }
 
-    /// Clears all authority-owned boot attachments before a replacement transaction is
-    /// attempted. A failed config replacement must not leave the stopped worker paired with an
-    /// authority composition built from a previous snapshot.
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn clear_boot_authority(&mut self) {
-        self.managed_history_writer = None;
-        self.authority_composition = None;
-        self.boot_cutover = None;
-    }
-
     /// Applies the runtime boot owner's frozen workspace/path view before any session or writer
     /// state is initialized. This prevents the TUI shell from resolving authority roots a second
     /// time from its own process cwd.
@@ -1258,6 +1252,7 @@ impl AppState {
             workspace_root,
             workspace_git_status,
             sigil_paths,
+            control_log_recovery: Default::default(),
             session_auxiliary: Default::default(),
             live_preview: Default::default(),
             managed_history_writer: None,
@@ -1266,6 +1261,8 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            runtime_transition: None,
+            runtime_maintenance: None,
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
@@ -1318,7 +1315,6 @@ impl AppState {
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
-                task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),
@@ -1347,6 +1343,8 @@ impl AppState {
             safe_tool_calls: HashMap::new(),
             tool_progress_execution_ids: HashMap::new(),
             tool_progress_entry_indices: HashMap::new(),
+            tool_call_entry_indices: HashMap::new(),
+            command_approval_request_ids: HashMap::new(),
             compaction_config: runtime_config.compaction.clone(),
             memory_config: runtime_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
@@ -1414,6 +1412,7 @@ impl AppState {
             workspace_root: workspace_root.clone(),
             workspace_git_status,
             sigil_paths,
+            control_log_recovery: Default::default(),
             session_auxiliary: Default::default(),
             live_preview: Default::default(),
             managed_history_writer: None,
@@ -1422,6 +1421,8 @@ impl AppState {
             session_log_dir,
             session_log_path: PathBuf::new(),
             session_id,
+            runtime_transition: None,
+            runtime_maintenance: None,
             pending_worker_session_attachment: std::cell::RefCell::new(None),
             support_build_info: SupportBuildInfo::unknown(),
             update_state: update_flow::UpdateUiState::default(),
@@ -1474,7 +1475,6 @@ impl AppState {
                 active_task: None,
                 task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
-                task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot::default(),
             },
             composer: ComposerState::default(),
             approval: ApprovalState::default(),
@@ -1507,6 +1507,8 @@ impl AppState {
             safe_tool_calls: HashMap::new(),
             tool_progress_execution_ids: HashMap::new(),
             tool_progress_entry_indices: HashMap::new(),
+            tool_call_entry_indices: HashMap::new(),
+            command_approval_request_ids: HashMap::new(),
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,

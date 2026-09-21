@@ -815,7 +815,7 @@ fn approval_body_looks_like_unified_diff(body: &str) -> bool {
 }
 
 fn approval_shell_preview(pending: &PendingApproval) -> Option<ShellApprovalPreview> {
-    if pending.call.name != "bash" {
+    if !super::formatting::command_tool_name(&pending.call.name) {
         return None;
     }
     let args: Value = serde_json::from_str(&pending.call.args_json).ok()?;

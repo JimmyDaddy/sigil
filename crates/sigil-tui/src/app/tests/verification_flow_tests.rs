@@ -219,22 +219,17 @@ fn integration_review_loads_only_the_exact_current_response() -> anyhow::Result<
         parent_verdict: Some(sigil_kernel::VerificationVerdict::Passed),
         entries: app.session_browser.current_entries.clone(),
     })?;
-    assert!(app.runtime.is_busy);
+    assert!(!app.runtime.is_busy);
+    assert!(app.review.integration_review_request.is_none());
     assert!(
         app.last_notice
             .as_deref()
-            .is_some_and(|notice| notice.contains("resuming task synthesis"))
+            .is_some_and(|notice| notice.contains("ready for model continuation"))
     );
     let pending = app.drain_pending_worker_commands();
     assert!(
-        matches!(
-            pending.as_slice(),
-            [crate::runner::WorkerCommand::ContinueTask {
-                task_id: Some(task_id),
-                guidance: None,
-            }] if task_id == request.task_id.as_str()
-        ),
-        "accepted integration should resume the exact task: {pending:?}",
+        pending.is_empty(),
+        "accepted integration should leave continuation to the model: {pending:?}",
     );
 
     app.sync_current_session_state(Vec::new());

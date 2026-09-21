@@ -16,6 +16,23 @@ struct SlowAdmissionPort {
 }
 
 impl ApplicationPort for SlowAdmissionPort {
+    fn recover_control_log(
+        &self,
+        _: ApplicationScope,
+        _: ControlLogRecoveryAction,
+    ) -> BoxFuture<'static, Result<ControlLogRecoveryOutcome, ApplicationError>> {
+        let started = self.started.clone();
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            let _ = started.send(());
+            if let Some(release) = release.lock().expect("recovery gate").take() {
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release recovery");
+            }
+            Err(ApplicationError::Unavailable)
+        })
+    }
     fn open_projection(
         &self,
         _: OpenProjectionRequest,
@@ -54,8 +71,13 @@ impl ApplicationPort for SlowAdmissionPort {
             calls.fetch_add(1, Ordering::SeqCst);
             requests.lock().expect("request log").push(request.clone());
             let _ = started.send(());
-            if let Some(release) = release.lock().expect("gate lock").take() {
-                release.recv().expect("release slow reservation");
+            let release = release.lock().expect("gate lock").take();
+            if let Some(release) = release {
+                tokio::task::spawn_blocking(move || {
+                    release.recv().expect("release slow reservation");
+                })
+                .await
+                .expect("join slow reservation");
                 return Err(ApplicationError::Unavailable);
             }
             Ok(ApplicationCommandReceipt::Uncertain(
@@ -74,6 +96,90 @@ impl ApplicationPort for SlowAdmissionPort {
             ))
         })
     }
+}
+
+#[test]
+fn control_log_recovery_keeps_input_responsive_without_projection_and_joins_on_exit() -> Result<()>
+{
+    let scope = ApplicationScope {
+        application_instance: ApplicationInstanceId::new("recovery-ui")?,
+        authenticated_subject: AuthenticatedSubject::new("local")?,
+        workspace: Some(WorkspaceScopeId::new("workspace")?),
+        session: Some(SessionScopeId::new("session")?),
+    };
+    let (release_tx, release_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = Arc::new(SlowAdmissionPort {
+        snapshot: Arc::new(Mutex::new(crate::application_bridge::tests::snapshot(
+            scope.clone(),
+        ))),
+        release: Arc::new(Mutex::new(Some(release_rx))),
+        started: started_tx,
+        calls: Arc::clone(&calls),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let application = Arc::new(crate::application_bridge::tests::session(port, scope)?);
+    assert!(application.current_projection()?.is_none());
+    let mut app = AppState::from_root_config(
+        Path::new("sigil.toml"),
+        &crate::app::tests::common::test_config(),
+    );
+    let (worker_tx, _commands) = runner::WorkerCommandSender::test_channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        application: Some(application),
+        pending_admission: None,
+        pending_interactions: Vec::new(),
+        worker_rx: mpsc::channel().1,
+        join_handle: None,
+        ready: true,
+    });
+    let started = Instant::now();
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::RecoverControlLog(ControlLogRecoveryAction::Preview),
+    )?;
+    assert!(started.elapsed() < Duration::from_millis(100));
+    started_rx.recv_timeout(Duration::from_secs(2))?;
+    for _ in 0..128 {
+        let started = Instant::now();
+        assert!(!control_log_recovery::poll(&mut app)?);
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ))?;
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "recovery must not enter ordinary command admission"
+    );
+    let replacement = AppState::from_root_config(
+        Path::new("sigil.toml"),
+        &crate::app::tests::common::test_config(),
+    );
+    let replacement_started = Instant::now();
+    control_log_recovery::replace_app_state(&mut app, replacement);
+    assert!(replacement_started.elapsed() < Duration::from_millis(100));
+    assert!(!control_log_recovery::poll(&mut app)?);
+    let mut recovery = std::mem::take(&mut app.control_log_recovery);
+    let (joining_tx, joining_rx) = mpsc::channel();
+    let cleanup = std::thread::spawn(move || {
+        joining_tx.send(()).expect("joining");
+        recovery.finish_shutdown()
+    });
+    joining_rx.recv_timeout(Duration::from_secs(2))?;
+    assert!(
+        !cleanup.is_finished(),
+        "shutdown must retain its in-flight recovery owner"
+    );
+    release_tx.send(())?;
+    cleanup.join().expect("recovery cleanup joined")?;
+    shutdown_and_join_worker(&mut worker)?;
+    Ok(())
 }
 
 fn wait_admission(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<()> {
@@ -154,7 +260,10 @@ fn revise_admission_is_nonblocking_deduplicated_and_retries_the_original_envelop
         .as_ref()
         .expect("pending")
         .request
-        .clone();
+        .lock()
+        .expect("frozen request")
+        .clone()
+        .expect("prepared request");
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
     assert!(matches!(
         worker_rx.recv_timeout(Duration::from_millis(100))?,
@@ -194,7 +303,7 @@ fn revise_admission_is_nonblocking_deduplicated_and_retries_the_original_envelop
             .pending_admission
             .as_ref()
             .expect("pending")
-            .domain_resolved,
+            .receipt_resolved,
         "a failure for a different plan hash cannot settle the pending command"
     );
     process_app_action(&mut app, &mut worker, revise.clone())?;
@@ -213,7 +322,7 @@ fn revise_admission_is_nonblocking_deduplicated_and_retries_the_original_envelop
     assert_eq!(
         calls.load(Ordering::SeqCst),
         3,
-        "exact domain failure permits a new revision command"
+        "a matching publication requests reconciliation of the original command"
     );
     apply_worker_message_state(
         worker.as_mut().expect("worker"),
@@ -227,23 +336,33 @@ fn revise_admission_is_nonblocking_deduplicated_and_retries_the_original_envelop
     process_app_action(&mut app, &mut worker, next_revision.clone())?;
     wait_admission(&mut app, &mut worker)?;
     assert_eq!(calls.load(Ordering::SeqCst), 4);
-    assert!(same_application_interaction(
-        &worker
-            .as_ref()
-            .expect("worker")
-            .pending_admission
-            .as_ref()
-            .expect("new revision")
-            .action,
-        &next_revision,
+    let retained = worker
+        .as_ref()
+        .expect("worker")
+        .pending_admission
+        .as_ref()
+        .expect("unresolved original revision");
+    assert!(!same_application_interaction(
+        &retained.action,
+        &next_revision
     ));
+    assert!(
+        !retained.receipt_resolved,
+        "matching UI failures cannot replace a durable receipt"
+    );
+    let recorded = requests.lock().expect("recorded requests");
+    assert!(
+        recorded.iter().all(|request| request == &recorded[0]),
+        "every reconciliation preserves the original K/F"
+    );
+    drop(recorded);
     app.join_session_auxiliary_until(Instant::now() + Duration::from_secs(1))?;
     shutdown_and_join_worker(&mut worker)?;
     Ok(())
 }
 
 #[test]
-fn production_shutdown_restores_terminal_before_join_and_reports_a_stuck_worker() -> Result<()> {
+fn bounded_non_exit_shutdown_restores_terminal_and_retains_a_pending_worker() -> Result<()> {
     let (worker_tx, commands) = runner::WorkerCommandSender::test_channel();
     let (release_tx, release_rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
@@ -282,19 +401,41 @@ fn production_shutdown_restores_terminal_before_join_and_reports_a_stuck_worker(
             .join_handle
             .is_some()
     );
+    let (exited, exit_result) = mpsc::channel();
+    let exit_owner = std::thread::spawn(move || {
+        // The outer launcher propagates its deadline error with this owner still in scope.
+        drop(worker);
+        let _ = exited.send(());
+    });
+    assert!(matches!(
+        exit_result.recv_timeout(Duration::from_millis(40)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
     release_tx.send(())?;
-    shutdown_and_join_worker_until(&mut worker, Instant::now() + Duration::from_secs(1))?;
-    assert!(worker.is_none());
+    exit_result.recv_timeout(Duration::from_secs(1))?;
+    exit_owner.join().expect("outer exit owner");
     Ok(())
 }
 
 #[test]
-fn queue_and_save_admission_remain_responsive_and_retry_the_frozen_request() -> Result<()> {
+fn queue_enqueue_and_save_admission_remain_responsive_and_retry_the_frozen_request() -> Result<()> {
     for action in [
+        AppAction::QueueConversationInput {
+            prompt: "continue after this run".to_owned(),
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        },
         AppAction::SetConversationQueuePaused { paused: true },
         AppAction::SavePlan {
             plan_id: "plan-one".to_owned(),
             expected_plan_hash: "plan-hash".to_owned(),
+        },
+        AppAction::SubmitUserInputDecision {
+            command_id: Some("generic-input".to_owned()),
+            request_id: "generic-request".to_owned(),
+            generation: 1,
+            expected_request_hash: "request-hash".to_owned(),
+            decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
         },
     ] {
         let scope = ApplicationScope {
@@ -334,19 +475,6 @@ fn queue_and_save_admission_remain_responsive_and_retry_the_frozen_request() -> 
             join_handle: None,
             ready: true,
         });
-        let generic_input = AppAction::SubmitUserInputDecision {
-            command_id: Some("generic-input".to_owned()),
-            request_id: "generic-request".to_owned(),
-            generation: 1,
-            expected_request_hash: "request-hash".to_owned(),
-            decision: sigil_kernel::UserInputDecisionV1::RunCancelled,
-        };
-        assert!(!queue_application_interaction(
-            &mut app,
-            &mut worker,
-            &generic_input
-        )?);
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
         let started = Instant::now();
         process_app_action(&mut app, &mut worker, action.clone())?;
         assert!(started.elapsed() < Duration::from_millis(100));
@@ -355,7 +483,10 @@ fn queue_and_save_admission_remain_responsive_and_retry_the_frozen_request() -> 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let original = worker.as_ref().expect("worker").pending_interactions[0]
             .request
-            .clone();
+            .lock()
+            .expect("frozen request")
+            .clone()
+            .expect("prepared request");
         process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
         assert!(matches!(
             worker_rx.recv_timeout(Duration::from_millis(100))?,
@@ -422,9 +553,15 @@ fn worker_join_uses_the_original_deadline_without_starting_a_new_budget() -> Res
         release_rx.recv().expect("test release");
     });
     let started = Instant::now();
-    assert!(wait_for_worker_thread(Some(handle), started - Duration::from_millis(1)).is_err());
+    let mut owned = Some(handle);
+    assert!(wait_for_owned_thread(&mut owned, started - Duration::from_millis(1)).is_err());
     assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(
+        owned.is_some(),
+        "deadline does not transfer or drop ownership"
+    );
     release_tx.send(())?;
+    wait_for_worker_thread(owned, Instant::now() + Duration::from_secs(1))?;
     Ok(())
 }
 
@@ -446,10 +583,12 @@ fn terminal_restore_precedes_owned_runtime_shutdown_without_waiting_for_blocking
     let mut runtime = Some(runtime);
     let mut restored = false;
     let started = Instant::now();
-    restore_terminal_and_shutdown_event_runtime(&mut runtime, || {
+    let mut restore = || -> std::io::Result<()> {
         restored = true;
         Ok(())
-    })?;
+    };
+    restore()?;
+    let mut shutdown_handle = shutdown::start_event_runtime_shutdown(&mut runtime)?;
     assert!(restored);
     assert!(runtime.is_none());
     assert!(started.elapsed() < Duration::from_millis(100));
@@ -459,6 +598,10 @@ fn terminal_restore_precedes_owned_runtime_shutdown_without_waiting_for_blocking
     ));
     release_tx.send(())?;
     finished_rx.recv_timeout(Duration::from_secs(2))?;
+    wait_for_worker_thread(
+        shutdown_handle.take(),
+        Instant::now() + Duration::from_secs(1),
+    )?;
     Ok(())
 }
 
@@ -753,12 +896,13 @@ fn disconnected_worker_shutdown_accounts_for_blocked_interaction_admission() -> 
         .expect("save plan has an application command");
     let mut pending = PendingApplicationAdmission {
         application: Arc::clone(&application),
-        request,
+        request: Arc::new(std::sync::Mutex::new(Some(request))),
         action,
         receiver: None,
         handle: None,
         retryable: true,
-        domain_resolved: false,
+        receipt_resolved: false,
+        reconcile_requested: false,
     };
     pending.start()?;
     started_rx.recv_timeout(Duration::from_secs(2))?;
@@ -828,12 +972,15 @@ fn joined_worker_panic_cannot_be_erased_by_retrying_shutdown() -> Result<()> {
         join_handle: Some(handle),
         ready: true,
     });
-    for _ in 0..2 {
+    for attempt in 0..2 {
         let error =
             shutdown_and_join_worker_until(&mut worker, Instant::now() + Duration::from_secs(1))
                 .expect_err("join panic remains cleanup-incomplete");
         assert!(error.to_string().contains("stage=owned-thread-join"));
         assert!(error.to_string().contains("cleanup_complete=false"));
+        if attempt == 0 {
+            assert!(format!("{error:#}").contains("worker shutdown fixture panic"));
+        }
         assert!(
             worker
                 .as_ref()
@@ -843,5 +990,34 @@ fn joined_worker_panic_cannot_be_erased_by_retrying_shutdown() -> Result<()> {
             "panic join result was consumed"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn shutdown_preserves_the_primary_failure_and_all_cleanup_failures() -> Result<()> {
+    let primary =
+        "background thread `sigil-tui-admission` panicked at projection.rs:700:18: no reactor";
+    let error = finish_tui_shutdown(
+        Err(anyhow::anyhow!(primary)),
+        [
+            Ok(()),
+            Err(anyhow::anyhow!(
+                "owned_thread=admission; cleanup_complete=false"
+            )),
+            Err(anyhow::anyhow!(
+                "projection drain failed; cleanup_complete=false"
+            )),
+        ],
+    )
+    .expect_err("shutdown must not hide the original panic");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.starts_with(primary));
+    assert!(diagnostic.contains("owned_thread=admission; cleanup_complete=false"));
+    assert!(diagnostic.contains("projection drain failed; cleanup_complete=false"));
+
+    let error = finish_tui_shutdown(Ok(()), [Err(anyhow::anyhow!("worker cleanup failed"))])
+        .expect_err("clean loop does not erase a failed cleanup");
+    assert_eq!(error.to_string(), "worker cleanup failed");
+    finish_tui_shutdown(Ok(()), [Ok(()), Ok(())])?;
     Ok(())
 }

@@ -699,14 +699,11 @@ fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> a
         prompt: "Choose the managed research scope".to_owned(),
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "scope".to_owned(),
-            header: "Scope".to_owned(),
             question: "Which module should be migrated first?".to_owned(),
             description: None,
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 64,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![sigil_kernel::UserInputActionV1::CancelRun],
         requested_at_unix_ms: 10,
@@ -741,18 +738,14 @@ fn process_app_action_forwards_private_plan_review_recovery_to_the_worker() -> a
 
     process_app_action(&mut app, &mut worker, action)?;
 
-    let sent = command_rx.recv_timeout(Duration::from_secs(1))?;
     assert!(matches!(
-        sent,
-        WorkerCommand::ResumeRecoveredUserInput {
-            command_id,
-            request_id,
-            generation: 1,
-            expected_request_hash,
-        } if command_id == command.command_id.as_str()
-            && request_id == request.identity.request_id.as_str()
-            && expected_request_hash == request.request_hash
+        command_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
     ));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("attached application owner"))
+    );
     Ok(())
 }
 

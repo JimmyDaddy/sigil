@@ -381,10 +381,11 @@ where
             })?;
         if cleanup_report.inspected > 0 {
             let _ = message_tx.send(WorkerMessage::Notice(format!(
-            "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
+            "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} retained for recovery, {} require review",
             cleanup_report.inspected,
             cleanup_report.removed,
             cleanup_report.already_missing,
+            cleanup_report.retained,
             cleanup_report.failed
         )));
         }
@@ -531,6 +532,7 @@ where
     state.session.projection_reconciliation_error = None;
     state.session.projection_reconciliation_attempts = 0;
     state.session.projection_reconciliation_latched = false;
+    state.session.application_operation_owner = Some(session.application_operation_owner()?);
     state.session.current = Some(session);
     state.session.log_path = session_log_path.clone();
     if let Some(artifact_store) = target_managed_artifact_store {

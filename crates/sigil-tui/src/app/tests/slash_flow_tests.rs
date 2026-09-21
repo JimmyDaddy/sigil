@@ -758,7 +758,10 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
         action,
         Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
-    assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        app.runtime.model_name, "deepseek-v4-flash",
+        "selection is pending until runtime activation"
+    );
     assert_eq!(app.session_id, previous_session_id);
     let (provider_name, route) = app
         .pending_session_route_selection()
@@ -774,7 +777,8 @@ fn model_command_switches_runtime_model_in_the_current_session() -> Result<()> {
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text.contains("route ->") && entry.text.contains("deepseek-v4-pro"))
+            .any(|entry| entry.text.contains("switching to")
+                && entry.text.contains("deepseek-v4-pro"))
     );
     Ok(())
 }
@@ -1095,6 +1099,10 @@ fn slash_command_entries_preserve_typed_argument_during_completion() {
     let rows = app.slash_selector_rows();
 
     assert!(rows.iter().any(|(label, _)| label == "/compact"));
+    app.slash_selector_index = rows
+        .iter()
+        .position(|(label, _)| label == "/compact")
+        .expect("compact candidate");
     assert_eq!(
         app.selected_slash_entry()
             .expect("slash entry should resolve")
@@ -1179,11 +1187,13 @@ fn slash_selector_does_not_register_tool_commands() {
 fn slash_selector_navigation_and_tab_completion_work() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/".to_owned();
+    let next_command = app.slash_selector_rows()[1].0.clone();
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.slash_selector_selected_index(), Some(1));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
 
-    assert_eq!(app.composer.input, "/config".to_owned());
+    assert_eq!(app.composer.input, next_command);
     assert_eq!(app.slash_selector_selected_index(), Some(0));
     Ok(())
 }
@@ -1322,7 +1332,7 @@ fn slash_selector_includes_custom_current_model_when_query_matches() -> Result<(
 }
 
 #[test]
-fn slash_model_omits_and_rejects_routes_from_a_cached_unready_connection() -> Result<()> {
+fn slash_model_keeps_configured_routes_available_despite_cached_inventory_failure() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let inventory = app
         .runtime
@@ -1338,13 +1348,17 @@ fn slash_model_omits_and_rejects_routes_from_a_cached_unready_connection() -> Re
     let previous_session_id = app.session_id.clone();
 
     app.composer.input = "/model custom".to_owned();
-    assert!(app.slash_selector_rows().is_empty());
-    assert!(app.submit_input()?.is_none());
+    assert!(!app.slash_selector_rows().is_empty());
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
+    ));
     assert_eq!(app.session_id, previous_session_id);
-    assert_eq!(
-        app.last_notice(),
-        Some("connection deepseek-default is not ready; open /config to repair authentication")
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("switching to"))
     );
+    assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     Ok(())
 }
 
@@ -1380,7 +1394,10 @@ fn slash_selector_executes_selected_model_candidate() -> Result<()> {
         action,
         Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
-    assert_eq!(app.runtime.model_name, "deepseek-v4-pro");
+    assert_eq!(
+        app.runtime.model_name, "deepseek-v4-flash",
+        "selection is pending until runtime activation"
+    );
     assert_eq!(app.session_id, previous_session_id);
     Ok(())
 }
@@ -1418,7 +1435,7 @@ fn enter_on_root_slash_effort_completes_into_second_stage_selector() -> Result<(
 }
 
 #[test]
-fn model_command_is_noop_when_selected_model_is_already_active() -> Result<()> {
+fn model_command_revalidates_runtime_when_selected_model_is_already_configured() -> Result<()> {
     let _env_guard = crate::test_env::lock();
     let _deepseek_key = crate::test_env::EnvScope::set("SIGIL_API_KEY", "deepseek-test-key");
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -1427,12 +1444,15 @@ fn model_command_is_noop_when_selected_model_is_already_active() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(action.is_none());
+    assert!(matches!(
+        action,
+        Some(AppAction::SessionRuntimeRouteUpdated { .. })
+    ));
     assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     assert_eq!(app.session_id, previous_session_id);
     assert_eq!(
         app.last_notice(),
-        Some("model already active = deepseek-default/deepseek-v4-flash")
+        Some("switching to deepseek-default/deepseek-v4-flash; draft retained")
     );
     Ok(())
 }
@@ -1451,8 +1471,9 @@ fn slash_model_and_effort_invalid_or_busy_paths_show_usage_without_state_change(
         Some("usage: /effort <low|medium|high|max>")
     );
 
-    app.composer.input = "/model".to_owned();
-    assert!(app.submit_input()?.is_none());
+    // Submitting the visible /model picker accepts its selected candidate. Validate the empty
+    // argument at the command boundary without accidentally accepting an available route.
+    assert!(app.set_runtime_model_from_command("")?.is_none());
     assert_eq!(app.runtime.model_name, original_model);
     assert_eq!(app.session_id, original_session_id);
 
@@ -1520,10 +1541,10 @@ fn slash_model_execution_accepts_an_explicit_custom_model_id() -> Result<()> {
         Some(AppAction::SessionRuntimeRouteUpdated { .. })
     ));
     assert_eq!(app.session_id, previous_session_id);
-    assert_eq!(app.runtime.model_name, "ds-custom-2026-08");
+    assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     assert!(app.last_notice().is_some_and(|notice| {
-        notice.contains("route -> deepseek-default/ds-custom-2026-08")
-            && notice.contains("saved default unchanged")
+        notice.contains("switching to deepseek-default/ds-custom-2026-08")
+            && notice.contains("draft retained")
     }));
     Ok(())
 }
@@ -1576,6 +1597,11 @@ fn slash_command_does_not_pollute_timeline_as_user_message() -> Result<()> {
 fn submit_root_slash_executes_selected_command() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.composer.input = "/".to_owned();
+    app.slash_selector_index = app
+        .slash_selector_rows()
+        .iter()
+        .position(|(label, _)| label == "/compact")
+        .expect("compact candidate");
 
     let action = app.submit_input()?;
 

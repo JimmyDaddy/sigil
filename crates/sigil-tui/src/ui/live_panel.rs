@@ -33,7 +33,6 @@ const LIVE_PLAN_APPROVAL_ROW_LIMIT: usize = 7;
 const LIVE_PLAN_APPROVAL_STEP_LIMIT: usize = 3;
 const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROUTE_LIMIT: usize = 3;
-const LIVE_TASK_COMPLETION_LIMIT: usize = 5;
 const LIVE_STATUS_CONTENT_INSET: usize = 2;
 
 #[cfg(test)]
@@ -176,10 +175,7 @@ fn live_status_row_counts_for_app(app: &AppState, width: usize) -> LiveStatusRow
             usize::from(live_task_strip_rows(
                 view.rows.len(),
                 app.runtime.task_provider_route_diagnostics.routes.len(),
-                crate::app::task_sidebar::task_completion_progress_live_lines(
-                    &app.runtime.task_completion_progress,
-                )
-                .len(),
+                0,
                 app.task_strip_expanded(&view.task_id),
             ))
         })
@@ -239,7 +235,7 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel, width: usize) ->
             live_task_strip_rows(
                 view.rows.len(),
                 view.route_diagnostics.len(),
-                view.completion_progress.len(),
+                0,
                 view.expanded,
             )
         })
@@ -305,10 +301,7 @@ pub(crate) fn task_strip_toggle_area_for_app(live_area: Rect, app: &AppState) ->
     let task_rows = live_task_strip_rows(
         task_strip.rows.len(),
         app.runtime.task_provider_route_diagnostics.routes.len(),
-        crate::app::task_sidebar::task_completion_progress_live_lines(
-            &app.runtime.task_completion_progress,
-        )
-        .len(),
+        0,
         expanded,
     );
     let inner = inset_rect(live_area, 1, 0);
@@ -371,7 +364,7 @@ fn live_task_strip_rows(
     };
     let toggle_rows = usize::from(row_count > TASK_STRIP_COLLAPSED_ROW_LIMIT);
     1u16.saturating_add(route_count.min(LIVE_TASK_ROUTE_LIMIT) as u16)
-        .saturating_add(completion_count.min(LIVE_TASK_COMPLETION_LIMIT) as u16)
+        .saturating_add(completion_count as u16)
         .saturating_add(visible_rows as u16)
         .saturating_add(toggle_rows as u16)
 }
@@ -1502,7 +1495,6 @@ fn render_task_strip_lines(
     }
     let mut lines = Vec::with_capacity(
         1 + task_strip.route_diagnostics.len()
-            + task_strip.completion_progress.len()
             + if task_strip.expanded {
                 task_strip.rows.len()
             } else {
@@ -1527,31 +1519,6 @@ fn render_task_strip_lines(
                     ),
                     Span::styled(
                         truncate_status_text(diagnostic, width.saturating_sub(8)),
-                        Style::default()
-                            .fg(theme.palette.text_secondary)
-                            .bg(theme.palette.surface_panel_alt),
-                    ),
-                ])
-            }),
-    );
-    lines.extend(
-        task_strip
-            .completion_progress
-            .iter()
-            .take(LIVE_TASK_COMPLETION_LIMIT)
-            .enumerate()
-            .map(|(index, progress)| {
-                let label = if index == 0 { "  Batch " } else { "    ↳ " };
-                Line::from(vec![
-                    Span::styled(
-                        label,
-                        Style::default()
-                            .fg(theme.palette.accent_warning)
-                            .bg(theme.palette.surface_panel_alt)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        truncate_status_text(progress, width.saturating_sub(8)),
                         Style::default()
                             .fg(theme.palette.text_secondary)
                             .bg(theme.palette.surface_panel_alt),

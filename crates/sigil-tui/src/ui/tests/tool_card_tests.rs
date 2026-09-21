@@ -1079,9 +1079,9 @@ fn tool_card_renders_terminal_task_status_and_preview() {
     let text = plain_text(&lines);
 
     assert_eq!(activity.key, "terminal_task:terminal-1");
-    assert_eq!(activity.title, "Terminal terminal-1 cargo test");
+    assert_eq!(activity.title, "Command cargo test");
     assert!(activity.defaults_expanded);
-    assert!(text.contains("Terminal terminal-1 cargo test"));
+    assert!(text.contains("Command cargo test"));
     assert!(text.contains("RUNNING"));
     assert!(text.contains("sh · local unconfined"));
     assert!(text.contains("terminal"));
@@ -1168,7 +1168,8 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
         Some("local unconfined · exit 7 · cleanup completed")
     );
     assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
-    assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
+    assert_eq!(exited_activity.title, "Command cargo test");
+    assert!(!exited_activity.title.contains("terminal-exited"));
     assert_eq!(generic_error_display.status.label, "ERROR");
     assert_eq!(generic_error_display.status.kind, StatusKind::Error);
     assert_eq!(generic_ok_display.status.label, "OK");
@@ -2159,4 +2160,19 @@ fn checkpoint_restore_card_distinguishes_preview_blocked_and_restored_states() {
     assert_eq!(restored_display.title.plain(), "Restored checkpoint files");
     assert_eq!(restored_display.status.label, "RESTORED");
     assert_eq!(restored_display.status.kind, StatusKind::Success);
+}
+
+#[test]
+fn command_elapsed_uses_execution_start_and_freezes_at_final_update() {
+    let mut summary = base_summary("exec_command");
+    summary.status = "pending".to_owned();
+    assert_eq!(command_elapsed_ms_at(&summary, 5_000), None);
+    summary.metadata.execution_started_at_ms = Some(1_000);
+    summary.metadata.execution_updated_at_ms = Some(2_000);
+    summary.metadata.terminal_status = Some("running".to_owned());
+    assert_eq!(command_elapsed_ms_at(&summary, 5_000), Some(4_000));
+    summary.metadata.terminal_status = Some("cancelled".to_owned());
+    assert_eq!(command_elapsed_ms_at(&summary, 8_000), Some(1_000));
+    summary.metadata.terminal_status = Some("approval".to_owned());
+    assert_eq!(command_elapsed_ms_at(&summary, 8_000), None);
 }

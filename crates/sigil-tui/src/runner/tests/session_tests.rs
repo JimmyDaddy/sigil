@@ -951,7 +951,7 @@ fn switch_session_reports_typed_busy_recovery_without_run_failed() -> Result<()>
         sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
             &target_log_path,
         )?;
-    sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+    sigil_runtime::provider_connections::load_session_for_route(
         &root_config,
         &fallback_route,
         JsonlSessionStore::new(&target_log_path)?,
@@ -1036,7 +1036,7 @@ fn switch_session_opens_typed_recovery_for_changed_target_route() -> Result<()> 
         let attachment = sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease::acquire(
             &target_log_path,
         )?;
-        sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+        sigil_runtime::provider_connections::load_session_for_route(
             &original_config,
             &original_route,
             JsonlSessionStore::new(&target_log_path)?,

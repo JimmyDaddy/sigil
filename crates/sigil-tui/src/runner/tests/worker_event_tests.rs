@@ -7,7 +7,6 @@ fn supervisor_wakes_coalesce_until_the_queued_token_is_consumed() {
 
     for _ in 0..32 {
         coalescer.notify_supervisor(sigil_runtime::AgentSupervisorChange::ProviderRouteDiagnostics);
-        coalescer.notify_supervisor(sigil_runtime::AgentSupervisorChange::TaskCompletionProgress);
     }
 
     let event = event_rx.recv().expect("one coalesced wake should arrive");
@@ -16,7 +15,7 @@ fn supervisor_wakes_coalesce_until_the_queued_token_is_consumed() {
     readiness.ingest(event);
     assert!(readiness.take_wake_readiness(&coalescer).any);
 
-    coalescer.notify_supervisor(sigil_runtime::AgentSupervisorChange::TaskCompletionProgress);
+    coalescer.notify_supervisor(sigil_runtime::AgentSupervisorChange::ProviderRouteDiagnostics);
     assert!(matches!(event_rx.recv(), Ok(WorkerEvent::Wake(_))));
 }
 

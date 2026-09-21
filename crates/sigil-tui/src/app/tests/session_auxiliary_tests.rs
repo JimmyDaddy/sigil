@@ -2,6 +2,49 @@ use super::*;
 use anyhow::Context;
 use sigil_kernel::{JsonlSessionStore, ModelMessage, SessionLogEntry};
 
+#[test]
+fn expired_observation_deadline_and_setup_replacement_retain_real_thread_owner() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let path = fixture.path().to_owned();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let exit = std::thread::spawn(move || {
+        // AppState stays on one UI thread, including creation, replacement and final Drop.
+        let mut config = crate::app::tests::common::test_config();
+        config.workspace.root = path.display().to_string();
+        let mut app = AppState::from_root_config(&path.join("sigil.toml"), &config);
+        let mut replacement = AppState::from_root_config(&path.join("sigil.toml"), &config);
+        let (_, receiver) = mpsc::channel();
+        app.session_auxiliary.task = Some(AuxiliaryTask {
+            budget: SessionReadBudget::default(),
+            receiver,
+            handle: Some(std::thread::spawn(move || {
+                let _ = release_rx.recv();
+            })),
+        });
+        assert!(app.join_session_auxiliary_until(Instant::now()).is_err());
+        assert!(app.session_auxiliary.retired[0].handle.is_some());
+        let started = Instant::now();
+        app.transfer_session_auxiliary_cleanup_to(&mut replacement);
+        drop(app);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(replacement.session_auxiliary.retired.len(), 1);
+        ready_tx.send(()).expect("ready for final Drop");
+        drop(replacement);
+        finished_tx.send(()).expect("exit signal");
+    });
+    ready_rx.recv_timeout(Duration::from_secs(2))?;
+    assert!(matches!(
+        finished_rx.recv_timeout(Duration::from_millis(40)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    release_tx.send(())?;
+    finished_rx.recv_timeout(Duration::from_secs(1))?;
+    exit.join().expect("actual observation cleanup");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn catalog_history_preserves_direct_source_alias_for_current_and_resume_selection() -> Result<()> {
@@ -210,7 +253,7 @@ fn blocked_owned_session_query_keeps_input_responsive_and_cancels_before_lock_re
     fs2::FileExt::unlock(&held)?;
     app.start_bootstrap_session_cleanup()?
         .join()
-        .expect("bootstrap cleanup joined");
+        .expect("bootstrap cleanup joined")?;
     assert!(store.path().exists(), "conversation survives cleanup");
     Ok(())
 }

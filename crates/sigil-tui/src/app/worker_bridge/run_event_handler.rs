@@ -20,7 +20,8 @@ use super::{
     },
     tool_card_lifecycle::{
         agent_tool_name, attach_progress_execution_id, suppress_reasoning_before_tool_call,
-        tool_card_replacement_indices, tool_progress_result, tracked_tool_card_replacement_index,
+        tool_card_replacement_indices, tool_progress_result, tool_progress_summary,
+        tracked_call_card_replacement_index, tracked_tool_card_replacement_index,
         wait_agent_pending_replacement_indices,
     },
 };
@@ -39,6 +40,9 @@ impl EventHandler for AppState {
                 self.append_reasoning_delta(&delta);
             }
             RunEvent::ToolCallStarted(call) => {
+                self.tool_call_entry_indices.remove(&call.id);
+                self.command_approval_request_ids.remove(&call.id);
+                self.safe_tool_calls.remove(&call.id);
                 self.runtime.run_phase = RunPhase::Tool(call.name.clone());
                 self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
@@ -61,6 +65,7 @@ impl EventHandler for AppState {
                 self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
+                self.render_command_call_state(&call, "pending");
                 if let Some(profile_id) = spawn_agent_profile_id(&call) {
                     self.set_agent_wait_phase(&profile_id);
                 } else {
@@ -70,6 +75,7 @@ impl EventHandler for AppState {
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
             }
             RunEvent::ToolApprovalRequested {
+                display_call_id,
                 approval_identity,
                 effects,
                 analysis,
@@ -98,6 +104,14 @@ impl EventHandler for AppState {
                 self.downgrade_streaming_assistant_entry_to_thinking();
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
+                let display_call_id = display_call_id.as_deref().unwrap_or(&call.id);
+                if let Some(safe_call) = self.safe_tool_calls.get(display_call_id).cloned() {
+                    self.command_approval_request_ids.insert(
+                        display_call_id.to_owned(),
+                        approval_identity.approval_request_id.clone(),
+                    );
+                    self.render_command_call_state(&safe_call, "approval");
+                }
                 if let Some(preview) = preview.as_ref() {
                     self.tool_preview_snapshots
                         .entry(call.id.clone())
@@ -160,11 +174,26 @@ impl EventHandler for AppState {
                 );
             }
             RunEvent::ToolApprovalResolved {
+                display_call_id,
                 call_id,
                 approval_request_id,
                 approved,
                 reason,
             } => {
+                // A parallel child's display occurrence can resolve while another request is
+                // presented. Update only that exact card before checking modal authority.
+                let display_call_id = display_call_id.as_deref().unwrap_or(&call_id);
+                if self.command_approval_request_ids.get(display_call_id)
+                    == Some(&approval_request_id)
+                {
+                    self.command_approval_request_ids.remove(display_call_id);
+                    if let Some(call) = self.safe_tool_calls.get(display_call_id).cloned() {
+                        self.render_command_call_state(
+                            &call,
+                            if approved { "pending" } else { "denied" },
+                        );
+                    }
+                }
                 if self.approval.pending.as_ref().is_some_and(|pending| {
                     pending.call.id != call_id || pending.approval_request_id != approval_request_id
                 }) {
@@ -235,6 +264,7 @@ impl EventHandler for AppState {
                 let execution_id = progress.execution_id.as_str().to_owned();
                 self.tool_progress_execution_ids
                     .insert(progress.call_id.clone(), execution_id.clone());
+                let progress_summary = tool_progress_summary(&progress);
                 let result = tool_progress_result(progress);
                 let tool_call = self.safe_tool_calls.get(&result.call_id);
                 let rendered = format_tool_progress_block_redacted_with_call(
@@ -248,7 +278,18 @@ impl EventHandler for AppState {
                     .and_then(|entry_index| {
                         tracked_tool_card_replacement_index(&self.timeline, &rendered, *entry_index)
                     });
+                let call_indices =
+                    self.tool_call_entry_indices
+                        .get(&result.call_id)
+                        .and_then(|index| {
+                            tracked_call_card_replacement_index(
+                                &self.timeline,
+                                &result.call_id,
+                                *index,
+                            )
+                        });
                 let replacement_indices = tracked_indices
+                    .or(call_indices)
                     .or_else(|| tool_card_replacement_indices(&self.timeline, &rendered));
                 let entry_index = if let Some(indices) = replacement_indices {
                     let entry_index = indices[0];
@@ -261,14 +302,18 @@ impl EventHandler for AppState {
                 };
                 self.tool_progress_entry_indices
                     .insert(execution_id, entry_index);
+                self.tool_call_entry_indices
+                    .insert(result.call_id.clone(), entry_index);
                 self.push_event(
                     "tool:progress",
-                    format!("{} {}", result.tool_name, result.content),
+                    format!("{} {}", result.tool_name, progress_summary),
                 );
             }
             RunEvent::ToolResult(mut result) => {
+                self.command_approval_request_ids.remove(&result.call_id);
                 self.retire_live_tool_slot(&result.call_id);
                 let refresh_workspace_git = result.tool_name == "bash"
+                    || result.tool_name.starts_with("exec_")
                     || result.tool_name.starts_with("terminal_")
                     || !result.metadata.changed_files.is_empty();
                 self.clear_recent_egress_disclosure();
@@ -301,6 +346,12 @@ impl EventHandler for AppState {
                     &self.secret_redactor,
                 );
                 self.safe_tool_calls.remove(result.call_id.as_str());
+                let call_indices = self
+                    .tool_call_entry_indices
+                    .remove(&result.call_id)
+                    .and_then(|index| {
+                        tracked_call_card_replacement_index(&self.timeline, &result.call_id, index)
+                    });
                 let tracked_indices = progress_execution_id.as_deref().and_then(|execution_id| {
                     let entry_index = self.tool_progress_entry_indices.remove(execution_id)?;
                     tracked_tool_card_replacement_index(&self.timeline, &rendered, entry_index)
@@ -309,7 +360,14 @@ impl EventHandler for AppState {
                     wait_agent_pending_replacement_indices(&self.timeline, &result, &rendered)
                 {
                     self.replace_tool_timeline_entries(&indices, rendered);
-                } else if let Some(indices) = tracked_indices {
+                } else if let Some(mut indices) = tracked_indices.or(call_indices) {
+                    if let Some(durable_indices) =
+                        tool_card_replacement_indices(&self.timeline, &rendered)
+                    {
+                        indices.extend(durable_indices);
+                        indices.sort_unstable();
+                        indices.dedup();
+                    }
                     self.replace_tool_timeline_entries(&indices, rendered);
                 } else if let Some(indices) =
                     tool_card_replacement_indices(&self.timeline, &rendered)
@@ -388,7 +446,20 @@ impl EventHandler for AppState {
                     self.refresh_workspace_git_status();
                 }
                 ControlEntry::ToolExecution(execution) => {
+                    if let Some(call) = self.safe_tool_calls.get(&execution.call_id).cloned()
+                        && let Some(status) = match execution.status {
+                            ToolExecutionStatus::Failed => Some("failed"),
+                            ToolExecutionStatus::Cancelled => Some("cancelled"),
+                            ToolExecutionStatus::Interrupted => Some("interrupted"),
+                            _ => None,
+                        }
+                    {
+                        self.render_command_call_state(&call, status);
+                    }
                     if matches!(execution.status, ToolExecutionStatus::Started) {
+                        if let Some(call) = self.safe_tool_calls.get(&execution.call_id).cloned() {
+                            self.render_command_call_state(&call, "running");
+                        }
                         self.runtime.run_phase = RunPhase::Tool(execution.tool_name.clone());
                         self.push_phase_marker(format!("tool|{}", execution.tool_name));
                     }
@@ -453,6 +524,9 @@ impl EventHandler for AppState {
                 self.commit_provisional_provider_output();
                 for call in &message.tool_calls {
                     self.safe_tool_calls.insert(call.id.clone(), call.clone());
+                    if !self.tool_call_entry_indices.contains_key(&call.id) {
+                        self.render_command_call_state(call, "pending");
+                    }
                 }
                 if let Some(tool_name) = message.tool_calls.first().map(|call| call.name.clone()) {
                     self.runtime.run_phase = RunPhase::Tool(tool_name.clone());

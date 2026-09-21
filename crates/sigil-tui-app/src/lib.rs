@@ -48,6 +48,13 @@ impl std::fmt::Debug for TuiApplicationAdapter {
 }
 
 impl TuiApplicationAdapter {
+    pub async fn recover_control_log(
+        &self,
+        action: sigil_application::ControlLogRecoveryAction,
+    ) -> Result<sigil_application::ControlLogRecoveryOutcome, sigil_application::ApplicationError>
+    {
+        self.client.recover_control_log(action).await
+    }
     /// Creates the product adapter from the host-provided application port and identity.
     ///
     /// The host supplies the port and scope, but the application adapter owns the client binding;
@@ -111,6 +118,13 @@ impl TuiApplicationAdapter {
         self.client.execute(command).await
     }
 
+    pub fn reservation_key(
+        &self,
+        command_id: ApplicationCommandId,
+    ) -> sigil_application::CommandReservationKey {
+        self.client.reservation_key(command_id)
+    }
+
     /// Freezes an application envelope for one UI interaction and its exact retries.
     pub fn prepare_command(
         &self,
@@ -126,6 +140,14 @@ impl TuiApplicationAdapter {
         request: sigil_application::ApplicationCommandRequest,
     ) -> Result<ApplicationCommandReceipt, ApplicationError> {
         self.client.execute_prepared(request).await
+    }
+
+    /// Resumes the exact runtime transition retained by the host lifecycle owner.
+    pub async fn resume_session_runtime_transition(
+        &self,
+        request: sigil_application::ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.client.resume_session_runtime_transition(request).await
     }
 
     pub async fn execute_with_id(

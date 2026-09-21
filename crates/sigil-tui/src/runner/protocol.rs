@@ -20,7 +20,7 @@ use sigil_runtime::{
     BalanceSnapshot, LocalSessionCatalogEntry, McpElicitationRequest, McpElicitationResponse,
     McpListChangedNotification, McpProgressNotification, ProviderStatusConfig, SessionDeleteOutput,
     SessionDeletePreview, SessionExportOutput, SessionRetentionOutput, SessionRetentionPolicy,
-    SessionRetentionPreview, TaskCompletionProgressSnapshot, TaskProviderRouteDiagnosticsSnapshot,
+    SessionRetentionPreview, TaskProviderRouteDiagnosticsSnapshot,
     provider_connections::{ModelCatalogRequest, ModelCatalogResult, PreparedCredential},
 };
 use tokio::sync::oneshot;
@@ -324,6 +324,38 @@ pub enum McpOAuthUserAction {
 
 #[derive(Debug)]
 pub enum WorkerCommand {
+    ResumeCommittedUserInput {
+        original_operation: Box<sigil_kernel::ApplicationOperationBindingV1>,
+    },
+
+    QueryApplicationOperation {
+        binding: Box<sigil_kernel::ApplicationOperationBindingV1>,
+        reply: std::sync::mpsc::Sender<
+            Result<
+                (
+                    sigil_kernel::ApplicationOperationBindingV1,
+                    Option<sigil_kernel::session::ApplicationOperationCommitProofV1>,
+                ),
+                String,
+            >,
+        >,
+    },
+    FindCommittedApplicationOperation {
+        target: Box<sigil_kernel::ApplicationOperationTargetV1>,
+        key_digest: String,
+        reply: std::sync::mpsc::Sender<
+            Result<Option<sigil_kernel::ApplicationOperationBindingV1>, String>,
+        >,
+    },
+    PrepareApplicationOperation {
+        binding: Box<sigil_kernel::ApplicationOperationBindingV1>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    ApplicationDispatch {
+        binding: Option<Box<sigil_kernel::ApplicationOperationBindingV1>>,
+        command: Box<WorkerCommand>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     SubmitPrompt {
         prompt: String,
         reasoning_effort: ReasoningEffort,
@@ -597,6 +629,17 @@ pub struct TerminalTaskControlIdentity {
 }
 
 pub(in crate::runner) fn is_urgent_worker_command(command: &WorkerCommand) -> bool {
+    if let WorkerCommand::ApplicationDispatch { command, .. } = command {
+        return is_urgent_worker_command(command);
+    }
+    if matches!(
+        command,
+        WorkerCommand::PrepareApplicationOperation { .. }
+            | WorkerCommand::QueryApplicationOperation { .. }
+            | WorkerCommand::FindCommittedApplicationOperation { .. }
+    ) {
+        return true;
+    }
     matches!(
         command,
         WorkerCommand::ApprovalCommand(_)
@@ -615,7 +658,7 @@ pub(in crate::runner) fn is_urgent_worker_command(command: &WorkerCommand) -> bo
 #[derive(Clone, Default)]
 pub(in crate::runner) struct WorkerStopControl(Arc<std::sync::Mutex<WorkerStopState>>);
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum WorkerShutdownStage {
     #[default]
     WorkerLoop,
@@ -629,6 +672,7 @@ pub(crate) enum WorkerShutdownStage {
     McpOAuth,
     ProviderStatus,
     SessionMaintenance,
+    TerminalTasks,
     Runtime,
 }
 
@@ -646,6 +690,7 @@ impl WorkerShutdownStage {
             Self::McpOAuth => "mcp-oauth-drain",
             Self::ProviderStatus => "provider-status-drain",
             Self::SessionMaintenance => "session-maintenance-drain",
+            Self::TerminalTasks => "terminal-tasks-drain",
             Self::Runtime => "runtime-drain",
         }
     }
@@ -653,7 +698,7 @@ impl WorkerShutdownStage {
 
 struct ObservedRunStop {
     capability: sigil_kernel::RunStopCapability,
-    counts: Box<dyn Fn() -> (usize, usize) + Send + Sync>,
+    handle: sigil_kernel::RunCancellationHandle,
 }
 
 #[derive(Default)]
@@ -662,9 +707,11 @@ struct WorkerStopState {
     active: Option<ObservedRunStop>,
     retired: Vec<ObservedRunStop>,
     started: Option<std::time::Instant>,
-    deadline: Option<std::time::Instant>,
     stage: WorkerShutdownStage,
     failed_stage: Option<WorkerShutdownStage>,
+    owned_threads_joined: bool,
+    stage_started: Option<std::time::Instant>,
+    stage_timings: [std::time::Duration; 13],
 }
 
 impl WorkerStopControl {
@@ -686,18 +733,15 @@ impl WorkerStopControl {
         {
             state.retired.push(previous);
         }
-        let handle = owner.handle();
         state.active = Some(ObservedRunStop {
             capability,
-            counts: Box::new(move || (handle.active_effects(), handle.active_tasks())),
+            handle: owner.handle(),
         });
     }
 
     pub(in crate::runner) fn reserve(&self, closing: bool) {
         if closing {
-            self.begin_shutdown_until(
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-            );
+            self.begin_shutdown();
             return;
         }
         let state = self
@@ -709,35 +753,34 @@ impl WorkerStopControl {
         }
     }
 
-    fn begin_shutdown_until(&self, deadline: std::time::Instant) {
+    pub(in crate::runner) fn begin_shutdown(&self) {
         let mut state = self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.closing = true;
         state.started.get_or_insert_with(std::time::Instant::now);
-        state.deadline = Some(
-            state
-                .deadline
-                .map_or(deadline, |current| current.min(deadline)),
-        );
+        state
+            .stage_started
+            .get_or_insert_with(std::time::Instant::now);
         for run in state.active.iter().chain(&state.retired) {
             run.capability.reserve();
         }
     }
 
-    pub(in crate::runner) fn shutdown_deadline(&self) -> Option<std::time::Instant> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deadline
-    }
-
     pub(in crate::runner) fn stage(&self, stage: WorkerShutdownStage) {
-        self.0
+        let mut state = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .stage = stage;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.stage != stage {
+            if let Some(started) = state.stage_started {
+                let index = state.stage as usize;
+                state.stage_timings[index] += started.elapsed();
+                state.stage_started = Some(std::time::Instant::now());
+            }
+            state.stage = stage;
+        }
     }
 
     pub(in crate::runner) fn fail_stage(&self, stage: WorkerShutdownStage) {
@@ -746,6 +789,19 @@ impl WorkerStopControl {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .failed_stage
             .get_or_insert(stage);
+    }
+
+    fn active_counts(&self) -> (usize, usize) {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .active
+            .iter()
+            .chain(&state.retired)
+            .map(|run| (run.handle.active_effects(), run.handle.active_tasks()))
+            .fold((0, 0), |(effects, tasks), (e, t)| (effects + e, tasks + t))
     }
 
     fn shutdown_diagnostic(&self, owned_thread: &str) -> String {
@@ -757,15 +813,70 @@ impl WorkerStopControl {
             .active
             .iter()
             .chain(&state.retired)
-            .map(|run| (run.counts)())
-            .fold((0, 0), |(effects, tasks), (next_effects, next_tasks)| {
-                (effects + next_effects, tasks + next_tasks)
-            });
+            .map(|run| (run.handle.active_effects(), run.handle.active_tasks()))
+            .fold((0, 0), |(effects, tasks), (e, t)| (effects + e, tasks + t));
         let elapsed_ms = state
             .started
             .map_or(0, |started| started.elapsed().as_millis());
+        let stage_elapsed_ms = state
+            .stage_started
+            .map_or(0, |started| started.elapsed().as_millis());
+        let complete = state.owned_threads_joined
+            && state.failed_stage.is_none()
+            && state
+                .active
+                .iter()
+                .chain(&state.retired)
+                .all(|run| run.capability.cleanup_complete());
+        let stages = [
+            WorkerShutdownStage::WorkerLoop,
+            WorkerShutdownStage::OwnedThreadJoin,
+            WorkerShutdownStage::CancellationRequest,
+            WorkerShutdownStage::RunQuiescence,
+            WorkerShutdownStage::CancellationFinalization,
+            WorkerShutdownStage::SessionReload,
+            WorkerShutdownStage::Compaction,
+            WorkerShutdownStage::ArtifactGc,
+            WorkerShutdownStage::McpOAuth,
+            WorkerShutdownStage::ProviderStatus,
+            WorkerShutdownStage::SessionMaintenance,
+            WorkerShutdownStage::TerminalTasks,
+            WorkerShutdownStage::Runtime,
+        ];
+        let timings = stages
+            .iter()
+            .filter_map(|stage| {
+                let mut duration = state.stage_timings[*stage as usize];
+                if *stage == state.stage
+                    && let Some(started) = state.stage_started
+                {
+                    duration += started.elapsed();
+                }
+                (!duration.is_zero())
+                    .then(|| format!("{}:{}ms", stage.label(), duration.as_millis()))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut execution = std::collections::BTreeMap::new();
+        for run in state.active.iter().chain(&state.retired) {
+            for stage in run.capability.cleanup_progress() {
+                let entry = execution
+                    .entry(stage.stage.as_str())
+                    .or_insert((0_u64, 0_u64, 0_u64));
+                entry.0 = entry.0.saturating_add(stage.elapsed_ms);
+                entry.1 = entry.1.saturating_add(stage.active_elapsed_ms);
+                entry.2 = entry.2.saturating_add(stage.active as u64);
+            }
+        }
+        let execution = execution
+            .into_iter()
+            .map(|(stage, (elapsed, active_elapsed, active))| {
+                format!("{stage}:{elapsed}ms+{active_elapsed}ms(active={active})")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
-            "owned_thread={owned_thread}; stage={}; elapsed_ms={elapsed_ms}; active_effects={effects}; active_tasks={tasks}; cleanup_complete=false",
+            "owned_thread={owned_thread}; stage={}; elapsed_ms={elapsed_ms}; stage_elapsed_ms={stage_elapsed_ms}; active_effects={effects}; active_tasks={tasks}; cleanup_complete={complete}; stage_timings=[{timings}]; execution_timings=[{execution}]",
             state.failed_stage.unwrap_or(state.stage).label()
         )
     }
@@ -839,12 +950,30 @@ impl WorkerCommandSender {
         self.inner.stop_control.reserve(closing);
     }
 
-    pub(crate) fn begin_shutdown_until(&self, deadline: std::time::Instant) {
-        self.inner.stop_control.begin_shutdown_until(deadline);
+    pub(crate) fn begin_shutdown(&self) {
+        self.inner.stop_control.begin_shutdown();
+    }
+
+    pub(crate) fn shutdown_active_counts(&self) -> (usize, usize) {
+        self.inner.stop_control.active_counts()
     }
 
     pub(crate) fn shutdown_diagnostic(&self, owned_thread: &str) -> String {
         self.inner.stop_control.shutdown_diagnostic(owned_thread)
+    }
+
+    pub(crate) fn record_shutdown_joins_complete(&self) {
+        let mut state = self
+            .inner
+            .stop_control
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.owned_threads_joined = true;
+        if let Some(started) = state.stage_started.take() {
+            let index = state.stage as usize;
+            state.stage_timings[index] += started.elapsed();
+        }
     }
 
     pub(crate) fn record_shutdown_join_panic(&self) {
@@ -854,11 +983,15 @@ impl WorkerCommandSender {
     }
 
     pub fn send(&self, command: WorkerCommand) -> Result<(), WorkerCommandSendError> {
+        let payload = match &command {
+            WorkerCommand::ApplicationDispatch { command, .. } => command.as_ref(),
+            other => other,
+        };
         if matches!(
-            command,
+            payload,
             WorkerCommand::Shutdown | WorkerCommand::CancelRun | WorkerCommand::PauseTask { .. }
         ) {
-            self.reserve_stop(matches!(command, WorkerCommand::Shutdown));
+            self.reserve_stop(matches!(payload, WorkerCommand::Shutdown));
         } else if !is_urgent_worker_command(&command) && self.inner.stop_control.is_closing() {
             return Err(WorkerCommandSendError(Box::new(command)));
         }
@@ -953,6 +1086,7 @@ pub enum WorkerMessage {
         sequence: u64,
     },
     WorkerReady,
+    RuntimeReady(sigil_kernel::SessionRuntimeReadyV1),
     SessionAttachmentTransferred {
         session_log_path: PathBuf,
         attachment:
@@ -1019,9 +1153,6 @@ pub enum WorkerMessage {
     TaskProviderRouteDiagnosticsUpdated {
         snapshot: TaskProviderRouteDiagnosticsSnapshot,
     },
-    TaskCompletionProgressUpdated {
-        snapshot: TaskCompletionProgressSnapshot,
-    },
     RunFinished {
         result: AgentRunResult,
         entries: Vec<SessionLogEntry>,
@@ -1079,12 +1210,6 @@ pub enum WorkerMessage {
     TaskCreatedFromPlan {
         entry: TaskCreatedFromPlanEntry,
         start_mode: PlanTaskStartMode,
-        entries: Vec<SessionLogEntry>,
-    },
-    /// RFC-0067: the adopted Task is held by a durable typed blocker with available actions.
-    TaskAdmissionBlocked {
-        task_id: String,
-        blocker: sigil_kernel::TaskBlockerV1,
         entries: Vec<SessionLogEntry>,
     },
     TaskRunFinished {

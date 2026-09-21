@@ -32,10 +32,254 @@ use crate::{
     runner::{WorkerApprovalCommand, WorkerCommand, WorkerCommandEnvelope, WorkerCommandSender},
 };
 
+/// Host-owned route transition implementation. Only its Activated session record can settle
+/// the command; the application adapter neither starts workers nor invents route receipts.
+pub(crate) trait TuiRouteOperation: Send + Sync {
+    fn resume_binding(
+        &self,
+        _request: &ApplicationCommandRequest,
+    ) -> Result<CommandEffectBinding, ApplicationError> {
+        Err(ApplicationError::Unavailable)
+    }
+    fn bind_effect(
+        &self,
+        request: &ApplicationCommandRequest,
+        route: &sigil_kernel::ResolvedModelRoute,
+        key: sigil_application::CommandReservationKey,
+        fingerprint: String,
+    ) -> Result<CommandEffectBinding, ApplicationError>;
+    fn reconcile(
+        &self,
+        request: &ApplicationCommandRequest,
+    ) -> Result<Option<sigil_runtime::RuntimeApplicationDispatch>, ApplicationError>;
+    fn dispatch(
+        &self,
+        request: &ApplicationCommandRequest,
+        route: &sigil_kernel::ResolvedModelRoute,
+    ) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError>;
+}
+
+#[derive(Default)]
+pub(crate) struct TuiWorkerEndpoint {
+    state: Mutex<TuiWorkerEndpointState>,
+}
+
+#[derive(Default)]
+struct TuiWorkerEndpointState {
+    worker: Option<WorkerCommandSender>,
+    generation: u64,
+    route_operation: Option<Arc<dyn TuiRouteOperation>>,
+}
+
+impl TuiWorkerEndpoint {
+    fn new(worker: WorkerCommandSender) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(TuiWorkerEndpointState {
+                worker: Some(worker),
+                generation: 1,
+                route_operation: None,
+            }),
+        })
+    }
+
+    pub(crate) fn is_open(&self) -> Result<bool, ApplicationError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .is_some())
+    }
+
+    pub(crate) fn is_open_generation(&self, generation: u64) -> Result<bool, ApplicationError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(state.worker.is_some() && state.generation == generation)
+    }
+
+    pub(crate) fn close_gate(&self) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .take();
+        Ok(())
+    }
+
+    pub(crate) fn publish(
+        &self,
+        generation: u64,
+        worker: WorkerCommandSender,
+    ) -> Result<(), ApplicationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if state.worker.is_some() || generation <= state.generation {
+            return Err(ApplicationError::ScopeMismatch);
+        }
+        state.generation = generation;
+        state.worker = Some(worker);
+        Ok(())
+    }
+
+    pub(crate) fn generation(&self) -> Result<u64, ApplicationError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .generation)
+    }
+
+    pub(crate) fn install_route_operation(
+        &self,
+        operation: Arc<dyn TuiRouteOperation>,
+    ) -> Result<(), ApplicationError> {
+        self.state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .route_operation = Some(operation);
+        Ok(())
+    }
+
+    fn route_operation(&self) -> Result<Arc<dyn TuiRouteOperation>, ApplicationError> {
+        self.state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .route_operation
+            .clone()
+            .ok_or(ApplicationError::Unavailable)
+    }
+
+    fn dispatch_route(
+        &self,
+        request: &ApplicationCommandRequest,
+        route: &sigil_kernel::ResolvedModelRoute,
+    ) -> Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError> {
+        let operation = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .route_operation
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        operation.dispatch(request, route)
+    }
+
+    fn prepare_operation(
+        &self,
+        binding: sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<(), ApplicationError> {
+        let worker = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        let (reply, received) = std::sync::mpsc::channel();
+        worker
+            .send(WorkerCommand::PrepareApplicationOperation {
+                binding: Box::new(binding),
+                reply,
+            })
+            .map_err(|_| ApplicationError::Unavailable)?;
+        received
+            .recv()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+    fn query_operation(
+        &self,
+        binding: sigil_kernel::ApplicationOperationBindingV1,
+    ) -> Result<
+        (
+            sigil_kernel::ApplicationOperationBindingV1,
+            Option<sigil_kernel::session::ApplicationOperationCommitProofV1>,
+        ),
+        ApplicationError,
+    > {
+        let worker = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        let (reply, received) = std::sync::mpsc::channel();
+        worker
+            .send(WorkerCommand::QueryApplicationOperation {
+                binding: Box::new(binding),
+                reply,
+            })
+            .map_err(|_| ApplicationError::Unavailable)?;
+        received
+            .recv()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+    fn find_committed_operation(
+        &self,
+        target: sigil_kernel::ApplicationOperationTargetV1,
+        key_digest: String,
+    ) -> Result<Option<sigil_kernel::ApplicationOperationBindingV1>, ApplicationError> {
+        let worker = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        let (reply, received) = std::sync::mpsc::channel();
+        worker
+            .send(WorkerCommand::FindCommittedApplicationOperation {
+                target: Box::new(target),
+                key_digest,
+                reply,
+            })
+            .map_err(|_| ApplicationError::Unavailable)?;
+        received
+            .recv()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+    fn send(
+        &self,
+        request: &ApplicationCommandRequest,
+        command: WorkerCommand,
+    ) -> Result<(), ApplicationError> {
+        let worker = self
+            .state
+            .lock()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .worker
+            .clone()
+            .ok_or(ApplicationError::Unavailable)?;
+        let binding =
+            sigil_runtime::application_operation_owner::application_operation_binding(request)?
+                .map(Box::new);
+        let (reply, received) = std::sync::mpsc::channel();
+        worker
+            .send(WorkerCommand::ApplicationDispatch {
+                binding,
+                command: Box::new(command),
+                reply,
+            })
+            .map_err(|_| ApplicationError::Unavailable)?;
+        received
+            .recv()
+            .map_err(|_| ApplicationError::Unavailable)?
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+}
+
 /// A TUI-local application client.  It caches only the latest bounded frontier/projection needed
 /// to construct a CAS-bound command; paths and physical authority objects remain in the runtime.
 pub(crate) struct TuiApplicationSession {
     application: TuiApplicationAdapter,
+    pub(crate) endpoint: Arc<TuiWorkerEndpoint>,
     projection_binding: Arc<sigil_runtime::RuntimeSessionProjectionBinding>,
     reasoning_effort: ApplicationReasoningEffort,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
@@ -76,6 +320,12 @@ impl std::fmt::Debug for TuiApplicationSession {
 }
 
 impl TuiApplicationSession {
+    pub(crate) async fn recover_control_log(
+        &self,
+        action: sigil_application::ControlLogRecoveryAction,
+    ) -> Result<sigil_application::ControlLogRecoveryOutcome, ApplicationError> {
+        self.application.recover_control_log(action).await
+    }
     #[allow(clippy::too_many_arguments)]
     fn new(
         port: Arc<dyn ApplicationPort>,
@@ -94,6 +344,7 @@ impl TuiApplicationSession {
         mcp_oauth_bindings: Arc<Mutex<BTreeMap<String, TuiMcpOAuthBinding>>>,
     ) -> Result<Self, ApplicationError> {
         Ok(Self {
+            endpoint: Arc::new(TuiWorkerEndpoint::default()),
             application: TuiApplicationAdapter::from_port(
                 port,
                 scope,
@@ -109,6 +360,13 @@ impl TuiApplicationSession {
             mcp_oauth_bindings,
             configuration_bindings,
         })
+    }
+
+    pub(crate) fn replace_projection_owner(
+        &self,
+        owner: sigil_runtime::RuntimeSessionProjectionOwner,
+    ) -> Result<(), ApplicationError> {
+        self.projection_binding.replace_owner(owner)
     }
 
     fn bind_session_target(
@@ -287,6 +545,15 @@ impl TuiApplicationSession {
         self.application.execute_prepared(request).await
     }
 
+    pub(crate) async fn resume_session_runtime_transition(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> Result<ApplicationCommandReceipt, ApplicationError> {
+        self.application
+            .resume_session_runtime_transition(request)
+            .await
+    }
+
     /// Converts only commands with a lossless V1 application representation.  Unsupported TUI
     /// actions remain at the legacy adapter until their typed payload is added to the contract;
     /// they are never smuggled through a generic string command.
@@ -320,6 +587,7 @@ impl TuiApplicationSession {
                 | AppAction::RefreshMcpServer { .. }
                 | AppAction::McpOAuth { .. }
                 | AppAction::SubmitUserInputDecision { .. }
+                | AppAction::ResumeCommittedUserInput { .. }
                 | AppAction::UpdateActiveRunPermissionMode { .. }
                 | AppAction::QueueConversationInput { .. }
                 | AppAction::CancelQueuedConversationInput { .. }
@@ -488,6 +756,56 @@ impl TuiApplicationSession {
                     binding: self.bind_provider_route(route)?,
                 },
             )),
+            AppAction::ResumeCommittedUserInput {
+                original_command_id,
+                request_id,
+                generation,
+                expected_request_hash,
+            } => {
+                let original_key =
+                    self.application
+                        .reservation_key(sigil_application::ApplicationCommandId::new(
+                            original_command_id.clone(),
+                        )?);
+                let digest =
+                    sigil_runtime::application_operation_owner::application_reservation_key_digest(
+                        &original_key,
+                    )?;
+                let target = sigil_kernel::ApplicationOperationTargetV1::UserInputDecision {
+                    request_id: request_id.clone(),
+                    generation: *generation,
+                    request_hash: expected_request_hash.clone(),
+                    command_id: original_command_id.clone(),
+                };
+                let original = self
+                    .endpoint
+                    .find_committed_operation(target.clone(), digest)?
+                    .ok_or(ApplicationError::Unavailable)?;
+                if original.target != target
+                    || original.session_scope_id
+                        != original_key
+                            .authority_scope
+                            .session
+                            .as_ref()
+                            .ok_or(ApplicationError::ScopeRequired)?
+                            .as_str()
+                {
+                    return Err(ApplicationError::ScopeMismatch);
+                }
+                Some(ApplicationCommand::UserInput(
+                    UserInputCommand::ResumeCommittedUserInput {
+                        original_key: Box::new(original_key),
+                        original_fingerprint: original.fingerprint,
+                        original_operation_id: original.operation_id,
+                        original_domain_session_scope_id: original.domain_session_scope_id,
+                        binding: request_id.clone(),
+                        generation: *generation,
+                        expected_request_hash: sigil_application::SafeText::new(
+                            expected_request_hash.clone(),
+                        )?,
+                    },
+                ))
+            }
             AppAction::SubmitUserInputDecision {
                 command_id: _,
                 request_id,
@@ -1143,38 +1461,79 @@ fn application_queue_item_kind(
 /// Builds the runtime application port for one already-started worker.  The worker command
 /// sender is only an executor edge; reservation, projection and receipt policy remain in the
 /// runtime service.
+#[derive(Clone)]
+pub(crate) struct TuiApplicationBindingInputs {
+    pub(crate) config_path: PathBuf,
+    pub(crate) launch_cwd: PathBuf,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) session_log_path: PathBuf,
+    pub(crate) session_id: String,
+    pub(crate) cutover: Arc<sigil_runtime::application_host::RuntimeGlobalCutoverV1>,
+    pub(crate) composition: Arc<sigil_runtime::application_host::RuntimeAuthorityCompositionV1>,
+}
+
+impl TuiApplicationBindingInputs {
+    pub(crate) fn from_app(app: &crate::app::AppState) -> Result<Self> {
+        Ok(Self {
+            config_path: app.config_path.clone(),
+            launch_cwd: std::env::current_dir()?,
+            workspace_root: app.workspace_root.clone(),
+            session_log_path: app.session_log_path.clone(),
+            session_id: app.session_id.clone(),
+            cutover: app
+                .boot_cutover()
+                .cloned()
+                .context("application requires boot cutover")?,
+            composition: app
+                .authority_composition()
+                .cloned()
+                .context("application requires authority composition")?,
+        })
+    }
+}
+
 pub(crate) fn build_for_worker(
     app: &crate::app::AppState,
     worker_tx: WorkerCommandSender,
     reasoning_effort: ReasoningEffort,
     projection_owner: sigil_runtime::RuntimeSessionProjectionOwner,
 ) -> Result<TuiApplicationSession> {
-    let cutover = app
-        .boot_cutover()
-        .context("application port requires the published boot cutover")?;
-    let composition = app
-        .authority_composition()
-        .context("application port requires the composed authority")?;
+    build_from_inputs(
+        TuiApplicationBindingInputs::from_app(app)?,
+        worker_tx,
+        reasoning_effort,
+        projection_owner,
+    )
+}
+
+pub(crate) fn build_from_inputs(
+    inputs: TuiApplicationBindingInputs,
+    worker_tx: WorkerCommandSender,
+    reasoning_effort: ReasoningEffort,
+    projection_owner: sigil_runtime::RuntimeSessionProjectionOwner,
+) -> Result<TuiApplicationSession> {
+    let cutover = &inputs.cutover;
+    let composition = &inputs.composition;
     let application_instance = sigil_application::ApplicationInstanceId::new(
         cutover.manifest().application_instance_id.clone(),
     )?;
     let subject = AuthenticatedSubject::new("local-user")?;
-    let workspace_id =
-        sigil_kernel::stable_workspace_id(&app.workspace_root).map_err(|error| anyhow!(error))?;
+    let workspace_id = sigil_kernel::stable_workspace_id(&inputs.workspace_root)
+        .map_err(|error| anyhow!(error))?;
     let scope = ApplicationScope {
         application_instance: application_instance.clone(),
         authenticated_subject: subject.clone(),
         workspace: Some(sigil_application::WorkspaceScopeId::new(workspace_id)?),
         session: Some(sigil_application::SessionScopeId::new(
-            app.session_id.clone(),
+            inputs.session_id.clone(),
         )?),
     };
-    let session_scope_id = app.session_id.clone();
+    let session_scope_id = inputs.session_id.clone();
     let projection = Arc::new(
         sigil_runtime::RuntimeSessionProjectionBinding::new(
-            app.config_path.clone(),
-            std::env::current_dir()?,
-            app.session_log_path.clone(),
+            inputs.config_path.clone(),
+            inputs.launch_cwd.clone(),
+            inputs.session_log_path.clone(),
             session_scope_id.clone(),
             application_instance,
             subject,
@@ -1193,7 +1552,7 @@ pub(crate) fn build_for_worker(
     .map_err(|error| anyhow!(error))?;
     let delivery_acks = sigil_runtime::RuntimeApplicationDeliveryAckStore::open(
         Arc::clone(&composition.storage_writer),
-        &format!("tui-application-delivery-{}", app.session_id),
+        &format!("tui-application-delivery-{}", inputs.session_id),
         scope.clone(),
         1,
     )
@@ -1204,8 +1563,10 @@ pub(crate) fn build_for_worker(
     let provider_route_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let mcp_oauth_bindings = Arc::new(Mutex::new(BTreeMap::new()));
     let configuration_bindings = Arc::new(Mutex::new(BTreeMap::new()));
+    let endpoint = TuiWorkerEndpoint::new(worker_tx);
     let executor = Arc::new(TuiWorkerCommandExecutor {
-        worker_tx,
+        endpoint: Arc::clone(&endpoint),
+        projection_binding: Some(Arc::clone(&projection)),
         reasoning_effort,
         session_id: session_scope_id,
         session_bindings: Arc::clone(&session_bindings),
@@ -1224,7 +1585,7 @@ pub(crate) fn build_for_worker(
     ));
     let client_epoch = stable_tui_client_epoch(&scope);
     let connection = HostConnectionInstanceId::new(format!("tui-{}", uuid::Uuid::new_v4()))?;
-    TuiApplicationSession::new(
+    let mut application = TuiApplicationSession::new(
         service,
         scope,
         projection,
@@ -1238,7 +1599,9 @@ pub(crate) fn build_for_worker(
         configuration_bindings,
         mcp_oauth_bindings,
     )
-    .map_err(|error| anyhow!(error))
+    .map_err(|error| anyhow!(error))?;
+    application.endpoint = endpoint;
+    Ok(application)
 }
 
 fn application_reasoning_effort(effort: &ReasoningEffort) -> ApplicationReasoningEffort {
@@ -1313,7 +1676,8 @@ fn stable_tui_client_epoch(scope: &ApplicationScope) -> u64 {
 }
 
 struct TuiWorkerCommandExecutor {
-    worker_tx: WorkerCommandSender,
+    endpoint: Arc<TuiWorkerEndpoint>,
+    projection_binding: Option<Arc<sigil_runtime::RuntimeSessionProjectionBinding>>,
     reasoning_effort: ReasoningEffort,
     session_id: String,
     session_bindings: Arc<Mutex<BTreeMap<SessionItemId, TuiSessionBinding>>>,
@@ -1324,12 +1688,59 @@ struct TuiWorkerCommandExecutor {
 }
 
 impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecutor {
+    fn session_runtime_resume_binding(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        let result = if matches!(
+            request.envelope.command,
+            ApplicationCommand::Provider(sigil_application::ProviderCommand::SelectRoute { .. })
+        ) {
+            self.endpoint
+                .route_operation()
+                .and_then(|owner| owner.resume_binding(&request))
+        } else {
+            Err(ApplicationError::ScopeMismatch)
+        };
+        Box::pin(async move { result })
+    }
     fn bind_effect(
         &self,
         request: ApplicationCommandRequest,
         key: sigil_application::CommandReservationKey,
         fingerprint: String,
     ) -> BoxFuture<'static, Result<CommandEffectBinding, ApplicationError>> {
+        if let ApplicationCommand::Provider(sigil_application::ProviderCommand::SelectRoute {
+            binding,
+        }) = &request.envelope.command
+        {
+            let result = (|| {
+                let route = self
+                    .provider_route_bindings
+                    .lock()
+                    .map_err(|_| ApplicationError::Unavailable)?
+                    .get(binding)
+                    .cloned()
+                    .ok_or(ApplicationError::ScopeMismatch)?;
+                self.endpoint
+                    .route_operation()?
+                    .bind_effect(&request, &route, key, fingerprint)
+            })();
+            return Box::pin(async move { result });
+        }
+        let owner_effect_id =
+            match sigil_runtime::application_operation_owner::application_operation_binding(
+                &request,
+            ) {
+                Ok(Some(operation)) => {
+                    if let Err(error) = self.endpoint.prepare_operation(operation.clone()) {
+                        return Box::pin(async move { Err(error) });
+                    }
+                    operation.operation_id
+                }
+                Ok(None) => format!("tui-worker:{}", request.envelope.command_id),
+                Err(error) => return Box::pin(async move { Err(error) }),
+            };
         let binding = CommandEffectBinding {
             command_id: request.envelope.command_id.clone(),
             command_kind: request.envelope.command.kind().to_owned(),
@@ -1338,12 +1749,36 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecut
                 key,
                 phase: CommandLifecyclePhase::EffectStarted,
             },
-            owner_effect_id: format!("tui-worker:{}", request.envelope.command_id),
+            owner_effect_id,
         };
         Box::pin(async move {
             binding.validate()?;
             Ok(binding)
         })
+    }
+
+    fn reconcile(
+        &self,
+        request: ApplicationCommandRequest,
+    ) -> BoxFuture<
+        'static,
+        Result<Option<sigil_runtime::RuntimeApplicationDispatch>, ApplicationError>,
+    > {
+        if matches!(
+            request.envelope.command,
+            ApplicationCommand::Provider(sigil_application::ProviderCommand::SelectRoute { .. })
+        ) {
+            let result = self
+                .endpoint
+                .route_operation()
+                .and_then(|operation| operation.reconcile(&request));
+            return Box::pin(async move { result });
+        }
+        reconcile_worker_operation(
+            self.projection_binding.clone(),
+            self.endpoint.clone(),
+            request,
+        )
     }
 
     fn dispatch(
@@ -1352,8 +1787,48 @@ impl sigil_runtime::RuntimeApplicationCommandExecutor for TuiWorkerCommandExecut
     ) -> BoxFuture<'static, Result<sigil_runtime::RuntimeApplicationDispatch, ApplicationError>>
     {
         let result = self.dispatch_sync(&request);
-        Box::pin(async move { result })
+        let projection = self.projection_binding.clone();
+        let endpoint = self.endpoint.clone();
+        Box::pin(async move {
+            let result = result?;
+            if matches!(
+                result,
+                sigil_runtime::RuntimeApplicationDispatch::Uncertain(_)
+            ) && let Some(settled) =
+                reconcile_worker_operation(projection, endpoint, request).await?
+            {
+                return Ok(settled);
+            }
+            Ok(result)
+        })
     }
+}
+
+fn reconcile_worker_operation(
+    projection: Option<Arc<sigil_runtime::RuntimeSessionProjectionBinding>>,
+    endpoint: Arc<TuiWorkerEndpoint>,
+    request: ApplicationCommandRequest,
+) -> BoxFuture<'static, Result<Option<sigil_runtime::RuntimeApplicationDispatch>, ApplicationError>>
+{
+    Box::pin(async move {
+        let Some(projection) = projection else {
+            return Ok(None);
+        };
+        let Some(binding) =
+            sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+        else {
+            return Ok(None);
+        };
+        let (binding, proof) = endpoint.query_operation(binding)?;
+        let Some(proof) = proof else {
+            return Ok(None);
+        };
+        let frontier = projection.durable_frontier().await?;
+        sigil_runtime::application_operation_owner::application_operation_receipt_from_proof(
+            &request, &binding, &proof, &frontier,
+        )
+        .map(Some)
+    })
 }
 
 impl TuiWorkerCommandExecutor {
@@ -1475,6 +1950,18 @@ impl TuiWorkerCommandExecutor {
                 WorkerCommand::McpOAuth {
                     server_name: target.server_name,
                     action: worker_action,
+                }
+            }
+            ApplicationCommand::UserInput(UserInputCommand::ResumeCommittedUserInput {
+                ..
+            }) => {
+                let original =
+                    sigil_runtime::application_operation_owner::resumed_user_input_operation(
+                        request,
+                    )?
+                    .ok_or(ApplicationError::ScopeMismatch)?;
+                WorkerCommand::ResumeCommittedUserInput {
+                    original_operation: Box::new(original),
                 }
             }
             ApplicationCommand::UserInput(UserInputCommand::Resolve {
@@ -2042,12 +2529,7 @@ impl TuiWorkerCommandExecutor {
                             "provider route binding is not owned by this TUI connection".to_owned(),
                         )
                     })?;
-                let _ = route;
-                return local_mutation_settled(
-                    request,
-                    "TUI provider route selection committed",
-                    "tui-provider-route",
-                );
+                return self.endpoint.dispatch_route(request, &route);
             }
             _ => {
                 return Ok(sigil_runtime::RuntimeApplicationDispatch::Rejected(
@@ -2058,14 +2540,10 @@ impl TuiWorkerCommandExecutor {
                 ));
             }
         };
-        self.worker_tx
-            .send(command)
-            .map_err(|_| ApplicationError::Unavailable)?;
-        // The worker command has crossed its transport boundary, but this synchronous adapter
-        // cannot observe the worker's eventual durable domain commit. Return a typed uncertainty
-        // carrying the exact owner identity so the application reservation remains recoverable;
-        // callers must never reinterpret this as a successful enqueue or fall back to a raw
-        // worker command after application admission failed.
+        self.endpoint.send(request, command)?;
+        // The worker acknowledged its actual dispatcher, so the application's forward guard
+        // covers the owner boundary. Durable operations are reconciled after this method;
+        // an external execution gap remains uncertain until its owner supplies real proof.
         let key = request
             .admission
             .reservation_key(&request.envelope.command_id);
@@ -2079,10 +2557,15 @@ impl TuiWorkerCommandExecutor {
                     key,
                     phase: CommandLifecyclePhase::EffectStarted,
                 },
-                owner_recovery_binding: Some(format!(
-                    "tui-worker:{}",
-                    request.envelope.command_id.as_str()
-                )),
+                owner_recovery_binding: Some(
+                    sigil_runtime::application_operation_owner::application_operation_binding(
+                        request,
+                    )?
+                    .map_or_else(
+                        || format!("tui-worker:{}", request.envelope.command_id.as_str()),
+                        |binding| binding.operation_id,
+                    ),
+                ),
             },
         ))
     }
@@ -2140,6 +2623,7 @@ impl TuiWorkerCommandExecutor {
 /// this TUI adapter itself. Configuration publication and route selection do not enqueue a worker
 /// command, so reporting `Uncertain` here would falsely tell the caller that an already-completed
 /// operation needs reconciliation. The reservation journal indexes this exact local commit.
+#[cfg(test)]
 fn local_mutation_settled(
     request: &ApplicationCommandRequest,
     summary: &str,
@@ -2188,6 +2672,7 @@ fn local_mutation_dispatch(
         settlement: request.envelope.command.policy().settlement,
         summary: summary.to_owned(),
         domain_commit: sigil_application::ApplicationDomainCommitRef {
+            source_session_scope_id: None,
             source_event_id: format!("{event_prefix}:{}", request.envelope.command_id),
             source_sequence,
             source_digest,

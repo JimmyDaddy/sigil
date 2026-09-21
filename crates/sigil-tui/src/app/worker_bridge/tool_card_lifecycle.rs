@@ -62,6 +62,18 @@ pub(super) fn tracked_tool_card_replacement_index(
     .then_some(vec![entry_index])
 }
 
+pub(super) fn tracked_call_card_replacement_index(
+    timeline: &[TimelineEntry],
+    call_id: &str,
+    entry_index: usize,
+) -> Option<Vec<usize>> {
+    let previous = timeline.get(entry_index)?;
+    let value = serde_json::from_str::<serde_json::Value>(&previous.text).ok()?;
+    (previous.role == TimelineRole::Tool
+        && value.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id))
+    .then_some(vec![entry_index])
+}
+
 pub(in crate::app) fn tool_card_replacement_key(text: &str) -> Option<String> {
     terminal_task_key_from_tool_block(text)
         .or_else(|| execution_key_from_tool_block(text))
@@ -73,8 +85,22 @@ pub(super) fn tool_progress_result(progress: ToolProgressEvent) -> ToolResult {
         .output_preview
         .clone()
         .filter(|preview| !preview.is_empty())
-        .unwrap_or_else(|| tool_progress_summary(&progress));
-    let details = tool_progress_details(progress.execution_id.as_str(), progress.details);
+        .unwrap_or_else(|| {
+            // Command cards reserve their output rail for bytes captured from the process.
+            if progress.tool_name.starts_with("exec_") {
+                String::new()
+            } else {
+                tool_progress_summary(&progress)
+            }
+        });
+    let mut details = tool_progress_details(progress.execution_id.as_str(), progress.details);
+    if progress.tool_name.starts_with("exec_")
+        && let Some(details) = details.as_object_mut()
+    {
+        details
+            .entry("status")
+            .or_insert_with(|| serde_json::Value::String(progress.status.clone()));
+    }
     ToolResult::ok(
         progress.call_id,
         progress.tool_name,
@@ -131,7 +157,16 @@ pub(super) fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {
     let tool_name = value.get("tool_name")?.as_str()?;
     if !matches!(
         tool_name,
-        "terminal_task" | "terminal_start" | "terminal_read" | "terminal_cancel"
+        "terminal_task"
+            | "terminal_start"
+            | "terminal_read"
+            | "terminal_cancel"
+            | "exec_command"
+            | "exec_read"
+            | "exec_wait"
+            | "exec_input"
+            | "exec_resize"
+            | "exec_cancel"
     ) {
         return None;
     }
@@ -141,7 +176,8 @@ pub(super) fn terminal_task_key_from_tool_block(text: &str) -> Option<String> {
         .get("status")
         .and_then(serde_json::Value::as_str)?;
     let task_id = terminal_task
-        .get("task_id")
+        .get("execution_id")
+        .or_else(|| terminal_task.get("task_id"))
         .and_then(serde_json::Value::as_str)?
         .trim();
     (!task_id.is_empty()).then(|| format!("terminal_task:{task_id}"))

@@ -80,6 +80,9 @@ pub(in crate::ui::tool_card) fn terminal_task_display_status(
         }
         _ => {}
     }
+    if let Some(duration_ms) = command_elapsed_ms(summary) {
+        details.push(format_duration_ms(duration_ms));
+    }
     if let Some(cleanup_status) = summary
         .metadata
         .terminal_cleanup_status
@@ -93,13 +96,25 @@ pub(in crate::ui::tool_card) fn terminal_task_display_status(
         detail: (!details.is_empty()).then(|| details.join(" · ")),
         kind: terminal_task_status_kind(summary),
         is_error: summary.is_error
-            || matches!(summary.metadata.terminal_status.as_deref(), Some("failed")),
+            || matches!(summary.metadata.terminal_status.as_deref(), Some("failed"))
+            || summary
+                .metadata
+                .terminal_exit_code
+                .is_some_and(|code| code != 0),
     }
 }
 
 pub(in crate::ui::tool_card) fn terminal_task_status_kind(summary: &ToolCardRender) -> StatusKind {
     match summary.metadata.terminal_status.as_deref() {
         Some("starting" | "running") => StatusKind::Running,
+        Some("exited")
+            if summary
+                .metadata
+                .terminal_exit_code
+                .is_some_and(|code| code != 0) =>
+        {
+            StatusKind::Error
+        }
         Some("exited") => StatusKind::Success,
         Some("failed" | "cancelled" | "interrupted") => StatusKind::Error,
         _ if summary.is_error => StatusKind::Error,

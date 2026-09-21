@@ -2020,6 +2020,7 @@ fn tool_result_uses_live_approval_preview_snapshot_for_diff_card() -> Result<()>
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: true,
@@ -2102,6 +2103,7 @@ fn approval_preview_snapshot_caches_diff_for_approved_tool_result() -> Result<()
 
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: true,
@@ -2204,6 +2206,7 @@ fn error_tool_result_does_not_render_cached_preview_as_applied_diff() -> Result<
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: false,

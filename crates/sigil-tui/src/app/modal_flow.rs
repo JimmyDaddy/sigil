@@ -1856,48 +1856,58 @@ fn mcp_user_input_form(
             })
             .collect::<Vec<_>>();
         let default = field.default.as_ref();
-        let (kind, draft) = match field.kind {
-            McpNormalizedFormFieldKind::String => (
-                sigil_kernel::UserInputFieldKindV1::Text {
-                    multiline: false,
-                    max_chars: sigil_kernel::MAX_USER_INPUT_TEXT_CHARS,
-                },
+        let (question_options, multiple, draft) = match field.kind {
+            McpNormalizedFormFieldKind::String
+            | McpNormalizedFormFieldKind::Number
+            | McpNormalizedFormFieldKind::Integer => (
+                Vec::new(),
+                false,
                 super::UserInputDraftValue::Text(
                     default
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
+                        .map(ToOwned::to_owned)
+                        .or_else(|| default.map(ToString::to_string))
+                        .unwrap_or_default(),
                 ),
             ),
-            McpNormalizedFormFieldKind::Number => (
-                sigil_kernel::UserInputFieldKindV1::Number,
-                super::UserInputDraftValue::Number(
-                    default.map(ToString::to_string).unwrap_or_default(),
-                ),
-            ),
-            McpNormalizedFormFieldKind::Integer => (
-                sigil_kernel::UserInputFieldKindV1::Integer,
-                super::UserInputDraftValue::Integer(
-                    default.map(ToString::to_string).unwrap_or_default(),
-                ),
-            ),
-            McpNormalizedFormFieldKind::Boolean => (
-                sigil_kernel::UserInputFieldKindV1::Boolean,
-                super::UserInputDraftValue::Boolean(default.and_then(serde_json::Value::as_bool)),
-            ),
+            McpNormalizedFormFieldKind::Boolean => {
+                let options = vec![
+                    sigil_kernel::UserInputOptionV1 {
+                        id: "true".to_owned(),
+                        label: "Yes".to_owned(),
+                        description: None,
+                    },
+                    sigil_kernel::UserInputOptionV1 {
+                        id: "false".to_owned(),
+                        label: "No".to_owned(),
+                        description: None,
+                    },
+                ];
+                let selected = default
+                    .and_then(serde_json::Value::as_bool)
+                    .map(|value| usize::from(!value));
+                (
+                    options,
+                    false,
+                    super::UserInputDraftValue::SingleSelect {
+                        selected,
+                        other: String::new(),
+                        selected_by_user: false,
+                    },
+                )
+            }
             McpNormalizedFormFieldKind::SingleSelect => {
                 let selected = default
                     .and_then(serde_json::Value::as_str)
                     .and_then(|value| options.iter().position(|option| option.id == value))
                     .or_else(|| (!options.is_empty()).then_some(0));
                 (
-                    sigil_kernel::UserInputFieldKindV1::SingleSelect {
-                        options,
-                        allow_other: false,
-                    },
+                    options,
+                    false,
                     super::UserInputDraftValue::SingleSelect {
                         selected,
                         other: String::new(),
+                        selected_by_user: false,
                     },
                 )
             }
@@ -1909,28 +1919,24 @@ fn mcp_user_input_form(
                     .filter_map(serde_json::Value::as_str)
                     .map(ToOwned::to_owned)
                     .collect::<Vec<_>>();
-                let max_selected = u32::try_from(options.len()).unwrap_or(u32::MAX);
                 (
-                    sigil_kernel::UserInputFieldKindV1::MultiSelect {
-                        options,
-                        max_selected,
-                    },
+                    options,
+                    true,
                     super::UserInputDraftValue::MultiSelect {
                         cursor: 0,
                         selected,
+                        other: String::new(),
                     },
                 )
             }
         };
         questions.push(sigil_kernel::UserInputQuestionV1 {
             id: field.name,
-            header: label.clone(),
-            question: field
-                .description
-                .unwrap_or_else(|| format!("Provide {label}.")),
+            question: field.description.unwrap_or(label),
             description: None,
             required: field.required,
-            field: kind,
+            options: question_options,
+            multiple,
         });
         drafts.push(draft);
     }

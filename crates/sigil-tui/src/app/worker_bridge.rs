@@ -38,6 +38,35 @@ use sigil_kernel::ToolResult;
 use sigil_kernel::{ControlEntry, EventHandler};
 
 impl AppState {
+    fn render_command_call_state(&mut self, call: &sigil_kernel::ToolCall, status: &str) {
+        if !super::formatting::command_tool_name(&call.name) {
+            return;
+        }
+        let rendered =
+            super::formatting::format_tool_call_block_redacted(call, status, &self.secret_redactor);
+        let existing = self
+            .tool_call_entry_indices
+            .get(&call.id)
+            .copied()
+            .and_then(|index| {
+                tool_card_lifecycle::tracked_call_card_replacement_index(
+                    &self.timeline,
+                    &call.id,
+                    index,
+                )
+            });
+        let index = if let Some(indices) = existing {
+            let index = indices[0];
+            self.replace_tool_timeline_entries(&indices, rendered);
+            index
+        } else {
+            let index = self.timeline.len();
+            self.push_timeline(TimelineRole::Tool, rendered);
+            index
+        };
+        self.tool_call_entry_indices.insert(call.id.clone(), index);
+    }
+
     pub(crate) fn worker_ready(&self) -> bool {
         self.worker_ready
     }
@@ -75,7 +104,7 @@ impl AppState {
         let Some(entry) = self.timeline.get_mut(keep_index) else {
             return;
         };
-        entry.text = rendered;
+        entry.text = preserve_command_card_input(&entry.text, rendered);
         let mut removed_duplicate = false;
         for index in duplicate_indices.iter().rev().copied() {
             if index < self.timeline.len() {
@@ -118,7 +147,14 @@ impl AppState {
     }
 
     pub fn has_pending_background_tasks(&self) -> bool {
-        self.has_live_preview_work()
+        self.runtime_transition
+            .as_ref()
+            .is_some_and(|owner| owner.is_running())
+            || self
+                .runtime_maintenance
+                .as_ref()
+                .is_some_and(|owner| owner.is_running())
+            || self.has_live_preview_work()
             || self.has_session_auxiliary_work()
             || self.runtime.setup_model_catalog_rx.is_some()
             || self.runtime.connection_inventory_rx.is_some()
@@ -160,6 +196,9 @@ impl AppState {
                 run_id,
                 sequence,
             } => self.accept_live_durable_frontier(&session_id, &run_id, sequence),
+            WorkerMessage::RuntimeReady(_) => {
+                // The host controller consumes this handshake; it is not a UI activation fact.
+            }
             WorkerMessage::WorkerReady => {
                 self.worker_ready = true;
                 if self.last_notice.as_deref() == Some("sigil starting; waiting for agent worker") {
@@ -459,8 +498,6 @@ impl AppState {
                 self.refresh_conversation_queue_selection();
                 self.runtime.task_provider_route_diagnostics =
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
-                self.runtime.task_completion_progress =
-                    sigil_runtime::TaskCompletionProgressSnapshot::default();
                 self.start_worker_run_phase(
                     RunPhase::Thinking,
                     "Task · creating a durable execution plan",
@@ -476,9 +513,6 @@ impl AppState {
             }
             WorkerMessage::TaskProviderRouteDiagnosticsUpdated { snapshot } => {
                 self.runtime.task_provider_route_diagnostics = snapshot;
-            }
-            WorkerMessage::TaskCompletionProgressUpdated { snapshot } => {
-                self.runtime.task_completion_progress = snapshot;
             }
             WorkerMessage::RunFinished { result, entries } => {
                 self.clear_worker_run_state();
@@ -773,40 +807,6 @@ impl AppState {
                 self.push_event(
                     "plan:task",
                     format!("{} -> {}", entry.plan_id.as_str(), entry.task_id.as_str()),
-                );
-            }
-            WorkerMessage::TaskAdmissionBlocked {
-                task_id,
-                blocker,
-                entries,
-            } => {
-                self.runtime.is_busy = false;
-                self.runtime.allow_projection_run_recovery = false;
-                self.sync_current_session_state(entries);
-                self.refresh_session_history();
-                let plan_reopened = self.reopen_plan_workbench_for_task_blocker(&task_id, &blocker);
-                let next_action = if plan_reopened {
-                    "Plan workbench reopened: R retries preparation; V revises the plan."
-                } else {
-                    "Review the task blocker before continuing."
-                };
-                self.last_notice = Some(format!(
-                    "task {} is blocked: {} {}",
-                    task_id, blocker.summary, next_action
-                ));
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    format!(
-                        "Task {} is blocked ({}): {} {}",
-                        task_id,
-                        blocker.reason_code.as_str(),
-                        blocker.summary,
-                        next_action
-                    ),
-                );
-                self.push_event(
-                    "task:blocked",
-                    format!("{task_id}:{}", blocker.reason_code.as_str()),
                 );
             }
             WorkerMessage::TaskRunFinished {
@@ -1141,26 +1141,15 @@ impl AppState {
                         format!("ignored stale acceptance response {}", request.request_id),
                     );
                 } else {
-                    let synthesis_ready = matches!(
-                        parent_verdict,
-                        Some(
-                            sigil_kernel::VerificationVerdict::Passed
-                                | sigil_kernel::VerificationVerdict::NotApplicable
-                        )
-                    );
                     self.sync_current_session_state(entries);
                     self.clear_integration_review();
                     let parent = parent_verdict
                         .map(|verdict| format!(" · parent {verdict:?}"))
                         .unwrap_or_default();
-                    self.last_notice = Some(if synthesis_ready {
-                        format!(
-                            "integration {}{parent} · resuming synthesis",
-                            promotion_status.as_str()
-                        )
-                    } else {
-                        format!("integration {}{parent}", promotion_status.as_str())
-                    });
+                    self.last_notice = Some(format!(
+                        "integration {}{parent} · ready for model continuation",
+                        promotion_status.as_str()
+                    ));
                     self.push_event(
                         "integration:accept",
                         format!(
@@ -1169,17 +1158,6 @@ impl AppState {
                             request.preview_digest
                         ),
                     );
-                    if synthesis_ready {
-                        self.start_worker_run_phase(
-                            RunPhase::Thinking,
-                            "resuming task synthesis",
-                            format!("task-synthesis|{}", request.task_id.as_str()),
-                        );
-                        self.enqueue_worker_command(WorkerCommand::ContinueTask {
-                            task_id: Some(request.task_id.as_str().to_owned()),
-                            guidance: None,
-                        });
-                    }
                 }
             }
             WorkerMessage::TaskIntegrationAcceptanceFailed {
@@ -1502,6 +1480,52 @@ impl AppState {
         }
         Ok(())
     }
+}
+
+pub(in crate::app) fn preserve_command_card_input(previous: &str, rendered: String) -> String {
+    let (Ok(previous), Ok(mut current)) = (
+        serde_json::from_str::<serde_json::Value>(previous),
+        serde_json::from_str::<serde_json::Value>(&rendered),
+    ) else {
+        return rendered;
+    };
+    let Some(call) = previous.pointer("/metadata/details/call") else {
+        return rendered;
+    };
+    if let Some(details) = current
+        .pointer_mut("/metadata/details")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(started) = previous.pointer("/metadata/details/started_at_ms") {
+            details
+                .entry("started_at_ms")
+                .or_insert_with(|| started.clone());
+        }
+        let current_call = details.entry("call").or_insert_with(|| call.clone());
+        if let Some(summary) = call
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .filter(|summary| summary.starts_with("command="))
+            && current_call
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|summary| !summary.starts_with("command="))
+            && let Some(current_call) = current_call.as_object_mut()
+        {
+            current_call.insert(
+                "summary".to_owned(),
+                serde_json::Value::String(summary.to_owned()),
+            );
+        }
+    }
+    if current.get("tool_name").and_then(serde_json::Value::as_str) == Some("terminal_task") {
+        for key in ["tool_name", "call_id"] {
+            if let Some(value) = previous.get(key) {
+                current[key] = value.clone();
+            }
+        }
+    }
+    serde_json::to_string(&current).unwrap_or(rendered)
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

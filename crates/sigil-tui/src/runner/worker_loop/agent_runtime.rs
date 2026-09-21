@@ -187,7 +187,6 @@ pub(in crate::runner) fn manual_agent_invocation_result(
         final_text,
         tool_calls: 0,
         final_message_id: None,
-        completion_claim: None,
     }
 }
 
@@ -294,10 +293,26 @@ pub(in crate::runner) fn partition_agent_result_continuations(
 pub(in crate::runner) fn pending_agent_result_continuations_from_session(
     session: Option<&Session>,
 ) -> Vec<AgentThreadId> {
+    let Some(session) = session else {
+        return Vec::new();
+    };
+    let task_projection = session.task_state_projection();
     session
-        .map(Session::agent_result_continuation_projection)
-        .map(|projection| projection.pending_thread_ids)
-        .unwrap_or_default()
+        .agent_result_continuation_projection()
+        .pending_thread_ids
+        .into_iter()
+        .filter(|thread_id| {
+            task_projection
+                .direct_task_for_background_agent(thread_id)
+                .is_none()
+        })
+        .collect()
+}
+
+pub(in crate::runner) fn ready_direct_task_background_continuations(
+    session: &Session,
+) -> Vec<sigil_kernel::TaskId> {
+    sigil_runtime::application_run::ready_direct_task_background_continuations(session)
 }
 
 pub(in crate::runner) fn agent_result_continuation_new_thread_ids(
@@ -901,7 +916,6 @@ pub(in crate::runner) fn tui_plan_review_result_from_durable_revision_outcome(
                 final_text: format!("Plan ready: {}", draft.summary),
                 tool_calls: 0,
                 final_message_id: None,
-                completion_claim: None,
             }),
         ),
         sigil_runtime::PlanReviewRunOutcome::CompletedWithoutDraft => Ok(
@@ -909,15 +923,13 @@ pub(in crate::runner) fn tui_plan_review_result_from_durable_revision_outcome(
                 final_text: "Plan review closed without a draft; no task was created.".to_owned(),
                 tool_calls: 0,
                 final_message_id: None,
-                completion_claim: None,
             }),
         ),
         sigil_runtime::PlanReviewRunOutcome::Cancelled => Ok(PlanReviewExecutionResult::Cancelled),
         sigil_runtime::PlanReviewRunOutcome::Interrupted(reason) => {
             Ok(PlanReviewExecutionResult::Interrupted { reason })
         }
-        sigil_runtime::PlanReviewRunOutcome::Failed(error)
-        | sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => Err(error),
+        sigil_runtime::PlanReviewRunOutcome::Failed(error) => Err(error),
         sigil_runtime::PlanReviewRunOutcome::Blocked(reason) => {
             Ok(PlanReviewExecutionResult::Blocked {
                 reason,
@@ -1175,7 +1187,6 @@ where
                     final_text: format!("Plan ready: {}", draft.summary),
                     tool_calls: 0,
                     final_message_id: None,
-                    completion_claim: None,
                 },
             ))
         }
@@ -1193,7 +1204,6 @@ where
                         .to_owned(),
                     tool_calls: 0,
                     final_message_id: None,
-                    completion_claim: None,
                 },
             ))
         }
@@ -1275,21 +1285,6 @@ where
             })?;
             Err(error)
         }
-        sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error) => {
-            let terminal =
-                sigil_runtime::PlanReviewRunOutcome::SubmitOnlyProtocolViolation(error.clone());
-            sigil_runtime::PlanReviewCoordinator::close_plan_review_run(
-                run_session,
-                request,
-                &terminal,
-                handler,
-                current_unix_time_ms(),
-            )
-            .map_err(|close_error| {
-                format!("plan review violated submit-only finalization ({error}) and its terminal closure also failed: {close_error:#}")
-            })?;
-            Err(error)
-        }
     }
 }
 
@@ -1317,17 +1312,11 @@ pub(in crate::runner) fn agent_result_continuation_run_result(
         AgentRunDisposition::RunPendingPlan(_) => {
             Err("agent result continuation cannot execute a pending plan".to_owned())
         }
-        AgentRunDisposition::PendingPlanDecisionRequired(_) => {
-            Err("agent result continuation cannot decide a pending plan".to_owned())
-        }
         AgentRunDisposition::StartPlanReview(_) => {
             Err("agent result continuation cannot start a plan review".to_owned())
         }
         AgentRunDisposition::PlanReviewDraftSubmitted(_) => {
             Err("agent result continuation cannot submit a plan review draft".to_owned())
-        }
-        AgentRunDisposition::TaskPlanAccepted => {
-            Err("agent result continuation cannot accept a task plan".to_owned())
         }
     }
 }
@@ -1694,32 +1683,8 @@ where
                                     .tasks
                                     .get(&adopted.receipt.task_id)
                                     .cloned();
-                                match (task, adopted.admission) {
-                                    (Some(_task), sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker)) => {
-                                        let _ = run_message_tx.send(
-                                            WorkerMessage::TaskAdmissionBlocked {
-                                                task_id: task_id.clone(),
-                                                blocker,
-                                                entries: adopted.entries.clone(),
-                                            },
-                                        );
-                                        RunTaskPayload::Chat {
-                                            result: Ok(sigil_kernel::AgentRunResult {
-                                                final_text: format!(
-                                                    "Task {task_id} is blocked until the environment is resolved."
-                                                ),
-                                                tool_calls: 0,
-                                                final_message_id: None,
-                            completion_claim: None,
-                                            }),
-                                            plan_mode: false,
-                                            plan_review: false,
-                                            queue_id: Some(queue_id.clone()),
-                                            provider_logical_run_id: None,
-                                            agent_result_continuation_thread_ids: Vec::new(),
-                                        }
-                                    }
-                                    (Some(task), _) => {
+                                match task {
+                                    Some(task) => {
                                         let _ = run_message_tx.send(WorkerMessage::TaskRunStarted {
                                             task_id: task_id.clone(),
                                             objective: task.objective.clone(),
@@ -1751,7 +1716,7 @@ where
                                             result,
                                         }
                                     }
-                                    (None, _) => RunTaskPayload::Chat {
+                                    None => RunTaskPayload::Chat {
                                         result: Err(format!(
                                             "plan adoption created task {task_id} without durable task state"
                                         )),
@@ -1773,21 +1738,6 @@ where
                             },
                         }
                     }
-                    AgentRunDisposition::PendingPlanDecisionRequired(_action) => {
-                        RunTaskPayload::Chat {
-                            result: Ok(sigil_kernel::AgentRunResult {
-                                final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
-                                tool_calls: output.result.tool_calls,
-                                final_message_id: output.result.final_message_id,
-                            completion_claim: None,
-                            }),
-                            plan_mode: false,
-                            plan_review: false,
-                            queue_id: Some(queue_id.clone()),
-                            provider_logical_run_id: None,
-                            agent_result_continuation_thread_ids: Vec::new(),
-                        }
-                    }
                     AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
                         result: Err("run was interrupted before a final answer".to_owned()),
                         plan_mode: false,
@@ -1798,14 +1748,6 @@ where
                     },
                     AgentRunDisposition::Blocked => RunTaskPayload::Chat {
                         result: Err("run was blocked before a final answer".to_owned()),
-                        plan_mode: false,
-                        plan_review: false,
-                        queue_id: Some(queue_id.clone()),
-                        provider_logical_run_id: None,
-                        agent_result_continuation_thread_ids: Vec::new(),
-                    },
-                    AgentRunDisposition::TaskPlanAccepted => RunTaskPayload::Chat {
-                        result: Err("task planning completed outside a task run".to_owned()),
                         plan_mode: false,
                         plan_review: false,
                         queue_id: Some(queue_id.clone()),

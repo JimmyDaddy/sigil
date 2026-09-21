@@ -14,8 +14,7 @@ use sigil_kernel::{
 };
 
 use super::{
-    readiness_reason_summary, required_action_label, task_completion_progress_live_lines,
-    task_completion_progress_sidebar_lines, task_provider_route_live_lines,
+    readiness_reason_summary, required_action_label, task_provider_route_live_lines,
     task_provider_route_sidebar_lines, task_sidebar_lines, task_strip_view,
     verification_stale_reason_compact_label, verification_verdict_label,
 };
@@ -63,7 +62,7 @@ fn provider_route_diagnostics_format_live_attribution_and_audit_identity() {
             model_name: "deepseek-v4-flash".to_owned(),
             consumers: vec![
                 sigil_runtime::TaskProviderRouteConsumerDiagnostics {
-                    consumer: sigil_runtime::TaskProviderRouteConsumer::Planner,
+                    consumer: sigil_runtime::TaskProviderRouteConsumer::Executor,
                     in_flight: 1,
                     waiting: 0,
                 },
@@ -85,13 +84,13 @@ fn provider_route_diagnostics_format_live_attribution_and_audit_identity() {
     assert_eq!(
         task_provider_route_live_lines(&snapshot),
         vec![
-            "planner + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit"
+            "executor + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit"
         ]
     );
     assert_eq!(
         task_provider_route_sidebar_lines(&snapshot),
         vec![
-            "provider route: planner + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit",
+            "provider route: executor + subagent-read×3 → deepseek/deepseek-v4-flash · cooldown 1.2s · adaptive 3/4 · 1 waiting · 1 rate limit",
             "route id: 1234567890",
         ]
     );
@@ -193,59 +192,6 @@ fn failed_task_strip_surfaces_durable_reason_without_internal_step_ids() {
     assert_eq!(
         strip.rows[0].detail,
         "failed · error decoding response body"
-    );
-}
-
-#[test]
-fn completion_progress_formats_arrival_and_durable_orders_separately() {
-    let snapshot = sigil_runtime::TaskCompletionProgressSnapshot {
-        batch: Some(sigil_runtime::TaskCompletionProgress {
-            generation: 7,
-            task_id: "task_1".to_owned(),
-            plan_version: 2,
-            arrived: 2,
-            total: 3,
-            members: vec![
-                sigil_runtime::TaskCompletionProgressMember {
-                    step_id: "read_a".to_owned(),
-                    title: "Read A".to_owned(),
-                    request_order: 1,
-                    arrival_order: Some(2),
-                    outcome: Some(sigil_runtime::TaskCompletionOutcome::Failed),
-                },
-                sigil_runtime::TaskCompletionProgressMember {
-                    step_id: "read_b".to_owned(),
-                    title: "Read B".to_owned(),
-                    request_order: 2,
-                    arrival_order: Some(1),
-                    outcome: Some(sigil_runtime::TaskCompletionOutcome::Succeeded),
-                },
-                sigil_runtime::TaskCompletionProgressMember {
-                    step_id: "read_c".to_owned(),
-                    title: "Read C".to_owned(),
-                    request_order: 3,
-                    arrival_order: None,
-                    outcome: None,
-                },
-            ],
-        }),
-    };
-
-    assert_eq!(
-        task_completion_progress_live_lines(&snapshot),
-        vec![
-            "read batch v2 · 2/3 arrived · commits follow request order",
-            "arrival #1 → commit #2 · Read B · ok",
-            "arrival #2 → commit #1 · Read A · failed",
-        ]
-    );
-    assert_eq!(
-        task_completion_progress_sidebar_lines(&snapshot),
-        vec![
-            "parallel progress: read batch v2 · 2/3 arrived · commits follow request order",
-            "  arrival #1 → commit #2 · Read B · ok",
-            "  arrival #2 → commit #1 · Read A · failed",
-        ]
     );
 }
 
@@ -821,6 +767,11 @@ fn direct_task_checklist_survives_an_interjected_chat_turn() {
                         text: "Verify the implementation".to_owned(),
                         status: TaskChecklistItemStatusV1::InProgress,
                     },
+                    TaskChecklistItemV1 {
+                        item_id: "research".to_owned(),
+                        text: "Check the upstream behavior".to_owned(),
+                        status: TaskChecklistItemStatusV1::InProgress,
+                    },
                 ],
             },
         )),
@@ -840,10 +791,14 @@ fn direct_task_checklist_survives_an_interjected_chat_turn() {
         Some(1)
     );
     let strip = task_strip_view(&entries).expect("paused direct Task remains visible");
-    assert_eq!(strip.detail, "paused · 1/2 done");
-    assert_eq!(strip.rows.len(), 2);
+    assert_eq!(strip.detail, "paused · 1/3 done");
+    assert_eq!(strip.rows.len(), 3);
+    assert_eq!(strip.rows.iter().filter(|row| row.active).count(), 2);
     assert_eq!(strip.rows[0].label, "1. Inspect the current changes");
     assert_eq!(strip.rows[1].label, "2. Verify the implementation");
+    assert_eq!(strip.rows[2].label, "3. Check the upstream behavior");
+    assert!(strip.rows[1].active);
+    assert!(strip.rows[2].active);
 }
 
 #[test]

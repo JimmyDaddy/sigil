@@ -7,7 +7,7 @@ use sigil_kernel::{
 };
 
 use super::*;
-use sigil_kernel::{TaskPlanEntry, TaskRunEntry};
+use sigil_kernel::{TaskDirectExecutionAdmittedV1, TaskRunEntry};
 
 const RAW_PROMPT: &str = "inspect https://example.com/private?signature=queue-secret-value exactly";
 
@@ -133,6 +133,7 @@ fn committed_queued_chat_candidate(
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -163,18 +164,18 @@ fn task_guidance_session(
         status,
         reason: None,
     }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: Vec::new(),
-        reason: None,
-    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(
+            task_id.clone(),
+            "exercise task guidance delivery",
+            1,
+        ),
+    ))?;
     Ok((session, task_id))
 }
 
 #[test]
-fn task_guidance_preparation_binds_exact_task_plan_without_writing() -> Result<()> {
+fn task_guidance_preparation_binds_exact_direct_task_without_writing() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let (session, task_id) = task_guidance_session(&store, TaskRunStatus::Paused)?;
@@ -201,7 +202,6 @@ fn task_guidance_preparation_binds_exact_task_plan_without_writing() -> Result<(
         panic!("accepted task guidance should prepare at an idle safe point");
     };
     assert_eq!(candidate.promotion.task_id, task_id);
-    assert_eq!(candidate.promotion.plan_version, 1);
     assert_eq!(candidate.exact_guidance, "prioritize the restart edge");
     assert_eq!(
         candidate.promotion.source_turn.session_scope_id,
@@ -241,13 +241,11 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
             status: TaskRunStatus::Paused,
             reason: None,
         }),
-        ControlEntry::TaskPlan(TaskPlanEntry {
-            task_id: overflow_task_id.clone(),
-            plan_version: 7,
-            status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
-            reason: None,
-        }),
+        ControlEntry::TaskDirectExecutionAdmittedV1(TaskDirectExecutionAdmittedV1::task_request(
+            overflow_task_id.clone(),
+            "resolve this task through canonical fallback",
+            1,
+        )),
     ]);
     session.append_controls(controls)?;
     assert!(
@@ -263,7 +261,7 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
         store.path(),
         &mut session,
         &mut exact_prompts,
-        "use the canonical accepted plan".to_owned(),
+        "use the canonical direct task binding".to_owned(),
         ConversationInputKind::TaskGuidance,
         ConversationInputTarget::Task {
             task_id: overflow_task_id.clone(),
@@ -279,7 +277,6 @@ fn saturated_task_guidance_cache_falls_back_to_canonical_task_state() -> Result<
         panic!("a cache miss after saturation must use canonical task state");
     };
     assert_eq!(candidate.promotion.task_id, overflow_task_id);
-    assert_eq!(candidate.promotion.plan_version, 7);
     Ok(())
 }
 
@@ -351,6 +348,76 @@ fn completed_task_guidance_is_rejected_instead_of_reviving_the_task() -> Result<
 }
 
 #[test]
+fn task_guidance_waits_for_a_running_direct_task_to_reach_a_safe_point() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let (session, task_id) = task_guidance_session(&store, TaskRunStatus::Running)?;
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "apply this after the current run".to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task { task_id },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+
+    let preparation = prepare_next_task_guidance_candidate(&session, &exact_prompts)
+        .map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        preparation,
+        TaskGuidancePreparation::Waiting { ref reason, .. }
+            if reason == "task guidance is waiting for the direct Task to reach a resumable point"
+    ));
+    Ok(())
+}
+
+#[test]
+fn task_guidance_rejects_task_without_current_direct_execution_authority() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let task_id = TaskId::new("task_guidance_without_admission")?;
+    let mut session = Session::load_from_store("test", "model", store.clone())?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("session.jsonl")?,
+        objective: "unadmitted task cannot receive guidance".to_owned(),
+        title: None,
+        status: TaskRunStatus::Paused,
+        reason: None,
+    }))?;
+    let mut session = Some(session);
+    let mut exact_prompts = ExactConversationPromptStore::new();
+    queue_conversation_input(
+        store.path(),
+        &mut session,
+        &mut exact_prompts,
+        "this must not revive an old task protocol".to_owned(),
+        ConversationInputKind::TaskGuidance,
+        ConversationInputTarget::Task { task_id },
+        ReasoningEffort::High,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let session = session.expect("store-backed session should remain available");
+
+    let preparation = prepare_next_task_guidance_candidate(&session, &exact_prompts)
+        .map_err(anyhow::Error::msg)?;
+    assert!(matches!(
+        preparation,
+        TaskGuidancePreparation::Terminal {
+            status: ConversationInputStatus::Rejected,
+            ref reason,
+            ..
+        } if reason == "task guidance requires a current direct Task without a TaskPlan"
+    ));
+    Ok(())
+}
+
+#[test]
 fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
     let temp = tempfile::tempdir().expect("temporary queue store should create");
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))
@@ -383,6 +450,7 @@ fn sensitive_queue_prompt_is_safe_at_rest_but_exact_at_same_process_dispatch() {
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -426,9 +494,13 @@ fn queued_candidate_freezes_the_exact_routing_and_memory_surface() -> Result<()>
             enabled: false,
             writable: true,
         },
-        sigil_kernel::route_surface_tool_specs_with_memory(
+        Some(sigil_kernel::conversation_auto_execution_contract_material()),
+        sigil_kernel::conversation_tool_specs_for_bound_context(
+            sigil_kernel::writable_memory_route_tool_specs(),
             sigil_kernel::AutomaticRouteCapability::DirectTask,
             true,
+            false,
+            false,
         ),
         None,
         None,
@@ -446,11 +518,11 @@ fn queued_candidate_freezes_the_exact_routing_and_memory_surface() -> Result<()>
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
-            sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
-            sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
             sigil_kernel::REMEMBER_USER_PREFERENCE_TOOL_NAME,
             sigil_kernel::REMEMBER_PROJECT_FACT_TOOL_NAME,
+            sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
+            sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
+            sigil_kernel::START_TASK_TOOL_NAME,
         ]
     );
     let routing_index = request
@@ -458,9 +530,9 @@ fn queued_candidate_freezes_the_exact_routing_and_memory_surface() -> Result<()>
         .iter()
         .position(|message| {
             message.content.as_deref()
-                == Some(sigil_kernel::conversation_route_routing_contract_material())
+                == Some(sigil_kernel::conversation_auto_execution_contract_material())
         })
-        .expect("queued request contains the routing-only system contract");
+        .expect("queued request contains the ordinary Auto execution contract");
     let exact_user_index = request
         .messages
         .iter()
@@ -500,6 +572,7 @@ fn sensitive_queue_prompt_without_process_local_exact_material_becomes_stale() {
         &restored_exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -539,6 +612,7 @@ fn queued_chat_candidate_freezes_exact_request_without_mutating_durable_state() 
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         Some(ReasoningEffort::Low),
         Some("test-partition".to_owned()),
@@ -596,6 +670,7 @@ fn queued_candidate_commit_promotes_once_and_persists_only_safe_user_material() 
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -690,6 +765,7 @@ fn queued_candidate_commit_rejects_a_stale_source_frontier_before_promotion() ->
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -968,6 +1044,7 @@ fn queued_pressure_candidate_binds_explicit_output_reservation_without_mutation(
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         Some(sigil_runtime::deepseek_v4_flash_portable_target_output_tokens()),
         Some(ReasoningEffort::Low),
@@ -1041,6 +1118,7 @@ fn queued_candidate_freezes_context_v2_for_the_exact_prompt_without_durable_leak
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -1102,6 +1180,7 @@ fn queued_pressure_admission_blocks_without_verified_local_tokenizer_without_mut
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -1154,6 +1233,7 @@ fn queued_pressure_admission_blocks_unadmitted_profile_without_mutation() -> Res
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,
@@ -1199,6 +1279,7 @@ fn queued_plan_candidate_is_blocked_without_changing_queue_state() -> Result<()>
         &exact_prompts,
         temp.path(),
         &MemoryConfig::with_enabled(false),
+        None,
         Vec::new(),
         None,
         None,

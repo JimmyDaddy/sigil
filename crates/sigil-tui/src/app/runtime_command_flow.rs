@@ -2,7 +2,7 @@ use anyhow::Result;
 use sigil_kernel::{ConnectionId, ModelRef};
 use sigil_runtime::{
     normalize_provider_model_alias,
-    provider_connections::{ConnectionReadiness, resolve_default_model_route, resolve_model_route},
+    provider_connections::{resolve_default_model_route, resolve_model_route},
 };
 
 use super::{AppAction, AppState, TimelineRole, formatting::parse_reasoning_effort};
@@ -41,14 +41,6 @@ impl AppState {
         let Some(root_config) = self.config_snapshot.clone() else {
             return Ok(None);
         };
-        let (_, default_route) =
-            resolve_default_model_route(&root_config).map_err(anyhow::Error::new)?;
-        let current_connection = self
-            .runtime
-            .model_route
-            .as_ref()
-            .map(|route| route.model_ref.connection_id.clone())
-            .unwrap_or_else(|| default_route.model_ref.connection_id.clone());
         let trimmed = argument.trim();
         if trimmed.is_empty() {
             self.last_notice = Some("usage: /model <model-id|connection-id/model-id>".to_owned());
@@ -64,6 +56,16 @@ impl AppState {
                 model_id.to_owned(),
             )?
         } else {
+            let current_connection = match self.runtime.model_route.as_ref() {
+                Some(route) => route.model_ref.connection_id.clone(),
+                None => {
+                    resolve_default_model_route(&root_config)
+                        .map_err(anyhow::Error::new)?
+                        .1
+                        .model_ref
+                        .connection_id
+                }
+            };
             let provider_name = self.runtime.provider_name.as_str();
             let model_id = normalize_provider_model_alias(provider_name, trimmed)
                 .unwrap_or_else(|| trimmed.to_owned());
@@ -71,67 +73,17 @@ impl AppState {
         };
         let (provider_name, route) =
             resolve_model_route(&root_config, &model_ref).map_err(anyhow::Error::new)?;
-        let ready = self
-            .runtime
-            .connection_inventory
-            .as_ref()
-            .is_some_and(|inventory| {
-                inventory
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == model_ref.connection_id)
-                    .is_some_and(|entry| {
-                        matches!(
-                            entry.readiness,
-                            ConnectionReadiness::Ready | ConnectionReadiness::Unverified
-                        )
-                    })
-            });
-        if !ready {
-            let notice = format!(
-                "connection {} is not ready; open /config to repair authentication",
-                model_ref.connection_id
-            );
-            self.last_notice = Some(notice.clone());
-            self.push_timeline(TimelineRole::Notice, notice);
-            return Ok(None);
-        }
-
-        if self.runtime.model_route.as_ref() == Some(&route) {
-            self.last_notice = Some(format!(
-                "model already active = {}/{}",
-                model_ref.connection_id, model_ref.model_id
-            ));
-            self.push_timeline(
-                TimelineRole::Notice,
-                format!(
-                    "model already active -> {}/{}",
-                    model_ref.connection_id, model_ref.model_id
-                ),
-            );
-            return Ok(None);
-        }
-
         self.select_current_session_route_with_trust(
             &root_config,
             provider_name.clone(),
             route.clone(),
         )?;
-        self.runtime.provider_name = provider_name;
-        self.runtime.model_name = model_ref.model_id.clone();
-        self.runtime.model_route = Some(route.clone());
         let notice = format!(
-            "route -> {}/{}; continuing current session; saved default unchanged",
+            "switching to {}/{}; draft retained",
             model_ref.connection_id, model_ref.model_id
         );
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
-        self.push_event(
-            "model",
-            format!("{}/{}", model_ref.connection_id, model_ref.model_id),
-        );
-
-        self.schedule_balance_refresh();
 
         Ok(Some(AppAction::SessionRuntimeRouteUpdated { route }))
     }

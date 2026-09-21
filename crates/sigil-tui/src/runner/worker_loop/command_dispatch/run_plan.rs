@@ -5,8 +5,6 @@ use super::super::agent_runtime::{
     unorchestrated_run_payload,
 };
 use super::*;
-use sigil_kernel::EventHandler;
-
 pub(super) fn dispatch_run_plan_command<P>(
     context: WorkerCommandContext<'_, P>,
     command: RunPlanCommand,
@@ -574,36 +572,8 @@ where
                                                 .tasks
                                                 .get(&adopted.receipt.task_id)
                                                 .cloned();
-                                            match (task, adopted.admission) {
-                                                (Some(_task), sigil_kernel::TaskAdmissionOutcomeV1::Blocked(blocker)) => {
-                                                    let _ = run_message_tx.send(
-                                                        WorkerMessage::TaskAdmissionBlocked {
-                                                            task_id: task_id.clone(),
-                                                            blocker,
-                                                            entries: adopted.entries.clone(),
-                                                        },
-                                                    );
-                                                    RunTaskPayload::Chat {
-                                                        result: Ok(sigil_kernel::AgentRunResult {
-                                                            final_text: format!(
-                                                                "Task {} is blocked until the environment is resolved.",
-                                                                task_id
-                                                            ),
-                                                            tool_calls: output.result.tool_calls,
-                                                            final_message_id: None,
-                            completion_claim: None,
-                                                        }),
-                                                        plan_mode,
-                                                        plan_review: false,
-                                                        queue_id: None,
-                                                        provider_logical_run_id: Some(
-                                                            provider_logical_run_id.clone(),
-                                                        ),
-                                                        agent_result_continuation_thread_ids:
-                                                            Vec::new(),
-                                                    }
-                                                }
-                                                (Some(task), _) => {
+                                            match task {
+                                                Some(task) => {
                                                     let _ = run_message_tx.send(
                                                         WorkerMessage::TaskRunStarted {
                                                             task_id: task_id.clone(),
@@ -641,7 +611,7 @@ where
                                                         result,
                                                     }
                                                 }
-                                                (None, _) => RunTaskPayload::Chat {
+                                                None => RunTaskPayload::Chat {
                                                     result: Err(format!(
                                                         "plan adoption created task {task_id} without durable task state"
                                                     )),
@@ -663,23 +633,6 @@ where
                                         },
                                     }
                                 }
-                                AgentRunDisposition::PendingPlanDecisionRequired(_action) => {
-                                    RunTaskPayload::Chat {
-                                        result: Ok(sigil_kernel::AgentRunResult {
-                                            final_text: "The current plan is still awaiting a decision. Choose Run, Revise, Save, or Reject before continuing.".to_owned(),
-                                            tool_calls: output.result.tool_calls,
-                                            final_message_id: output.result.final_message_id,
-                            completion_claim: None,
-                                        }),
-                                        plan_mode,
-                                        plan_review: false,
-                                        queue_id: None,
-                                        provider_logical_run_id: Some(
-                                            provider_logical_run_id.clone(),
-                                        ),
-                                        agent_result_continuation_thread_ids: Vec::new(),
-                                    }
-                                }
                                 AgentRunDisposition::Interrupted => RunTaskPayload::Chat {
                                     result: Err(
                                         "run was interrupted before a final answer".to_owned()
@@ -696,16 +649,6 @@ where
                                     plan_review: false,
                                     queue_id: None,
                                     provider_logical_run_id: Some(provider_logical_run_id.clone()),
-                                    agent_result_continuation_thread_ids: Vec::new(),
-                                },
-                                AgentRunDisposition::TaskPlanAccepted => RunTaskPayload::Chat {
-                                    result: Err(
-                                        "task planning completed outside a task run".to_owned()
-                                    ),
-                                    plan_mode,
-                                    plan_review: false,
-                                    queue_id: None,
-                                    provider_logical_run_id: None,
                                     agent_result_continuation_thread_ids: Vec::new(),
                                 },
                                 AgentRunDisposition::StartPlanReview(action) => {
@@ -1255,15 +1198,9 @@ where
                     active_run,
                     runtime,
                     root_config,
-                    &state.session.log_path,
-                    &mut state.session.current,
-                    &mut state.session.detached_durable_controls,
+                    state,
                     message_tx,
                     elicitation_handler,
-                    state.agent.supervisor.as_ref(),
-                    &mut state.run.discarded_ids,
-                    &mut state.run.retired,
-                    &state.stop_control,
                     ActiveRunStopDisposition::PauseTask,
                     "task paused from TUI",
                 );
@@ -1274,15 +1211,9 @@ where
                         active_run,
                         runtime,
                         root_config,
-                        &state.session.log_path,
-                        &mut state.session.current,
-                        &mut state.session.detached_durable_controls,
+                        state,
                         message_tx,
                         elicitation_handler,
-                        state.agent.supervisor.as_ref(),
-                        &mut state.run.discarded_ids,
-                        &mut state.run.retired,
-                        &state.stop_control,
                         ActiveRunStopDisposition::Cancel,
                         "run cancelled from TUI",
                     );
@@ -1419,8 +1350,7 @@ where
                 if state.agent.supervisor.is_none()
                     && matches!(
                         &exact.source,
-                        sigil_kernel::UserInputSourceV1::Planner { .. }
-                            | sigil_kernel::UserInputSourceV1::PlanRevision { .. }
+                        sigil_kernel::UserInputSourceV1::PlanRevision { .. }
                             | sigil_kernel::UserInputSourceV1::PlanReviewResearch { .. }
                     )
                 {
@@ -1479,228 +1409,6 @@ where
                         )
                     })
                 });
-                if let Some(route) = child_route.as_ref().filter(|route| {
-                    matches!(
-                        route.request.source,
-                        sigil_kernel::UserInputSourceV1::Planner { .. }
-                    )
-                }) {
-                    let Some(agent_supervisor) = state.agent.supervisor.clone() else {
-                        let _ = message_tx.send(user_input_failure_with_entries(
-                            input_failure(
-                                "task orchestration is unavailable in this composition".to_owned(),
-                            ),
-                            state.session.current.as_ref(),
-                        ));
-                        continue;
-                    };
-                    let command = sigil_kernel::UserInputDecisionCommandV1 {
-                        identity: exact.identity,
-                        request_hash: exact.request_hash,
-                        command_id,
-                        decision,
-                    };
-                    let mut handler = ChannelEventHandler::new(message_tx.clone());
-                    if !matches!(
-                        command.decision,
-                        sigil_kernel::UserInputDecisionV1::Submitted { .. }
-                    ) {
-                        let result = state.session.current.as_mut().map_or_else(
-                            || Err(anyhow::anyhow!("session state is unavailable for task planner input")),
-                            |session| {
-                                sigil_runtime::agent_supervisor::task_role_runtime::settle_task_planner_user_input_without_continuation(
-                                    session,
-                                    route,
-                                    command,
-                                )
-                            },
-                        );
-                        match result {
-                            Ok((receipt, controls)) => {
-                                for control in controls {
-                                    if let Err(error) = handler.handle(RunEvent::Control(control)) {
-                                        let _ = message_tx.send(user_input_failure_with_entries(input_failure(format!(
-                                            "task planner input event delivery failed: {error:#}"
-                                        )), state.session.current.as_ref()));
-                                    }
-                                }
-                                let entries = state
-                                    .session
-                                    .current
-                                    .as_ref()
-                                    .map(|session| session.entries().to_vec())
-                                    .unwrap_or_default();
-                                let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
-                                    request: receipt.request,
-                                    continuation_started: false,
-                                    entries,
-                                });
-                            }
-                            Err(error) => {
-                                let _ = message_tx.send(user_input_failure_with_entries(
-                                    input_failure(format!(
-                                        "task planner input decision failed: {error:#}"
-                                    )),
-                                    state.session.current.as_ref(),
-                                ));
-                            }
-                        }
-                        continue;
-                    }
-                    let Some(mut run_session) = state.session.current.take() else {
-                        let _ = message_tx.send(user_input_failure_with_entries(
-                            input_failure(
-                                "session state is unavailable for task planner input".to_owned(),
-                            ),
-                            state.session.current.as_ref(),
-                        ));
-                        continue;
-                    };
-                    let task = run_session
-                        .task_state_projection()
-                        .tasks
-                        .get(&route.budget_scope_id)
-                        .cloned();
-                    let Some(task) = task else {
-                        state.session.current = Some(run_session);
-                        let _ = message_tx.send(user_input_failure_with_entries(
-                            input_failure(
-                                "task planner input references an unavailable task".to_owned(),
-                            ),
-                            state.session.current.as_ref(),
-                        ));
-                        continue;
-                    };
-                    let task_id = task.task_id.clone();
-                    let task_id_value = task_id.as_str().to_owned();
-                    let effective_config =
-                        effective_orchestration_root_config(root_config, &run_session);
-                    let (approval_tx, approval_rx) = mpsc::channel();
-                    let elicitation_audit_buffer: McpElicitationAuditBuffer =
-                        Arc::new(std::sync::Mutex::new(Vec::new()));
-                    elicitation_handler
-                        .set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
-                    let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                    let run_id = state.allocate_run_id();
-                    let (
-                        cancellation_owner,
-                        cancellation_recorder,
-                        cancellation_handle,
-                        cancellation_task_guard,
-                    ) = match prepare_task_run_cancellation(&mut run_session, &task_id) {
-                        Ok(cancellation) => cancellation,
-                        Err(error) => {
-                            state.session.current = Some(run_session);
-                            let _ = message_tx.send(user_input_failure_with_entries(
-                                input_failure(error),
-                                state.session.current.as_ref(),
-                            ));
-                            continue;
-                        }
-                    };
-                    if let Err(error) = state
-                        .acquire_route_execution_owner_for_scope(run_session.session_scope_id())
-                    {
-                        state.session.current = Some(run_session);
-                        let _ = message_tx.send(user_input_failure_with_entries(
-                            input_failure(error),
-                            state.session.current.as_ref(),
-                        ));
-                        continue;
-                    }
-                    let Some(verification_execution_port) =
-                        managed_verification_execution.as_ref().map(Arc::clone)
-                    else {
-                        state.session.current = Some(run_session);
-                        let _ = message_tx.send(user_input_failure_with_entries(
-                            input_failure(
-                                "planner continuation requires the managed verification route"
-                                    .to_owned(),
-                            ),
-                            state.session.current.as_ref(),
-                        ));
-                        continue;
-                    };
-                    let prepared = runtime.block_on(
-                        sigil_runtime::agent_supervisor::task_role_runtime::prepare_task_planner_user_input_continuation(
-                            &effective_config,
-                            options,
-                            agent.tool_registry(),
-                            agent_supervisor.clone(),
-                            role_provider_builder.as_ref(),
-                            verification_execution_port,
-                            &mut run_session,
-                            route,
-                            &command,
-                        ),
-                    );
-                    let prepared = match prepared {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            state.run.route_execution_owner = None;
-                            state.session.current = Some(run_session);
-                            let _ = message_tx.send(user_input_failure_with_entries(
-                                input_failure(format!(
-                                    "task planner continuation preparation failed: {error:#}"
-                                )),
-                                state.session.current.as_ref(),
-                            ));
-                            continue;
-                        }
-                    };
-                    let entries = run_session.entries().to_vec();
-                    let _ = message_tx.send(WorkerMessage::UserInputDecisionApplied {
-                        request: prepared.receipt.request.clone(),
-                        continuation_started: true,
-                        entries,
-                    });
-                    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
-                        task_id: task_id_value.clone(),
-                        objective: task.objective.clone(),
-                    });
-                    let url_capability_registrar = run_session.user_url_capability_registrar();
-                    let image_attachment_resolver = run_session.image_attachment_resolver();
-                    let cancellation_target = RunCancellationTarget::Task {
-                        task_id: task_id_value.clone(),
-                    };
-                    state.stop_control.bind(&cancellation_owner);
-                    let handle = spawn_task_planner_input(
-                        runtime,
-                        TaskPlannerInputSpawn {
-                            run_id,
-                            session: run_session,
-                            task_id,
-                            task_id_value,
-                            parent_session_ref: task.parent_session_ref,
-                            objective: task.objective,
-                            route: prepared.route,
-                            command,
-                            task_runtime: prepared.runtime,
-                            max_plan_steps: effective_config.task.max_plan_steps,
-                            task_result_tx: state.run.result_tx.clone(),
-                            approval_rx,
-                            handler,
-                            elicitation_audit_buffer: run_elicitation_audit_buffer,
-                            cancellation_handle,
-                            cancellation_task_guard,
-                            tool_artifact_read_budget,
-                        },
-                    );
-                    state.run.active = Some(ActiveRun {
-                        run_id,
-                        public_run_id: None,
-                        handle,
-                        approval_tx,
-                        elicitation_audit_buffer,
-                        cancellation_owner,
-                        cancellation_recorder,
-                        cancellation_target,
-                        revision_terminal_run_id: None,
-                        url_capability_registrar,
-                        image_attachment_resolver,
-                    });
-                    continue;
-                }
                 if child_route.is_some() {
                     let Some(agent_supervisor) = state.agent.supervisor.clone() else {
                         let _ = message_tx.send(user_input_failure_with_entries(
@@ -2211,7 +1919,6 @@ where
                                 final_text: "Plan candidate adopted".to_owned(),
                                 tool_calls: 0,
                                 final_message_id: None,
-                                completion_claim: None,
                             },
                             entries,
                         });

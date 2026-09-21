@@ -1754,6 +1754,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
     session: &mut Session,
     exact_prompts: &ExactConversationPromptStore,
     memory_config: &sigil_kernel::MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<sigil_kernel::ReasoningEffort>,
     traffic_partition_key: Option<String>,
@@ -1772,6 +1773,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pre_turn_admission(
             exact_prompts,
             workspace_root,
             memory_config,
+            conversation_contract,
             tools.clone(),
             default_reasoning_effort.clone(),
             traffic_partition_key.clone(),
@@ -1922,17 +1924,13 @@ async fn prepare_queued_portable_preflight(
     let runtime_context = candidate.runtime_context.clone();
     let direct_request = candidate.frozen_request.request();
     let mut transient_messages = vec![exact_user_message];
-    if direct_request.messages.iter().any(|message| {
-        message.role == sigil_kernel::MessageRole::System
-            && message.content.as_deref()
-                == Some(sigil_kernel::conversation_route_routing_contract_material())
-    }) {
-        transient_messages.insert(
-            0,
-            sigil_kernel::ModelMessage::system(
-                sigil_kernel::conversation_route_routing_contract_material(),
-            ),
-        );
+    for contract in [sigil_kernel::conversation_auto_execution_contract_material()] {
+        if direct_request.messages.iter().any(|message| {
+            message.role == sigil_kernel::MessageRole::System
+                && message.content.as_deref() == Some(contract)
+        }) {
+            transient_messages.insert(0, sigil_kernel::ModelMessage::system(contract));
+        }
     }
     transient_messages.extend(candidate.background_ready_context.clone());
     let target_input = PortableV2TargetRequestInput {

@@ -16,6 +16,7 @@ fn approval_request_stores_preview() -> Result<()> {
 fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-webfetch"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -73,6 +74,7 @@ fn read_only_network_approval_exposes_session_grant_scope() -> Result<()> {
 fn approval_uses_kernel_session_grant_availability_without_recomputing_facets() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-webfetch-exact"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -195,6 +197,7 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
         )),
     ]);
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-mcp-1"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -260,6 +263,7 @@ fn terminal_input_approval_modal_explains_task_without_echoing_input() -> Result
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-terminal-input"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -411,6 +415,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     for (operation, expected) in operations {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.handle(RunEvent::ToolApprovalRequested {
+            display_call_id: None,
             approval_identity: test_approval_identity("call-meta"),
             effects: std::collections::BTreeSet::new(),
             analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -453,6 +458,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-risk"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -542,6 +548,7 @@ fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
     ] {
         let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
         app.handle(RunEvent::ToolApprovalRequested {
+            display_call_id: None,
             approval_identity: test_approval_identity("call-confirmation"),
             effects: std::collections::BTreeSet::new(),
             analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -626,6 +633,7 @@ fn approval_modal_view_includes_affected_diagnostics_summary() -> Result<()> {
 fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-change-set"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -734,6 +742,7 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let external_path = Path::new("/tmp/sigil-outside.txt").to_path_buf();
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-external-1"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -812,6 +821,7 @@ fn approval_keys_emit_allow_and_deny_actions() -> Result<()> {
 fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-spawn-agent"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -1039,6 +1049,7 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: false,
@@ -1054,6 +1065,7 @@ fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
 
     inject_write_file_approval(&mut app, sample_approval_preview())?;
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: true,
@@ -1104,6 +1116,7 @@ fn approval_preview_handles_empty_preview_body_and_slash_shortcut() -> Result<()
 fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-plain-1"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -1217,6 +1230,7 @@ fn inject_bash_approval(
 ) -> Result<()> {
     let args_json = serde_json::json!({ "command": command }).to_string();
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-bash"),
         effects: std::collections::BTreeSet::from([
             sigil_kernel::ToolPermissionEffect::ExecuteWorkspaceCode,
@@ -1334,6 +1348,7 @@ fn approval_enter_selects_family_action_when_highlighted() -> Result<()> {
 fn approval_family_pattern_ignores_non_shell_calls() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-write"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,

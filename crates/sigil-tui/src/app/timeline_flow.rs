@@ -315,6 +315,7 @@ impl AppState {
         self.timeline_state.expanded_diagram_entry_indices.clear();
         self.timeline_state.deferred_render_indexes.clear();
         self.rebuild_tool_activity_cache();
+        self.rebuild_command_elapsed_tracking();
         self.clear_timeline_text_selection_state();
         let options = self.timeline_render_options();
         self.timeline_state
@@ -325,17 +326,22 @@ impl AppState {
     }
 
     fn remap_tool_activity_state_after_entry_removal(&mut self, removed_indices: &[usize]) {
-        self.tool_progress_entry_indices.retain(|_, entry_index| {
-            if removed_indices.contains(entry_index) {
-                return false;
-            }
-            let shift = removed_indices
-                .iter()
-                .filter(|removed_index| **removed_index < *entry_index)
-                .count();
-            *entry_index = (*entry_index).saturating_sub(shift);
-            true
-        });
+        for indices in [
+            &mut self.tool_progress_entry_indices,
+            &mut self.tool_call_entry_indices,
+        ] {
+            indices.retain(|_, entry_index| {
+                if removed_indices.contains(entry_index) {
+                    return false;
+                }
+                let shift = removed_indices
+                    .iter()
+                    .filter(|removed_index| **removed_index < *entry_index)
+                    .count();
+                *entry_index = (*entry_index).saturating_sub(shift);
+                true
+            });
+        }
         self.timeline_state.selected_tool_activity_key = self
             .timeline_state
             .selected_tool_activity_key
@@ -484,6 +490,7 @@ impl AppState {
     }
 
     pub(super) fn rebuild_timeline_render_store(&mut self) {
+        self.rebuild_command_elapsed_tracking();
         let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         self.timeline_state.deferred_render_indexes.clear();
@@ -501,6 +508,7 @@ impl AppState {
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
+        self.track_command_elapsed(index);
         let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         self.timeline_state.deferred_render_indexes.remove(&index);
@@ -599,6 +607,7 @@ impl AppState {
     }
 
     pub(super) fn append_timeline_render_store_entry(&mut self, index: usize) {
+        self.track_command_elapsed(index);
         let history_anchor = self.capture_timeline_history_anchor();
         self.clear_timeline_text_selection_state();
         let options = self.timeline_render_options();
@@ -1117,6 +1126,9 @@ impl AppState {
                     "result ready"
                 } else {
                     match child.status {
+                        sigil_kernel::TaskChildSessionStatus::Blocked => {
+                            "blocked before final response"
+                        }
                         sigil_kernel::TaskChildSessionStatus::Failed => {
                             "failed before final response"
                         }
@@ -1609,6 +1621,36 @@ impl AppState {
             return Some(LiveActivitySummary {
                 label: "mcp".to_owned(),
                 detail: progress.detail.clone(),
+            });
+        }
+        if let RunPhase::Tool(name) = &self.runtime.run_phase
+            && super::formatting::command_tool_name(name)
+            && let Some((_, index)) = self
+                .tool_call_entry_indices
+                .iter()
+                .filter(|(id, _)| {
+                    self.safe_tool_calls
+                        .get(*id)
+                        .is_some_and(|call| &call.name == name)
+                })
+                .max_by_key(|(_, index)| **index)
+            && let Some(entry) = self.timeline.get(*index)
+            && let Ok(card) = serde_json::from_str::<serde_json::Value>(&entry.text)
+            && let Some(command) = card
+                .pointer("/metadata/details/call/summary")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|summary| summary.strip_prefix("command="))
+        {
+            let status = match card.get("status").and_then(serde_json::Value::as_str) {
+                Some("running") => "running",
+                Some("approval") => "waiting for approval",
+                Some("denied") => "denied",
+                _ => "pending",
+            };
+            let command = command.split_whitespace().collect::<Vec<_>>().join(" ");
+            return Some(LiveActivitySummary {
+                label: "command".to_owned(),
+                detail: format!("{status}: {}", truncate_session_view_text(&command, 160)),
             });
         }
         let (label, detail) = match &self.runtime.run_phase {

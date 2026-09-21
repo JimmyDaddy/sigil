@@ -18,13 +18,13 @@ use sigil_kernel::{
     AgentBatchProjection, AgentResultContinuationProjection, AgentThreadDisplayNameEntry,
     AgentThreadId, AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus,
     ControlEntry, JsonlSessionStore, SessionLogEntry, TaskRunProjection, TaskStateProjection,
-    ToolCall, ToolExecutionStatus, ToolResult, ToolResultMeta, normalize_task_agent_display_name,
+    ToolCall, ToolExecutionStatus, normalize_task_agent_display_name,
 };
 
 use super::{
     ActiveAgentChildTranscript, AgentSidebarItem, AgentView, AppAction, AppState,
     ChildTranscriptFileSignature,
-    formatting::{format_tool_progress_block_redacted_with_call, summarize_terminal_reason},
+    formatting::{format_tool_call_block_redacted, summarize_terminal_reason},
     state::ChildToolCardOccurrence,
 };
 
@@ -42,6 +42,7 @@ struct PendingChildToolCall {
     order: usize,
     call: ToolCall,
     render_running_card: bool,
+    status: &'static str,
 }
 
 pub(super) fn child_tool_event_scope(
@@ -60,16 +61,12 @@ pub(super) fn format_child_pending_tool_card(
     safe_call: Option<&ToolCall>,
     redactor: &sigil_kernel::SecretRedactor,
 ) -> String {
-    let result = ToolResult::ok(
-        call.id.clone(),
-        call.name.clone(),
-        format!("{} is running", call.name),
-        ToolResultMeta {
-            details: serde_json::json!({"child_tool_call_pending":true}),
-            ..ToolResultMeta::default()
-        },
-    );
-    format_tool_progress_block_redacted_with_call(&result, safe_call, redactor)
+    let identity_only = ToolCall {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        args_json: "{}".to_owned(),
+    };
+    format_tool_call_block_redacted(safe_call.unwrap_or(&identity_only), "pending", redactor)
 }
 
 impl AppState {
@@ -866,9 +863,9 @@ impl AppState {
                 .filter(|pending| pending.render_running_card)
                 .map(|pending| TimelineEntry {
                     role: TimelineRole::Tool,
-                    text: format_child_pending_tool_card(
+                    text: format_tool_call_block_redacted(
                         &pending.call,
-                        Some(&pending.call),
+                        pending.status,
                         &self.secret_redactor,
                     ),
                 }),
@@ -1010,12 +1007,20 @@ fn pending_child_tool_calls(entries: &[SessionLogEntry]) -> Vec<PendingChildTool
                             order,
                             call: call.clone(),
                             render_running_card: true,
+                            status: "pending",
                         },
                     );
                 }
             }
             SessionLogEntry::ToolResultV3(result) => {
                 pending.remove(&result.call_id);
+            }
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.status == ToolExecutionStatus::Started =>
+            {
+                if let Some(call) = pending.get_mut(&execution.call_id) {
+                    call.status = "running";
+                }
             }
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
                 if matches!(

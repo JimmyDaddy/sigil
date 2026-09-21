@@ -76,9 +76,15 @@ fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
 }
 
 #[test]
-fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
+fn alt_p_pauses_only_the_exact_running_direct_task() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let admission = sigil_kernel::TaskDirectExecutionAdmittedV1::task_request(
+        task_id.clone(),
+        "pause safely",
+        1,
+    );
+    let admission_id = admission.admission_id.clone();
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
             task_id: task_id.clone(),
@@ -88,23 +94,7 @@ fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
-            task_id,
-            plan_version: 2,
-            status: sigil_kernel::TaskPlanStatus::Accepted,
-            steps: vec![sigil_kernel::TaskStepSpec {
-                step_id: sigil_kernel::TaskStepId::new("step_1")?,
-                title: "Inspect".to_owned(),
-                display_name: None,
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            }],
-            reason: None,
-        })),
+        SessionLogEntry::Control(ControlEntry::TaskDirectExecutionAdmittedV1(admission)),
     ]);
     app.runtime.is_busy = true;
 
@@ -116,7 +106,7 @@ fn alt_p_pauses_only_the_exact_running_task_plan() -> Result<()> {
     assert_eq!(request.task_id.as_str(), "task_1");
     assert_eq!(
         request.execution,
-        sigil_kernel::TaskExecutionBindingV1::Plan { plan_version: 2 }
+        sigil_kernel::TaskExecutionBindingV1::Direct { admission_id }
     );
     assert_eq!(app.last_notice(), Some("pausing task task_1"));
 

@@ -166,7 +166,7 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
                 provider_name: "deepseek".to_owned(),
                 model_name: "deepseek-v4-flash".to_owned(),
                 consumers: vec![sigil_runtime::TaskProviderRouteConsumerDiagnostics {
-                    consumer: sigil_runtime::TaskProviderRouteConsumer::Planner,
+                    consumer: sigil_runtime::TaskProviderRouteConsumer::Executor,
                     in_flight: 1,
                     waiting: 0,
                 }],
@@ -179,43 +179,8 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
             }],
         },
     })?;
-    app.handle_worker_message(WorkerMessage::TaskCompletionProgressUpdated {
-        snapshot: sigil_runtime::TaskCompletionProgressSnapshot {
-            batch: Some(sigil_runtime::TaskCompletionProgress {
-                generation: 1,
-                task_id: "task_1".to_owned(),
-                plan_version: 1,
-                arrived: 1,
-                total: 2,
-                members: vec![
-                    sigil_runtime::TaskCompletionProgressMember {
-                        step_id: "read_a".to_owned(),
-                        title: "Read A".to_owned(),
-                        request_order: 1,
-                        arrival_order: None,
-                        outcome: None,
-                    },
-                    sigil_runtime::TaskCompletionProgressMember {
-                        step_id: "read_b".to_owned(),
-                        title: "Read B".to_owned(),
-                        request_order: 2,
-                        arrival_order: Some(1),
-                        outcome: Some(sigil_runtime::TaskCompletionOutcome::Succeeded),
-                    },
-                ],
-            }),
-        },
-    })?;
-
     assert_eq!(app.runtime.task_provider_route_diagnostics.routes.len(), 1);
-    assert_eq!(
-        app.runtime
-            .task_completion_progress
-            .batch
-            .as_ref()
-            .map(|batch| batch.arrived),
-        Some(1)
-    );
+
     let strip = app
         .task_strip_view()
         .expect("live task should render before durable projection arrives");
@@ -225,12 +190,7 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
     assert!(
         app.task_sidebar_lines()
             .iter()
-            .any(|line| line.contains("planner → deepseek/deepseek-v4-flash"))
-    );
-    assert!(
-        app.task_sidebar_lines()
-            .iter()
-            .any(|line| line.contains("arrival #1 → commit #2"))
+            .any(|line| line.contains("executor → deepseek/deepseek-v4-flash"))
     );
 
     app.handle_worker_message(WorkerMessage::TaskRunStarted {
@@ -244,10 +204,7 @@ fn task_provider_route_diagnostics_are_live_only_and_clear_at_task_boundary() ->
             .is_empty(),
         "a new task must not inherit stale live route attribution"
     );
-    assert!(
-        app.runtime.task_completion_progress.batch.is_none(),
-        "a new task must not inherit stale live completion order"
-    );
+
     Ok(())
 }
 
@@ -511,7 +468,6 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             final_text: draft.inline_text.clone().unwrap_or_default(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: review_session.entries().to_vec(),
     })?;
@@ -560,7 +516,6 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
             final_text: "   ".to_owned(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -598,7 +553,6 @@ fn pending_plan_approval_non_empty_input_submits_normally() -> Result<()> {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -628,13 +582,7 @@ fn completed_rehydrated_plan_attention_does_not_capture_next_prompt() -> Result<
     .expect("structured plan should create draft");
     let task_id = sigil_kernel::TaskId::new("rehydrated-task")?;
     app.set_pending_plan_approval_from_draft(&draft, None);
-    // A stale presentation cache cannot keep attention open after durable recovery found no
-    // unresolved materialization blocker.
-    app.composer
-        .pending_plan_approval
-        .as_mut()
-        .expect("pending rehydrated plan")
-        .retrying_materialization = true;
+    // The completed Plan-to-Task handoff no longer owns the next prompt.
     app.composer.mode = ComposerMode::Plan;
     app.session_browser.current_entries = vec![
         SessionLogEntry::Control(ControlEntry::PlanDraftCreated(draft.clone())),
@@ -653,9 +601,6 @@ fn completed_rehydrated_plan_attention_does_not_capture_next_prompt() -> Result<
                 plan_id: draft.plan_id.clone(),
                 plan_hash: draft.plan_hash.clone(),
                 task_id,
-                task_plan_version: 0,
-                step_mapping: Vec::new(),
-                stale_reason: None,
                 created_at_ms: 2,
             },
         )),
@@ -716,7 +661,6 @@ fn unstructured_plan_finished_does_not_create_pending_surface() -> Result<()> {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -1394,7 +1338,6 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             final_text: "kernel review complete".to_owned(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: restored_entries("restored-provider", "restored-model"),
     })?;
@@ -1421,7 +1364,6 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             final_text: "restored final".to_owned(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: vec![
             SessionLogEntry::Control(ControlEntry::SessionIdentity {
@@ -1712,7 +1654,6 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             final_text: "done".to_owned(),
             tool_calls: 2,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: entries.clone(),
     })?;
@@ -1870,6 +1811,7 @@ fn exact_resolution_clears_an_accepted_approval_tombstone_idempotently() -> Resu
     ))?;
 
     let resolved = RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-call-1".to_owned(),
         approved: true,
@@ -1908,6 +1850,7 @@ fn stale_approval_receipt_and_resolution_do_not_close_newer_request() -> Result<
     }));
 
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-1".to_owned(),
         approval_request_id: "approval-old".to_owned(),
         approved: true,
@@ -1968,7 +1911,6 @@ fn run_finished_does_not_duplicate_visible_final_answer_or_drop_thinking() -> Re
             final_text: "final summary".to_owned(),
             tool_calls: 0,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: Vec::new(),
     })?;
@@ -2141,8 +2083,8 @@ fn assistant_tool_preamble_becomes_thinking_before_one_final_reply() -> Result<(
     let summary = app
         .live_activity_summary()
         .expect("expected live tool activity");
-    assert_eq!(summary.label, "tool");
-    assert_eq!(summary.detail, "running bash");
+    assert_eq!(summary.label, "command");
+    assert_eq!(summary.detail, "pending: cargo check");
 
     app.handle(RunEvent::TextDelta("done".to_owned()))?;
     app.handle(RunEvent::AssistantMessage(
@@ -2288,8 +2230,9 @@ fn child_bash_progress_and_final_share_one_redacted_command_card() -> Result<()>
         .timeline_entries[0]
         .text;
     let pending_payload: serde_json::Value = serde_json::from_str(pending)?;
-    assert_eq!(pending_payload["status"], "running");
-    assert!(pending.contains("bash is running"));
+    assert_eq!(pending_payload["status"], "pending");
+    assert_eq!(pending_payload["preview_lines"], json!([]));
+    assert!(!pending.contains("is running"));
     assert!(!pending.contains("exact-provider-argument"));
     assert!(app.agent_panel.safe_child_tool_calls.is_empty());
 
@@ -2312,7 +2255,7 @@ fn child_bash_progress_and_final_share_one_redacted_command_card() -> Result<()>
         .timeline_entries[0]
         .text;
     let completed_pending_payload: serde_json::Value = serde_json::from_str(completed_pending)?;
-    assert_eq!(completed_pending_payload["status"], "running");
+    assert_eq!(completed_pending_payload["status"], "pending");
     assert_eq!(
         completed_pending_payload["metadata"]["details"]["call"]["summary"],
         "command=printf [redacted] && cargo check --workspace"
@@ -2332,7 +2275,9 @@ fn child_bash_progress_and_final_share_one_redacted_command_card() -> Result<()>
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(completed_pending_rendered.contains("RUNNING"));
+    assert!(completed_pending_rendered.contains("PENDING"));
+    assert!(completed_pending_rendered.contains("cargo check --workspace"));
+    assert!(!completed_pending_rendered.contains("child-secret"));
     assert!(!completed_pending_rendered.contains(" OK "));
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
@@ -2470,7 +2415,7 @@ fn child_completed_call_restores_command_after_switch_before_progress_and_final(
     assert!(
         restored.timeline_entries[0]
             .text
-            .contains("status\":\"running")
+            .contains("status\":\"pending")
     );
     assert!(
         restored.timeline_entries[0]
@@ -2950,7 +2895,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
         .last()
         .expect("pending tool card")
         .text;
-    assert!(pending_tool_card.contains("read_file is running"));
+    assert!(pending_tool_card.contains("\"status\":\"pending\""));
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::Notice("after start".to_owned())),
@@ -3012,6 +2957,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolApprovalRequested {
+            display_call_id: None,
             approval_identity: test_approval_identity("call-write"),
             effects: std::collections::BTreeSet::new(),
             analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -3057,6 +3003,7 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
         event: Box::new(RunEvent::ToolApprovalResolved {
+            display_call_id: None,
             call_id: "call-write".to_owned(),
             approval_request_id: "approval-call-write".to_owned(),
             approved: false,
@@ -3197,6 +3144,7 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
     assert_eq!(app.last_notice(), Some("waiting for agent @explore"));
 
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-spawn"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -3233,6 +3181,7 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
     assert_eq!(app.run_phase(), RunPhase::Tool("spawn_agent".to_owned()));
 
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-spawn".to_owned(),
         approval_request_id: "approval-call-spawn".to_owned(),
         approved: true,
@@ -5455,7 +5404,6 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
             final_text: "done".to_owned(),
             tool_calls: 1,
             final_message_id: None,
-            completion_claim: None,
         },
         entries: restored_entries("deepseek", "deepseek-v4-flash"),
     })?;
@@ -5643,258 +5591,6 @@ fn task_creation_failure_restores_the_same_actionable_plan() -> Result<()> {
 }
 
 #[test]
-fn materialization_blocker_reopens_the_plan_with_retry_and_revise_actions() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let draft = sigil_kernel::plan_draft_created_entry(
-        &structured_plan_text(
-            "Repair the materialization path",
-            "Correct the task contract",
-            "crates/sigil-tui/src/app/session_flow.rs",
-        ),
-        sigil_kernel::PlanSourceRef::default(),
-        1,
-        None,
-    )?
-    .expect("plan draft");
-    let task_id = sigil_kernel::TaskId::new("plan-task-materialization-blocked")?;
-    let blocker = sigil_kernel::TaskBlockerV1 {
-        reason_code: sigil_kernel::TaskBlockerReasonCodeV1::ContractRecompileRequired,
-        summary: "Plan approved; Task preparation is blocked: plan step is missing its role, mode or isolation contract".to_owned(),
-        affected_step: Some(sigil_kernel::TaskStepId::new("step-1")?),
-        affected_capability: None,
-        retryable: true,
-        available_actions: vec![
-            sigil_kernel::TaskBlockerActionV1::RetryAdmission,
-            sigil_kernel::TaskBlockerActionV1::Replan,
-            sigil_kernel::TaskBlockerActionV1::Cancel,
-        ],
-        evidence_digest: sigil_kernel::stable_event_hash(b"materialization-blocker"),
-        created_at_ms: 20,
-        resolved_at_ms: None,
-    };
-    let review_attempt = sigil_kernel::PlanReviewAttemptEntry {
-        plan_review_id: sigil_kernel::PlanReviewId::new("review-materialization-blocked")?,
-        attempt_id: sigil_kernel::PlanReviewAttemptId::new("attempt-materialization-blocked")?,
-        plan_id: draft.plan_id.clone(),
-        source: sigil_kernel::PlanReviewSource::ExplicitPlanCommand,
-        source_turn: sigil_kernel::ConversationTurnRef {
-            session_scope_id: "session-materialization-blocked".to_owned(),
-            message_id: "message-materialization-blocked".to_owned(),
-            logical_run_id: "run-materialization-blocked".to_owned(),
-        },
-        route_decision_id: None,
-        child_session_ref: sigil_kernel::SessionRef::new_relative(
-            "child-materialization-blocked.jsonl",
-        )?,
-        finalizer_session_ref: Some(sigil_kernel::SessionRef::new_relative(
-            "finalizer-materialization-blocked.jsonl",
-        )?),
-        revision_request_id: None,
-        attempt_ordinal: 1,
-        base_plan_id: None,
-        base_plan_hash: None,
-        explicit_objective: Some("materialization blocker review".to_owned()),
-        workspace_snapshot_id: None,
-        pending_user_input: None,
-        status: sigil_kernel::PlanReviewAttemptStatus::DraftReady,
-        terminal_reason: None,
-        recorded_at_ms: 10,
-    };
-    let entries = vec![
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanReviewAttempt(
-            review_attempt,
-        )),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDraftCreated(
-            draft.clone(),
-        )),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanDecisionRecorded(
-            sigil_kernel::PlanDecisionRecordedEntry {
-                plan_id: draft.plan_id.clone(),
-                plan_hash: draft.plan_hash.clone(),
-                decision: sigil_kernel::PlanDecision::Accepted,
-                decided_by: sigil_kernel::PlanDecisionActor::User,
-                decided_at_ms: 11,
-                reason: Some("approved before materialization".to_owned()),
-            },
-        )),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskRun(
-            sigil_kernel::TaskRunEntry {
-                task_id: task_id.clone(),
-                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
-                objective: "Repair the materialization path".to_owned(),
-                title: Some("Repair the materialization path".to_owned()),
-                status: sigil_kernel::TaskRunStatus::Started,
-                reason: Some("Task shell created before materialization".to_owned()),
-            },
-        )),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::TaskCreatedFromPlan(
-            sigil_kernel::TaskCreatedFromPlanEntry {
-                plan_id: draft.plan_id.clone(),
-                plan_hash: draft.plan_hash.clone(),
-                task_id: task_id.clone(),
-                task_plan_version: 0,
-                step_mapping: Vec::new(),
-                stale_reason: Some("Task materialization pending".to_owned()),
-                created_at_ms: 11,
-            },
-        )),
-        sigil_kernel::SessionLogEntry::Control(
-            sigil_kernel::ControlEntry::TaskMaterializationAttemptStartedV1(
-                sigil_kernel::TaskMaterializationAttemptStartedV1 {
-                    task_id: task_id.clone(),
-                    generation: 1,
-                    plan_hash: draft.plan_hash.clone(),
-                    compiler_contract_fingerprint: sigil_kernel::stable_event_hash(
-                        b"materialization-compiler-contract",
-                    ),
-                    started_at_ms: 20,
-                },
-            ),
-        ),
-        sigil_kernel::SessionLogEntry::Control(sigil_kernel::ControlEntry::PlanCompileFailedV1(
-            sigil_kernel::PlanCompileFailureV1 {
-                plan_id: draft.plan_id.clone(),
-                plan_hash: draft.plan_hash.clone(),
-                reason_code: "incomplete_step_contract".to_owned(),
-                reason: "plan step is missing its role, mode or isolation contract".to_owned(),
-                affected_step: Some("step-1".to_owned()),
-                compile_binding: None,
-                failed_at_ms: 20,
-            },
-        )),
-        sigil_kernel::SessionLogEntry::Control(
-            sigil_kernel::ControlEntry::TaskMaterializationBlockedV1(
-                sigil_kernel::TaskMaterializationBlockedV1 {
-                    task_id: task_id.clone(),
-                    generation: 1,
-                    plan_hash: draft.plan_hash.clone(),
-                    blocker_id: "materialization-blocked-1".to_owned(),
-                    blocker: blocker.clone(),
-                    blocked_at_ms: 20,
-                },
-            ),
-        ),
-    ];
-
-    app.handle_worker_message(WorkerMessage::TaskAdmissionBlocked {
-        task_id: task_id.as_str().to_owned(),
-        blocker,
-        entries,
-    })?;
-
-    let pending = app
-        .pending_plan_approval()
-        .expect("the materialization blocker should reopen its Plan workbench");
-    assert_eq!(pending.plan_id.as_deref(), Some(draft.plan_id.as_str()));
-    assert!(pending.workbench_open);
-    assert!(pending.retrying_materialization);
-    assert_eq!(
-        pending.last_run_failure.as_deref(),
-        Some(
-            "Plan approved; Task preparation is blocked: plan step is missing its role, mode or isolation contract"
-        )
-    );
-    assert_eq!(
-        pending.allowed_actions,
-        vec![
-            sigil_kernel::PublicPlanAction::Run,
-            sigil_kernel::PublicPlanAction::Revise,
-        ]
-    );
-    assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice
-            && entry
-                .text
-                .contains("plan step is missing its role, mode or isolation contract")
-            && entry.text.contains("R retries preparation")
-            && !entry.text.contains("once the environment is resolved")
-    }));
-
-    // The durable blocker, not a presentation cache, authorizes the retry surface.
-    app.composer
-        .pending_plan_approval
-        .as_mut()
-        .expect("reopened materialization plan")
-        .retrying_materialization = false;
-
-    let conflicting_decision_hash = format!("sha256:{}", "c".repeat(64));
-    let decision = app
-        .session_browser
-        .current_entries
-        .iter_mut()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision)) => {
-                Some(decision)
-            }
-            _ => None,
-        })
-        .expect("durable accepted decision");
-    decision.plan_hash = conflicting_decision_hash;
-    assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?
-            .is_none(),
-        "a mismatched accepted decision must not authorize a retry"
-    );
-    assert!(app.pending_plan_approval().is_some());
-    let decision = app
-        .session_browser
-        .current_entries
-        .iter_mut()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanDecisionRecorded(decision)) => {
-                Some(decision)
-            }
-            _ => None,
-        })
-        .expect("durable accepted decision");
-    decision.plan_hash = draft.plan_hash.clone();
-
-    let conflicting_draft_hash = format!("sha256:{}", "d".repeat(64));
-    let durable_draft = app
-        .session_browser
-        .current_entries
-        .iter_mut()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(durable_draft)) => {
-                Some(durable_draft)
-            }
-            _ => None,
-        })
-        .expect("durable plan draft");
-    durable_draft.plan_hash = conflicting_draft_hash;
-    assert!(
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?
-            .is_none(),
-        "a mismatched durable draft must not authorize a retry"
-    );
-    assert!(app.pending_plan_approval().is_some());
-    let durable_draft = app
-        .session_browser
-        .current_entries
-        .iter_mut()
-        .find_map(|entry| match entry {
-            SessionLogEntry::Control(ControlEntry::PlanDraftCreated(durable_draft)) => {
-                Some(durable_draft)
-            }
-            _ => None,
-        })
-        .expect("durable plan draft");
-    durable_draft.plan_hash = draft.plan_hash.clone();
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
-    assert!(matches!(
-        action,
-        Some(AppAction::CreateTaskFromPlan {
-            plan_id,
-            expected_plan_hash,
-            start_mode: sigil_kernel::PlanTaskStartMode::CreateAndRun,
-            permission_grant: None,
-        }) if plan_id == draft.plan_id.as_str() && expected_plan_hash == draft.plan_hash
-    ));
-    Ok(())
-}
-
-#[test]
 fn pending_plan_shortcuts_keep_composer_input_and_save_from_workbench() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let draft = sigil_kernel::plan_draft_created_entry(
@@ -5934,6 +5630,9 @@ fn pending_plan_run_shortcut_dispatches_create_and_run() -> Result<()> {
         Some("snapshot-1".to_owned()),
     )?
     .expect("non-empty plan should create draft");
+    app.session_browser.current_entries = vec![SessionLogEntry::Control(
+        ControlEntry::PlanDraftCreated(draft.clone()),
+    )];
     app.set_pending_plan_approval_from_draft(&draft, Some("snapshot-1"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -6033,6 +5732,9 @@ fn workspace_changes_and_missing_snapshots_do_not_block_plan_actions() -> Result
                 base.map(str::to_owned),
             )?
             .expect("non-empty plan should create draft");
+            app.session_browser.current_entries = vec![SessionLogEntry::Control(
+                ControlEntry::PlanDraftCreated(draft.clone()),
+            )];
             app.set_pending_plan_approval_from_draft(&draft, current);
             let pending = app.pending_plan_approval().expect("pending plan");
             assert!(pending.stale);
@@ -6109,14 +5811,11 @@ pub(crate) fn pending_text_user_input_request() -> Result<sigil_kernel::PublicUs
         prompt: "One constraint is required before work can continue.".to_owned(),
         questions: vec![sigil_kernel::UserInputQuestionV1 {
             id: "scope".to_owned(),
-            header: "Scope".to_owned(),
             question: "Which scope should be used?".to_owned(),
             description: None,
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 64,
-            },
+            options: Vec::new(),
+            multiple: false,
         }],
         allowed_actions: vec![
             sigil_kernel::UserInputActionV1::Submit,
@@ -6150,7 +5849,10 @@ fn user_input_form_validates_required_text_preserves_spaces_and_submits_exact_id
             .is_none(),
         "an empty required answer must stay in the form"
     );
-    assert_eq!(app.last_notice(), Some("Scope requires an answer"));
+    assert_eq!(
+        app.last_notice(),
+        Some("Which scope should be used? requires an answer")
+    );
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     for character in "repo scope".chars() {
@@ -6185,25 +5887,19 @@ fn user_input_form_enter_advances_through_multiple_questions_before_submit() -> 
     request.questions.extend([
         sigil_kernel::UserInputQuestionV1 {
             id: "constraint".to_owned(),
-            header: "Constraint".to_owned(),
             question: "What constraint matters most?".to_owned(),
             description: None,
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 64,
-            },
+            options: Vec::new(),
+            multiple: false,
         },
         sigil_kernel::UserInputQuestionV1 {
             id: "target".to_owned(),
-            header: "Target".to_owned(),
             question: "Which target should be preserved?".to_owned(),
             description: None,
             required: true,
-            field: sigil_kernel::UserInputFieldKindV1::Text {
-                multiline: false,
-                max_chars: 64,
-            },
+            options: Vec::new(),
+            multiple: false,
         },
     ]);
     app.set_pending_user_input(request);
@@ -6275,25 +5971,16 @@ fn accepted_user_input_restores_an_exact_resume_action_without_echoing_answers()
     app.set_pending_user_input_recovery(request.clone(), command.clone());
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(
-        action
-            .as_ref()
-            .and_then(|action| app.recovered_user_input_resume_command(action))
-            .is_some(),
-        "ordinary accepted recovery must use the exact worker-owned resume command"
-    );
     assert!(matches!(
         action,
-        Some(AppAction::SubmitUserInputDecision {
-            command_id: Some(command_id),
+        Some(AppAction::ResumeCommittedUserInput {
+            original_command_id,
             request_id,
             generation: 1,
             expected_request_hash,
-            decision,
-        }) if command_id == command.command_id.as_str()
+        }) if original_command_id == command.command_id.as_str()
             && request_id == request.identity.request_id.as_str()
             && expected_request_hash == request.request_hash
-            && decision == command.decision
     ));
     Ok(())
 }
@@ -6358,9 +6045,6 @@ fn recovered_plan_review_attention_message_restores_the_existing_private_resume_
         child_session_ref: sigil_kernel::SessionRef::new_relative(
             "managed/tui-recovered-research.jsonl",
         )?,
-        finalizer_session_ref: Some(sigil_kernel::SessionRef::new_relative(
-            "managed/tui-recovered-finalizer.jsonl",
-        )?),
         revision_request_id: Some(sigil_kernel::UserInputRequestId::new(
             "tui-recovered-revision-request",
         )?),
@@ -6395,36 +6079,19 @@ fn recovered_plan_review_attention_message_restores_the_existing_private_resume_
         Some("an accepted input decision is ready to resume; choose Resume")
     );
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    let private_resume = action
-        .as_ref()
-        .and_then(|action| app.recovered_user_input_resume_command(action))
-        .expect("only the private plan-review recovery form may bypass application receipt replay");
-    assert!(matches!(
-        private_resume,
-        crate::runner::WorkerCommand::ResumeRecoveredUserInput {
-            command_id,
-            request_id,
-            generation,
-            expected_request_hash,
-        } if command_id == command.command_id.as_str()
-            && request_id == command.identity.request_id.as_str()
-            && generation == command.identity.generation
-            && expected_request_hash == command.request_hash
-    ));
     assert!(matches!(
         action,
-        Some(AppAction::SubmitUserInputDecision {
-            command_id: Some(command_id),
+        Some(AppAction::ResumeCommittedUserInput {
+            original_command_id,
             request_id,
             generation,
             expected_request_hash,
-            decision,
-        }) if command_id == command.command_id.as_str()
+        }) if original_command_id == command.command_id.as_str()
             && request_id == command.identity.request_id.as_str()
             && generation == command.identity.generation
             && expected_request_hash == command.request_hash
-            && decision == command.decision
     ));
+
     assert!(
         !app.timeline
             .iter()
@@ -6441,20 +6108,18 @@ fn recovered_plan_review_attention_message_restores_the_existing_private_resume_
 }
 
 #[test]
-fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_session() -> Result<()>
+fn accepted_agent_child_answer_restores_from_parent_route_and_private_child_session() -> Result<()>
 {
     let temp = tempdir()?;
     let parent_path = temp.path().join("parent.jsonl");
-    let child_ref = sigil_kernel::SessionRef::new_relative("children/planner.jsonl")?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/agent.jsonl")?;
     let child_path = child_ref.resolve(temp.path());
     let mut child = sigil_kernel::Session::new("planned", "planned-model")
         .with_store(JsonlSessionStore::new(&child_path)?);
-    let task_id = sigil_kernel::TaskId::new("task-tui-planner-recovery")?;
+    let task_id = sigil_kernel::TaskId::new("task-tui-agent-recovery")?;
     let mut public = pending_text_user_input_request()?;
     public.identity.session_scope_id = sigil_kernel::SessionScopeId::new(child.session_scope_id())?;
-    public.source = sigil_kernel::UserInputSourceV1::Planner {
-        task_id: task_id.clone(),
-    };
+    public.source = sigil_kernel::UserInputSourceV1::Agent;
     let requested = sigil_kernel::UserInputRequestedV1::new(sigil_kernel::UserInputRequestV1 {
         schema_version: sigil_kernel::USER_INPUT_SCHEMA_VERSION,
         identity: public.identity.clone(),
@@ -6465,8 +6130,8 @@ fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_se
         allowed_actions: public.allowed_actions.clone(),
         requested_at_unix_ms: public.requested_at_unix_ms,
         continuation: Some(sigil_kernel::UserInputContinuationBindingV1 {
-            assistant_message_id: "planner-question-message".to_owned(),
-            tool_call_id: "planner-question-call".to_owned(),
+            assistant_message_id: "agent-question-message".to_owned(),
+            tool_call_id: "agent-question-call".to_owned(),
             provider_name: "planned".to_owned(),
             model_name: "planned-model".to_owned(),
         }),
@@ -6474,12 +6139,12 @@ fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_se
     let command = sigil_kernel::UserInputDecisionCommandV1 {
         identity: requested.request.identity.clone(),
         request_hash: requested.request_hash.clone(),
-        command_id: sigil_kernel::UserInputCommandId::new("tui-planner-recovery-command")?,
+        command_id: sigil_kernel::UserInputCommandId::new("tui-agent-recovery-command")?,
         decision: sigil_kernel::UserInputDecisionV1::Submitted {
             answers: vec![sigil_kernel::UserInputAnswerV1 {
                 question_id: "scope".to_owned(),
                 value: sigil_kernel::UserInputAnswerValueV1::Text {
-                    value: "private planner answer".to_owned(),
+                    value: "private agent answer".to_owned(),
                 },
             }],
         },
@@ -6490,10 +6155,10 @@ fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_se
     let _receipt = sigil_kernel::accept_user_input_decision(&mut child, command.clone(), 20)?;
     let route = sigil_kernel::AgentUserInputRouteEntryV1 {
         schema_version: sigil_kernel::AGENT_USER_INPUT_ROUTE_SCHEMA_VERSION,
-        route_id: sigil_kernel::AgentRouteId::new("route-tui-planner-recovery")?,
+        route_id: sigil_kernel::AgentRouteId::new("route-tui-agent-recovery")?,
         source_thread_id: command.identity.source_thread_id.clone(),
-        source_attempt_id: sigil_kernel::AgentRunAttemptId::new("attempt-tui-planner-recovery")?,
-        profile_id: sigil_kernel::AgentProfileId::new("planner")?,
+        source_attempt_id: sigil_kernel::AgentRunAttemptId::new("attempt-tui-agent-recovery")?,
+        profile_id: sigil_kernel::AgentProfileId::new("agent")?,
         parent_thread_id: sigil_kernel::AgentThreadId::new("root")?,
         batch_id: None,
         budget_scope_id: task_id,
@@ -6528,39 +6193,30 @@ fn accepted_planner_child_answer_restores_from_parent_route_and_private_child_se
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         action,
-        Some(AppAction::SubmitUserInputDecision {
-            command_id: Some(command_id),
+        Some(AppAction::ResumeCommittedUserInput {
+            original_command_id,
             request_id,
             generation,
             expected_request_hash,
-            decision,
-        }) if command_id == command.command_id.as_str()
+        }) if original_command_id == command.command_id.as_str()
             && request_id == command.identity.request_id.as_str()
             && generation == command.identity.generation
             && expected_request_hash == command.request_hash
-            && decision == command.decision
     ));
     Ok(())
 }
 
 #[test]
-fn multiline_user_input_uses_enter_for_newline_and_control_enter_for_actions() -> Result<()> {
+fn single_line_user_input_uses_enter_to_focus_actions_and_submit() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    let mut request = pending_text_user_input_request()?;
-    request.questions[0].field = sigil_kernel::UserInputFieldKindV1::Text {
-        multiline: true,
-        max_chars: 64,
-    };
+    let request = pending_text_user_input_request()?;
     app.set_pending_user_input(request);
 
     for character in "first".chars() {
         app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
     }
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    for character in "second".chars() {
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL))?;
+    assert!(app.pending_user_input().expect("input form").focus_actions);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(matches!(
         action,
@@ -6572,7 +6228,7 @@ fn multiline_user_input_uses_enter_for_newline_and_control_enter_for_actions() -
             [sigil_kernel::UserInputAnswerV1 {
                 value: sigil_kernel::UserInputAnswerValueV1::Text { value },
                 ..
-            }] if value == "first\nsecond"
+            }] if value == "first"
         )
     ));
     Ok(())
@@ -6657,4 +6313,160 @@ fn user_input_attention_queue_switches_by_exact_identity_and_preserves_drafts() 
         [crate::app::UserInputDraftValue::Text(value)] if value == "b"
     ));
     Ok(())
+}
+
+#[test]
+fn command_parameters_render_before_progress_and_keep_one_card_through_cancellation() -> Result<()>
+{
+    for tool_name in ["bash", "exec_command"] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.runtime.is_busy = true;
+        app.secret_redactor = sigil_kernel::SecretRedactor::from_values(["command-secret"]);
+        let call = ToolCall {
+            id: "silent-command".to_owned(),
+            name: tool_name.to_owned(),
+            args_json: json!({"command":"printf command-secret && cargo check --workspace"})
+                .to_string(),
+        };
+        app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::ToolCallStarted(
+            call.clone(),
+        ))))?;
+        assert!(
+            !app.timeline_plain_lines()
+                .join("\n")
+                .contains("command-secret")
+        );
+        app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::ToolCallCompleted(
+            call.clone(),
+        ))))?;
+        let pending = app.timeline_plain_lines().join("\n");
+        assert!(pending.contains("PENDING"));
+        assert!(pending.contains("printf [redacted]"));
+        assert!(!pending.contains("RUNNING"));
+        assert!(!pending.contains("command-secret"));
+        assert!(
+            app.live_activity_summary()
+                .expect("command activity")
+                .detail
+                .contains("pending: printf [redacted]")
+        );
+        for (status, label) in [
+            (ToolExecutionStatus::Started, "RUNNING"),
+            (ToolExecutionStatus::Cancelled, "CANCELLED"),
+        ] {
+            app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::Control(
+                ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    status,
+                    duration_ms: None,
+                    subjects: Vec::new(),
+                    changed_files: Vec::new(),
+                    metadata: ToolResultMeta::default(),
+                    error: None,
+                    model_content_hash: None,
+                })),
+            ))))?;
+            let rendered = app.timeline_plain_lines().join("\n");
+            assert!(rendered.contains(label), "{rendered}");
+            assert!(rendered.contains("printf [redacted]"));
+            assert_eq!(
+                app.timeline
+                    .iter()
+                    .filter(|entry| entry.role == TimelineRole::Tool)
+                    .count(),
+                1
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn exec_command_yield_and_wait_keep_command_visible_and_process_status_truthful() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let call = ToolCall {
+        id: "start-command".to_owned(),
+        name: "exec_command".to_owned(),
+        args_json: json!({"command":"cargo check --workspace"}).to_string(),
+    };
+    app.handle(RunEvent::ToolCallCompleted(call.clone()))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        call.id,
+        call.name,
+        String::new(),
+        ToolResultMeta {
+            details: json!({"execution_id":"opaque-process-identity", "status":"running"}),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+    let running = app.timeline_plain_lines().join("\n");
+    assert!(running.contains("RUNNING"), "{running}");
+    assert!(running.contains("cargo check --workspace"));
+    assert!(!running.contains("opaque-process-identity"));
+    app.handle(RunEvent::ToolResult(ToolResult::ok("wait-command".to_owned(), "exec_wait".to_owned(), "compile error".to_owned(), ToolResultMeta {
+        details: json!({"execution_id":"opaque-process-identity", "status":"exited", "status_detail":{"exit_code":1}}),
+        ..ToolResultMeta::default()
+    })))?;
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Tool)
+            .count(),
+        1
+    );
+    let exited = app.timeline_plain_lines().join("\n");
+    assert!(exited.contains("cargo check --workspace"), "{exited}");
+    assert!(exited.contains("exit 1"));
+    assert!(!exited.contains("RUNNING"));
+    Ok(())
+}
+
+#[test]
+fn pending_exec_command_can_expand_full_multiline_input_without_stdout() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let command = format!(
+        "cargo check --workspace\nprintf '{}'\nprintf final-command-line",
+        "x".repeat(180)
+    );
+    app.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: "multiline-command".to_owned(),
+        name: "exec_command".to_owned(),
+        args_json: json!({"command":command}).to_string(),
+    }))?;
+    let index = app
+        .timeline
+        .iter()
+        .position(|entry| entry.role == TimelineRole::Tool)
+        .expect("pending card");
+    assert!(app.toggle_tool_activity_entry(index));
+    let rendered = app.timeline_plain_lines().join("\n");
+    assert!(rendered.contains("cargo check --workspace"));
+    assert!(rendered.contains("printf final-command-line"), "{rendered}");
+    assert!(rendered.contains("PENDING"));
+    assert!(!rendered.contains("No output"));
+    Ok(())
+}
+
+#[test]
+fn silent_background_execution_refreshes_elapsed_after_provider_run_finishes() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let block = |status: &str| {
+        json!({ "tool_name":"exec_command", "call_id":"quiet", "status":"ok",
+        "metadata":{"details":{"execution_id":"quiet-execution","started_at_ms":1_000,
+            "updated_at_ms":3_000,"status":status,"call":{"summary":"command=sleep 60"}}},
+        "preview_lines":[] })
+        .to_string()
+    };
+    app.push_timeline(TimelineRole::Tool, block("running"));
+    app.runtime.is_busy = false;
+    assert!(app.has_running_command_elapsed());
+    assert!(app.refresh_command_elapsed(4_000));
+    assert!(app.timeline_plain_lines().join("\n").contains("RUNNING"));
+    assert!(!app.refresh_command_elapsed(4_500));
+    assert!(app.refresh_command_elapsed(5_000));
+    app.replace_or_push_tool_card(block("cancelled"));
+    assert!(!app.has_running_command_elapsed());
+    assert!(!app.refresh_command_elapsed(6_000));
+    assert!(app.timeline_plain_lines().join("\n").contains("2.0 s"));
 }

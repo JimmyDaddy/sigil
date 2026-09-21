@@ -18,7 +18,7 @@ fn update(app: &AppState, attempt: &str, revision: u64, base: u64, text: &str) -
         schema_version: APPLICATION_CONTRACT_SCHEMA_VERSION,
         session_id: app.session_id.clone(),
         run_id: "run".to_owned(),
-        attempt_id: attempt.to_owned(),
+        attempt_id: Some(attempt.to_owned()),
         slot_id: "assistant-text".to_owned(),
         live_revision: revision,
         base_durable_sequence: base,

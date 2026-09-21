@@ -132,6 +132,9 @@ impl WorkerLoopState {
             readiness: WorkerReadiness::new(),
             session: SessionWorkerState {
                 log_path: session_log_path,
+                application_operation_owner: session
+                    .as_ref()
+                    .and_then(|session| session.application_operation_owner().ok()),
                 current: session,
                 attachment_lease,
                 detached_durable_controls: Vec::new(),
@@ -196,8 +199,6 @@ impl WorkerLoopState {
                 background_runs: background_agent_runs,
                 last_task_provider_route_diagnostics:
                     sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default(),
-                last_task_completion_progress:
-                    sigil_runtime::TaskCompletionProgressSnapshot::default(),
             },
             mcp_oauth: McpOAuthWorkerState {
                 result_tx: WorkerEventPayloadSender::mcp_oauth(event_tx),
@@ -404,6 +405,8 @@ pub(in crate::runner) struct McpOAuthWorkerState {
 }
 
 pub(in crate::runner) struct SessionWorkerState {
+    pub(in crate::runner) application_operation_owner:
+        Option<sigil_kernel::session::SessionApplicationOperationOwner>,
     pub(in crate::runner) log_path: PathBuf,
     pub(in crate::runner) current: Option<Session>,
     pub(in crate::runner) attachment_lease: Option<
@@ -507,8 +510,6 @@ pub(in crate::runner) struct AgentWorkerState {
     pub(in crate::runner) background_runs: sigil_runtime::AgentToolBackgroundRuns,
     pub(in crate::runner) last_task_provider_route_diagnostics:
         sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
-    pub(in crate::runner) last_task_completion_progress:
-        sigil_runtime::TaskCompletionProgressSnapshot,
 }
 
 #[cfg(test)]

@@ -2181,17 +2181,6 @@ impl AppState {
             provider_name.clone(),
             route.clone(),
         )?;
-        self.runtime.provider_name = provider_name;
-        self.runtime.model_name = target_model.model_id.clone();
-        self.runtime.model_route = Some(route);
-        if let Some(config_state) = self.config_state.as_mut() {
-            config_state.current_session_route = Some(target_model.clone());
-        }
-        self.push_event(
-            "model",
-            format!("{}/{}", target_model.connection_id, target_model.model_id),
-        );
-        self.schedule_balance_refresh();
         Ok(Some(target_model))
     }
 

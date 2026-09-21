@@ -11,7 +11,7 @@ impl std::fmt::Display for OwnedTaskDrainFailure {
         match self {
             Self::DeadlineExceeded { pending_tasks } => write!(
                 formatter,
-                "shutdown deadline exceeded; pending_tasks={pending_tasks}; cleanup_complete=false"
+                "shutdown still pending; pending_tasks={pending_tasks}"
             ),
             Self::TaskPanicked => {
                 formatter.write_str("owned task panicked during shutdown; cleanup_complete=false")
@@ -73,6 +73,61 @@ pub(in crate::runner) fn drain_owned_tasks_until(
     }
 }
 
+/// Request all independent owners before any join. This is also called while a foreground
+/// cancellation is pending if the UI sets closing, so Shutdown need not wait in the inbox.
+pub(super) fn request_independent_worker_stops(state: &mut WorkerLoopState) {
+    if let Some(terminal_control) = &state.terminal_control {
+        terminal_control.request_stop_all();
+    }
+    state.refresh.provider_status_tasks.abort_all();
+    state.compaction.preparation_tasks.abort_all();
+    state.artifact_gc.tasks.abort_all();
+    cancel_all_mcp_oauth_flows(state);
+    state.session_maintenance.request_stop();
+    // Retired run roots have already reached their natural terminal or received cooperative
+    // cancellation. Aborting them here could interrupt the cleanup they still own.
+}
+
+fn join_owned_tasks(
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    task_panicked: &mut bool,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), OwnedTaskDrainFailure> {
+    while let Some(handle) = handles.last_mut() {
+        *task_panicked |= runtime
+            .block_on(handle)
+            .is_err_and(|error| error.is_panic());
+        handles.pop();
+    }
+    if *task_panicked {
+        Err(OwnedTaskDrainFailure::TaskPanicked)
+    } else {
+        Ok(())
+    }
+}
+
+/// Bounded manager polls retain their handles. A poll deadline is progress only; keep the same
+/// owner and retry until every join is consumed, preserving a previously observed panic.
+fn drain_stopping_owner(
+    stage: WorkerShutdownStage,
+    stop_control: &super::super::protocol::WorkerStopControl,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    mut drain: impl FnMut(Instant) -> Result<(), OwnedTaskDrainFailure>,
+) {
+    stop_control.stage(stage);
+    loop {
+        match drain(Instant::now() + Duration::from_secs(1)) {
+            Ok(()) => return,
+            Err(OwnedTaskDrainFailure::DeadlineExceeded { .. }) => continue,
+            Err(error @ OwnedTaskDrainFailure::TaskPanicked) => {
+                stop_control.fail_stage(stage);
+                let _ = message_tx.send(WorkerMessage::Notice(error.to_string()));
+                return;
+            }
+        }
+    }
+}
+
 pub(super) fn shutdown_worker_state(
     state: &mut WorkerLoopState,
     runtime: &tokio::runtime::Runtime,
@@ -81,104 +136,94 @@ pub(super) fn shutdown_worker_state(
     elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
 ) {
     state.stop_control.reserve(true);
-    let deadline = state
-        .stop_control
-        .shutdown_deadline()
-        .expect("closing worker has a deadline");
-    // Request every independent owner to stop before spending the shared budget on any join.
-    state.refresh.provider_status_tasks.abort_all();
-    state.compaction.preparation_tasks.abort_all();
-    state.artifact_gc.tasks.abort_all();
-    cancel_all_mcp_oauth_flows(state);
-    for task in &state.run.retired {
-        task.abort();
-    }
-    state.session_maintenance.request_stop();
+    request_independent_worker_stops(state);
 
     if let Some(active_run) = state.run.active.take() {
         cancel_active_run(
             active_run,
             runtime,
             root_config,
-            &state.session.log_path,
-            &mut state.session.current,
-            &mut state.session.detached_durable_controls,
+            state,
             message_tx,
             elicitation_handler,
-            state.agent.supervisor.as_ref(),
-            &mut state.run.discarded_ids,
-            &mut state.run.retired,
-            &state.stop_control,
             ActiveRunStopDisposition::Cancel,
             "run interrupted by TUI shutdown",
         );
     }
 
     let stop_control = state.stop_control.clone();
-    let drain = |stage, result: Result<(), String>| {
-        if let Err(error) = result {
-            stop_control.fail_stage(stage);
-            let _ = message_tx.send(WorkerMessage::Notice(error));
-        }
-    };
-    stop_control.stage(WorkerShutdownStage::RunQuiescence);
-    drain(
+    stop_control.stage(WorkerShutdownStage::TerminalTasks);
+    if let Some(terminal_control) = &state.terminal_control
+        && let Err(error) = runtime.block_on(terminal_control.shutdown_owned())
+    {
+        stop_control.fail_stage(WorkerShutdownStage::TerminalTasks);
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "terminal execution shutdown failed: {error:#}"
+        )));
+    }
+    drain_stopping_owner(
         WorkerShutdownStage::RunQuiescence,
-        drain_owned_tasks_until(
-            &mut state.run.retired,
-            &mut state.run.task_panicked,
-            runtime,
-            deadline,
-        )
-        .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |_| {
+            join_owned_tasks(
+                &mut state.run.retired,
+                &mut state.run.task_panicked,
+                runtime,
+            )
+        },
     );
-    stop_control.stage(WorkerShutdownStage::Compaction);
-    drain(
+    drain_stopping_owner(
         WorkerShutdownStage::Compaction,
-        state
-            .compaction
-            .preparation_tasks
-            .shutdown_until(runtime, deadline)
-            .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |deadline| {
+            state
+                .compaction
+                .preparation_tasks
+                .shutdown_until(runtime, deadline)
+        },
     );
-    stop_control.stage(WorkerShutdownStage::ArtifactGc);
-    drain(
+    drain_stopping_owner(
         WorkerShutdownStage::ArtifactGc,
-        state
-            .artifact_gc
-            .tasks
-            .shutdown_until(runtime, deadline)
-            .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |deadline| state.artifact_gc.tasks.shutdown_until(runtime, deadline),
     );
-    stop_control.stage(WorkerShutdownStage::McpOAuth);
-    drain(
+    drain_stopping_owner(
         WorkerShutdownStage::McpOAuth,
-        drain_owned_tasks_until(
-            &mut state.mcp_oauth.retired,
-            &mut state.mcp_oauth.task_panicked,
-            runtime,
-            deadline,
-        )
-        .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |_| {
+            join_owned_tasks(
+                &mut state.mcp_oauth.retired,
+                &mut state.mcp_oauth.task_panicked,
+                runtime,
+            )
+        },
     );
-    stop_control.stage(WorkerShutdownStage::ProviderStatus);
-    drain(
+    drain_stopping_owner(
         WorkerShutdownStage::ProviderStatus,
-        runtime
-            .block_on(state.refresh.provider_status_tasks.shutdown_until(deadline))
-            .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |deadline| {
+            runtime.block_on(state.refresh.provider_status_tasks.shutdown_until(deadline))
+            .map_err(|error| match error {
+                sigil_runtime::provider_status::ProviderStatusShutdownError::DeadlineExceeded { pending_tasks } =>
+                    OwnedTaskDrainFailure::DeadlineExceeded { pending_tasks },
+                sigil_runtime::provider_status::ProviderStatusShutdownError::TaskPanicked => OwnedTaskDrainFailure::TaskPanicked,
+            })
+        },
     );
-    stop_control.stage(WorkerShutdownStage::SessionMaintenance);
-    drain(
+    drain_stopping_owner(
         WorkerShutdownStage::SessionMaintenance,
-        state
-            .session_maintenance
-            .shutdown_until(runtime, deadline)
-            .map_err(|error| error.to_string()),
+        &stop_control,
+        message_tx,
+        |deadline| state.session_maintenance.shutdown_until(runtime, deadline),
     );
     stop_control.stage(WorkerShutdownStage::Runtime);
-    // Runtime destruction remains owned by the worker thread. A blocking task still executing
-    // here keeps that thread unfinished, so the launcher reports uncertainty at its deadline.
+    // Runtime destruction remains on the explicitly joined worker. The launcher keeps waiting
+    // and observing this phase until the real thread finishes, even beyond its slow threshold.
 }
 
 #[cfg(test)]

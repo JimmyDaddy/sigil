@@ -9,16 +9,17 @@ use std::{
 use crate::runner::TerminalTaskControlIdentity;
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
-    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
-    AgentRunContextSnapshot, AgentRunDisposition, AgentRunOutcome, AgentRunOutput, AgentRunResult,
-    AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
+    Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentResultContinuationEntry,
+    AgentResultContinuationStatus, AgentRole, AgentRunContextSnapshot, AgentRunDisposition,
+    AgentRunOutcome, AgentRunOutput, AgentRunResult, AgentThreadId, AgentThreadStartedEntry,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, ControlEntry,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, ExecutionCleanupStatus,
     JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
     MutationEventRecorder, PlanDecision, PlanDecisionActor, PlanDecisionRecordedEntry,
     PlanTaskStartMode, Provider, PublicIntentStackStateV1, ReasoningEffort, RootConfig, Session,
     SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskCreatedFromPlanEntry, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskChildSessionStatus, TaskDirectExecutionAdmittedV1, TaskId, TaskPlanEntry, TaskPlanStatus,
     TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
     TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
     ToolCall, ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry,
@@ -34,7 +35,6 @@ use super::{
         LocalOperationKind, LocalOperationStatus, McpActivationStatus, WorkerCommand,
         WorkerCommandSender, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
-        event_bridge::ChannelEventHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         terminal_lifecycle_bridge::ChannelTerminalLifecycleRouter,
         worker_event::WorkerMcpRuntimeEventSender,
@@ -46,10 +46,10 @@ use super::{
             partition_agent_result_continuations,
             pending_agent_continuations_from_active_projection,
             pending_agent_result_continuations_from_session, plan_handoff_workspace_snapshot_id,
-            queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
-            session_ref_for_log_path, worker_reactor_metrics,
+            queued_background_ready_transient_context, ready_direct_task_background_continuations,
+            resolve_continue_task, run_worker_loop, session_ref_for_log_path,
+            worker_reactor_metrics,
         },
-        worker_loop::{append_interrupted_task_state, append_paused_task_state},
     },
     common::{
         PlannedProvider, StreamPlan, spawn_test_worker, test_authority_composition,
@@ -308,99 +308,6 @@ fn task_from_plan_acceptance_uses_direct_execution_without_activating_model_inte
 }
 
 #[test]
-fn task_from_plan_rejects_created_anchor_prefix_without_approval_authority() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace_root = temp.path().to_path_buf();
-    let session_log_path = temp.path().join(".sigil/sessions/plan-anchor-prefix.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let base_snapshot = plan_handoff_workspace_snapshot_id(&root_config, &workspace_root)
-        .map_err(anyhow::Error::msg)?;
-    let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::load_from_store("planned", "planned-model", store)?;
-    let draft = commit_explicit_plan_review_draft(
-        &mut session,
-        "Inspect the workspace",
-        "anchor-plan-review",
-        r#"```sigil-plan-v2
-{"summary":"Inspect","steps":[{"step_id":"inspect","title":"Inspect","role":"executor","depends_on":[],"mode":"read","isolation":"shared_read_only"}]}
-```"#,
-        base_snapshot,
-    )?;
-    let stable_task_id = task_id_from_plan_draft(&draft)?;
-    let objective = plan_task_input_from_draft(&draft);
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: stable_task_id.clone(),
-        parent_session_ref: session_ref_for_log_path(&session_log_path)
-            .map_err(anyhow::Error::msg)?,
-        objective,
-        title: None,
-
-        status: TaskRunStatus::Started,
-        reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
-    }))?;
-    // Fixed historical crash-prefix record; current Plan approval never constructs this DAG.
-    let promoted = TaskPlanEntry {
-        task_id: stable_task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("inspect")?,
-            title: "Inspect".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: Some(sigil_kernel::TaskStepMode::Read),
-            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-        }],
-        reason: Some("historical plan promotion prefix".to_owned()),
-    };
-    let step_mapping = vec![sigil_kernel::PlanToTaskStepMapping {
-        plan_step_id: "inspect".to_owned(),
-        task_step_id: TaskStepId::new("inspect")?,
-        title: "Inspect".to_owned(),
-    }];
-    session.append_control(ControlEntry::TaskPlan(promoted))?;
-    session.append_control(ControlEntry::TaskCreatedFromPlan(
-        TaskCreatedFromPlanEntry {
-            plan_id: draft.plan_id.clone(),
-            plan_hash: draft.plan_hash.clone(),
-            task_id: stable_task_id.clone(),
-            task_plan_version: 1,
-            step_mapping,
-            stale_reason: None,
-            created_at_ms: 2,
-        },
-    ))?;
-    assert!(
-        session
-            .plan_artifact_projection()
-            .latest_pending_plan()
-            .is_some()
-    );
-    let entry_count_before_run = session.entries().len();
-    let error = match adopt_plan_run(
-        &root_config,
-        &workspace_root,
-        &session_log_path,
-        &mut session,
-        draft.plan_id.as_str().to_owned(),
-        draft.plan_hash,
-        PlanTaskStartMode::CreateAndRun,
-        None,
-        sigil_kernel::PlanRunCommandSource::TuiKeyboard,
-        None,
-    ) {
-        Ok(_) => panic!("a Task anchor without approval authority must remain non-runnable"),
-        Err(error) => error,
-    };
-    assert_eq!(error, "the run command conflicts with an earlier command");
-    assert_eq!(session.entries().len(), entry_count_before_run);
-    Ok(())
-}
-
-#[test]
 fn task_from_plan_without_base_snapshot_starts_host_direct_execution() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -423,8 +330,8 @@ fn task_from_plan_without_base_snapshot_starts_host_direct_execution() -> Result
     assert!(
         session
             .plan_artifact_projection()
-            .latest_candidate(&draft.plan_id)
-            .is_none()
+            .plans
+            .contains_key(&draft.plan_id)
     );
     let mut current_session = Some(session);
 
@@ -442,12 +349,6 @@ fn task_from_plan_without_base_snapshot_starts_host_direct_execution() -> Result
         None,
     )
     .expect("a readable Plan must not require a snapshot or candidate to run");
-    assert!(matches!(
-        adopted.admission,
-        sigil_kernel::TaskAdmissionOutcomeV1::Ready(_)
-    ));
-    assert_eq!(adopted.entry.task_plan_version, 0);
-    assert!(adopted.entry.stale_reason.is_none());
     let current_session = Some(session);
     let projection = current_session
         .as_ref()
@@ -464,7 +365,7 @@ fn task_from_plan_without_base_snapshot_starts_host_direct_execution() -> Result
 }
 
 #[test]
-fn task_from_plan_rejects_legacy_prefix_before_workspace_admission() -> Result<()> {
+fn task_from_plan_rejects_existing_task_before_workspace_admission() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().join("workspace");
     fs::create_dir_all(&workspace_root)?;
@@ -495,25 +396,6 @@ fn task_from_plan_rejects_legacy_prefix_before_workspace_admission() -> Result<(
         status: TaskRunStatus::Started,
         reason: Some(format!("created from plan {}", draft.plan_id.as_str())),
     }))?;
-    // Fixed historical crash-prefix record; current Plan approval never constructs this DAG.
-    let promoted = TaskPlanEntry {
-        task_id: stable_task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("inspect")?,
-            title: "Inspect".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: Some(sigil_kernel::TaskStepMode::Read),
-            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-        }],
-        reason: Some("historical plan promotion prefix".to_owned()),
-    };
-    session.append_control(ControlEntry::TaskPlan(promoted))?;
     fs::write(workspace_root.join("README.md"), "snapshot b\n")?;
     let entry_count_before_run = session.entries().len();
     let error = match adopt_plan_run(
@@ -528,7 +410,7 @@ fn task_from_plan_rejects_legacy_prefix_before_workspace_admission() -> Result<(
         sigil_kernel::PlanRunCommandSource::TuiKeyboard,
         None,
     ) {
-        Ok(_) => panic!("an incomplete legacy prefix must not reach workspace admission"),
+        Ok(_) => panic!("an existing Task identity must not be reused by Plan approval"),
         Err(error) => error,
     };
     assert_eq!(error, "the run command conflicts with an earlier command");
@@ -591,6 +473,264 @@ fn pending_agent_result_continuations_restore_started_statuses() -> Result<()> {
     let restored = pending_agent_result_continuations_from_session(Some(&session));
 
     assert_eq!(restored, vec![pending, started]);
+    Ok(())
+}
+
+#[test]
+fn direct_task_background_results_do_not_restore_as_chat_continuations() -> Result<()> {
+    let workspace = std::env::current_dir()?;
+    let temp = tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("direct-task-background.jsonl"))?;
+    let mut session = Session::new("planned", "planned-model").with_store(store.clone());
+    session.append_control(ControlEntry::SessionIdentity {
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+        resolved_model_route: None,
+    })?;
+    let task_id = TaskId::new("task_direct_background")?;
+    let direct_thread_id = AgentThreadId::new("agent_direct_background")?;
+    let chat_thread_id = AgentThreadId::new("agent_chat_background")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "continue after the background result".to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    let task_admission = TaskDirectExecutionAdmittedV1::task_request(
+        task_id.clone(),
+        "continue after the background result",
+        1,
+    );
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        task_admission.clone(),
+    ))?;
+    let mut direct_attempt =
+        sigil_kernel::TaskDirectExecutionAttemptV1::started(&task_admission, 1);
+    direct_attempt.status = sigil_kernel::TaskExecutionAttemptStatus::Completed;
+    direct_attempt.reason = Some("waiting for its owned background agents".to_owned());
+    direct_attempt.final_message_id = Some("message_task_final".to_owned());
+    direct_attempt.output_hash = Some(format!("sha256:{}", "a".repeat(64)));
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(direct_attempt))?;
+    let profile_id = AgentProfileId::new("explore")?;
+    let direct_profile_snapshot_id =
+        AgentProfileSnapshotId::new(format!("snapshot_{}", direct_thread_id.as_str()))?;
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        AgentProfileCapturedEntry {
+            snapshot: AgentProfileSnapshot {
+                snapshot_id: direct_profile_snapshot_id,
+                profile_id: profile_id.clone(),
+                source: AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    let grant = sigil_kernel::AgentInvocationGrantRecord {
+        grant_fingerprint: format!("sha256:{}", "a".repeat(64)),
+        source: sigil_kernel::AgentInvocationGrantSource::DirectTask {
+            task_id: task_id.clone(),
+        },
+        authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+            task_id: task_id.clone(),
+        },
+        profile_id: profile_id.clone(),
+        role: AgentRole::SubagentRead,
+        isolation: sigil_kernel::TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound_fingerprint: format!("sha256:{}", "b".repeat(64)),
+        network_upper_bound: sigil_kernel::NetworkPolicy::Deny,
+        tool_contract_fingerprint: format!("sha256:{}", "c".repeat(64)),
+        workspace_snapshot_id: None,
+        root_run_fingerprint: format!("sha256:{}", "d".repeat(64)),
+        root_cancellation_scope_fingerprint: format!("sha256:{}", "e".repeat(64)),
+        expires_at_ms: 100,
+    };
+    session.append_control(ControlEntry::AgentThreadStarted(
+        test_agent_thread_started_entry(
+            &workspace,
+            direct_thread_id.clone(),
+            AgentInvocationMode::Background,
+        )?,
+    ))?;
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: direct_thread_id.clone(),
+            profile_id,
+            invocation_mode: AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                task_id: task_id.clone(),
+            },
+            objective_hash: format!("sha256:{}", "f".repeat(64)),
+            tool_contract_fingerprint: grant.tool_contract_fingerprint.clone(),
+            invocation_grant: Some(grant),
+            admitted_at_ms: Some(2),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        AgentThreadStatusChangedEntry {
+            thread_id: direct_thread_id.clone(),
+            status: AgentThreadStatus::Completed,
+            reason: None,
+            updated_at_ms: Some(3),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadResultRecorded(
+        sigil_kernel::AgentThreadResultRecordedEntry {
+            result: sigil_kernel::AgentThreadResult {
+                thread_id: direct_thread_id.clone(),
+                session_ref: SessionRef::new_relative(format!(
+                    "children/{}.jsonl",
+                    direct_thread_id.as_str()
+                ))?,
+                status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                summary: "background result is durable".to_owned(),
+                summary_truncated: false,
+                original_summary_chars: None,
+                artifacts: Vec::new(),
+                changed_paths: Vec::new(),
+                risks: Vec::new(),
+                followups: Vec::new(),
+                usage: None,
+                output_hash: "sha256:background-result".to_owned(),
+                final_answer_ref: None,
+            },
+        },
+    ))?;
+    for thread_id in [direct_thread_id, chat_thread_id.clone()] {
+        session.append_control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id,
+                status: AgentResultContinuationStatus::Pending,
+                reason: None,
+                updated_at_ms: Some(3),
+            },
+        ))?;
+    }
+
+    assert_eq!(
+        pending_agent_result_continuations_from_session(Some(&session)),
+        vec![chat_thread_id]
+    );
+    assert_eq!(
+        ready_direct_task_background_continuations(&session),
+        vec![task_id.clone()]
+    );
+
+    let interrupted_task_id = TaskId::new("task_interrupted_background")?;
+    let interrupted_thread_id = AgentThreadId::new("agent_interrupted_background")?;
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: interrupted_task_id.clone(),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "do not resume without the lost child result".to_owned(),
+        title: None,
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+    let interrupted_admission = TaskDirectExecutionAdmittedV1::task_request(
+        interrupted_task_id.clone(),
+        "do not resume without the lost child result",
+        4,
+    );
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        interrupted_admission.clone(),
+    ))?;
+    let mut interrupted_attempt =
+        sigil_kernel::TaskDirectExecutionAttemptV1::started(&interrupted_admission, 2);
+    interrupted_attempt.status = sigil_kernel::TaskExecutionAttemptStatus::Completed;
+    interrupted_attempt.final_message_id = Some("message_interrupted_task_final".to_owned());
+    interrupted_attempt.output_hash = Some(format!("sha256:{}", "e".repeat(64)));
+    session.append_control(ControlEntry::TaskDirectExecutionAttemptV1(
+        interrupted_attempt,
+    ))?;
+    let interrupted_grant = sigil_kernel::AgentInvocationGrantRecord {
+        grant_fingerprint: format!("sha256:{}", "f".repeat(64)),
+        source: sigil_kernel::AgentInvocationGrantSource::DirectTask {
+            task_id: interrupted_task_id.clone(),
+        },
+        authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+            task_id: interrupted_task_id.clone(),
+        },
+        profile_id: AgentProfileId::new("explore")?,
+        role: AgentRole::SubagentRead,
+        isolation: sigil_kernel::TaskIsolationMode::SharedReadOnly,
+        permission_upper_bound_fingerprint: format!("sha256:{}", "1".repeat(64)),
+        network_upper_bound: sigil_kernel::NetworkPolicy::Deny,
+        tool_contract_fingerprint: format!("sha256:{}", "2".repeat(64)),
+        workspace_snapshot_id: None,
+        root_run_fingerprint: format!("sha256:{}", "3".repeat(64)),
+        root_cancellation_scope_fingerprint: format!("sha256:{}", "4".repeat(64)),
+        expires_at_ms: 100,
+    };
+    let interrupted_profile_id = interrupted_grant.profile_id.clone();
+    let interrupted_profile_snapshot_id =
+        AgentProfileSnapshotId::new(format!("snapshot_{}", interrupted_thread_id.as_str()))?;
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        AgentProfileCapturedEntry {
+            snapshot: AgentProfileSnapshot {
+                snapshot_id: interrupted_profile_snapshot_id,
+                profile_id: interrupted_profile_id,
+                source: AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        test_agent_thread_started_entry(
+            &workspace,
+            interrupted_thread_id.clone(),
+            AgentInvocationMode::Background,
+        )?,
+    ))?;
+    session.append_control(ControlEntry::AgentDelegationAdmitted(
+        sigil_kernel::AgentDelegationAdmissionEntry {
+            thread_id: interrupted_thread_id.clone(),
+            profile_id: interrupted_grant.profile_id.clone(),
+            invocation_mode: AgentInvocationMode::Background,
+            invocation_source: AgentInvocationSource::Task,
+            authority: sigil_kernel::DelegationAuthorityRecord::DirectTask {
+                task_id: interrupted_task_id.clone(),
+            },
+            objective_hash: format!("sha256:{}", "5".repeat(64)),
+            tool_contract_fingerprint: interrupted_grant.tool_contract_fingerprint.clone(),
+            invocation_grant: Some(interrupted_grant),
+            admitted_at_ms: Some(5),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        AgentThreadStatusChangedEntry {
+            thread_id: interrupted_thread_id,
+            status: AgentThreadStatus::Running,
+            reason: Some("child was active before session restore".to_owned()),
+            updated_at_ms: Some(6),
+        },
+    ))?;
+
+    let restored = Session::load_from_store("planned", "planned-model", store)?;
+    let restored_tasks = restored.task_state_projection();
+    assert_eq!(
+        restored_tasks
+            .tasks
+            .get(&interrupted_task_id)
+            .map(|task| task.status),
+        Some(TaskRunStatus::Interrupted)
+    );
+    assert_eq!(
+        ready_direct_task_background_continuations(&restored),
+        vec![task_id]
+    );
     Ok(())
 }
 
@@ -729,7 +869,6 @@ fn agent_result_continuation_requires_final_answer_disposition() {
         final_text: String::new(),
         tool_calls: 0,
         final_message_id: None,
-        completion_claim: None,
     };
     let interrupted = AgentRunOutput {
         result: result.clone(),
@@ -837,23 +976,9 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         status: TaskRunStatus::Failed,
         reason: None,
     }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: TaskId::new("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step_1")?,
-            title: "retry".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
+    session.append_control(ControlEntry::TaskDirectExecutionAdmittedV1(
+        TaskDirectExecutionAdmittedV1::task_request(TaskId::new("task_1")?, "resume me", 1),
+    ))?;
     session.append_control(ControlEntry::TaskRun(TaskRunEntry {
         task_id: TaskId::new("task_2")?,
         parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
@@ -864,63 +989,12 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         reason: None,
     }))?;
 
-    let (task_id, task_id_value, objective, needs_planning) =
-        resolve_continue_task(&session, None).map_err(anyhow::Error::msg)?;
+    let (task_id, task_id_value, objective) =
+        resolve_continue_task(&session, Some("task_1".to_owned())).map_err(anyhow::Error::msg)?;
 
     assert_eq!(task_id.as_str(), "task_1");
     assert_eq!(task_id_value, "task_1");
     assert_eq!(objective, "resume me");
-    assert!(!needs_planning);
-    Ok(())
-}
-
-#[test]
-fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
-    let mut session = Session::new("deepseek", "model");
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: TaskId::new("task_1")?,
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "already done".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Started,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: TaskId::new("task_1")?,
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "already done".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Completed,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: TaskId::new("task_1")?,
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: TaskStepId::new("step_1")?,
-            title: "done".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::Executor,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: None,
-            isolation: None,
-        }],
-        reason: None,
-    }))?;
-
-    let error = match resolve_continue_task(&session, None) {
-        Ok((task_id, _, _, _)) => {
-            anyhow::bail!("completed task unexpectedly resumed: {task_id:?}")
-        }
-        Err(error) => error,
-    };
-
-    assert_eq!(error, "task task_1 is already completed");
     Ok(())
 }
 
@@ -941,247 +1015,6 @@ fn resolve_continue_task_rejects_an_exact_cancelled_task() -> Result<()> {
         .expect_err("cancelled task must not resume");
 
     assert_eq!(error, "task task_cancelled is cancelled");
-    Ok(())
-}
-
-#[test]
-fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> {
-    let mut session = Session::new("deepseek", "model");
-    let (event_tx, _event_rx) = mpsc::channel();
-    let mut handler = ChannelEventHandler::new(event_tx);
-    let task_id = TaskId::new("task_1")?;
-    let step_ids = [TaskStepId::new("step_1")?, TaskStepId::new("step_2")?];
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "cancel task".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: step_ids
-            .iter()
-            .map(|step_id| TaskStepSpec {
-                step_id: step_id.clone(),
-                title: format!("running {}", step_id.as_str()),
-                display_name: None,
-                detail: None,
-                role: AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            })
-            .collect(),
-        reason: None,
-    }))?;
-    for (index, step_id) in step_ids.iter().enumerate() {
-        session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            step_id: step_id.clone(),
-            role: AgentRole::SubagentRead,
-            status: TaskStepStatus::Running,
-            title: Some(format!("running {}", step_id.as_str())),
-            summary: None,
-            reason: None,
-        }))?;
-        session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
-            task_id: task_id.clone(),
-            plan_version: 1,
-            step_id: step_id.clone(),
-            child_task_id: TaskId::new(format!("child_{}", index + 1))?,
-            child_session_ref: SessionRef::new_relative(format!(
-                "children/task_1/{}-child_{}.jsonl",
-                step_id.as_str(),
-                index + 1
-            ))?,
-            role: AgentRole::SubagentRead,
-            status: TaskChildSessionStatus::Started,
-            summary_hash: None,
-        }))?;
-    }
-
-    sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
-        &mut session,
-        &mut handler,
-        None,
-        sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Cancelled,
-        "user explicitly cancelled the task",
-    )?;
-
-    assert_eq!(
-        session
-            .entries()
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    SessionLogEntry::Control(ControlEntry::TaskStep(step))
-                        if step.status == TaskStepStatus::Cancelled
-                )
-            })
-            .count(),
-        2
-    );
-    assert_eq!(
-        session
-            .entries()
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    SessionLogEntry::Control(ControlEntry::TaskChildSession(child))
-                        if child.status == TaskChildSessionStatus::Cancelled
-                )
-            })
-            .count(),
-        2
-    );
-    assert!(session.entries().iter().any(|entry| {
-        matches!(
-            entry,
-            SessionLogEntry::Control(ControlEntry::TaskRun(run))
-                if run.status == TaskRunStatus::Cancelled
-        )
-    }));
-    Ok(())
-}
-
-#[test]
-fn append_paused_task_state_keeps_interrupted_step_resumable() -> Result<()> {
-    let mut session = Session::new("deepseek", "model");
-    let (event_tx, _event_rx) = mpsc::channel();
-    let mut handler = ChannelEventHandler::new(event_tx);
-    let task_id = TaskId::new("task_1")?;
-    let step_id = TaskStepId::new("step_1")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "pause task".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        status: TaskPlanStatus::Accepted,
-        steps: vec![TaskStepSpec {
-            step_id: step_id.clone(),
-            title: "running step".to_owned(),
-            display_name: None,
-            detail: None,
-            role: AgentRole::SubagentRead,
-            depends_on: Vec::new(),
-            intent_refs: Vec::new(),
-            mode: Some(sigil_kernel::TaskStepMode::Read),
-            isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-        }],
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id: step_id.clone(),
-        role: AgentRole::SubagentRead,
-        status: TaskStepStatus::Running,
-        title: Some("running step".to_owned()),
-        summary: None,
-        reason: None,
-    }))?;
-    session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
-        task_id: task_id.clone(),
-        plan_version: 1,
-        step_id,
-        child_task_id: TaskId::new("child_1")?,
-        child_session_ref: SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?,
-        role: AgentRole::SubagentRead,
-        status: TaskChildSessionStatus::Started,
-        summary_hash: None,
-    }))?;
-    let unrelated_task_id = TaskId::new("task_2")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: unrelated_task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "unrelated running task".to_owned(),
-        title: None,
-
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-
-    append_paused_task_state(&mut session, &mut handler, task_id.as_str())
-        .map_err(anyhow::Error::msg)?;
-
-    let projection = session.task_state_projection();
-    let task = projection.tasks.get(&task_id).expect("paused task");
-    assert_eq!(task.status, TaskRunStatus::Paused);
-    assert!(task.steps.values().any(|step| {
-        step.step_id == TaskStepId::new("step_1").expect("step id")
-            && step.status == TaskStepStatus::Interrupted
-    }));
-    assert!(task.child_sessions.values().any(|child| {
-        child.child_task_id == TaskId::new("child_1").expect("child id")
-            && child.status == TaskChildSessionStatus::Interrupted
-    }));
-    let plan = task.plans.get(&1).expect("accepted plan");
-    let ready = plan
-        .graph
-        .as_ref()
-        .expect("valid task graph")
-        .ready_steps(&task.steps);
-    assert_eq!(ready.len(), 1);
-    assert_eq!(ready[0].step_id.as_str(), "step_1");
-    assert_eq!(
-        projection
-            .tasks
-            .get(&unrelated_task_id)
-            .expect("unrelated task")
-            .status,
-        TaskRunStatus::Running,
-        "pause must not use latest-task fallback after validating an exact target"
-    );
-    Ok(())
-}
-
-#[test]
-fn stopped_task_run_is_interrupted_and_remains_continuable() -> Result<()> {
-    let mut session = Session::new("deepseek", "model");
-    let (event_tx, _event_rx) = mpsc::channel();
-    let mut handler = ChannelEventHandler::new(event_tx);
-    let task_id = TaskId::new("task_stopped")?;
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: task_id.clone(),
-        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-        objective: "continue this plan later".to_owned(),
-        title: Some("Continue this plan later".to_owned()),
-        status: TaskRunStatus::Running,
-        reason: None,
-    }))?;
-
-    append_interrupted_task_state(
-        &mut session,
-        &mut handler,
-        Some(task_id.as_str()),
-        "task run stopped from TUI; task remains available to continue",
-    )
-    .map_err(anyhow::Error::msg)?;
-
-    let projection = session.task_state_projection();
-    let task = projection.tasks.get(&task_id).expect("interrupted task");
-    assert_eq!(task.status, TaskRunStatus::Interrupted);
-    assert_eq!(task.title.as_deref(), Some("Continue this plan later"));
-    let (continued_task_id, _, _, _) =
-        resolve_continue_task(&session, Some(task_id.as_str().to_owned()))
-            .map_err(anyhow::Error::msg)?;
-    assert_eq!(continued_task_id, task_id);
     Ok(())
 }
 
@@ -1303,12 +1136,12 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         temp.path(),
         &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
         "call-terminal-start",
-        "terminal_start",
+        "exec_command",
         ToolEffect::Unknown,
     )?;
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
         call_id: "call-terminal-start".to_owned(),
-        tool_name: "terminal_start".to_owned(),
+        tool_name: "exec_command".to_owned(),
         status: ToolExecutionStatus::Started,
         duration_ms: None,
         subjects: Vec::new(),
@@ -1323,17 +1156,15 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         model_content_hash: None,
     })))?;
     let tool_context = ToolContext::new(temp.path().to_path_buf(), 5);
-    let task_id = "terminal-cancel-audit";
     let start = runtime.block_on(
         registry.execute(
             tool_context.clone(),
             ToolCall {
                 id: "call-terminal-start".to_owned(),
-                name: "terminal_start".to_owned(),
+                name: "exec_command".to_owned(),
                 args_json: serde_json::json!({
-                    "task_id": task_id,
                     "command": "printf terminal-mutated > terminal-mutated.txt; printf cancel-tail; sleep 5",
-                    "mode": "background"
+                    "yield_time_ms": 0
                 })
                 .to_string(),
             },
@@ -1341,8 +1172,9 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     )?;
     let start_entry = TerminalTaskEntry::from_tool_result_details(&start.metadata.details)?
         .ok_or_else(|| {
-            anyhow::anyhow!("terminal_start should return terminal metadata: {start:?}")
+            anyhow::anyhow!("exec_command should return terminal metadata: {start:?}")
         })?;
+    let task_id = start_entry.handle.task_id.as_str();
     runtime.block_on(wait_for_terminal_output(
         &registry,
         tool_context.clone(),
@@ -1352,7 +1184,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
 
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
         call_id: "call-terminal-start".to_owned(),
-        tool_name: "terminal_start".to_owned(),
+        tool_name: "exec_command".to_owned(),
         status: ToolExecutionStatus::Completed,
         duration_ms: Some(1),
         subjects: Vec::new(),
@@ -1429,7 +1261,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     assert!(entry.output_total_bytes > 0);
     let planned_hash = entries.iter().find_map(|entry| match entry {
         SessionLogEntry::Control(ControlEntry::ToolPermissionPlannedV2(planned))
-            if planned.tool_name == "terminal_cancel" =>
+            if planned.tool_name == "exec_cancel" =>
         {
             Some(planned.plan_hash.clone())
         }
@@ -1443,7 +1275,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.tool_name == "terminal_cancel"
+                if execution.tool_name == "exec_cancel"
                     && execution.status == ToolExecutionStatus::Started
                     && execution.model_content_hash.is_none()
                     && execution.metadata.details.get("permission_plan_hash")
@@ -1455,7 +1287,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.tool_name == "terminal_cancel"
+                if execution.tool_name == "exec_cancel"
                     && execution.status == ToolExecutionStatus::Completed
                     && execution.model_content_hash.is_some()
                     && execution.error.is_none()
@@ -1484,7 +1316,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
     assert_eq!(detected.len(), 1);
     let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
     assert_eq!(payload.tool_call_id.as_deref(), Some("call-terminal-start"));
-    assert_eq!(payload.tool_name, "terminal_start");
+    assert_eq!(payload.tool_name, "exec_command");
     assert!(!payload.unknown_dirty);
     assert!(payload.from_workspace_snapshot_id.is_some());
     assert!(payload.to_workspace_snapshot_id.is_some());
@@ -1565,7 +1397,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.tool_name == "terminal_cancel"
+                if execution.tool_name == "exec_cancel"
                     && execution.status == ToolExecutionStatus::Started
         )
     }));
@@ -1573,7 +1405,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
-                if execution.tool_name == "terminal_cancel"
+                if execution.tool_name == "exec_cancel"
                     && execution.status == ToolExecutionStatus::Failed
                     && execution.error.is_some()
                     && execution.model_content_hash.is_some()
@@ -1955,29 +1787,43 @@ async fn wait_for_terminal_output(
     task_id: &str,
     expected: &str,
 ) -> Result<()> {
-    for attempt in 0..40 {
-        let read = registry
-            .execute(
-                tool_context.clone(),
-                ToolCall {
-                    id: format!("call-terminal-read-{attempt}"),
-                    name: "terminal_read".to_owned(),
-                    args_json: serde_json::json!({
-                    "task_id": task_id,
+    registry
+        .execute(
+            tool_context.clone(),
+            ToolCall {
+                id: "call-terminal-wait".to_owned(),
+                name: "exec_wait".to_owned(),
+                args_json: serde_json::json!({
+                    "execution_id": task_id,
+                    "until": "output_contains",
+                    "value": expected,
+                    "yield_time_ms": 2000
+                })
+                .to_string(),
+            },
+        )
+        .await?;
+    let read = registry
+        .execute(
+            tool_context,
+            ToolCall {
+                id: "call-terminal-read".to_owned(),
+                name: "exec_read".to_owned(),
+                args_json: serde_json::json!({
+                    "execution_id": task_id,
                     "offset": 0,
                     "limit_bytes": 1024,
                     "include_content": true
-                    })
-                    .to_string(),
-                },
-            )
-            .await?;
-        if read.content.contains(expected) {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    anyhow::bail!("terminal output did not include {expected}");
+                })
+                .to_string(),
+            },
+        )
+        .await?;
+    anyhow::ensure!(
+        read.content.contains(expected),
+        "terminal output did not include {expected}"
+    );
+    Ok(())
 }
 
 fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<TerminalTaskEntry> {

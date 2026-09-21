@@ -25,13 +25,9 @@ fn ordinary_user_input_recovery_after_restart_requires_exact_receipt_and_resumes
         workspace_root.join(".sigil/sessions/session-ordinary-input-recovery.jsonl");
     let root_config = routed_unauthenticated_test_root_config(&workspace_root, "planned-model");
     let question_args = r#"{
-        "prompt": "Choose the subsystem to inspect",
         "questions": [{
             "id": "scope",
-            "header": "Scope",
-            "question": "Which subsystem should the agent inspect?",
-            "required": true,
-            "field": { "kind": "text", "multiline": false, "max_chars": 128 }
+            "question": "Which subsystem should the agent inspect?"
         }]
     }"#;
     let provider = PlannedProvider::new(vec![StreamPlan::Chunks(vec![

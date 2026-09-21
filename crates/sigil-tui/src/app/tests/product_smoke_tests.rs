@@ -14,6 +14,7 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-cargo-check"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -90,6 +91,7 @@ fn product_smoke_workspace_check_permission_mode_once_and_can_select_session() -
         Some(AppAction::ApprovalSessionDecision { call_id, .. }) if call_id == "call-cargo-check"
     ));
     app.handle(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: "call-cargo-check".to_owned(),
         approval_request_id: "approval-call-cargo-check".to_owned(),
         approved: true,

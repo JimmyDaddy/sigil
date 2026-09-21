@@ -55,6 +55,7 @@ use crate::host_effects::{ExternalLaunchPlatform, TestHostEffects, external_laun
 #[cfg(not(test))]
 use crate::input_event::{FocusChange, InputEvent, InputKeyCode, InputKeyEventKind, Modifiers};
 use crate::ui;
+pub(crate) mod control_log_recovery;
 #[cfg(test)]
 use crate::ui::LayoutSnapshot;
 use crate::{
@@ -68,6 +69,12 @@ use crate::{
     runner::{self, WorkerCommand, WorkerMessage},
     surface_adapter::build_surface_model,
 };
+
+pub(crate) mod shutdown;
+use shutdown::{ShutdownPass, ShutdownPoll, poll_owned_thread};
+
+mod runtime_transition;
+pub(crate) use runtime_transition::{RuntimeMaintenanceOwner, RuntimeTransitionOwner};
 
 #[path = "launcher_projection_retry.rs"]
 mod projection_retry;
@@ -257,63 +264,63 @@ fn run_tui_with_initial_session(
     } else {
         finalize_terminal_presentation(&mut terminal)
     };
-    let deadline = *shutdown
-        .deadline
-        .get_or_insert_with(|| Instant::now() + WORKER_SHUTDOWN_TIMEOUT);
-    if let Some(runtime) = worker.as_ref() {
-        runtime.worker_tx.reserve_stop(true);
-    }
     cleanup.mouse_capture_active = mouse_capture_active;
     cleanup.focus_change_active = focus_change_active;
-    app.cancel_session_auxiliary();
-    abort_projection_observations(&shutdown.projection_observation_owners);
-    let (cleanup_result, shutdown_result) =
-        restore_terminal_then_join_worker(&mut worker, deadline, || {
-            restore_terminal_and_shutdown_event_runtime(&mut owned_event_runtime, || {
-                cleanup.restore()
-            })
-        });
-    let observer_shutdown_result = app.join_session_auxiliary_until(deadline);
-    let projection_shutdown_result =
-        drain_projection_observations_until(&mut shutdown.projection_observation_owners, deadline);
-    app.release_worker_session_attachment();
+    let cleanup_result = cleanup.restore();
+    let clean_exit = matches!(&result, Ok(Ok(())))
+        && cleanup_result.is_ok()
+        && presentation_cleanup_result.is_ok();
+    let shutdown_result = shutdown::shutdown_tui_owners(
+        &mut app,
+        &mut worker,
+        &mut shutdown,
+        &mut owned_event_runtime,
+        clean_exit,
+        |notice| eprintln!("{notice}"),
+    );
     let background_panic_during_shutdown = background_panics.try_recv().ok();
     let result = match (result, background_panic_during_shutdown) {
         (Ok(Ok(())), Some(report)) => Ok(Err(anyhow::anyhow!(report))),
         (result, _) => result,
-    };
-    let clean_exit = matches!(&result, Ok(Ok(())))
-        && shutdown_result.is_ok()
-        && observer_shutdown_result.is_ok()
-        && projection_shutdown_result.is_ok()
-        && cleanup_result.is_ok();
-    let bootstrap_cleanup_result = if clean_exit {
-        if Instant::now() >= deadline {
-            Err(anyhow::anyhow!(
-                "shutdown cleanup deadline exceeded; cleanup_complete=false"
-            ))
-        } else {
-            app.start_bootstrap_session_cleanup()
-                .map_err(anyhow::Error::new)
-                .and_then(|handle| wait_for_worker_thread(Some(handle), deadline))
-        }
-    } else {
-        Ok(())
     };
     panic_hook.restore();
     let result = match result {
         Ok(result) => result,
         Err(payload) => panic::resume_unwind(payload),
     };
-    presentation_cleanup_result.context("failed to clear the TUI viewport before exit")?;
-    cleanup_result?;
-    shutdown_result?;
-    observer_shutdown_result?;
-    projection_shutdown_result?;
-    bootstrap_cleanup_result?;
-    result?;
+    finish_tui_shutdown(
+        result,
+        [
+            presentation_cleanup_result.context("failed to clear the TUI viewport before exit"),
+            cleanup_result.map_err(anyhow::Error::new),
+            shutdown_result,
+        ],
+    )?;
     print!("{}", render_tui_exit_resume_hint(&app, config.as_deref()));
     Ok(())
+}
+
+fn finish_tui_shutdown(
+    result: Result<()>,
+    cleanup_results: impl IntoIterator<Item = Result<()>>,
+) -> Result<()> {
+    let mut errors = result
+        .err()
+        .into_iter()
+        .chain(cleanup_results.into_iter().filter_map(Result::err));
+    let Some(primary) = errors.next() else {
+        return Ok(());
+    };
+    let additional = errors.map(|error| format!("{error:#}")).collect::<Vec<_>>();
+    if additional.is_empty() {
+        return Err(primary);
+    }
+    // Cleanup is already complete or accounted for. Keep the original failure first, including
+    // a background panic's location, while retaining every failed owner's cleanup diagnostic.
+    Err(anyhow::anyhow!(
+        "{primary:#}; additional shutdown failures: {}",
+        additional.join("; ")
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,13 +452,7 @@ impl TuiPanicHookGuard {
 fn format_background_panic(info: &panic::PanicHookInfo<'_>) -> String {
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("unnamed");
-    let payload = info
-        .payload()
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload");
-    let payload = payload.chars().take(512).collect::<String>();
+    let payload = format_panic_payload(info.payload());
     if let Some(location) = info.location() {
         format!(
             "background thread `{thread_name}` panicked at {}:{}:{}: {payload}",
@@ -462,6 +463,17 @@ fn format_background_panic(info: &panic::PanicHookInfo<'_>) -> String {
     } else {
         format!("background thread `{thread_name}` panicked: {payload}")
     }
+}
+
+fn format_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+        .chars()
+        .take(512)
+        .collect()
 }
 
 impl Drop for TuiPanicHookGuard {
@@ -567,8 +579,9 @@ async fn run_app(
     shutdown: &mut TuiShutdownState,
 ) -> Result<()> {
     let TuiShutdownState {
-        deadline: shutdown_deadline,
+        started: shutdown_started,
         projection_observation_owners,
+        ..
     } = shutdown;
     // From this point onward the event stream is the sole reader of terminal input. Full-screen
     // rendering never queries the cursor and never writes transcript rows into native scrollback.
@@ -600,8 +613,14 @@ async fn run_app(
     loop {
         release_finished_projection_observations(projection_observation_owners);
         if app.should_quit {
+            if let Some(owner) = app.runtime_transition.as_ref() {
+                owner.request_exit();
+            }
+            if let Some(owner) = app.runtime_maintenance.as_ref() {
+                owner.request_exit();
+            }
             app.cancel_session_auxiliary();
-            shutdown_deadline.get_or_insert_with(|| Instant::now() + WORKER_SHUTDOWN_TIMEOUT);
+            shutdown_started.get_or_insert_with(Instant::now);
             if let Some(runtime) = worker.as_ref() {
                 runtime.worker_tx.reserve_stop(true);
             }
@@ -609,6 +628,8 @@ async fn run_app(
         }
         attention.update_config(app.terminal_notification_config());
         let mut dirty = needs_render;
+        dirty |= runtime_transition::poll(app, worker)?;
+        dirty |= runtime_transition::poll_maintenance(app, worker)?;
         let (worker_dirty, worker_projection_refresh) =
             drain_worker_messages_with_attention(app, worker, &mut attention)?;
         dirty |= worker_dirty;
@@ -618,6 +639,7 @@ async fn run_app(
         }
         dirty |= app.poll_background_tasks();
         let admission_changed = poll_application_admission(app, worker)?;
+        dirty |= control_log_recovery::poll(app)?;
         dirty |= admission_changed;
         projection_refresh_requested |= admission_changed;
         let commands_flushed = flush_pending_worker_commands(app, worker)?;
@@ -626,7 +648,12 @@ async fn run_app(
         let current_projection_owner = worker
             .as_ref()
             .and_then(|runtime| runtime.application.as_ref())
-            .cloned();
+            .cloned()
+            .or_else(|| {
+                app.runtime_transition
+                    .as_ref()
+                    .and_then(|owner| owner.observation_application())
+            });
         if reconcile_projection_owner(
             &mut projection_owner,
             current_projection_owner,
@@ -663,6 +690,11 @@ async fn run_app(
                 .as_ref()
                 .and_then(|runtime| runtime.application.as_ref())
                 .cloned()
+                .or_else(|| {
+                    app.runtime_transition
+                        .as_ref()
+                        .and_then(|owner| owner.observation_application())
+                })
             {
                 projection_refresh_requested = false;
                 let task_application = Arc::clone(&application);
@@ -822,6 +854,13 @@ async fn run_app(
         dirty |= app.set_terminal_size(frame_area.width, frame_area.height);
 
         let spinner_tick = live_spinner_tick();
+        if spinner_tick != last_spinner_tick {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0);
+            dirty |= app.refresh_command_elapsed(now_ms);
+        }
         if app.runtime.is_busy && spinner_tick != last_spinner_tick {
             dirty = true;
         }
@@ -1000,9 +1039,8 @@ async fn run_app(
                     apply_received_worker_message(app, worker, &mut attention, *message)?;
             }
             WakeEvent::WorkerClosed => {
-                // The next loop reconciles the removed application owner before another
-                // projection or ACK can be scheduled or applied.
-                shutdown_and_join_worker(worker)?;
+                // The next loop stops scheduling observations while the host joins in background.
+                runtime_transition::maintain(app, worker, None)?;
                 app.handle_worker_message(WorkerMessage::RunFailed(
                     "agent worker disconnected".to_owned(),
                 ))?;
@@ -1481,7 +1519,10 @@ fn install_setup_boot_transaction(
     // a partially initialized normal AppState behind.
     let transaction = boot_current_transaction(config_path, launch_cwd, Some(expected_config))?;
     let persisted_config = transaction.config().clone();
-    *app = AppState::from_root_config(config_path, &persisted_config);
+    control_log_recovery::replace_app_state(
+        app,
+        AppState::from_root_config(config_path, &persisted_config),
+    );
     install_published_boot_transaction(app, transaction, session_route)
 }
 
@@ -1573,6 +1614,7 @@ where
     H: HostEffects,
 {
     match action {
+        AppAction::RecoverControlLog(action) => control_log_recovery::start(app, worker, action)?,
         AppAction::CancelRun => {
             if let Some(runtime) = worker.as_ref() {
                 runtime.worker_tx.reserve_stop(false);
@@ -1612,7 +1654,10 @@ where
                 {
                     // Unit action tests exercise ordering with the injected test boot stub; the
                     // shipping path above keeps authority boot ahead of normal AppState creation.
-                    *app = AppState::from_root_config(&config_path, &root_config);
+                    control_log_recovery::replace_app_state(
+                        app,
+                        AppState::from_root_config(&config_path, &root_config),
+                    );
                     install_current_boot_transaction(
                         app,
                         &config_path,
@@ -1662,6 +1707,9 @@ where
                 apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
                 return Ok(());
             }
+            #[cfg(not(test))]
+            return runtime_transition::maintain(app, worker, Some(root_config));
+            #[cfg(test)]
             match spawn_worker_fn(root_config, app) {
                 Ok(runtime) => *worker = Some(runtime),
                 Err(error) => report_worker_unavailable(
@@ -1675,17 +1723,29 @@ where
                 apply_worker_startup_recovery(app, &error, &app.session_log_path.clone())?;
                 return Ok(());
             }
-            shutdown_and_join_worker(worker)?;
-            let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
-                report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
-                return Ok(());
-            };
-            match spawn_worker_fn(root_config, app) {
-                Ok(runtime) => *worker = Some(runtime),
-                Err(error) => report_worker_unavailable(
-                    app,
-                    &format!("workspace trusted; agent runtime remains unavailable: {error:#}"),
-                )?,
+            #[cfg(not(test))]
+            return runtime_transition::maintain(
+                app,
+                worker,
+                app.session_runtime_config_snapshot().cloned(),
+            );
+            #[cfg(test)]
+            {
+                shutdown_and_join_worker(worker)?;
+                let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
+                    report_worker_unavailable(
+                        app,
+                        "agent worker stopped; runtime config unavailable",
+                    )?;
+                    return Ok(());
+                };
+                match spawn_worker_fn(root_config, app) {
+                    Ok(runtime) => *worker = Some(runtime),
+                    Err(error) => report_worker_unavailable(
+                        app,
+                        &format!("workspace trusted; agent runtime remains unavailable: {error:#}"),
+                    )?,
+                }
             }
         }
         AppAction::PersistConfiguration { request } => {
@@ -1774,92 +1834,80 @@ where
             }
         }
         AppAction::ConfigSaved { .. } | AppAction::RuntimeConfigUpdated { .. } => {
-            let Some(session_route) = app.current_session_route() else {
-                return Ok(());
-            };
-            let config_path = app.config_path.clone();
-            let launch_cwd = std::env::current_dir()?;
-            shutdown_and_join_worker(worker)?;
-            #[cfg(not(test))]
-            app.clear_boot_authority();
-            let runtime_config = match install_current_boot_transaction(
-                app,
-                &config_path,
-                Some(session_route),
-                &launch_cwd,
-                None,
-            ) {
-                Ok(config) => config,
-                Err(error) => {
-                    let startup_error =
-                        format!("configuration saved but authority reboot failed: {error:#}");
-                    let recovery_code = startup_recovery_code_from_error(&error);
-                    return_to_setup_after_boot_failure(
-                        app,
-                        worker,
-                        config_path,
-                        startup_error,
-                        recovery_code,
-                    )?;
-                    return Ok(());
-                }
-            };
-            match spawn_worker_fn(runtime_config, app) {
-                Ok(runtime) => *worker = Some(runtime),
-                Err(error) => report_worker_unavailable(
-                    app,
-                    &format!("configuration saved; agent runtime remains unavailable: {error:#}"),
-                )?,
-            }
-        }
-        AppAction::SessionRuntimeRouteUpdated { route } => {
             #[cfg(not(test))]
             {
-                let receipt = match try_execute_application_action(
+                let route = app
+                    .pending_session_route_selection()
+                    .map(|(_, route)| route.clone())
+                    .or_else(|| app.current_session_route());
+                if let Some(route) = route {
+                    return runtime_transition::start(app, worker, route);
+                }
+                return Ok(());
+            }
+            #[cfg(test)]
+            {
+                let Some(session_route) = app.current_session_route() else {
+                    return Ok(());
+                };
+                let config_path = app.config_path.clone();
+                let launch_cwd = std::env::current_dir()?;
+                shutdown_and_join_worker(worker)?;
+                let runtime_config = match install_current_boot_transaction(
                     app,
-                    worker,
-                    &AppAction::SessionRuntimeRouteUpdated {
-                        route: route.clone(),
-                    },
+                    &config_path,
+                    Some(session_route),
+                    &launch_cwd,
+                    None,
                 ) {
-                    Ok(Some(receipt)) => receipt,
-                    Ok(None) => {
-                        report_worker_unavailable(
-                            app,
-                            "model route selection requires the application port",
-                        )?;
-                        return Ok(());
-                    }
+                    Ok(config) => config,
                     Err(error) => {
-                        report_worker_unavailable(
+                        let startup_error =
+                            format!("configuration saved but authority reboot failed: {error:#}");
+                        let recovery_code = startup_recovery_code_from_error(&error);
+                        return_to_setup_after_boot_failure(
                             app,
-                            &format!("model route selection was not admitted: {error}"),
+                            worker,
+                            config_path,
+                            startup_error,
+                            recovery_code,
                         )?;
                         return Ok(());
                     }
                 };
-                report_application_receipt(app, &receipt)?;
-                if !matches!(
-                    receipt,
-                    sigil_application::ApplicationCommandReceipt::Settled(_)
-                        | sigil_application::ApplicationCommandReceipt::Replayed(_)
-                ) {
-                    return Ok(());
+                match spawn_worker_fn(runtime_config, app) {
+                    Ok(runtime) => *worker = Some(runtime),
+                    Err(error) => report_worker_unavailable(
+                        app,
+                        &format!(
+                            "configuration saved; agent runtime remains unavailable: {error:#}"
+                        ),
+                    )?,
                 }
             }
-            let persisted_config = app
-                .persisted_config_snapshot()
-                .cloned()
-                .context("session route update requires the persisted runtime config")?;
-            let runtime_config = app.runtime_config_for_session_route(persisted_config, &route)?;
-            app.apply_session_runtime_config(&runtime_config);
-            shutdown_and_join_worker(worker)?;
-            match spawn_worker_fn(runtime_config, app) {
-                Ok(runtime) => *worker = Some(runtime),
-                Err(error) => report_worker_unavailable(
-                    app,
-                    &format!("model route changed; agent runtime remains unavailable: {error:#}"),
-                )?,
+        }
+        AppAction::SessionRuntimeRouteUpdated { route } => {
+            #[cfg(not(test))]
+            return runtime_transition::start(app, worker, route);
+            #[cfg(test)]
+            {
+                let persisted_config = app
+                    .persisted_config_snapshot()
+                    .cloned()
+                    .context("session route update requires the persisted runtime config")?;
+                let runtime_config =
+                    app.runtime_config_for_session_route(persisted_config, &route)?;
+                app.apply_session_runtime_config(&runtime_config);
+                shutdown_and_join_worker(worker)?;
+                match spawn_worker_fn(runtime_config, app) {
+                    Ok(runtime) => *worker = Some(runtime),
+                    Err(error) => report_worker_unavailable(
+                        app,
+                        &format!(
+                            "model route changed; agent runtime remains unavailable: {error:#}"
+                        ),
+                    )?,
+                }
             }
         }
         AppAction::SetDefaultModel {
@@ -1971,7 +2019,7 @@ where
                     )
                     .map_err(anyhow::Error::new)?,
                 );
-                let session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+                let session = sigil_runtime::provider_connections::load_session_for_route(
                     &root_config,
                     &fallback_route,
                     JsonlSessionStore::new(&session_log_path)?,
@@ -2100,7 +2148,7 @@ where
                     }
                     .map_err(anyhow::Error::new)?,
                 );
-                let target = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
+                let target = sigil_runtime::provider_connections::load_session_for_route(
                     &root_config,
                     &fallback_route,
                     JsonlSessionStore::new(&session_log_path)?,
@@ -2211,15 +2259,7 @@ where
             if queue_plan_revision(app, worker, &action)? {
                 return Ok(());
             }
-            if let Some(command) = app.recovered_user_input_resume_command(&action) {
-                // A recovered input decision already owns the original application
-                // command id. Its prior enqueue may therefore be durably `Uncertain` in the
-                // application reservation store. Replaying it through that store would only
-                // return the cached receipt and never reach the worker. This narrow private
-                // command contains no answer and is revalidated by the worker against the
-                // actual owned receipt before the ordinary input dispatcher runs.
-                send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
-            } else if queue_application_interaction(app, worker, &action)? {
+            if queue_application_interaction(app, worker, &action)? {
                 return Ok(());
             } else {
                 match try_execute_application_action(app, worker, &action) {
@@ -2248,7 +2288,7 @@ where
 
 struct PendingApplicationAdmission {
     application: Arc<application_bridge::TuiApplicationSession>,
-    request: sigil_application::ApplicationCommandRequest,
+    request: Arc<std::sync::Mutex<Option<sigil_application::ApplicationCommandRequest>>>,
     action: AppAction,
     receiver: Option<
         std::sync::mpsc::Receiver<
@@ -2260,12 +2300,13 @@ struct PendingApplicationAdmission {
     >,
     handle: Option<std::thread::JoinHandle<()>>,
     retryable: bool,
-    domain_resolved: bool,
+    receipt_resolved: bool,
+    reconcile_requested: bool,
 }
 
 impl PendingApplicationAdmission {
-    fn domain_resolved_and_finished(&self) -> bool {
-        self.domain_resolved
+    fn receipt_resolved_and_finished(&self) -> bool {
+        self.receipt_resolved
             && self
                 .handle
                 .as_ref()
@@ -2288,12 +2329,39 @@ impl PendingApplicationAdmission {
         }
         let (sender, receiver) = std::sync::mpsc::channel();
         let application = Arc::clone(&self.application);
-        let request = self.request.clone();
+        let request = Arc::clone(&self.request);
+        let action = self.action.clone();
         self.handle = Some(
             std::thread::Builder::new()
                 .name("sigil-tui-admission".to_owned())
                 .spawn(move || {
-                    let result = futures::executor::block_on(application.execute_prepared(request));
+                    let result = (|| {
+                        // Admission can outlive the UI event runtime. Own the executor and its
+                        // blocking observations here, and drain them before publishing a result.
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .map_err(|error| {
+                                tracing::error!(%error, "failed to build TUI admission runtime");
+                                sigil_application::ApplicationError::Unavailable
+                            })?;
+                        let mut frozen = request
+                            .lock()
+                            .map_err(|_| sigil_application::ApplicationError::Unavailable)?;
+                        if frozen.is_none() {
+                            *frozen = Some(
+                                application
+                                    .prepare_action(&action, None, None)?
+                                    .ok_or(sigil_application::ApplicationError::Unavailable)?,
+                            );
+                        }
+                        let request = frozen
+                            .as_ref()
+                            .ok_or(sigil_application::ApplicationError::Unavailable)?
+                            .clone();
+                        drop(frozen);
+                        runtime.block_on(application.execute_prepared(request))
+                    })();
                     let _ = sender.send(result);
                 })
                 .context("failed to start application admission")?,
@@ -2334,7 +2402,7 @@ fn queue_plan_revision(
     if runtime
         .pending_admission
         .as_ref()
-        .is_some_and(|pending| pending.domain_resolved)
+        .is_some_and(|pending| pending.receipt_resolved)
     {
         if runtime.pending_interactions.len() >= MAX_PENDING_APPLICATION_INTERACTIONS {
             report_application_admission_error(
@@ -2376,12 +2444,13 @@ fn queue_plan_revision(
         };
     let mut pending = PendingApplicationAdmission {
         application: Arc::clone(application),
-        request,
+        request: Arc::new(std::sync::Mutex::new(Some(request))),
         action: action.clone(),
         receiver: None,
         handle: None,
         retryable: true,
-        domain_resolved: false,
+        receipt_resolved: false,
+        reconcile_requested: false,
     };
     if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
@@ -2401,7 +2470,8 @@ fn queue_application_interaction(
 ) -> Result<bool> {
     if !matches!(
         action,
-        AppAction::CancelQueuedConversationInput { .. }
+        AppAction::QueueConversationInput { .. }
+            | AppAction::CancelQueuedConversationInput { .. }
             | AppAction::EditQueuedConversationInput { .. }
             | AppAction::MoveQueuedConversationInput { .. }
             | AppAction::PromoteQueuedConversationInput { .. }
@@ -2411,37 +2481,33 @@ fn queue_application_interaction(
             | AppAction::RejectPlan { .. }
             | AppAction::CreateTaskFromPlan { .. }
             | AppAction::SubmitUserInputDecision { .. }
+            | AppAction::ResumeCommittedUserInput { .. }
     ) {
         return Ok(false);
     }
-    if let AppAction::SubmitUserInputDecision {
-        request_id,
-        generation,
-        expected_request_hash,
-        ..
-    } = action
-        && !app.pending_user_input().is_some_and(|form| {
-            form.request.as_ref().is_some_and(|request| {
-                request.identity.request_id.as_str() == request_id
-                    && request.identity.generation == *generation
-                    && request.request_hash == *expected_request_hash
-                    && matches!(
-                        request.source,
-                        sigil_kernel::UserInputSourceV1::PlanRevision { .. }
-                    )
-            })
-        })
-    {
-        return Ok(false);
-    }
+    let resume = matches!(action, AppAction::ResumeCommittedUserInput { .. });
     let Some(runtime) = worker.as_mut() else {
-        return Ok(false);
+        if resume {
+            report_application_admission_error(
+                app,
+                action,
+                &anyhow::anyhow!("user input continuation requires an attached application owner"),
+            )?;
+        }
+        return Ok(resume);
     };
     let Some(application) = runtime.application.as_ref() else {
-        return Ok(false);
+        if resume {
+            report_application_admission_error(
+                app,
+                action,
+                &anyhow::anyhow!("user input continuation requires an attached application owner"),
+            )?;
+        }
+        return Ok(resume);
     };
     if let Some(pending) = runtime.pending_interactions.iter_mut().find(|pending| {
-        !pending.domain_resolved && same_application_interaction(&pending.action, action)
+        !pending.receipt_resolved && same_application_interaction(&pending.action, action)
     }) {
         if let Err(error) = pending.start() {
             report_application_admission_error(app, action, &error)?;
@@ -2458,26 +2524,31 @@ fn queue_application_interaction(
     }
     // These actions prepare against the cached projection. Durable admission and dispatch run
     // on the owned thread so pending feedback and urgent cancellation stay responsive.
-    let request = match application.prepare_action(
-        action,
-        app.active_conversation_queue_target().as_ref(),
-        None,
-    ) {
-        Ok(Some(request)) => request,
-        Ok(None) => return Ok(false),
-        Err(error) => {
-            report_application_admission_error(app, action, &anyhow::Error::new(error))?;
-            return Ok(true);
+    let request = if resume {
+        None
+    } else {
+        match application.prepare_action(
+            action,
+            app.active_conversation_queue_target().as_ref(),
+            None,
+        ) {
+            Ok(Some(request)) => Some(request),
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                report_application_admission_error(app, action, &anyhow::Error::new(error))?;
+                return Ok(true);
+            }
         }
     };
     let mut pending = PendingApplicationAdmission {
         application: Arc::clone(application),
-        request,
+        request: Arc::new(std::sync::Mutex::new(request)),
         action: action.clone(),
         receiver: None,
         handle: None,
         retryable: true,
-        domain_resolved: false,
+        receipt_resolved: false,
+        reconcile_requested: false,
     };
     if let Err(error) = pending.start() {
         report_application_admission_error(app, action, &error)?;
@@ -2541,6 +2612,20 @@ fn same_application_interaction(left: &AppAction, right: &AppAction) -> bool {
                 && left_mode == right_mode
                 && left_grant == right_grant
         }
+        (
+            AppAction::ResumeCommittedUserInput {
+                original_command_id: a,
+                request_id: b,
+                generation: c,
+                expected_request_hash: d,
+            },
+            AppAction::ResumeCommittedUserInput {
+                original_command_id: w,
+                request_id: x,
+                generation: y,
+                expected_request_hash: z,
+            },
+        ) => a == w && b == x && c == y && d == z,
         (
             AppAction::SubmitUserInputDecision {
                 command_id: left_command,
@@ -2660,6 +2745,12 @@ fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerM
                 generation,
                 expected_request_hash,
                 ..
+            }
+            | AppAction::ResumeCommittedUserInput {
+                request_id,
+                generation,
+                expected_request_hash,
+                ..
             },
             WorkerMessage::UserInputDecisionApplied { request, .. },
         ) => {
@@ -2669,6 +2760,12 @@ fn application_interaction_outcome_matches(action: &AppAction, message: &WorkerM
         }
         (
             AppAction::SubmitUserInputDecision {
+                request_id,
+                generation,
+                expected_request_hash,
+                ..
+            }
+            | AppAction::ResumeCommittedUserInput {
                 request_id,
                 generation,
                 expected_request_hash,
@@ -2699,7 +2796,7 @@ fn poll_application_admission(
     let mut changed = false;
     if let Some(pending) = runtime.pending_admission.as_mut() {
         changed |= poll_pending_application_admission(app, pending)?;
-        if pending.domain_resolved_and_finished() {
+        if pending.receipt_resolved_and_finished() {
             wait_for_worker_thread(pending.handle.take(), Instant::now())?;
             runtime.pending_admission = None;
             changed = true;
@@ -2709,7 +2806,7 @@ fn poll_application_admission(
     while index < runtime.pending_interactions.len() {
         let pending = &mut runtime.pending_interactions[index];
         changed |= poll_pending_application_admission(app, pending)?;
-        if pending.domain_resolved_and_finished() {
+        if pending.receipt_resolved_and_finished() {
             wait_for_worker_thread(pending.handle.take(), Instant::now())?;
             runtime.pending_interactions.remove(index);
             changed = true;
@@ -2724,8 +2821,15 @@ fn poll_pending_application_admission(
     app: &mut AppState,
     pending: &mut PendingApplicationAdmission,
 ) -> Result<bool> {
-    if pending.domain_resolved {
+    if pending.receipt_resolved {
         return Ok(false);
+    }
+    if pending.receiver.is_none() && pending.reconcile_requested {
+        pending.retryable = true;
+        pending.start()?;
+        if pending.receiver.is_some() {
+            pending.reconcile_requested = false;
+        }
     }
     let Some(receiver) = pending.receiver.as_ref() else {
         return Ok(false);
@@ -2751,7 +2855,7 @@ fn poll_pending_application_admission(
             );
             report_application_action_receipt(app, &pending.action, &receipt)?;
             if resolved {
-                pending.domain_resolved = true;
+                pending.receipt_resolved = true;
             }
         }
         Err(error) => {
@@ -2769,27 +2873,28 @@ fn try_execute_application_action(
 ) -> Result<Option<sigil_application::ApplicationCommandReceipt>> {
     #[cfg(not(test))]
     {
-        worker
+        let application = worker
             .as_ref()
-            .map(|runtime| {
-                let attachment_recovery_binding = match action {
-                    AppAction::SwitchSession { session_log_path } => {
-                        app.pending_session_attachment_recovery_binding_for(session_log_path)
-                    }
-                    _ => None,
-                };
-                let Some(application) = runtime.application.as_ref() else {
-                    return Ok(None);
-                };
-                application.try_execute_action(
-                    action,
-                    app.active_conversation_queue_target().as_ref(),
-                    attachment_recovery_binding,
-                )
-            })
-            .transpose()?
-            .flatten()
-            .map_or(Ok(None), |receipt| Ok(Some(receipt)))
+            .and_then(|runtime| runtime.application.clone())
+            .or_else(|| {
+                app.runtime_transition
+                    .as_ref()
+                    .and_then(|owner| owner.application())
+            });
+        let Some(application) = application else {
+            return Ok(None);
+        };
+        let attachment_recovery_binding = match action {
+            AppAction::SwitchSession { session_log_path } => {
+                app.pending_session_attachment_recovery_binding_for(session_log_path)
+            }
+            _ => None,
+        };
+        Ok(application.try_execute_action(
+            action,
+            app.active_conversation_queue_target().as_ref(),
+            attachment_recovery_binding,
+        )?)
     }
     #[cfg(test)]
     {
@@ -2877,7 +2982,6 @@ fn worker_message_requires_projection_refresh(message: &WorkerMessage) -> bool {
         | WorkerMessage::PlanRejected { .. }
         | WorkerMessage::PlanSaved { .. }
         | WorkerMessage::TaskCreatedFromPlan { .. }
-        | WorkerMessage::TaskAdmissionBlocked { .. }
         | WorkerMessage::PlanActionFailed { .. }
         | WorkerMessage::TaskRunFinished { .. }
         | WorkerMessage::TaskRunPaused { .. }
@@ -2997,6 +3101,12 @@ fn fail_pending_application_action(app: &mut AppState, action: &AppAction, messa
         generation,
         expected_request_hash,
         ..
+    }
+    | AppAction::ResumeCommittedUserInput {
+        request_id,
+        generation,
+        expected_request_hash,
+        ..
     } = action
     {
         app.fail_pending_user_input_submission(
@@ -3089,12 +3199,13 @@ fn return_to_setup_after_boot_failure_with_draft(
         .as_ref()
         .map(|draft| draft.config_path.clone())
         .unwrap_or_else(|| app.config_path.clone());
-    *app = AppState::from_setup_with_recovery(
+    let replacement = AppState::from_setup_with_recovery(
         config_path,
         workspace_root,
         Some(startup_error.clone()),
         startup_recovery_code,
     );
+    control_log_recovery::replace_app_state(app, replacement);
     if let Some(draft) = setup_draft.as_mut() {
         draft.startup_error = Some(startup_error);
         draft.startup_recovery_code = startup_recovery_code;
@@ -3207,6 +3318,9 @@ fn drain_worker_messages_inner(
         }
     }
     if startup_failed {
+        #[cfg(not(test))]
+        runtime_transition::maintain(app, worker, None)?;
+        #[cfg(test)]
         shutdown_and_join_worker(worker)?;
     }
     Ok((
@@ -3249,6 +3363,9 @@ fn apply_received_worker_message(
     app.handle_worker_message(message)?;
     app.flush_timeline_render_batch();
     if startup_failed {
+        #[cfg(not(test))]
+        runtime_transition::maintain(app, worker, None)?;
+        #[cfg(test)]
         shutdown_and_join_worker(worker)?;
     }
     Ok(true)
@@ -3261,17 +3378,15 @@ fn apply_worker_message_state(
 ) -> bool {
     for pending in &mut runtime.pending_interactions {
         if application_interaction_outcome_matches(&pending.action, message) {
-            pending.retryable = false;
-            pending.domain_resolved = true;
+            pending.reconcile_requested = true;
         }
     }
     if let Some(pending) = runtime.pending_admission.as_mut()
         && application_interaction_outcome_matches(&pending.action, message)
     {
-        // The owner committed the matching question before publication. Retain a still
-        // running admission thread for shutdown accounting; its response is only transport.
-        pending.retryable = false;
-        pending.domain_resolved = true;
+        // Publication can request reconciliation; only an owner-validated application receipt
+        // settles the original K/F. A matching UI message is not commit evidence.
+        pending.reconcile_requested = true;
     }
     let route_transition_recovery = matches!(
         message,
@@ -3298,31 +3413,44 @@ fn apply_worker_message_state(
 fn restart_worker_after_session_transition<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
-    mut spawn_worker_fn: F,
+    spawn_worker_fn: F,
 ) -> Result<bool>
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
+    #[cfg(test)]
+    let mut spawn_worker_fn = spawn_worker_fn;
+    #[cfg(not(test))]
+    let _ = spawn_worker_fn;
     if !app.take_worker_rebind_required() {
         return Ok(false);
     }
-    app.mark_worker_not_ready();
-    shutdown_and_join_worker(worker)?;
-    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
-        report_worker_unavailable(
-            app,
-            "session changed but the runtime config is unavailable; no prompt was sent",
-        )?;
-        return Ok(true);
-    };
-    match spawn_worker_fn(root_config, app) {
-        Ok(runtime) => *worker = Some(runtime),
-        Err(error) => report_worker_unavailable(
-            app,
-            &format!("session changed but the agent worker could not rebind: {error:#}"),
-        )?,
+    #[cfg(not(test))]
+    {
+        let config = app.session_runtime_config_snapshot().cloned();
+        runtime_transition::maintain(app, worker, config)?;
+        Ok(true)
     }
-    Ok(true)
+    #[cfg(test)]
+    {
+        app.mark_worker_not_ready();
+        shutdown_and_join_worker(worker)?;
+        let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
+            report_worker_unavailable(
+                app,
+                "session changed but the runtime config is unavailable; no prompt was sent",
+            )?;
+            return Ok(true);
+        };
+        match spawn_worker_fn(root_config, app) {
+            Ok(runtime) => *worker = Some(runtime),
+            Err(error) => report_worker_unavailable(
+                app,
+                &format!("session changed but the agent worker could not rebind: {error:#}"),
+            )?,
+        }
+        Ok(true)
+    }
 }
 
 fn flush_pending_worker_commands(
@@ -3354,6 +3482,9 @@ fn flush_pending_worker_commands(
             for remaining in commands {
                 app.enqueue_worker_command(remaining);
             }
+            #[cfg(not(test))]
+            runtime_transition::maintain(app, worker, None)?;
+            #[cfg(test)]
             shutdown_and_join_worker(worker)?;
             report_worker_unavailable(app, "agent worker stopped before accepting command")?;
             break;
@@ -3371,52 +3502,76 @@ fn send_worker_command_with_restart<F>(
 where
     F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
 {
-    let command = if let Some(runtime) = worker.as_ref() {
-        if !runtime.ready {
+    #[cfg(not(test))]
+    {
+        let _ = spawn_worker_fn;
+        if let Some(runtime) = worker.as_ref() {
+            if !runtime.ready {
+                app.enqueue_worker_command(command);
+                return Ok(());
+            }
+            match runtime.worker_tx.send(command) {
+                Ok(()) => return Ok(()),
+                Err(error) => app.enqueue_worker_command(*error.0),
+            }
+        } else {
             app.enqueue_worker_command(command);
-            return Ok(());
         }
-        match runtime.worker_tx.send(command) {
-            Ok(()) => return Ok(()),
+        let config = app.session_runtime_config_snapshot().cloned();
+        runtime_transition::maintain(app, worker, config)
+    }
+    #[cfg(test)]
+    {
+        let command = if let Some(runtime) = worker.as_ref() {
+            if !runtime.ready {
+                app.enqueue_worker_command(command);
+                return Ok(());
+            }
+            match runtime.worker_tx.send(command) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let command = *error.0;
+                    shutdown_and_join_worker(worker)?;
+                    command
+                }
+            }
+        } else {
+            command
+        };
+
+        let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
+            app.enqueue_worker_command(command);
+            report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
+            return Ok(());
+        };
+
+        match spawn_worker_fn(root_config, app) {
+            Ok(runtime) => {
+                *worker = Some(runtime);
+            }
             Err(error) => {
-                let command = *error.0;
-                shutdown_and_join_worker(worker)?;
-                command
+                app.enqueue_worker_command(command);
+                report_worker_unavailable(
+                    app,
+                    &format!("failed to restart agent worker: {error:#}"),
+                )?;
+                return Ok(());
             }
         }
-    } else {
-        command
-    };
 
-    let Some(root_config) = app.session_runtime_config_snapshot().cloned() else {
-        app.enqueue_worker_command(command);
-        report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
-        return Ok(());
-    };
-
-    match spawn_worker_fn(root_config, app) {
-        Ok(runtime) => {
-            *worker = Some(runtime);
+        if let Some(runtime) = worker.as_ref() {
+            if !runtime.ready {
+                app.enqueue_worker_command(command);
+                return Ok(());
+            }
+            match runtime.worker_tx.send(command) {
+                Ok(()) => return Ok(()),
+                Err(error) => app.enqueue_worker_command(*error.0),
+            }
         }
-        Err(error) => {
-            app.enqueue_worker_command(command);
-            report_worker_unavailable(app, &format!("failed to restart agent worker: {error:#}"))?;
-            return Ok(());
-        }
+        shutdown_and_join_worker(worker)?;
+        report_worker_unavailable(app, "agent worker stopped before accepting command")
     }
-
-    if let Some(runtime) = worker.as_ref() {
-        if !runtime.ready {
-            app.enqueue_worker_command(command);
-            return Ok(());
-        }
-        match runtime.worker_tx.send(command) {
-            Ok(()) => return Ok(()),
-            Err(error) => app.enqueue_worker_command(*error.0),
-        }
-    }
-    shutdown_and_join_worker(worker)?;
-    report_worker_unavailable(app, "agent worker stopped before accepting command")
 }
 
 fn report_application_admission_error(
@@ -3476,31 +3631,42 @@ fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
     })
 }
 
-fn restore_terminal_and_shutdown_event_runtime(
-    runtime: &mut Option<tokio::runtime::Runtime>,
-    restore: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let restored = restore();
-    // Runtime Drop waits indefinitely for spawn_blocking. Cancel async observers only after
-    // restoring the terminal; their owner tracks actual background completion below.
-    if let Some(runtime) = runtime.take() {
-        runtime.shutdown_background();
-    }
-    restored
-}
-
 // Scope changes retire these observations, but do not release their owners while an aborted
 // async task or its already-running blocking read/ACK is still alive.
-#[cfg(not(test))]
-#[derive(Default)]
 struct TuiShutdownState {
-    deadline: Option<Instant>,
+    started: Option<Instant>,
+    hint_after: Duration,
     projection_observation_owners: Vec<ProjectionObservationOwner>,
+}
+
+impl Default for TuiShutdownState {
+    fn default() -> Self {
+        Self {
+            started: None,
+            hint_after: WORKER_SHUTDOWN_TIMEOUT,
+            projection_observation_owners: Vec::new(),
+        }
+    }
 }
 
 struct ProjectionObservationOwner {
     application: Arc<application_bridge::TuiApplicationSession>,
     tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for ProjectionObservationOwner {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+        // An aborted future can still own a running blocking observation. The terminal has
+        // already been restored on launcher exit; keep the actual owner until it finishes.
+        while self.tasks.iter().any(|task| !task.is_finished())
+            || self.application.pending_observations() > 0
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 fn retain_projection_observation(
@@ -3536,6 +3702,7 @@ fn abort_projection_observations(owners: &[ProjectionObservationOwner]) {
     }
 }
 
+#[cfg(test)]
 fn drain_projection_observations_until(
     owners: &mut Vec<ProjectionObservationOwner>,
     deadline: Instant,
@@ -3561,13 +3728,14 @@ fn drain_projection_observations_until(
 /// A `JoinHandle::join` can block forever when a provider or OS call is stuck. Keep unfinished
 /// owners in `worker` on timeout, and report which owned thread and worker stage exhausted the
 /// budget. Terminal restoration always precedes any wait.
+#[cfg(test)]
 fn restore_terminal_then_join_worker(
     worker: &mut Option<WorkerRuntime>,
     deadline: Instant,
     restore: impl FnOnce() -> std::io::Result<()>,
 ) -> (std::io::Result<()>, Result<()>) {
     if let Some(runtime) = worker.as_ref() {
-        runtime.worker_tx.begin_shutdown_until(deadline);
+        runtime.worker_tx.begin_shutdown();
     }
     let restored = restore();
     let joined = shutdown_and_join_worker_until(worker, deadline);
@@ -3585,7 +3753,7 @@ fn shutdown_and_join_worker_until(
     let Some(runtime) = worker.as_mut() else {
         return Ok(());
     };
-    runtime.worker_tx.begin_shutdown_until(deadline);
+    runtime.worker_tx.begin_shutdown();
     let _ = runtime.worker_tx.send(AppState::shutdown_command());
     join_runtime_owned_thread(
         &mut runtime.join_handle,
@@ -3639,6 +3807,7 @@ fn shutdown_and_join_worker_until(
         "{}",
         runtime.worker_tx.shutdown_diagnostic("sigil-agent-worker")
     );
+    runtime.worker_tx.record_shutdown_joins_complete();
     worker.take();
     Ok(())
 }
@@ -3660,7 +3829,17 @@ fn wait_for_worker_thread(
     mut handle: Option<std::thread::JoinHandle<()>>,
     deadline: Instant,
 ) -> Result<()> {
-    wait_for_owned_thread(&mut handle, deadline)
+    let started = Instant::now();
+    shutdown::drain_shutdown(
+        started,
+        deadline.saturating_duration_since(started),
+        || {
+            let mut pass = ShutdownPass::default();
+            pass.observe("owned-worker-thread", poll_owned_thread(&mut handle));
+            pass
+        },
+        |notice| tracing::warn!("{notice}"),
+    )
 }
 
 fn wait_for_owned_thread(
@@ -3686,8 +3865,8 @@ fn wait_for_owned_thread(
         "shutdown deadline exceeded; owned_thread={thread_name}; stage=thread-join; elapsed_ms={}; cleanup_complete=false",
         started.elapsed().as_millis()
     );
-    owned.take().expect("finished owned thread remains present").join().map_err(|_| {
-        anyhow::anyhow!("owned_thread={thread_name}; stage=thread-join; elapsed_ms={}; worker panicked during shutdown; cleanup_complete=false", started.elapsed().as_millis())
+    owned.take().expect("finished owned thread remains present").join().map_err(|payload| {
+        anyhow::anyhow!("owned_thread={thread_name}; stage=thread-join; elapsed_ms={}; worker panicked during shutdown: {}; cleanup_complete=false", started.elapsed().as_millis(), format_panic_payload(payload.as_ref()))
     })
 }
 
@@ -3818,6 +3997,8 @@ fn next_wake_deadline(app: &AppState) -> Option<Duration> {
         Some(Duration::from_millis(32))
     } else if app.has_pending_background_tasks() {
         Some(BACKGROUND_TASK_WAKE_INTERVAL)
+    } else if app.has_running_command_elapsed() {
+        Some(Duration::from_secs(1))
     } else {
         None
     }
@@ -3940,6 +4121,40 @@ struct WorkerRuntime {
     ready: bool,
 }
 
+impl Drop for WorkerRuntime {
+    fn drop(&mut self) {
+        self.worker_tx.reserve_stop(true);
+        let _ = self.worker_tx.send(AppState::shutdown_command());
+        // Normal lifecycle transitions join before releasing this value. A launcher error or
+        // expired exit deadline must retain the same obligation instead of detaching threads.
+        for handle in std::iter::once(&mut self.join_handle)
+            .chain(
+                self.pending_admission
+                    .iter_mut()
+                    .map(|pending| &mut pending.handle),
+            )
+            .chain(
+                self.pending_interactions
+                    .iter_mut()
+                    .map(|pending| &mut pending.handle),
+            )
+        {
+            if let Some(handle) = handle.take()
+                && handle.join().is_err()
+            {
+                self.worker_tx.record_shutdown_join_panic();
+            }
+        }
+        #[cfg(not(test))]
+        self.worker_rx.finish_shutdown();
+        if let Some(application) = self.application.as_ref() {
+            while application.pending_observations() > 0 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 #[cfg(not(test))]
 struct WorkerMessageInbox {
     receiver: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
@@ -3950,13 +4165,30 @@ struct WorkerMessageInbox {
 #[cfg(not(test))]
 impl Drop for WorkerMessageInbox {
     fn drop(&mut self) {
-        self.stopped
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.finish_shutdown();
     }
 }
 
 #[cfg(not(test))]
 impl WorkerMessageInbox {
+    fn finish_shutdown(&mut self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("worker event forwarding thread panicked during shutdown");
+        }
+    }
+    fn empty() -> Self {
+        let (_, receiver) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            receiver,
+            stopped: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            handle: None,
+        }
+    }
+
     fn forward_from(receiver: std::sync::mpsc::Receiver<WorkerMessage>) -> Result<Self> {
         let (sender, forwarded) = tokio::sync::mpsc::unbounded_channel();
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4008,6 +4240,7 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         app.workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
         runner::WorkerSessionRouteDirective {
+            runtime_ready: None,
             recovery_confirmation: app
                 .pending_session_route_confirmation_binding()
                 .map(str::to_owned),
@@ -4035,15 +4268,18 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
             }
         },
     );
-    Ok(WorkerRuntime {
+    let mut runtime = WorkerRuntime {
         worker_tx: spawned.command_tx,
         application,
         pending_admission: None,
         pending_interactions: Vec::new(),
-        worker_rx: WorkerMessageInbox::forward_from(spawned.message_rx)?,
+        worker_rx: WorkerMessageInbox::empty(),
         join_handle: Some(spawned.join_handle),
         ready: false,
-    })
+    };
+    // Establish the worker owner before the fallible event forwarding thread is created.
+    runtime.worker_rx = WorkerMessageInbox::forward_from(spawned.message_rx)?;
+    Ok(runtime)
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

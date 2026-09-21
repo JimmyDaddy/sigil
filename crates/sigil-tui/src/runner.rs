@@ -33,7 +33,6 @@ pub(crate) use route_recovery::worker_session_route_recovery_message;
 pub(in crate::runner) use session_flow::ManagedTuiArtifactStoreLease;
 #[cfg(test)]
 pub(crate) use spawn::spawn_agent_worker;
-#[cfg(not(test))]
 pub(crate) use spawn::{
     WorkerSessionRouteDirective, spawn_agent_worker_with_route_directive_and_attachment,
 };

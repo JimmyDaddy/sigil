@@ -57,9 +57,16 @@ fn core_worker_approves_and_executes_file_write_and_one_shot_command() -> Result
             as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>,
         sigil_tools_builtin::BuiltinToolSelection::core(),
         Some(scratch),
-        || panic!("Core must not construct a persistent terminal owner"),
+        || sigil_tools_builtin::BuiltinTerminalOptions {
+            execution_config: sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                &config.execution,
+            ),
+            lifecycle_route: None,
+            executor: Arc::clone(&authority.command_execution)
+                as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>,
+        },
     );
-    assert!(handles.terminal.is_none());
+    assert!(handles.terminal.is_some());
     let provider = PlannedProvider::new(vec![
         tool_call_plan(
             "core-write",
@@ -71,7 +78,7 @@ fn core_worker_approves_and_executes_file_write_and_one_shot_command() -> Result
         ),
         tool_call_plan(
             "core-command",
-            "bash",
+            "exec_command",
             serde_json::json!({
             "command": "printf core-command-ok > core-command.txt && cat core-command.txt"
             }),
@@ -409,7 +416,14 @@ fn core_worker_cancels_blocked_provider_and_continues_same_session_without_late_
             as Arc<dyn sigil_tools_builtin::ManagedCommandExecutionPortV1>,
         sigil_tools_builtin::BuiltinToolSelection::core(),
         Some(scratch),
-        || panic!("Core must not construct a persistent terminal owner"),
+        || sigil_tools_builtin::BuiltinTerminalOptions {
+            execution_config: sigil_tools_builtin::TerminalExecutionConfig::from_execution_config(
+                &config.execution,
+            ),
+            lifecycle_route: None,
+            executor: Arc::clone(&authority.command_execution)
+                as Arc<dyn sigil_tools_builtin::ManagedTerminalExecutionPortV1>,
+        },
     );
     let gate = Arc::new(tokio::sync::Notify::new());
     let StreamPlan::Chunks(late_tool_chunks) = tool_call_plan(
@@ -682,13 +696,9 @@ fn core_worker_user_input_resolution_clears_durable_public_pending() -> Result<(
             "core-question",
             sigil_kernel::REQUEST_USER_INPUT_TOOL_NAME,
             serde_json::json!({
-                "prompt": "Choose the module to inspect",
                 "questions": [{
                     "id": "scope",
-                    "header": "Scope",
-                    "question": "Which module should be inspected?",
-                    "required": true,
-                    "field": {"kind": "text", "multiline": false, "max_chars": 120}
+                    "question": "Which module should be inspected?"
                 }]
             }),
         )];
@@ -861,5 +871,103 @@ fn core_worker_user_input_resolution_clears_durable_public_pending() -> Result<(
         assert!(projection.run.active_binding.is_none(), "case {case}");
         worker.shutdown()?;
     }
+    Ok(())
+}
+
+#[test]
+fn application_queue_commit_waits_for_owner_and_replays_after_worker_reopen() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let _runtime_guard = runtime.enter();
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let session_path = workspace.join(".sigil/sessions/application-queue.jsonl");
+    let config = core_root_config(&workspace)?;
+    let (provider, route) =
+        sigil_runtime::provider_connections::resolve_default_model_route(&config)?;
+    let store = JsonlSessionStore::new(&session_path)?;
+    let mut session =
+        sigil_kernel::Session::new_with_route(provider, route).with_store(store.clone());
+    session.ensure_identity_entry()?;
+    let session_id = session.session_scope_id().to_owned();
+    let (authority, _authority_root) = test_authority_composition(&workspace)?;
+    let mut worker = spawn_test_worker_with_existing_authority_composition(
+        config.clone(),
+        session_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let application = crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?;
+    runtime
+        .block_on(application.refresh())
+        .context("initial queue application projection")?;
+    let action = crate::app::AppAction::SetConversationQueuePaused { paused: true };
+    let request = application
+        .prepare_action(&action, None, None)?
+        .context("queue request")?;
+    let receipt = runtime
+        .block_on(application.execute_prepared(request.clone()))
+        .context("first queue application admission")?;
+    assert!(
+        matches!(
+            receipt,
+            sigil_application::ApplicationCommandReceipt::Settled(_)
+        ),
+        "actual owner commit must be known before dispatch releases its guard: {receipt:?}"
+    );
+    let binding =
+        sigil_runtime::application_operation_owner::application_operation_binding(&request)?
+            .context("causal queue binding")?;
+    assert!(
+        sigil_kernel::session::reconcile_application_operation(&store.read_handle(), &binding)?
+            .is_some()
+    );
+    worker.stop()?;
+    drop(application);
+    worker = spawn_test_worker_with_existing_authority_composition(
+        config,
+        session_path.clone(),
+        Agent::new(PlannedProvider::new(Vec::new()), ToolRegistry::new()),
+        workspace.clone(),
+        Arc::clone(&authority),
+    )?;
+    worker.recv_until(|message| matches!(message, WorkerMessage::WorkerReady))?;
+    let reopened = crate::application_bridge::tests::connect_real_worker(
+        &workspace.join("sigil.toml"),
+        &workspace,
+        &session_path,
+        &session_id,
+        worker.command_sender(),
+        &authority,
+        sigil_runtime::RuntimeSessionProjectionOwner::from_store(&store),
+    )?;
+    runtime.block_on(reopened.refresh())?;
+    assert!(matches!(
+        runtime.block_on(reopened.execute_prepared(request))?,
+        sigil_application::ApplicationCommandReceipt::Replayed(_)
+    ));
+    let records = store.read_handle().read_event_records()?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(
+                record.session_log_entry(),
+                Ok(Some(SessionLogEntry::Control(
+                    ControlEntry::ConversationInputQueueControl(_)
+                )))
+            ))
+            .count(),
+        1
+    );
+    worker.shutdown()?;
     Ok(())
 }

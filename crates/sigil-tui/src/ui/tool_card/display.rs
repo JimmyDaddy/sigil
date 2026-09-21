@@ -19,7 +19,7 @@ pub(super) fn build_tool_activity_view(
         title: display.title.plain(),
         is_inspection: tool_activity_is_inspection_summary(summary),
         defaults_expanded: summary.diff.is_some()
-            || terminal_task_is_active(summary)
+            || (terminal_task_is_active(summary) && !summary.tool_name.starts_with("exec_"))
             || checkpoint_restore_tool(summary),
     }
 }
@@ -47,12 +47,24 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
             },
             StatusKind::Error,
         )
+    } else if summary.status == "approval" {
+        ("APPROVAL", StatusKind::Pending)
+    } else if summary.status == "pending" {
+        ("PENDING", StatusKind::Pending)
+    } else if summary.status == "denied" {
+        ("DENIED", StatusKind::Error)
+    } else if summary.status == "cancelled" {
+        ("CANCELLED", StatusKind::Error)
+    } else if summary.status == "interrupted" {
+        ("INTERRUPTED", StatusKind::Error)
+    } else if summary.status == "failed" {
+        ("FAILED", StatusKind::Error)
     } else if status_kind_from_label(&summary.status) == StatusKind::Running {
         ("RUNNING", StatusKind::Running)
     } else {
         ("OK", StatusKind::Success)
     };
-    let detail = if tool_name_matches(&summary.tool_name, "bash") {
+    let detail = if command_tool(summary) {
         let mut details = Vec::new();
         if let Some(shell) = shell_runtime_label(&summary.metadata) {
             details.push(shell);
@@ -63,7 +75,7 @@ pub(super) fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplaySt
         if let Some(code) = summary.metadata.exit_code {
             details.push(format!("exit {code}"));
         }
-        if let Some(duration_ms) = summary.metadata.duration_ms {
+        if let Some(duration_ms) = command_elapsed_ms(summary) {
             details.push(format_duration_ms(duration_ms));
         }
         if let Some(verdict) = summary.metadata.shell_verdict.as_deref() {
@@ -146,9 +158,7 @@ pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
     {
         return Some(summary);
     }
-    if tool_name_matches(&summary.tool_name, "bash")
-        && bash_running_without_observed_output(summary)
-    {
+    if command_tool(summary) && bash_running_without_observed_output(summary) {
         return None;
     }
     if let Some(diff) = &summary.diff {
@@ -157,7 +167,7 @@ pub(super) fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
     summary.summary.clone()
 }
 
-fn format_duration_ms(duration_ms: u64) -> String {
+pub(super) fn format_duration_ms(duration_ms: u64) -> String {
     if duration_ms < 1_000 {
         return format!("{duration_ms} ms");
     }
@@ -172,18 +182,17 @@ pub(super) fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
         };
     }
     if terminal_task_tool(summary) {
-        return ToolCardTitle::new(
-            "Terminal",
-            summary
-                .metadata
-                .terminal_task_id
-                .clone()
-                .unwrap_or_else(|| "task".to_owned()),
-            summary
-                .metadata
-                .terminal_command
-                .as_deref()
-                .map(|command| truncate_inline_text(command, 96)),
+        return call_argument(summary, "command")
+            .map(|command| shell_command_title("Command", &command))
+            .unwrap_or_else(|| ToolCardTitle::new("Command", "execution", None));
+    }
+    if matches!(
+        summary.tool_name.as_str(),
+        "exec_command" | "terminal_start"
+    ) {
+        return shell_command_title(
+            "Command",
+            &call_argument(summary, "command").unwrap_or_else(|| "execution".to_owned()),
         );
     }
     if tool_name_matches(&summary.tool_name, "bash") {
@@ -505,6 +514,11 @@ pub(super) fn primary_path(summary: &ToolCardRender) -> String {
 }
 
 pub(super) fn call_argument(summary: &ToolCardRender, key: &str) -> Option<String> {
+    if key == "command"
+        && let Some(command) = &summary.metadata.terminal_command
+    {
+        return Some(command.clone());
+    }
     let call_summary = summary.metadata.call_summary.as_deref()?;
     call_summary_argument(call_summary, key)
 }
@@ -559,4 +573,32 @@ pub(super) fn sanitize_call_summary(call_summary: &str) -> String {
             .join(" "),
         120,
     )
+}
+
+pub(super) fn command_elapsed_ms(summary: &ToolCardRender) -> Option<u64> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)?;
+    command_elapsed_ms_at(summary, now_ms)
+}
+
+pub(super) fn command_elapsed_ms_at(summary: &ToolCardRender, now_ms: u64) -> Option<u64> {
+    let Some(started_at_ms) = summary.metadata.execution_started_at_ms else {
+        return summary.metadata.duration_ms;
+    };
+    let status = summary
+        .metadata
+        .terminal_status
+        .as_deref()
+        .unwrap_or(&summary.status);
+    if matches!(status, "pending" | "approval" | "denied") {
+        return None;
+    }
+    let until = if matches!(status, "starting" | "running") {
+        now_ms
+    } else {
+        summary.metadata.execution_updated_at_ms?
+    };
+    Some(until.saturating_sub(started_at_ms))
 }

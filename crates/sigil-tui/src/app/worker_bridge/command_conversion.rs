@@ -108,6 +108,9 @@ impl AppState {
                 plan_id,
                 expected_candidate_hash,
             },
+            AppAction::ResumeCommittedUserInput { .. } => {
+                panic!("committed user input continuation requires application admission")
+            }
             AppAction::SubmitUserInputDecision {
                 command_id,
                 request_id,
@@ -351,6 +354,7 @@ impl AppState {
                 }
             }
             AppAction::SetupCompleted { .. }
+            | AppAction::RecoverControlLog(_)
             | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }

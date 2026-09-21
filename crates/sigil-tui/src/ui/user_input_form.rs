@@ -65,15 +65,7 @@ pub(super) fn render_user_input_form(
                     .view
                     .questions
                     .get(form.focused_question)
-                    .is_some_and(|question| {
-                        matches!(
-                            question.field,
-                            sigil_kernel::UserInputFieldKindV1::Text {
-                                multiline: true,
-                                ..
-                            }
-                        )
-                    })
+                    .is_some_and(|question| question.options.is_empty())
             {
                 "Tab fields/actions · Pg scroll · Enter newline · Ctrl-Enter actions · Esc close"
             } else {
@@ -335,7 +327,7 @@ fn render_fields(frame: &mut Frame, area: Rect, form: &PendingUserInputForm, the
                     Style::default().fg(theme.palette.accent_primary),
                 ),
                 Span::styled(
-                    format!("{}: ", question.header),
+                    format!("{}: ", question.id),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(question.question.clone()),
@@ -374,10 +366,8 @@ fn answer_lines(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let marker = if focused { "    › " } else { "      " };
-    match (&question.field, draft) {
-        (_, UserInputDraftValue::Text(value))
-        | (_, UserInputDraftValue::Number(value))
-        | (_, UserInputDraftValue::Integer(value)) => vec![Line::from(vec![
+    match draft {
+        UserInputDraftValue::Text(value) => vec![Line::from(vec![
             Span::styled(marker, Style::default().fg(theme.palette.accent_primary)),
             Span::styled(
                 if value.is_empty() {
@@ -392,22 +382,11 @@ fn answer_lines(
                 },
             ),
         ])],
-        (_, UserInputDraftValue::Boolean(value)) => vec![Line::raw(format!(
-            "{marker}{}",
-            match value {
-                Some(true) => "Yes",
-                Some(false) => "No",
-                None => "Not answered",
-            }
-        ))],
-        (
-            sigil_kernel::UserInputFieldKindV1::SingleSelect {
-                options,
-                allow_other,
-            },
-            UserInputDraftValue::SingleSelect { selected, other },
-        ) => {
-            let mut values = options
+        UserInputDraftValue::SingleSelect {
+            selected, other, ..
+        } => {
+            let mut values = question
+                .options
                 .iter()
                 .enumerate()
                 .map(|(index, option)| {
@@ -422,27 +401,27 @@ fn answer_lines(
                     ))
                 })
                 .collect::<Vec<_>>();
-            if *allow_other {
-                values.push(Line::raw(format!(
-                    "    {} Other{}",
-                    if *selected == Some(options.len()) {
-                        "●"
-                    } else {
-                        "○"
-                    },
-                    if other.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {other}")
-                    }
-                )));
-            }
+            values.push(Line::raw(format!(
+                "    {} Other{}",
+                if *selected == Some(question.options.len()) {
+                    "●"
+                } else {
+                    "○"
+                },
+                if other.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {other}")
+                }
+            )));
             values
         }
-        (
-            sigil_kernel::UserInputFieldKindV1::MultiSelect { options, .. },
-            UserInputDraftValue::MultiSelect { cursor, selected },
-        ) => options
+        UserInputDraftValue::MultiSelect {
+            cursor,
+            selected,
+            other,
+        } => question
+            .options
             .iter()
             .enumerate()
             .map(|(index, option)| {
@@ -457,8 +436,15 @@ fn answer_lines(
                     option.label
                 ))
             })
+            .chain(std::iter::once(Line::raw(format!(
+                "    Other{}",
+                if other.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {other}")
+                }
+            ))))
             .collect(),
-        _ => Vec::new(),
     }
 }
 

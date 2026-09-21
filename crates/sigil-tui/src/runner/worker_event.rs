@@ -333,7 +333,6 @@ struct WorkerWakeSlot {
     session_projection_invalid: bool,
     session_projection_families: BTreeSet<ActiveProjectionFamily>,
     provider_route_diagnostics_changed: bool,
-    task_completion_progress_changed: bool,
     background_agents: BTreeSet<AgentThreadId>,
 }
 
@@ -343,7 +342,6 @@ struct WorkerWakeBatch {
     session_projection_invalid: bool,
     session_projection_families: BTreeSet<ActiveProjectionFamily>,
     provider_route_diagnostics_changed: bool,
-    task_completion_progress_changed: bool,
     background_agents: BTreeSet<AgentThreadId>,
 }
 
@@ -352,7 +350,6 @@ impl WorkerWakeBatch {
         self.session_projection_invalid
             || !self.session_projection_families.is_empty()
             || self.provider_route_diagnostics_changed
-            || self.task_completion_progress_changed
             || !self.background_agents.is_empty()
     }
 }
@@ -372,7 +369,6 @@ impl WorkerWakeCoalescer {
                     session_projection_invalid: false,
                     session_projection_families: BTreeSet::new(),
                     provider_route_diagnostics_changed: false,
-                    task_completion_progress_changed: false,
                     background_agents: BTreeSet::new(),
                 }),
             }),
@@ -420,9 +416,6 @@ impl WorkerWakeCoalescer {
                 sigil_runtime::AgentSupervisorChange::ProviderRouteDiagnostics => {
                     slot.provider_route_diagnostics_changed = true;
                 }
-                sigil_runtime::AgentSupervisorChange::TaskCompletionProgress => {
-                    slot.task_completion_progress_changed = true;
-                }
             }
             true
         });
@@ -442,7 +435,6 @@ impl WorkerWakeCoalescer {
         slot.session_projection_invalid = false;
         slot.session_projection_families.clear();
         slot.provider_route_diagnostics_changed = false;
-        slot.task_completion_progress_changed = false;
         slot.background_agents.clear();
         // Keep wake_queued: an already queued token will observe the new slot. If there is no
         // token, the next producer sets this flag and publishes one.
@@ -486,9 +478,6 @@ impl WorkerWakeCoalescer {
             session_projection_families: std::mem::take(&mut slot.session_projection_families),
             provider_route_diagnostics_changed: std::mem::take(
                 &mut slot.provider_route_diagnostics_changed,
-            ),
-            task_completion_progress_changed: std::mem::take(
-                &mut slot.task_completion_progress_changed,
             ),
             background_agents: std::mem::take(&mut slot.background_agents),
         };

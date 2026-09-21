@@ -64,6 +64,9 @@ struct AuxiliaryResult {
 impl Drop for AuxiliaryTask {
     fn drop(&mut self) {
         self.budget.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -164,13 +167,45 @@ impl AppState {
         }
     }
 
+    /// Retired observations keep their original reader and cancellation budget until the real
+    /// thread exits. A rebuilt UI owns their cleanup but cannot consume their old-scope results.
+    pub(crate) fn transfer_session_auxiliary_cleanup_to(&mut self, replacement: &mut Self) {
+        self.cancel_session_auxiliary();
+        if let Some(task) = self.session_auxiliary.task.take() {
+            replacement.session_auxiliary.retired.push(task);
+        }
+        replacement
+            .session_auxiliary
+            .retired
+            .append(&mut self.session_auxiliary.retired);
+    }
+
+    pub(crate) fn poll_session_auxiliary_shutdown(
+        &mut self,
+    ) -> crate::launcher::shutdown::ShutdownPass {
+        use crate::launcher::shutdown::{ShutdownPass, poll_owned_thread};
+        self.cancel_session_auxiliary();
+        if let Some(task) = self.session_auxiliary.task.take() {
+            self.session_auxiliary.retired.push(task);
+        }
+        let mut pass = ShutdownPass::default();
+        for task in &mut self.session_auxiliary.retired {
+            pass.observe("session-auxiliary", poll_owned_thread(&mut task.handle));
+        }
+        self.session_auxiliary
+            .retired
+            .retain(|task| task.handle.is_some());
+        pass
+    }
+
+    #[cfg(test)]
     pub(crate) fn join_session_auxiliary_until(&mut self, deadline: Instant) -> Result<()> {
         self.cancel_session_auxiliary();
         if let Some(task) = self.session_auxiliary.task.take() {
             self.session_auxiliary.retired.push(task);
         }
         for task in &mut self.session_auxiliary.retired {
-            if let Some(handle) = task.handle.take() {
+            if let Some(handle) = task.handle.as_ref() {
                 while !handle.is_finished() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -178,9 +213,13 @@ impl AppState {
                     handle.is_finished(),
                     "session observation interrupted; cleanup_complete=false"
                 );
-                handle.join().map_err(|_| {
-                    anyhow::anyhow!("session observation panicked; cleanup_complete=false")
-                })?;
+                task.handle
+                    .take()
+                    .expect("finished observation remains owned")
+                    .join()
+                    .map_err(|_| {
+                        anyhow::anyhow!("session observation panicked; cleanup_complete=false")
+                    })?;
             }
         }
         self.session_auxiliary.retired.clear();

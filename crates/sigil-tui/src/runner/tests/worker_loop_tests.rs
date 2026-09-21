@@ -21,8 +21,7 @@ use crate::runner::{
         PlanReviewExecutionResult, VerificationCheckPromotionKind,
         VerificationCheckPromotionOutcome, append_mcp_elicitation_audits, append_plan_draft,
         chat_agent_run_input_with_repo_context, clean_mutation_artifacts,
-        commit_tui_plan_review_revision_waiting, configured_max_parallel_changeset_steps,
-        configured_max_parallel_read_steps, configured_provider_route_concurrency_limit,
+        commit_tui_plan_review_revision_waiting, configured_provider_route_concurrency_limit,
         delete_mutation_artifact, deliver_durable_revision_terminal_after_audit,
         materialize_task_verification_config, prepare_task_run_cancellation,
         preserve_revision_result_after_audit, promote_workspace_verification_check,
@@ -73,11 +72,6 @@ fn worker_revision_waiting_commits_the_exact_public_outbox_before_tui_wakeup() -
             &review_id,
             &base_attempt_id,
         ),
-        finalizer_session_ref: Some(sigil_kernel::plan_review_finalizer_session_ref(
-            &review_id,
-            &base_attempt_id,
-            1,
-        )),
         revision_request_id: None,
         attempt_ordinal: 1,
         base_plan_id: None,
@@ -274,7 +268,6 @@ fn durable_revision_success_survives_a_real_post_run_audit_append_failure() {
                 final_text: "original durable revision result".to_owned(),
                 tool_calls: 0,
                 final_message_id: None,
-                completion_claim: None,
             },
         )),
         audit_result,
@@ -369,22 +362,14 @@ fn append_plan_draft_preserves_plain_model_output_without_graph_contract() {
 }
 
 #[test]
-fn task_parallel_concurrency_uses_config_and_clamps_zero() {
+fn task_provider_route_concurrency_uses_its_own_config_and_clamps_zero() {
     let mut config = TaskConfig::default();
-    assert_eq!(configured_max_parallel_read_steps(&config), 4);
-    assert_eq!(configured_max_parallel_changeset_steps(&config), 2);
     assert_eq!(configured_provider_route_concurrency_limit(&config), 4);
 
-    config.max_parallel_read_steps = 2;
-    config.max_parallel_changeset_steps = 3;
-    assert_eq!(configured_max_parallel_read_steps(&config), 2);
-    assert_eq!(configured_max_parallel_changeset_steps(&config), 3);
-    assert_eq!(configured_provider_route_concurrency_limit(&config), 3);
+    config.max_concurrent_provider_routes = 6;
+    assert_eq!(configured_provider_route_concurrency_limit(&config), 6);
 
-    config.max_parallel_read_steps = 0;
-    config.max_parallel_changeset_steps = 0;
-    assert_eq!(configured_max_parallel_read_steps(&config), 1);
-    assert_eq!(configured_max_parallel_changeset_steps(&config), 1);
+    config.max_concurrent_provider_routes = 0;
     assert_eq!(configured_provider_route_concurrency_limit(&config), 1);
 }
 
@@ -496,7 +481,10 @@ fn tui_materialize_task_verification_wrapper_records_specs_policy_and_events() {
                 == sigil_kernel::CheckDiscoverySource::UserExplicitConfig)
     );
     assert!(projection.latest_policy(&scope).is_some_and(|entry| {
-        entry.policy.required_checks.len() == 1
+        entry.policy.required_checks.is_empty()
+            && entry.policy.completion_criteria
+                == sigil_kernel::CompletionCriteria::NoChecksRequired
+            && entry.policy.allow_unverified_completion
             && entry.policy.workspace_trust_requirement
                 == sigil_kernel::WorkspaceTrustRequirement::None
             && entry
@@ -547,6 +535,54 @@ fn tui_materialize_task_verification_wrapper_records_specs_policy_and_events() {
         })
         .count();
     assert_eq!(control_count, 2);
+
+    // Catalog refresh preserves a separately recorded, explicit requirement.
+    let mut required_policy = projection
+        .latest_policy(&scope)
+        .expect("candidate policy")
+        .policy
+        .clone();
+    required_policy.required_checks.push(
+        projection
+            .check_spec(&scope, "cargo-test")
+            .expect("explicit candidate")
+            .trusted_check
+            .check_spec
+            .clone(),
+    );
+    required_policy.completion_criteria = sigil_kernel::CompletionCriteria::AllRequiredChecks;
+    required_policy.allow_unverified_completion = false;
+    session
+        .append_control(ControlEntry::VerificationPolicyChanged(
+            sigil_kernel::VerificationPolicyChangedEntry::new(
+                scope.clone(),
+                required_policy.clone(),
+                "explicit-required-check",
+            )
+            .expect("explicit required policy"),
+        ))
+        .expect("record explicit requirement");
+    let entries_before_refresh = session.entries().len();
+    let (tx, rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(tx);
+    materialize_task_verification_config(
+        &mut session,
+        &mut handler,
+        &root_config,
+        temp.path(),
+        &task_id,
+    )
+    .expect("refresh with an explicit required policy");
+    assert_eq!(session.entries().len(), entries_before_refresh);
+    assert_eq!(
+        session
+            .verification_state_projection()
+            .latest_policy(&scope)
+            .expect("required policy")
+            .policy,
+        required_policy
+    );
+    assert!(rx.try_iter().next().is_none());
 }
 
 #[test]
@@ -721,12 +757,11 @@ fn materialize_task_verification_config_uses_workspace_check_promotion() {
         check.trusted_check.promoted_by,
         sigil_kernel::CheckPromotion::UserApproved { .. }
     ));
-    assert!(
-        projection
-            .latest_policy(&task_scope)
-            .is_some_and(|entry| entry.policy.workspace_trust_requirement
-                == sigil_kernel::WorkspaceTrustRequirement::ApprovalOrSandbox)
-    );
+    assert!(projection.latest_policy(&task_scope).is_some_and(|entry| {
+        entry.policy.required_checks.is_empty()
+            && entry.policy.completion_criteria
+                == sigil_kernel::CompletionCriteria::NoChecksRequired
+    }));
     let controls = rx
         .try_iter()
         .filter_map(|message| match message {
@@ -744,6 +779,82 @@ fn materialize_task_verification_config_uses_workspace_check_promotion() {
             ControlEntry::VerificationPolicyChanged(_)
         ]
     ));
+
+    // Promotion authorizes this candidate; a separate explicit requirement must retain its
+    // workspace execution trust gate after another catalog refresh.
+    let mut required_policy = projection
+        .latest_policy(&task_scope)
+        .expect("candidate policy")
+        .policy
+        .clone();
+    required_policy
+        .required_checks
+        .push(check.trusted_check.check_spec.clone());
+    required_policy.completion_criteria = sigil_kernel::CompletionCriteria::AllRequiredChecks;
+    required_policy.allow_unverified_completion = false;
+    required_policy.workspace_trust_requirement =
+        sigil_kernel::WorkspaceTrustRequirement::ApprovalOrSandbox;
+    session
+        .append_control(ControlEntry::VerificationPolicyChanged(
+            sigil_kernel::VerificationPolicyChangedEntry::new(
+                task_scope.clone(),
+                required_policy.clone(),
+                "explicit-promoted-check-requirement",
+            )
+            .expect("workspace required policy"),
+        ))
+        .expect("record workspace requirement");
+    let entries_before_refresh = session.entries().len();
+    let (tx, rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(tx);
+    materialize_task_verification_config(
+        &mut session,
+        &mut handler,
+        &root_config,
+        temp.path(),
+        &task_id,
+    )
+    .expect("refresh with a workspace required policy");
+    let refreshed = session.verification_state_projection();
+    assert_eq!(
+        refreshed
+            .latest_policy(&task_scope)
+            .expect("required policy")
+            .policy,
+        required_policy
+    );
+    assert_eq!(
+        refreshed
+            .check_spec(&task_scope, "cargo-test")
+            .expect("promoted candidate")
+            .trusted_check,
+        check.trusted_check
+    );
+    assert_eq!(session.entries().len(), entries_before_refresh);
+    assert!(rx.try_iter().next().is_none());
+    let mut readiness =
+        sigil_kernel::ReadinessInput::new_run(sigil_kernel::RunStatus::Completed, required_policy);
+    let trust_blocked = |input: &sigil_kernel::ReadinessInput| {
+        sigil_kernel::evaluate_readiness(input)
+            .reasons
+            .contains(&sigil_kernel::ReadinessReason::WorkspaceTrustUnsatisfied)
+    };
+    assert!(trust_blocked(&readiness));
+    let sigil_kernel::CheckPromotion::UserApproved { approval_event_id } =
+        &check.trusted_check.promoted_by
+    else {
+        panic!("workspace check retains its actual approval");
+    };
+    readiness.workspace_trust_approval_event_id = Some(approval_event_id.clone());
+    assert!(!trust_blocked(&readiness));
+    readiness.workspace_trust_approval_event_id = None;
+    readiness.policy.required_checks.clear();
+    readiness.policy.completion_criteria = sigil_kernel::CompletionCriteria::NoChecksRequired;
+    readiness.policy.allow_unverified_completion = true;
+    assert!(
+        trust_blocked(&readiness),
+        "zero checks cannot bypass a retained trust requirement"
+    );
 }
 
 #[test]

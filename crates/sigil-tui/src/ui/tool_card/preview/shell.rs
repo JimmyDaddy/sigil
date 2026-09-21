@@ -38,7 +38,8 @@ pub(in crate::ui::tool_card) fn render_bash_preview_with_palette(
 pub(in crate::ui::tool_card) fn bash_running_without_output_preview(
     summary: &ToolCardRender,
 ) -> bool {
-    status_kind_from_label(&summary.status) == StatusKind::Running
+    (status_kind_from_label(&summary.status) == StatusKind::Running
+        || matches!(summary.status.as_str(), "pending" | "approval" | "denied"))
         && summary.metadata.returned_bytes.unwrap_or(0) == 0
         && summary.metadata.returned_lines.unwrap_or(0) == 0
 }
@@ -65,7 +66,10 @@ pub(in crate::ui::tool_card) fn render_bash_command_section_with_palette(
     } else {
         max_content_width.saturating_sub(4).max(1)
     };
-    let command_lines = wrap_display_width(&command, command_width);
+    let command_lines = command
+        .split('\n')
+        .flat_map(|line| wrap_display_width(line, command_width))
+        .collect::<Vec<_>>();
     let mut lines = command_lines
         .into_iter()
         .enumerate()

@@ -2,9 +2,7 @@ use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentProfileId, AgentProfileTrustEntry, AgentTrustState, ControlEntry,
     ConversationInputQueueId, JsonlSessionStore, ProviderCapabilities, ReasoningStreamSupport,
-    RunCancellationTarget, SecretString, Session, SessionLogEntry, SessionRef, TaskId,
-    TaskPauseRequest, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepId,
-    TaskStepSpec, ToolRegistry,
+    SecretString, Session, SessionLogEntry, TaskId, TaskPauseRequest, ToolRegistry,
 };
 use std::sync::Arc;
 
@@ -14,9 +12,7 @@ use super::{
         worker_loop::{
             IdleAutoCompactionPreparation, IdleAutoCompactionState, IdleV2CompactionPreparation,
             SessionTransitionKind, WorkerCommandDomain, WorkerLoopState,
-            changed_task_completion_progress, changed_task_provider_route_diagnostics,
-            classify_worker_command, task_completion_progress_for_active_task, transition_session,
-            validate_task_pause_request,
+            changed_task_provider_route_diagnostics, classify_worker_command, transition_session,
         },
     },
     super::{
@@ -105,7 +101,6 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
             .routes
             .is_empty()
     );
-    assert!(state.agent.last_task_completion_progress.batch.is_none());
     assert!(state.approval_command_receipts.is_empty());
     assert!(
         state.defer_startup_artifact_gc,
@@ -141,74 +136,6 @@ fn worker_loop_state_initializes_domain_owners_from_session() -> Result<()> {
 }
 
 #[test]
-fn task_pause_validation_rejects_stale_plan_and_wrong_active_target() -> Result<()> {
-    let task_id = TaskId::new("task_1")?;
-    let entries = vec![
-        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
-            task_id: task_id.clone(),
-            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
-            objective: "pause safely".to_owned(),
-            title: None,
-
-            status: TaskRunStatus::Running,
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
-            task_id: task_id.clone(),
-            plan_version: 2,
-            status: TaskPlanStatus::Accepted,
-            steps: vec![TaskStepSpec {
-                step_id: TaskStepId::new("step_1")?,
-                title: "Inspect".to_owned(),
-                display_name: None,
-                detail: None,
-                role: sigil_kernel::AgentRole::SubagentRead,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: Some(sigil_kernel::TaskStepMode::Read),
-                isolation: Some(sigil_kernel::TaskIsolationMode::SharedReadOnly),
-            }],
-            reason: None,
-        })),
-        SessionLogEntry::Control(ControlEntry::TaskRunCancellationScopeBound(
-            sigil_kernel::TaskRunCancellationScopeBoundEntry {
-                task_id: task_id.clone(),
-                run_scope_id: "scope_1".to_owned(),
-            },
-        )),
-    ];
-    let target = RunCancellationTarget::Task {
-        task_id: task_id.as_str().to_owned(),
-    };
-    let request = TaskPauseRequest::new(task_id, 2);
-    validate_task_pause_request(&request, &target, "scope_1", &entries)
-        .expect("exact active task plan should pause");
-
-    let stale = TaskPauseRequest::new(request.task_id.clone(), 1);
-    assert!(
-        validate_task_pause_request(&stale, &target, "scope_1", &entries)
-            .expect_err("stale plan must fail")
-            .contains("execution authority changed")
-    );
-    let wrong_target = RunCancellationTarget::Task {
-        task_id: "task_2".to_owned(),
-    };
-    assert!(
-        validate_task_pause_request(&request, &wrong_target, "scope_1", &entries)
-            .expect_err("wrong active task must fail")
-            .contains("another task")
-    );
-    validate_task_pause_request(&request, &RunCancellationTarget::Run, "scope_1", &entries)
-        .expect("automatic handoff task should inherit the active root cancellation scope");
-    assert!(
-        validate_task_pause_request(&request, &RunCancellationTarget::Run, "scope_2", &entries,)
-            .expect_err("another root run scope must fail")
-            .contains("another task")
-    );
-    Ok(())
-}
-
-#[test]
 fn task_route_diagnostics_emit_only_on_change_and_clear_when_task_stops() {
     let empty = sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default();
     let active = task_route_diagnostics_fixture("route", 1);
@@ -233,69 +160,6 @@ fn task_route_diagnostics_emit_only_on_change_and_clear_when_task_stops() {
         ),
         Some(empty)
     );
-}
-
-#[test]
-fn task_completion_progress_emits_only_on_change_and_clears_when_task_stops() {
-    let empty = sigil_runtime::TaskCompletionProgressSnapshot::default();
-    let active = task_completion_progress_fixture();
-
-    assert_eq!(
-        changed_task_completion_progress(true, active.clone(), &empty),
-        Some(active.clone())
-    );
-    assert_eq!(
-        changed_task_completion_progress(true, active.clone(), &active),
-        None
-    );
-    assert_eq!(
-        changed_task_completion_progress(false, active, &empty),
-        None
-    );
-    assert_eq!(
-        changed_task_completion_progress(false, empty.clone(), &task_completion_progress_fixture(),),
-        Some(empty)
-    );
-}
-
-#[test]
-fn task_completion_progress_does_not_cross_task_identity() {
-    let current = task_completion_progress_fixture();
-
-    assert_eq!(
-        task_completion_progress_for_active_task(Some("task_1"), current.clone()),
-        current
-    );
-    assert_eq!(
-        task_completion_progress_for_active_task(
-            Some("task_2"),
-            task_completion_progress_fixture(),
-        ),
-        sigil_runtime::TaskCompletionProgressSnapshot::default()
-    );
-    assert_eq!(
-        task_completion_progress_for_active_task(None, task_completion_progress_fixture()),
-        sigil_runtime::TaskCompletionProgressSnapshot::default()
-    );
-}
-
-fn task_completion_progress_fixture() -> sigil_runtime::TaskCompletionProgressSnapshot {
-    sigil_runtime::TaskCompletionProgressSnapshot {
-        batch: Some(sigil_runtime::TaskCompletionProgress {
-            generation: 1,
-            task_id: "task_1".to_owned(),
-            plan_version: 1,
-            arrived: 1,
-            total: 1,
-            members: vec![sigil_runtime::TaskCompletionProgressMember {
-                step_id: "read".to_owned(),
-                title: "Read".to_owned(),
-                request_order: 1,
-                arrival_order: Some(1),
-                outcome: Some(sigil_runtime::TaskCompletionOutcome::Succeeded),
-            }],
-        }),
-    }
 }
 
 fn task_route_diagnostics_fixture(
@@ -324,7 +188,10 @@ fn worker_commands_are_routed_to_explicit_domains() {
         (WorkerCommand::CancelRun, WorkerCommandDomain::RunPlan),
         (
             WorkerCommand::PauseTask {
-                request: TaskPauseRequest::new(TaskId::new("task_1").expect("task id"), 1),
+                request: TaskPauseRequest::direct(
+                    TaskId::new("task_1").expect("task id"),
+                    "admission-1",
+                ),
             },
             WorkerCommandDomain::RunPlan,
         ),

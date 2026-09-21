@@ -131,28 +131,6 @@ fn render_body(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, the
 fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'static>> {
     let detail = &pending.detail;
     let mut lines = Vec::new();
-    // RFC-0067 13.1: a compile-failed plan shows the exact step/field/reason instead of a
-    // runnable state.
-    if let Some(failure) = detail.compile.failure.as_ref() {
-        lines.push(Line::from(Span::styled(
-            "Plan needs changes",
-            Style::default()
-                .fg(theme.palette.status_error)
-                .add_modifier(Modifier::BOLD),
-        )));
-        if let Some(step) = failure.affected_step.as_deref() {
-            lines.push(Line::from(Span::styled(
-                format!("step: {step}"),
-                styles::muted(&theme.palette),
-            )));
-        }
-        push_multiline(&mut lines, "", &failure.reason);
-        lines.push(Line::from(Span::styled(
-            "Revise the plan to fix the compile failure, or reject it.",
-            styles::muted(&theme.palette),
-        )));
-        lines.push(Line::raw(String::new()));
-    }
     if let Some(error) = pending.last_run_failure.as_deref() {
         lines.push(Line::from(Span::styled(
             "Task could not start",
@@ -161,13 +139,8 @@ fn plan_detail_lines(pending: &PendingPlanApproval, theme: &Theme) -> Vec<Line<'
                 .add_modifier(Modifier::BOLD),
         )));
         push_multiline(&mut lines, "", error);
-        let recovery_hint = if pending.retrying_materialization {
-            "This legacy Task remains intact. Retry it after correcting the reported condition, or revise the plan."
-        } else {
-            "The plan remains available. Correct the reported condition and run it again."
-        };
         lines.push(Line::from(Span::styled(
-            recovery_hint,
+            "The plan remains available. Correct the reported condition and run it again.",
             styles::muted(&theme.palette),
         )));
         lines.push(Line::raw(String::new()));
@@ -342,18 +315,11 @@ fn render_actions(frame: &mut Frame, area: Rect, pending: &PendingPlanApproval, 
             } else {
                 Style::default().fg(theme.palette.button_inactive_fg)
             };
-            let action_label =
-                if action == PlanWorkbenchAction::Run && pending.retrying_materialization {
-                    if compact_labels {
-                        "Retry"
-                    } else {
-                        "Retry task"
-                    }
-                } else if compact_labels && action == PlanWorkbenchAction::Save {
-                    "Save"
-                } else {
-                    action.label()
-                };
+            let action_label = if compact_labels && action == PlanWorkbenchAction::Save {
+                "Save"
+            } else {
+                action.label()
+            };
             let label = if compact_labels {
                 format!("{}:{action_label}", action.shortcut())
             } else {

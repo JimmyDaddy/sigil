@@ -1428,14 +1428,14 @@ fn config_provider_selection_switches_route_without_replacing_the_session() -> R
 
     assert_eq!(app.session_id, original_session_id);
     assert_eq!(app.session_log_path, original_session_path);
-    assert_eq!(app.runtime.provider_name, "openai_compat");
-    assert_eq!(app.runtime.model_name, "gpt-4.1");
+    assert_eq!(app.runtime.provider_name, "deepseek");
+    assert_eq!(app.runtime.model_name, "deepseek-v4-flash");
     assert_eq!(
         app.runtime
             .model_route
             .as_ref()
             .map(|route| route.model_ref.connection_id.as_str()),
-        Some("secondary")
+        Some("deepseek-default")
     );
     assert_eq!(
         root_config

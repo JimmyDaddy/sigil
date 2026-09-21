@@ -17,6 +17,9 @@ pub(super) struct LivePreviewState {
     slots: BTreeMap<String, usize>,
     durable_sequence: u64,
     pending: BTreeMap<String, LiveRunUpdate>,
+    execution_pending: BTreeMap<String, LiveRunUpdate>,
+    execution_revisions: BTreeMap<String, u64>,
+    execution_calls: BTreeMap<String, String>,
 }
 
 impl AppState {
@@ -74,6 +77,7 @@ impl AppState {
             // Durable terminal delivery still owns committing/restoring timeline entries.
             self.live_preview.reader = None;
             self.live_preview.pending.clear();
+            self.live_preview.execution_pending.clear();
             return false;
         }
         let updates = match reader.poll_updates() {
@@ -97,7 +101,46 @@ impl AppState {
             {
                 continue;
             }
-            if self.live_preview.attempt_id.as_deref() != Some(&update.attempt_id) {
+            if update.kind == LiveRunUpdateKind::ToolProgress {
+                let Some(progress) = &update.tool_progress else {
+                    continue;
+                };
+                if self
+                    .live_preview
+                    .execution_revisions
+                    .get(&update.slot_id)
+                    .is_some_and(|revision| *revision >= update.live_revision)
+                {
+                    continue;
+                }
+                if !self
+                    .live_preview
+                    .execution_revisions
+                    .contains_key(&update.slot_id)
+                    && self.live_preview.execution_revisions.len() >= 4
+                    && let Some(oldest) = self
+                        .live_preview
+                        .execution_revisions
+                        .iter()
+                        .min_by_key(|(_, revision)| **revision)
+                        .map(|(id, _)| id.clone())
+                {
+                    self.live_preview.execution_revisions.remove(&oldest);
+                    self.live_preview.execution_calls.remove(&oldest);
+                    self.live_preview.execution_pending.remove(&oldest);
+                }
+                self.live_preview
+                    .execution_calls
+                    .insert(update.slot_id.clone(), progress.call_id.clone());
+                self.live_preview
+                    .execution_revisions
+                    .insert(update.slot_id.clone(), update.live_revision);
+                self.live_preview
+                    .execution_pending
+                    .insert(update.slot_id.clone(), update);
+                continue;
+            }
+            if self.live_preview.attempt_id != update.attempt_id {
                 // Producer revisions increase across physical attempts. An old attempt can
                 // never replace the current one even if its durable base becomes ready later.
                 if update.live_revision <= self.live_preview.latest_revision {
@@ -109,7 +152,7 @@ impl AppState {
                 self.live_preview.retired.clear();
                 self.live_preview.retired_arguments.clear();
                 self.discard_provisional_provider_output();
-                self.live_preview.attempt_id = Some(update.attempt_id.clone());
+                self.live_preview.attempt_id = update.attempt_id.clone();
             }
             if self.live_preview.retired.contains(&update.slot_id)
                 || (update.kind == LiveRunUpdateKind::ToolCallArguments
@@ -151,7 +194,7 @@ impl AppState {
             })
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
-        let mut changed = false;
+        let mut changed = self.apply_ready_execution_updates();
         for key in ready {
             let Some(update) = self.live_preview.pending.remove(&key) else {
                 continue;
@@ -182,40 +225,7 @@ impl AppState {
                     changed = true;
                     continue;
                 }
-                LiveRunUpdateKind::ToolProgress => {
-                    if let Some(progress) = update.tool_progress {
-                        match sigil_kernel::ToolExecutionId::new(progress.execution_id) {
-                            Ok(execution_id) => {
-                                let event = sigil_kernel::ToolProgressEvent {
-                                    execution_id,
-                                    call_id: progress.call_id,
-                                    tool_name: progress.tool_name,
-                                    sequence: update.live_revision,
-                                    status: progress.status,
-                                    message: None,
-                                    output_preview: Some(preview),
-                                    output_log_ref: None,
-                                    total_bytes: progress.total_bytes,
-                                    updated_at_ms: progress.updated_at_ms,
-                                    details: serde_json::Value::Null,
-                                };
-                                if let Err(error) = sigil_kernel::EventHandler::handle(
-                                    self,
-                                    sigil_kernel::RunEvent::ToolProgress(event),
-                                ) {
-                                    self.last_notice =
-                                        Some(format!("tool preview unavailable: {error}"));
-                                }
-                            }
-                            Err(error) => {
-                                self.last_notice =
-                                    Some(format!("tool preview identity invalid: {error}"))
-                            }
-                        }
-                    }
-                    changed = true;
-                    continue;
-                }
+                LiveRunUpdateKind::ToolProgress => continue,
             };
             let prior = self.live_preview.slots.get(&update.slot_id).copied();
             let index = if let Some(index) = prior.filter(|index| {
@@ -247,6 +257,68 @@ impl AppState {
         changed
     }
 
+    fn apply_ready_execution_updates(&mut self) -> bool {
+        let ready = self
+            .live_preview
+            .execution_pending
+            .iter()
+            .filter(|(_, update)| {
+                update.base_durable_sequence <= self.live_preview.durable_sequence
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for key in ready {
+            let Some(update) = self.live_preview.execution_pending.remove(&key) else {
+                continue;
+            };
+            let Some(progress) = update.tool_progress else {
+                continue;
+            };
+            // The matching completed call must already be delivered. A final result removes
+            // it, so delayed snapshots cannot resurrect a finished execution card.
+            if !self.safe_tool_calls.contains_key(&progress.call_id) {
+                continue;
+            }
+            let preview = if update.truncated {
+                format!(
+                    "{}\n[Live preview truncated; complete output follows.]",
+                    update.preview.as_str()
+                )
+            } else {
+                update.preview.as_str().to_owned()
+            };
+            match sigil_kernel::ToolExecutionId::new(progress.execution_id) {
+                Ok(execution_id) => {
+                    let event = sigil_kernel::ToolProgressEvent {
+                        execution_id,
+                        call_id: progress.call_id,
+                        tool_name: progress.tool_name,
+                        sequence: update.live_revision,
+                        status: progress.status,
+                        message: (!progress.preview_is_output).then(|| preview.clone()),
+                        output_preview: progress.preview_is_output.then_some(preview),
+                        output_log_ref: None,
+                        total_bytes: progress.total_bytes,
+                        updated_at_ms: progress.updated_at_ms,
+                        details: serde_json::json!({ "started_at_ms": progress.started_at_ms }),
+                    };
+                    if let Err(error) = sigil_kernel::EventHandler::handle(
+                        self,
+                        sigil_kernel::RunEvent::ToolProgress(event),
+                    ) {
+                        self.last_notice = Some(format!("tool preview unavailable: {error}"));
+                    }
+                }
+                Err(error) => {
+                    self.last_notice = Some(format!("tool preview identity invalid: {error}"))
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
     pub(super) fn remap_live_preview_after_entry_removal(&mut self, removed: &[usize]) {
         self.live_preview.slots.retain(|_, index| {
             if removed.contains(index) {
@@ -268,6 +340,18 @@ impl AppState {
     }
 
     pub(super) fn retire_live_tool_slot(&mut self, call_id: &str) {
+        let executions = self
+            .live_preview
+            .execution_calls
+            .iter()
+            .filter(|(_, call)| call.as_str() == call_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in executions {
+            self.live_preview.execution_calls.remove(&id);
+            self.live_preview.execution_revisions.remove(&id);
+            self.live_preview.execution_pending.remove(&id);
+        }
         self.live_preview.pending.remove(call_id);
         self.live_preview.slots.remove(call_id);
         if self.live_preview.revisions.contains_key(call_id) {

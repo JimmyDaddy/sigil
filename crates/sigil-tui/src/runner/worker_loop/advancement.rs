@@ -134,8 +134,6 @@ where
     let oauth_advanced = advance_mcp_oauth_results(context.message_tx, context.state);
     let task_route_diagnostics_advanced =
         advance_task_provider_route_diagnostics(context.message_tx, context.state);
-    let task_completion_progress_advanced =
-        advance_task_completion_progress(context.message_tx, context.state);
 
     match advance_projection_reconciliation(context.message_tx, context.state) {
         ProjectionReconciliationControl::Blocked => {
@@ -144,7 +142,6 @@ where
                 || refresh_advanced
                 || oauth_advanced
                 || task_route_diagnostics_advanced
-                || task_completion_progress_advanced
             {
                 WorkerAdvancementControl::SkipCommandPoll
             } else {
@@ -199,7 +196,6 @@ where
         || refresh_advanced
         || oauth_advanced
         || task_route_diagnostics_advanced
-        || task_completion_progress_advanced
     {
         WorkerAdvancementControl::SkipCommandPoll
     } else {
@@ -545,46 +541,6 @@ fn advance_task_provider_route_diagnostics(
     true
 }
 
-fn advance_task_completion_progress(
-    message_tx: &mpsc::Sender<WorkerMessage>,
-    state: &mut WorkerLoopState,
-) -> bool {
-    let Some(agent_supervisor) = state.agent.supervisor.as_ref() else {
-        return false;
-    };
-    let active_task_id = active_task_id(state);
-    let active_snapshot = task_completion_progress_for_active_task(
-        active_task_id,
-        agent_supervisor.task_completion_progress(),
-    );
-    let Some(snapshot) = changed_task_completion_progress(
-        active_task_id.is_some(),
-        active_snapshot,
-        &state.agent.last_task_completion_progress,
-    ) else {
-        return false;
-    };
-    state.agent.last_task_completion_progress = snapshot.clone();
-    let _ = message_tx.send(WorkerMessage::TaskCompletionProgressUpdated { snapshot });
-    true
-}
-
-pub(in crate::runner) fn task_completion_progress_for_active_task(
-    active_task_id: Option<&str>,
-    snapshot: sigil_runtime::TaskCompletionProgressSnapshot,
-) -> sigil_runtime::TaskCompletionProgressSnapshot {
-    if active_task_id.is_some_and(|active_task_id| {
-        snapshot
-            .batch
-            .as_ref()
-            .is_some_and(|batch| batch.task_id == active_task_id)
-    }) {
-        snapshot
-    } else {
-        sigil_runtime::TaskCompletionProgressSnapshot::default()
-    }
-}
-
 pub(in crate::runner) fn changed_task_provider_route_diagnostics(
     task_run_active: bool,
     active_snapshot: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
@@ -594,19 +550,6 @@ pub(in crate::runner) fn changed_task_provider_route_diagnostics(
         active_snapshot
     } else {
         sigil_runtime::TaskProviderRouteDiagnosticsSnapshot::default()
-    };
-    (snapshot != *previous).then_some(snapshot)
-}
-
-pub(in crate::runner) fn changed_task_completion_progress(
-    task_run_active: bool,
-    active_snapshot: sigil_runtime::TaskCompletionProgressSnapshot,
-    previous: &sigil_runtime::TaskCompletionProgressSnapshot,
-) -> Option<sigil_runtime::TaskCompletionProgressSnapshot> {
-    let snapshot = if task_run_active {
-        active_snapshot
-    } else {
-        sigil_runtime::TaskCompletionProgressSnapshot::default()
     };
     (snapshot != *previous).then_some(snapshot)
 }
@@ -939,7 +882,7 @@ where
             let delivered = ConversationInputStatusEntry {
                 queue_id: candidate.promotion.queue_id.clone(),
                 status: ConversationInputStatus::Delivered,
-                reason: Some("task guidance accepted at scheduler safe point".to_owned()),
+                reason: Some("direct Task guidance accepted for continuation".to_owned()),
                 updated_at_ms: Some(current_unix_time_ms()),
             };
             if let Err(error) =
@@ -2447,36 +2390,11 @@ where
                     .as_ref()
                     .map(|session| session.entries().to_vec())
                     .unwrap_or_default();
-                let planner_input = (status == TaskRunStatus::Paused)
-                    .then(|| TaskId::new(task_id.clone()).ok())
-                    .flatten()
-                    .and_then(|task_id| {
-                        sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
-                            &entries,
-                        )
-                        .ok()
-                        .and_then(|projection| {
-                            projection
-                                .pending()
-                                .filter(|route| route.budget_scope_id == task_id)
-                                .filter(|route| {
-                                    matches!(
-                                        route.request.source,
-                                        sigil_kernel::UserInputSourceV1::Planner { .. }
-                                    )
-                                })
-                                .max_by_key(|route| route.request.requested_at_unix_ms)
-                                .map(|route| route.request.clone())
-                        })
-                    });
                 let _ = message_tx.send(WorkerMessage::TaskRunFinished {
                     task_id,
                     status,
                     entries: entries.clone(),
                 });
-                if let Some(request) = planner_input {
-                    let _ = message_tx.send(WorkerMessage::UserInputRequested { request, entries });
-                }
             }
             RunTaskPayload::Task {
                 task_id,
@@ -2703,6 +2621,143 @@ where
     WorkerAdvancementControl::PollCommand
 }
 
+fn start_direct_task_background_continuation<P>(
+    context: WorkerAdvancementContext<'_, P>,
+    task_id: sigil_kernel::TaskId,
+) -> WorkerAdvancementControl
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let WorkerAdvancementContext {
+        runtime,
+        agent,
+        root_config,
+        options,
+        message_tx,
+        elicitation_handler,
+        role_provider_builder,
+        managed_verification_execution,
+        state,
+        ..
+    } = context;
+    let Some(mut run_session) = state.session.current.take() else {
+        let _ = message_tx.send(WorkerMessage::RunFailed(
+            "session state is unavailable for Direct Task background continuation".to_owned(),
+        ));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    };
+    let resolved = match resolve_continue_task(&run_session, Some(task_id.as_str().to_owned())) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            state.session.current = Some(run_session);
+            let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                "Direct Task background result could not resume its owner: {error}"
+            )));
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    let parent_session_ref = match session_ref_for_log_path(&state.session.log_path) {
+        Ok(reference) => reference,
+        Err(error) => {
+            state.session.current = Some(run_session);
+            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+            return WorkerAdvancementControl::SkipCommandPoll;
+        }
+    };
+    if let Err(error) =
+        state.acquire_route_execution_owner_for_scope(run_session.session_scope_id())
+    {
+        state.session.current = Some(run_session);
+        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    }
+    let (cancellation_owner, cancellation_recorder, cancellation_handle, cancellation_task_guard) =
+        match prepare_task_run_cancellation(&mut run_session, &task_id) {
+            Ok(cancellation) => cancellation,
+            Err(error) => {
+                state.session.current = Some(run_session);
+                state.run.route_execution_owner = None;
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                return WorkerAdvancementControl::SkipCommandPoll;
+            }
+        };
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    let run_id = state.allocate_run_id();
+    let public_run_id = format!("foreground-run-{}", uuid::Uuid::new_v4());
+    if let Err(error) = handler.start_public_run(
+        &run_session,
+        &public_run_id,
+        &sigil_kernel::safe_persistence_text(&resolved.2),
+    ) {
+        state.session.current = Some(run_session);
+        state.run.route_execution_owner = None;
+        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+            "failed to persist Direct Task continuation admission: {error:#}"
+        )));
+        return WorkerAdvancementControl::SkipCommandPoll;
+    }
+    let (approval_tx, approval_rx) = mpsc::channel();
+    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+    let url_capability_registrar = run_session.user_url_capability_registrar();
+    let image_attachment_resolver = run_session.image_attachment_resolver();
+    let effective_root_config =
+        agent_runtime::effective_orchestration_root_config(root_config, &run_session);
+    let tool_artifact_read_budget = state.session.begin_root_tool_artifact_read_budget();
+    let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+        task_id: resolved.1.clone(),
+        objective: sigil_kernel::safe_persistence_text(&resolved.2),
+    });
+    state.stop_control.bind(&cancellation_owner);
+    let handle = spawn_task_continue(
+        runtime,
+        TaskContinueSpawn {
+            run_id,
+            session: run_session,
+            task_id: resolved.0,
+            task_id_value: resolved.1,
+            parent_session_ref,
+            objective: resolved.2,
+            guidance: None,
+            guidance_promotion: None,
+            root_config: effective_root_config,
+            options: options.clone(),
+            base_registry: agent.tool_registry().clone(),
+            agent_supervisor: state
+                .agent
+                .supervisor
+                .clone()
+                .expect("background collection requires its supervisor"),
+            role_provider_builder: Arc::clone(role_provider_builder),
+            managed_verification_execution: managed_verification_execution.as_ref().map(Arc::clone),
+            task_result_tx: state.run.result_tx.clone(),
+            approval_rx,
+            handler,
+            elicitation_audit_buffer: Arc::clone(&elicitation_audit_buffer),
+            cancellation_handle,
+            cancellation_task_guard,
+            tool_artifact_read_budget,
+        },
+    );
+    state.run.active = Some(ActiveRun {
+        run_id,
+        public_run_id: Some(public_run_id),
+        handle,
+        approval_tx,
+        elicitation_audit_buffer,
+        cancellation_owner,
+        cancellation_recorder,
+        cancellation_target: RunCancellationTarget::Task {
+            task_id: task_id.as_str().to_owned(),
+        },
+        revision_terminal_run_id: None,
+        url_capability_registrar,
+        image_attachment_resolver,
+    });
+    WorkerAdvancementControl::SkipCommandPoll
+}
+
 fn advance_background_agents<P>(
     context: WorkerAdvancementContext<'_, P>,
 ) -> WorkerAdvancementControl
@@ -2716,6 +2771,13 @@ where
         options,
         message_tx,
         elicitation_handler,
+        provider_capabilities,
+        workspace_root,
+        mcp_event_handler,
+        role_provider_builder,
+        context_resolver,
+        managed_extension_execution,
+        managed_verification_execution,
         state,
         ..
     } = context;
@@ -2732,6 +2794,23 @@ where
             &mut state.session.current,
             message_tx,
         );
+        let direct_task_threads = state
+            .session
+            .current
+            .as_ref()
+            .map(|session| {
+                let projection = session.task_state_projection();
+                completed_agent_threads
+                    .iter()
+                    .filter(|thread_id| {
+                        projection
+                            .direct_task_for_background_agent(thread_id)
+                            .is_some()
+                    })
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
         if !completed_agent_threads.is_empty() {
             let pending_agent_input = state.session.current.as_ref().and_then(|session| {
                 sigil_kernel::AgentUserInputRouteProjectionV1::from_session_entries(
@@ -2755,9 +2834,42 @@ where
                     .unwrap_or_default();
                 let _ = message_tx.send(WorkerMessage::UserInputRequested { request, entries });
             }
+        }
+        let ready_direct_tasks = state
+            .session
+            .current
+            .as_ref()
+            .map(ready_direct_task_background_continuations)
+            .unwrap_or_default();
+        if let Some(task_id) = ready_direct_tasks.into_iter().next() {
+            return start_direct_task_background_continuation(
+                WorkerAdvancementContext {
+                    runtime,
+                    agent,
+                    root_config,
+                    provider_capabilities,
+                    workspace_root,
+                    options,
+                    message_tx,
+                    elicitation_handler,
+                    mcp_event_handler,
+                    role_provider_builder,
+                    context_resolver,
+                    managed_extension_execution,
+                    managed_verification_execution,
+                    state,
+                },
+                task_id,
+            );
+        }
+        if !completed_agent_threads.is_empty() {
             let new_continuation_threads = agent_result_continuation_new_thread_ids(
                 state.session.current.as_ref(),
-                &completed_agent_threads,
+                &completed_agent_threads
+                    .iter()
+                    .filter(|thread_id| !direct_task_threads.contains(*thread_id))
+                    .cloned()
+                    .collect::<Vec<_>>(),
             );
             if !new_continuation_threads.is_empty()
                 && let Err(error) = append_agent_result_continuation_status_entries(
@@ -2773,7 +2885,10 @@ where
             }
             let (blocking, non_blocking) = partition_agent_result_continuations(
                 state.session.current.as_ref(),
-                completed_agent_threads,
+                completed_agent_threads
+                    .into_iter()
+                    .filter(|thread_id| !direct_task_threads.contains(thread_id))
+                    .collect(),
             );
             extend_agent_thread_ids_unique(
                 &mut state.session.pending_agent_result_continuations,
@@ -2965,34 +3080,38 @@ where
             let session_log_path = state.session.log_path.clone();
             let exact_prompts = state.session.exact_prompts.clone();
             let options = options.clone();
-            let tools = if super::agent_runtime::task_orchestration_enabled(&root_config) {
-                let conversation_coordinator = ConversationCoordinator::new(
-                    root_config.task.enabled,
-                    root_config.task.routing_policy,
-                )
-                .with_writable_memory_routing(root_config.memory.writable)
-                .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
-                    &root_config.agent.runtime_provider,
-                    &root_config.agent.model,
-                    sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
-                ))
-                .with_route_capability_evidence(
-                    sigil_runtime::RouteCapabilityEvidence {
+            let (tools, conversation_contract) =
+                if super::agent_runtime::task_orchestration_enabled(&root_config) {
+                    let conversation_coordinator = ConversationCoordinator::new(
+                        root_config.task.enabled,
+                        root_config.task.routing_policy,
+                    )
+                    .with_writable_memory_routing(root_config.memory.writable)
+                    .with_orchestration_route_guard(sigil_runtime::OrchestrationRouteGuard::new(
+                        &root_config.agent.runtime_provider,
+                        &root_config.agent.model,
+                        sigil_runtime::ORCHESTRATION_RUNTIME_BUILD_ID,
+                    ))
+                    .with_route_capability_evidence(sigil_runtime::RouteCapabilityEvidence {
                         provider_supports_routing_tools: agent
                             .provider_capabilities()
                             .supports_tool_stream,
                         task_executor_available: true,
-                    },
-                );
-                let route_capability = conversation_coordinator.resolve_route_capability(session);
-                if route_capability.routes_automatically() {
-                    conversation_coordinator.route_tool_specs_for_session(session, route_capability)
+                    });
+                    let route_capability =
+                        conversation_coordinator.resolve_route_capability(session);
+                    (
+                        conversation_coordinator.conversation_tool_specs_for_session(
+                            session,
+                            route_capability,
+                            agent.tool_registry().specs(),
+                        ),
+                        conversation_coordinator
+                            .conversation_contract_for_session(session, route_capability),
+                    )
                 } else {
-                    agent.tool_registry().specs()
-                }
-            } else {
-                agent.tool_registry().specs()
-            };
+                    (agent.tool_registry().specs(), None)
+                };
             let runtime_handle = runtime.handle().clone();
             let queue_context_resolver = context_resolver.clone();
             let preparation_agent = Arc::clone(agent);
@@ -3052,6 +3171,7 @@ where
                         &mut session,
                         &exact_prompts,
                         &options.memory_config,
+                        conversation_contract,
                         tools,
                         options.reasoning_effort.clone(),
                         options.traffic_partition_key.clone(),

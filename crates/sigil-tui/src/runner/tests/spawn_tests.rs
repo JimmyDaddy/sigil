@@ -366,10 +366,13 @@ fn worker_rebinds_same_origin_route_after_endpoint_correction() -> Result<()> {
         .expect("connection")["base_url"] = json!("https://example.com/wrong-endpoint");
     let (_, wrong_route) =
         sigil_runtime::provider_connections::resolve_default_model_route(&wrong_config)?;
-    let initial = sigil_runtime::provider_connections::load_session_for_route_resume(
+    let initial = sigil_runtime::provider_connections::load_session_for_route(
         &wrong_config,
         &wrong_route,
         JsonlSessionStore::new(&session_log_path)?,
+        None,
+        None,
+        None,
     )?;
     let wrong_fingerprint = initial
         .resolved_model_route()

@@ -30,6 +30,7 @@ use super::{
 pub(crate) struct WorkerSessionRouteDirective {
     pub(crate) recovery_confirmation: Option<String>,
     pub(crate) explicit_selection: Option<(String, ResolvedModelRoute)>,
+    pub(crate) runtime_ready: Option<sigil_kernel::SessionRuntimeReadyV1>,
 }
 
 pub(crate) struct SpawnedAgentWorker {
@@ -614,7 +615,7 @@ pub(crate) fn spawn_agent_worker_with_route_directive_and_attachment(
                 WorkerLoopSessionAttachment::from_shared(
                     effective_session_log_path,
                     attachment_lease,
-                ),
+                ).with_runtime_ready(route_directive.runtime_ready.clone()),
                 options,
                 permission_mode_override,
                 (event_tx, event_rx, urgent_rx),
@@ -688,17 +689,17 @@ fn initialize_worker_session_route(
     )
     .map_err(sigil_runtime::provider_connections::SessionRouteLoadError::Unavailable)?;
     sigil_runtime::validate_session_composition(&inspected.session, root_config)?;
-    let mut session = sigil_runtime::provider_connections::load_session_for_route_resume_with_directive_and_attachment(
-            root_config,
-            &fallback_route,
-            store.clone(),
-            directive.recovery_confirmation.as_deref(),
-            directive
-                .explicit_selection
-                .as_ref()
-                .map(|(provider_name, route)| (provider_name.as_str(), route)),
-            Some(attachment),
-        )?;
+    let mut session = sigil_runtime::provider_connections::load_session_for_route(
+        root_config,
+        &fallback_route,
+        store.clone(),
+        directive.recovery_confirmation.as_deref(),
+        directive
+            .explicit_selection
+            .as_ref()
+            .map(|(provider_name, route)| (provider_name.as_str(), route)),
+        Some(attachment),
+    )?;
     sigil_runtime::bind_session_composition(&mut session, root_config)?;
     let route = session.resolved_model_route().cloned().ok_or_else(|| {
         anyhow::anyhow!(

@@ -174,6 +174,7 @@ fn agent_thread_sidebar_detail_handles_fully_delivered_result_projection() -> an
         result_delivered: true,
         result_fully_delivered: true,
         result_delivered_chars: 40_000,
+        result_delivery_coverage: Default::default(),
         result_delivery_call_ids: vec!["call-read-result".to_owned()],
         attempts: BTreeMap::new(),
         merge_safe_points: Vec::new(),

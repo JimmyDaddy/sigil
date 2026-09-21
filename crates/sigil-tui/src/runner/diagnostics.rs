@@ -328,7 +328,7 @@ pub(super) fn permission_block_reason(
         (
             ToolErrorKind::ExternalDirectoryRequired,
             format!(
-                "external directory access requires permission.external_directory.enabled for {subject_label}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start."
+                "external directory access requires permission.external_directory.enabled for {subject_label}. For scratch files, use $SIGIL_SCRATCH_DIR from exec_command."
             ),
         )
     } else if decision.mode == ApprovalMode::Ask {

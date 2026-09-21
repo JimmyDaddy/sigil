@@ -51,6 +51,8 @@ pub(crate) struct TimelineState {
     pub(in crate::app) revision: u64,
     pub(in crate::app) defer_renders: bool,
     pub(in crate::app) deferred_render_indexes: BTreeSet<usize>,
+    pub(in crate::app) running_command_indices: BTreeSet<usize>,
+    pub(in crate::app) command_elapsed_second: Option<u64>,
     pub(in crate::app) tool_activity_cache: Vec<ToolActivityCacheEntry>,
 }
 
@@ -189,7 +191,6 @@ pub(crate) struct RuntimeStatusState {
     pub(in crate::app) pending_connection_inventory_config: Option<sigil_kernel::RootConfig>,
     pub(crate) active_task: Option<ActiveTaskRuntimeStatus>,
     pub(crate) task_provider_route_diagnostics: sigil_runtime::TaskProviderRouteDiagnosticsSnapshot,
-    pub(crate) task_completion_progress: sigil_runtime::TaskCompletionProgressSnapshot,
 }
 
 #[derive(Debug, Clone)]

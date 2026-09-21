@@ -14,7 +14,7 @@ use sigil_kernel::{
 };
 use sigil_runtime::{
     AgentProfileRegistry, ResolvedAgentProfile, normalize_provider_model_alias,
-    provider_connections::{ConnectionReadiness, bundled_model_entries, load_provider_connections},
+    provider_connections::{bundled_model_entries, load_provider_connections},
 };
 use std::{collections::HashSet, path::Path};
 
@@ -171,20 +171,9 @@ impl AppState {
             return Vec::new();
         };
         let loaded = load_provider_connections(root_config);
-        let Some(inventory) = self.runtime.connection_inventory.as_ref() else {
-            return Vec::new();
-        };
-        let usable_connections = inventory
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.readiness,
-                    ConnectionReadiness::Ready | ConnectionReadiness::Unverified
-                )
-            })
-            .map(|entry| entry.id.clone())
-            .collect::<HashSet<_>>();
+        // Cached credential/catalog observations do not grant route authority. Keep configured
+        // candidates available; the controller validates their actual startup dependencies.
+        let usable_connections = loaded.connections.keys().cloned().collect::<HashSet<_>>();
         let current = self
             .runtime
             .model_route

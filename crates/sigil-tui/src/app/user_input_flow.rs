@@ -242,19 +242,10 @@ impl AppState {
     }
 
     fn focused_user_input_is_multiline(&self) -> bool {
-        self.composer
-            .pending_user_input
-            .as_ref()
-            .and_then(|form| form.view.questions.get(form.focused_question))
-            .is_some_and(|question| {
-                matches!(
-                    question.field,
-                    sigil_kernel::UserInputFieldKindV1::Text {
-                        multiline: true,
-                        ..
-                    }
-                )
-            })
+        // The provider-neutral question contract no longer carries a field-level
+        // multiline switch. Ordinary text questions are single-line form fields;
+        // the dedicated plan-revision editor owns multiline editing explicitly.
+        false
     }
 
     fn update_user_input_scroll(&mut self, update: impl FnOnce(usize) -> usize) {
@@ -289,27 +280,38 @@ impl AppState {
         let Some(question) = form.view.questions.get(form.focused_question) else {
             return;
         };
-        match (&question.field, form.drafts.get_mut(form.focused_question)) {
-            (
-                sigil_kernel::UserInputFieldKindV1::SingleSelect {
-                    options,
-                    allow_other,
-                },
-                Some(UserInputDraftValue::SingleSelect { selected, .. }),
-            ) => {
-                let len = options.len() + usize::from(*allow_other);
+        let selection_was_confirmed = matches!(
+            form.drafts.get(form.focused_question),
+            Some(UserInputDraftValue::SingleSelect {
+                selected_by_user: true,
+                ..
+            })
+        );
+        if !question.options.is_empty() && !question.multiple && selection_was_confirmed {
+            let len = form.view.questions.len();
+            if len > 0 {
+                form.focused_question = ((form.focused_question as isize + direction)
+                    .rem_euclid(len as isize)) as usize;
+            }
+            return;
+        }
+        match (
+            question.options.is_empty(),
+            question.multiple,
+            form.drafts.get_mut(form.focused_question),
+        ) {
+            (false, false, Some(UserInputDraftValue::SingleSelect { selected, .. })) => {
+                let len = question.options.len() + 1;
                 if len > 0 {
                     let current =
                         selected.map_or(if direction < 0 { 0 } else { -1 }, |value| value as isize);
                     *selected = Some(((current + direction).rem_euclid(len as isize)) as usize);
                 }
             }
-            (
-                sigil_kernel::UserInputFieldKindV1::MultiSelect { options, .. },
-                Some(UserInputDraftValue::MultiSelect { cursor, .. }),
-            ) => {
-                if !options.is_empty() {
-                    *cursor = ((*cursor as isize + direction).rem_euclid(options.len() as isize))
+            (false, true, Some(UserInputDraftValue::MultiSelect { cursor, .. })) => {
+                if !question.options.is_empty() {
+                    *cursor = ((*cursor as isize + direction)
+                        .rem_euclid(question.options.len() as isize))
                         as usize;
                 }
             }
@@ -331,28 +333,40 @@ impl AppState {
         let Some(question) = form.view.questions.get(form.focused_question) else {
             return false;
         };
-        match (&question.field, form.drafts.get_mut(form.focused_question)) {
-            (_, Some(UserInputDraftValue::Boolean(value))) => {
-                *value = match value {
-                    None => Some(true),
-                    Some(true) => Some(false),
-                    Some(false) => None,
-                };
+        match (
+            question.options.is_empty(),
+            question.multiple,
+            form.drafts.get_mut(form.focused_question),
+        ) {
+            (
+                false,
+                false,
+                Some(UserInputDraftValue::SingleSelect {
+                    selected,
+                    selected_by_user,
+                    ..
+                }),
+            ) => {
+                let next = selected
+                    .map(|current| (current + 1) % question.options.len())
+                    .unwrap_or(0);
+                *selected = Some(next);
+                *selected_by_user = true;
                 true
             }
             (
-                sigil_kernel::UserInputFieldKindV1::MultiSelect {
-                    options,
-                    max_selected,
-                },
-                Some(UserInputDraftValue::MultiSelect { cursor, selected }),
+                false,
+                true,
+                Some(UserInputDraftValue::MultiSelect {
+                    cursor, selected, ..
+                }),
             ) => {
-                let Some(option) = options.get(*cursor) else {
+                let Some(option) = question.options.get(*cursor) else {
                     return true;
                 };
                 if let Some(index) = selected.iter().position(|value| value == &option.id) {
                     selected.remove(index);
-                } else if selected.len() < *max_selected as usize {
+                } else {
                     selected.push(option.id.clone());
                 }
                 true
@@ -369,11 +383,9 @@ impl AppState {
             return;
         };
         let target = match draft {
-            UserInputDraftValue::Text(value)
-            | UserInputDraftValue::Number(value)
-            | UserInputDraftValue::Integer(value) => Some(value),
+            UserInputDraftValue::Text(value) => Some(value),
             UserInputDraftValue::SingleSelect { other, .. } => Some(other),
-            _ => None,
+            UserInputDraftValue::MultiSelect { other, .. } => Some(other),
         };
         let Some(target) = target else {
             return;
@@ -429,11 +441,23 @@ impl AppState {
                         Ok(Some(answer)) => answers.push(answer),
                         Ok(None) => {}
                         Err(error) => {
-                            self.last_notice = Some(error.clone());
+                            let message = match error {
+                                UserInputAnswerError::Required => {
+                                    if revision {
+                                        "Revision request requires an answer".to_owned()
+                                    } else {
+                                        format!("{} requires an answer", question.question)
+                                    }
+                                }
+                                UserInputAnswerError::InvalidType => {
+                                    format!("{} has an invalid answer type", question.question)
+                                }
+                            };
+                            self.last_notice = Some(message.clone());
                             if revision
                                 && let Some(form) = self.composer.pending_user_input.as_mut()
                             {
-                                form.plan_revision_editor.error = Some(error);
+                                form.plan_revision_editor.error = Some(message);
                             }
                             return None;
                         }
@@ -456,12 +480,21 @@ impl AppState {
             .request
             .as_ref()
             .expect("durable input form must retain its authoritative request");
-        let action = AppAction::SubmitUserInputDecision {
-            command_id: command_id.clone(),
-            request_id: request.identity.request_id.as_str().to_owned(),
-            generation: request.identity.generation,
-            expected_request_hash: request.request_hash.clone(),
-            decision,
+        let action = if let Some(original_command_id) = command_id.as_ref() {
+            AppAction::ResumeCommittedUserInput {
+                original_command_id: original_command_id.clone(),
+                request_id: request.identity.request_id.as_str().to_owned(),
+                generation: request.identity.generation,
+                expected_request_hash: request.request_hash.clone(),
+            }
+        } else {
+            AppAction::SubmitUserInputDecision {
+                command_id: None,
+                request_id: request.identity.request_id.as_str().to_owned(),
+                generation: request.identity.generation,
+                expected_request_hash: request.request_hash.clone(),
+                decision,
+            }
         };
         if revision && let Some(form) = self.composer.pending_user_input.as_mut() {
             form.plan_revision_editor.submitting = true;
@@ -524,43 +557,6 @@ impl AppState {
         {
             preserve_plan_revision_draft(next, &previous);
         }
-    }
-
-    /// Routes only a worker-recovered form through the private recovery dispatcher. The worker
-    /// re-reads the exact command under its current owner; no answer or new command id is sent.
-    pub(crate) fn recovered_user_input_resume_command(
-        &self,
-        action: &AppAction,
-    ) -> Option<crate::runner::WorkerCommand> {
-        let form = self.composer.pending_user_input.as_ref()?;
-        let request = form.request.as_ref()?;
-        let recovery = form.recovery_command.as_ref()?;
-        let AppAction::SubmitUserInputDecision {
-            command_id: Some(command_id),
-            request_id,
-            generation,
-            expected_request_hash,
-            decision,
-        } = action
-        else {
-            return None;
-        };
-        if recovery.identity != request.identity
-            || recovery.request_hash != request.request_hash
-            || recovery.command_id.as_str() != command_id
-            || recovery.identity.request_id.as_str() != request_id
-            || recovery.identity.generation != *generation
-            || recovery.request_hash.as_str() != expected_request_hash.as_str()
-            || &recovery.decision != decision
-        {
-            return None;
-        }
-        Some(crate::runner::WorkerCommand::ResumeRecoveredUserInput {
-            command_id: recovery.command_id.as_str().to_owned(),
-            request_id: recovery.identity.request_id.as_str().to_owned(),
-            generation: recovery.identity.generation,
-            expected_request_hash: recovery.request_hash.clone(),
-        })
     }
 
     pub(crate) fn set_pending_user_input(
@@ -1143,32 +1139,20 @@ fn mcp_content_from_answers(
             sigil_kernel::UserInputAnswerValueV1::Text { value } => {
                 serde_json::Value::String(value)
             }
-            sigil_kernel::UserInputAnswerValueV1::Number { value } => {
-                let value = value
-                    .parse::<f64>()
-                    .map_err(|_| "MCP number answer was invalid".to_owned())?;
-                serde_json::Number::from_f64(value)
-                    .map(serde_json::Value::Number)
-                    .ok_or_else(|| "MCP number answer was not finite".to_owned())?
-            }
-            sigil_kernel::UserInputAnswerValueV1::Integer { value } => {
-                serde_json::Value::Number(value.into())
-            }
-            sigil_kernel::UserInputAnswerValueV1::Boolean { value } => {
-                serde_json::Value::Bool(value)
-            }
             sigil_kernel::UserInputAnswerValueV1::SingleSelect { option_id, other } => {
                 serde_json::Value::String(option_id.or(other).ok_or_else(|| {
                     "MCP single-select answer omitted its selected value".to_owned()
                 })?)
             }
-            sigil_kernel::UserInputAnswerValueV1::MultiSelect { option_ids } => {
-                serde_json::Value::Array(
-                    option_ids
-                        .into_iter()
-                        .map(serde_json::Value::String)
-                        .collect(),
-                )
+            sigil_kernel::UserInputAnswerValueV1::MultiSelect { option_ids, other } => {
+                let mut values = option_ids
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect::<Vec<_>>();
+                if let Some(other) = other {
+                    values.push(serde_json::Value::String(other));
+                }
+                serde_json::Value::Array(values)
             }
         };
         content.insert(answer.question_id, value);
@@ -1205,133 +1189,85 @@ fn empty_user_input_drafts(
 ) -> Vec<UserInputDraftValue> {
     questions
         .iter()
-        .map(|question| match &question.field {
-            sigil_kernel::UserInputFieldKindV1::Text { .. } => {
+        .map(|question| {
+            if question.options.is_empty() {
                 UserInputDraftValue::Text(String::new())
-            }
-            sigil_kernel::UserInputFieldKindV1::Number => {
-                UserInputDraftValue::Number(String::new())
-            }
-            sigil_kernel::UserInputFieldKindV1::Integer => {
-                UserInputDraftValue::Integer(String::new())
-            }
-            sigil_kernel::UserInputFieldKindV1::Boolean => UserInputDraftValue::Boolean(None),
-            sigil_kernel::UserInputFieldKindV1::SingleSelect { .. } => {
-                UserInputDraftValue::SingleSelect {
-                    selected: None,
-                    other: String::new(),
-                }
-            }
-            sigil_kernel::UserInputFieldKindV1::MultiSelect { .. } => {
+            } else if question.multiple {
                 UserInputDraftValue::MultiSelect {
                     cursor: 0,
                     selected: Vec::new(),
+                    other: String::new(),
+                }
+            } else {
+                UserInputDraftValue::SingleSelect {
+                    selected: None,
+                    other: String::new(),
+                    selected_by_user: false,
                 }
             }
         })
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserInputAnswerError {
+    Required,
+    InvalidType,
+}
+
 fn user_input_answer(
     question: &sigil_kernel::UserInputQuestionV1,
     draft: &UserInputDraftValue,
-) -> Result<Option<sigil_kernel::UserInputAnswerV1>, String> {
-    let value = match (&question.field, draft) {
-        (
-            sigil_kernel::UserInputFieldKindV1::Text { max_chars, .. },
-            UserInputDraftValue::Text(value),
-        ) => {
-            if value.is_empty() && !question.required {
+) -> Result<Option<sigil_kernel::UserInputAnswerV1>, UserInputAnswerError> {
+    let value = if question.options.is_empty() {
+        let UserInputDraftValue::Text(value) = draft else {
+            return Err(UserInputAnswerError::InvalidType);
+        };
+        if value.is_empty() {
+            if !question.required {
                 return Ok(None);
             }
-            if value.is_empty() {
-                return Err(format!("{} requires an answer", question.header));
-            }
-            if value.chars().count() > *max_chars as usize {
-                return Err(format!("{} exceeds its character limit", question.header));
-            }
-            sigil_kernel::UserInputAnswerValueV1::Text {
-                value: value.clone(),
-            }
+            return Err(UserInputAnswerError::Required);
         }
-        (_, UserInputDraftValue::Number(value)) => {
-            if value.is_empty() && !question.required {
+        sigil_kernel::UserInputAnswerValueV1::Text {
+            value: value.clone(),
+        }
+    } else if question.multiple {
+        let UserInputDraftValue::MultiSelect {
+            selected, other, ..
+        } = draft
+        else {
+            return Err(UserInputAnswerError::InvalidType);
+        };
+        if selected.is_empty() && other.is_empty() {
+            if !question.required {
                 return Ok(None);
             }
-            let parsed = value
-                .parse::<f64>()
-                .map_err(|_| format!("{} must be a number", question.header))?;
-            if !parsed.is_finite() {
-                return Err(format!("{} must be a finite number", question.header));
-            }
-            sigil_kernel::UserInputAnswerValueV1::Number {
-                value: value.clone(),
-            }
+            return Err(UserInputAnswerError::Required);
         }
-        (_, UserInputDraftValue::Integer(value)) => {
-            if value.is_empty() && !question.required {
-                return Ok(None);
-            }
-            sigil_kernel::UserInputAnswerValueV1::Integer {
-                value: value
-                    .parse()
-                    .map_err(|_| format!("{} must be an integer", question.header))?,
-            }
+        sigil_kernel::UserInputAnswerValueV1::MultiSelect {
+            option_ids: selected.clone(),
+            other: (!other.is_empty()).then_some(other.clone()),
         }
-        (_, UserInputDraftValue::Boolean(value)) => {
-            let Some(value) = value else {
-                if question.required {
-                    return Err(format!("{} requires an answer", question.header));
-                }
-                return Ok(None);
-            };
-            sigil_kernel::UserInputAnswerValueV1::Boolean { value: *value }
-        }
-        (
-            sigil_kernel::UserInputFieldKindV1::SingleSelect {
-                options,
-                allow_other,
+    } else {
+        let UserInputDraftValue::SingleSelect {
+            selected, other, ..
+        } = draft
+        else {
+            return Err(UserInputAnswerError::InvalidType);
+        };
+        match selected.and_then(|index| question.options.get(index)) {
+            Some(option) => sigil_kernel::UserInputAnswerValueV1::SingleSelect {
+                option_id: Some(option.id.clone()),
+                other: None,
             },
-            UserInputDraftValue::SingleSelect { selected, other },
-        ) => {
-            let Some(selected) = selected else {
-                if question.required {
-                    return Err(format!("{} requires an answer", question.header));
-                }
-                return Ok(None);
-            };
-            if let Some(option) = options.get(*selected) {
-                sigil_kernel::UserInputAnswerValueV1::SingleSelect {
-                    option_id: Some(option.id.clone()),
-                    other: None,
-                }
-            } else if *allow_other {
-                if other.is_empty() {
-                    return Err(format!("{} requires an Other value", question.header));
-                }
-                sigil_kernel::UserInputAnswerValueV1::SingleSelect {
-                    option_id: None,
-                    other: Some(other.clone()),
-                }
-            } else {
-                return Err(format!("{} requires a valid selection", question.header));
-            }
+            None if !other.is_empty() => sigil_kernel::UserInputAnswerValueV1::SingleSelect {
+                option_id: None,
+                other: Some(other.clone()),
+            },
+            None if !question.required => return Ok(None),
+            None => return Err(UserInputAnswerError::Required),
         }
-        (_, UserInputDraftValue::MultiSelect { selected, .. }) => {
-            if selected.is_empty() && !question.required {
-                return Ok(None);
-            }
-            if selected.is_empty() {
-                return Err(format!(
-                    "{} requires at least one selection",
-                    question.header
-                ));
-            }
-            sigil_kernel::UserInputAnswerValueV1::MultiSelect {
-                option_ids: selected.clone(),
-            }
-        }
-        _ => return Err(format!("{} has an invalid answer type", question.header)),
     };
     Ok(Some(sigil_kernel::UserInputAnswerV1 {
         question_id: question.id.clone(),

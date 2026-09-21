@@ -55,20 +55,10 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
-        // A durable Task shell alone is not completion while its post-approval
-        // materialization is blocked and still needs the Plan retry/revise surface.
-        let has_unresolved_materialization_blocker =
-            plans.tasks_created.get(&plan_id).is_some_and(|links| {
-                links.iter().any(|link| {
-                    plans
-                        .materialization_blocker_for_task(&link.task_id)
-                        .is_some()
-                })
-            });
         let completed = plans.latest_decision(&plan_id).is_some_and(|decision| {
             decision.decision == sigil_kernel::PlanDecision::Accepted
                 && plans.task_created_for_plan(&plan_id)
-        }) && !has_unresolved_materialization_blocker;
+        });
         if completed {
             self.clear_pending_plan_approval();
             self.composer.mode = super::ComposerMode::Build;
@@ -263,9 +253,8 @@ impl AppState {
         })
     }
 
-    /// A materialization retry must match its durable approved Plan content.
-    /// Workspace observations and the presentation-only retry flag do not authorize this action.
-    fn pending_plan_run_matches_durable_task(&self, pending: &PendingPlanApproval) -> bool {
+    /// A Plan action must stay bound to the exact durable draft displayed in the workbench.
+    fn pending_plan_matches_durable_draft(&self, pending: &PendingPlanApproval) -> bool {
         let Some(plan_id) = pending
             .plan_id
             .as_ref()
@@ -276,36 +265,10 @@ impl AppState {
         let plans = sigil_kernel::PlanArtifactProjection::from_entries(
             &self.session_browser.current_entries,
         );
-        let Some(links) = plans.tasks_created.get(&plan_id).filter(|links| {
-            links.iter().any(|link| {
-                link.plan_hash == pending.plan_hash
-                    && plans
-                        .materialization_blocker_for_task(&link.task_id)
-                        .is_some()
-            })
-        }) else {
-            return true;
-        };
         plans
             .plans
             .get(&plan_id)
             .is_some_and(|draft| draft.plan_hash == pending.plan_hash)
-            && plans.latest_decision(&plan_id).is_some_and(|decision| {
-                decision.decision == sigil_kernel::PlanDecision::Accepted
-                    && decision.plan_hash == pending.plan_hash
-            })
-            && links.iter().any(|link| {
-                link.plan_hash == pending.plan_hash
-                    && plans
-                        .materialization_blocker_for_task(&link.task_id)
-                        .is_some_and(|blocked| {
-                            blocked.plan_hash == pending.plan_hash
-                                && blocked
-                                    .blocker
-                                    .available_actions
-                                    .contains(&sigil_kernel::TaskBlockerActionV1::RetryAdmission)
-                        })
-            })
     }
 
     fn create_task_from_pending_plan(
@@ -318,9 +281,8 @@ impl AppState {
             self.last_notice = Some("run is unavailable in the current plan state".to_owned());
             return None;
         }
-        if !self.pending_plan_run_matches_durable_task(pending) {
-            self.last_notice =
-                Some("plan content or task retry state changed; refresh the review".to_owned());
+        if !self.pending_plan_matches_durable_draft(pending) {
+            self.last_notice = Some("plan content changed; refresh the review".to_owned());
             return None;
         }
         let Some(plan_id) = pending.plan_id.clone() else {
@@ -422,7 +384,6 @@ impl AppState {
             stale: stale_reason.is_some(),
             stale_reason,
             last_run_failure: None,
-            retrying_materialization: false,
             // Action authority comes only from the canonical public projection. A detail payload
             // is immutable display data and must never grant actions by itself.
             allowed_actions: Vec::new(),
@@ -479,12 +440,6 @@ impl AppState {
             ],
             lineage,
             legacy_markdown: Some(candidate.content.clone()),
-            compile: sigil_kernel::PlanCompileDetailV1 {
-                state: sigil_kernel::PlanReadyStateV1::NotReady,
-                candidate_hash: None,
-                compiler_version: None,
-                failure: None,
-            },
         };
         self.set_pending_plan_approval_from_detail(&detail, current_workspace_snapshot_id);
         self.apply_pending_plan_public_review(review);
@@ -546,12 +501,6 @@ impl AppState {
             ],
             lineage,
             legacy_markdown: None,
-            compile: sigil_kernel::PlanCompileDetailV1 {
-                state: sigil_kernel::PlanReadyStateV1::NotReady,
-                candidate_hash: None,
-                compiler_version: None,
-                failure: None,
-            },
         };
         self.composer.pending_plan_approval = Some(PendingPlanApproval {
             plan_id: Some(review.plan_id.clone()),
@@ -564,7 +513,6 @@ impl AppState {
             stale: review.stale,
             stale_reason: None,
             last_run_failure: None,
-            retrying_materialization: false,
             allowed_actions: review.allowed_actions.clone(),
             status: Some(review.status),
             revision: review.revision.clone(),
@@ -605,16 +553,8 @@ impl AppState {
             return None;
         }
         let plan_id = pending.plan_id.clone()?;
-        let expected_candidate_hash = pending
-            .detail
-            .compile
-            .candidate_hash
-            .clone()
-            .or_else(|| {
-                (pending.detail.compile.state == sigil_kernel::PlanReadyStateV1::NotReady)
-                    .then(|| pending.plan_hash.clone())
-            })
-            .filter(|hash| !hash.trim().is_empty());
+        let expected_candidate_hash =
+            (!pending.plan_hash.trim().is_empty()).then(|| pending.plan_hash.clone());
         self.begin_pending_plan_action(PlanWorkbenchAction::RetryReview);
         self.last_notice = Some("retrying preserved Plan review".to_owned());
         self.push_event("plan", "retry_review");
@@ -894,7 +834,6 @@ impl PendingPlanApproval {
                 sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput => {
                     "revision waiting for input"
                 }
-                sigil_kernel::PublicPlanRevisionStatusV1::Finalizing => "revision finalizing",
                 sigil_kernel::PublicPlanRevisionStatusV1::Failed => "revision failed",
                 sigil_kernel::PublicPlanRevisionStatusV1::Cancelled => "revision cancelled",
                 sigil_kernel::PublicPlanRevisionStatusV1::Succeeded => "revision succeeded",
@@ -904,7 +843,6 @@ impl PendingPlanApproval {
             Some(sigil_kernel::PublicPlanReviewStatus::DraftReady) => "ready",
             Some(sigil_kernel::PublicPlanReviewStatus::Started) => "researching",
             Some(sigil_kernel::PublicPlanReviewStatus::WaitingForInput) => "waiting for input",
-            Some(sigil_kernel::PublicPlanReviewStatus::Finalizing) => "finalizing",
             Some(sigil_kernel::PublicPlanReviewStatus::CompileFailed) => "needs changes",
             Some(sigil_kernel::PublicPlanReviewStatus::Paused) => "paused",
             Some(sigil_kernel::PublicPlanReviewStatus::Blocked) => "blocked",
@@ -929,8 +867,7 @@ impl PendingPlanApproval {
                     "Original plan · read-only while the revision waits to start."
                 }
                 sigil_kernel::PublicPlanRevisionStatusV1::Researching
-                | sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput
-                | sigil_kernel::PublicPlanRevisionStatusV1::Finalizing => {
+                | sigil_kernel::PublicPlanRevisionStatusV1::WaitingForInput => {
                     "Original plan · read-only while the revised plan is prepared."
                 }
                 sigil_kernel::PublicPlanRevisionStatusV1::Failed => {

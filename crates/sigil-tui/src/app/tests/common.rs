@@ -746,6 +746,7 @@ pub(crate) fn multi_file_approval_preview() -> ToolPreview {
 
 pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPreview) -> Result<()> {
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-1"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,

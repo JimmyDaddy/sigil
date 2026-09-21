@@ -18,10 +18,10 @@ pub(in crate::runner) struct ActiveRun {
     pub(in crate::runner) image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
 }
 
-// Keep the foreground cancellation deadline below the worker's public terminal wait window.
-// Once this bounded interval elapses we persist `Interrupted` with cleanup uncertainty and
-// retain the join handle for the worker's shared shutdown drain.
-const RUN_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(2);
+// Cancellation acknowledgement is immediate. Crossing this target only emits a slow-cleanup
+// notice: the same owner keeps every handle and settles once actual cleanup is known.
+const RUN_QUIESCENCE_NOTICE_AFTER: Duration = Duration::from_secs(2);
+const RUN_STOP_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runner) enum ActiveRunStopDisposition {
@@ -30,7 +30,7 @@ pub(in crate::runner) enum ActiveRunStopDisposition {
 }
 
 pub(in crate::runner) fn finalize_completed_run_cancellation(owner: &RunCancellationOwner) -> bool {
-    // A returned failure or suspended routing microturn may leave the root phase open. Close it
+    // A returned failure or suspended model-selected operation may leave the root phase open. Close it
     // before releasing its owner, without erasing outstanding work or cleanup-failure evidence.
     owner.handle().try_finalize_naturally();
     // A stop that already won still needs the live owner to perform its durable settlement.
@@ -99,23 +99,21 @@ pub(in crate::runner) fn cancel_active_run(
     active_run: ActiveRun,
     runtime: &tokio::runtime::Runtime,
     root_config: &RootConfig,
-    current_session_log_path: &Path,
-    current_session: &mut Option<Session>,
-    detached_durable_controls: &mut Vec<ControlEntry>,
+    state: &mut WorkerLoopState,
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
-    agent_supervisor: Option<&sigil_runtime::AgentSupervisor>,
-    discarded_run_ids: &mut BTreeSet<u64>,
-    retired_runs: &mut Vec<tokio::task::JoinHandle<()>>,
-    stop_control: &super::super::protocol::WorkerStopControl,
     disposition: ActiveRunStopDisposition,
     reason: &str,
 ) {
     let url_capability_registrar = active_run.url_capability_registrar.clone();
     let image_attachment_resolver = active_run.image_attachment_resolver.clone();
-    let tool_artifact_store = current_session
+    let stop_control = state.stop_control.clone();
+    let tool_artifact_store = state
+        .session
+        .current
         .as_ref()
         .and_then(Session::tool_artifact_store);
+    let background_runs = state.agent.background_runs.clone();
     elicitation_handler.set_audit_buffer(None);
     if !active_run.cancellation_owner.reserve_cancel()
         && !active_run.cancellation_owner.is_cancel_reserved()
@@ -123,15 +121,15 @@ pub(in crate::runner) fn cancel_active_run(
         let _ = message_tx.send(WorkerMessage::Notice(
             "run already reached its natural terminal state before cancellation".to_owned(),
         ));
-        retired_runs.push(active_run.handle);
+        state.run.retired.push(active_run.handle);
         return;
     }
+    let cancellation_scope_id = active_run.cancellation_owner.handle().scope_id().to_owned();
     let started = Instant::now();
-    let deadline = stop_control
-        .shutdown_deadline()
-        .map_or(started + RUN_QUIESCENCE_TIMEOUT, |deadline| {
-            deadline.min(started + RUN_QUIESCENCE_TIMEOUT)
-        });
+    let notice_at = started + RUN_QUIESCENCE_NOTICE_AFTER;
+    if stop_control.is_closing() {
+        super::shutdown::request_independent_worker_stops(state);
+    }
     let requested_at_ms = current_unix_time_ms();
     let request_id = format!(
         "{}-{}",
@@ -148,18 +146,28 @@ pub(in crate::runner) fn cancel_active_run(
         reason: reason.to_owned(),
         requested_at_ms,
         quiescence_deadline_ms: requested_at_ms
-            .saturating_add(deadline.saturating_duration_since(started).as_millis() as u64),
+            .saturating_add(notice_at.saturating_duration_since(started).as_millis() as u64),
     };
     stop_control.stage(WorkerShutdownStage::CancellationRequest);
+    let request_stage = active_run
+        .cancellation_owner
+        .handle()
+        .begin_cleanup_stage(sigil_kernel::RunCleanupStage::AuditPersistence);
     let request_persisted = match active_run.cancellation_recorder.append_requested(&request) {
         Ok(_) => true,
         Err(error) => {
+            stop_control.fail_stage(WorkerShutdownStage::CancellationRequest);
+            active_run
+                .cancellation_owner
+                .handle()
+                .mark_cleanup_incomplete();
             let _ = message_tx.send(WorkerMessage::Notice(format!(
                 "cancellation audit request failed; cleanup will continue: {error:#}"
             )));
             false
         }
     };
+    request_stage.finish(request_persisted);
     let _ = match (&disposition, &active_run.cancellation_target) {
         (ActiveRunStopDisposition::PauseTask, RunCancellationTarget::Task { task_id }) => {
             message_tx.send(WorkerMessage::TaskPauseRequested {
@@ -168,84 +176,129 @@ pub(in crate::runner) fn cancel_active_run(
         }
         _ => message_tx.send(WorkerMessage::RunCancellationRequested),
     };
+    let activation_stage = active_run
+        .cancellation_owner
+        .handle()
+        .begin_cleanup_stage(sigil_kernel::RunCleanupStage::CancellationActivation);
     let activated = active_run.cancellation_owner.activate_reserved_cancel();
+    activation_stage.finish(activated);
     debug_assert!(
         activated,
         "reserved cancellation must activate exactly once"
     );
-    discarded_run_ids.insert(active_run.run_id);
+    state.run.discarded_ids.insert(active_run.run_id);
     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
-    let agent_cancel_impact =
-        agent_supervisor.map(sigil_runtime::AgentSupervisor::cancel_foreground_run);
+    let agent_cancel_impact = state
+        .agent
+        .supervisor
+        .as_ref()
+        .map(sigil_runtime::AgentSupervisor::cancel_foreground_run);
     let mut handle = active_run.handle;
     stop_control.stage(WorkerShutdownStage::RunQuiescence);
-    let joined = runtime.block_on(async {
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut handle).await
-    });
-    let join_confirmed = matches!(joined, Ok(Ok(())));
-    let quiescence = if join_confirmed {
-        runtime.block_on(
-            active_run
-                .cancellation_owner
-                .wait_for_quiescence(Duration::ZERO),
-        )
-    } else {
-        if joined.is_err() {
-            handle.abort();
-            // Aborting is only a request. Keep the actual task owned until its join completes.
-            retired_runs.push(handle);
-        }
-        RunQuiescenceOutcome::TimedOut {
-            active_effects: active_run.cancellation_owner.handle().active_effects(),
-            active_tasks: active_run.cancellation_owner.handle().active_tasks(),
-        }
-    };
-    let (outcome, cleanup_complete, active_effects, active_tasks, terminal_reason) =
-        match quiescence {
-            RunQuiescenceOutcome::Quiescent
-                if join_confirmed && active_run.cancellation_owner.cleanup_complete() =>
-            {
-                (
-                    RunCancellationTerminalOutcome::Cancelled,
-                    true,
-                    0,
-                    0,
-                    "cancellation quiescence confirmed".to_owned(),
-                )
-            }
-            RunQuiescenceOutcome::Quiescent | RunQuiescenceOutcome::TimedOut { .. } => {
-                let (active_effects, active_tasks) = match quiescence {
-                    RunQuiescenceOutcome::Quiescent => (0, 0),
-                    RunQuiescenceOutcome::TimedOut {
-                        active_effects,
-                        active_tasks,
-                    } => (active_effects, active_tasks),
-                };
-                (
-                    RunCancellationTerminalOutcome::Interrupted,
-                    false,
-                    active_effects,
-                    active_tasks,
-                    "cancellation deadline exceeded; cleanup could not be confirmed".to_owned(),
-                )
-            }
-        };
-    if !cleanup_complete || !request_persisted {
+    let joined = wait_for_cancelled_run(
+        &mut handle,
+        &active_run.cancellation_owner,
+        runtime,
+        state,
+        message_tx,
+        notice_at,
+    );
+    let join_confirmed = joined.is_ok();
+    if !join_confirmed || !active_run.cancellation_owner.cleanup_complete() {
+        stop_control.fail_stage(WorkerShutdownStage::RunQuiescence);
         active_run
             .cancellation_owner
             .handle()
             .mark_cleanup_incomplete();
     }
-    if !request_persisted {
-        stop_control.stage(WorkerShutdownStage::SessionReload);
-        if let Ok(session) = load_active_run_session(
+    let mut cancellation_session = None;
+    if !matches!(
+        active_run.cancellation_target,
+        RunCancellationTarget::AgentThread { .. }
+    ) {
+        match load_active_run_session(
             &root_config.agent.runtime_provider,
             &root_config.agent.model,
-            current_session_log_path,
+            state.session.log_path.as_path(),
             url_capability_registrar.clone(),
             image_attachment_resolver.clone(),
             tool_artifact_store.clone(),
+            &background_runs,
+            &cancellation_scope_id,
         ) {
+            Ok(mut session) => {
+                if let Err(error) =
+                    runtime.block_on(background_runs.cancel_task_background_agents_for_scope(
+                        &mut session,
+                        &active_run.cancellation_target,
+                        active_run.cancellation_owner.handle().scope_id(),
+                        reason,
+                        &mut ChannelEventHandler::new(message_tx.clone()),
+                    ))
+                {
+                    stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
+                    active_run
+                        .cancellation_owner
+                        .handle()
+                        .mark_cleanup_incomplete();
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "Direct Task background cleanup could not be confirmed after TUI cancellation: {error:#}"
+                    )));
+                }
+                cancellation_session = Some(session);
+            }
+            Err(error) => {
+                stop_control.fail_stage(WorkerShutdownStage::SessionReload);
+                active_run
+                    .cancellation_owner
+                    .handle()
+                    .mark_cleanup_incomplete();
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "Direct Task background cleanup could not inspect the durable session after TUI cancellation: {error}"
+                )));
+            }
+        }
+    }
+    let cleanup_complete = join_confirmed && active_run.cancellation_owner.cleanup_complete();
+    let outcome = if cleanup_complete {
+        RunCancellationTerminalOutcome::Cancelled
+    } else {
+        RunCancellationTerminalOutcome::Interrupted
+    };
+    let terminal_reason = match joined {
+        Ok(()) if cleanup_complete => "cancellation quiescence confirmed",
+        Ok(()) => "cancellation cleanup reported a failure",
+        Err(error) if error.is_panic() => "run task panicked during cancellation cleanup",
+        Err(_) => "run task was aborted before cancellation cleanup completed",
+    }
+    .to_owned();
+    // The owned root has joined and every registered task/effect has released its guard.
+    // A failed cleanup latch stays failed even though no operation is still active.
+    let active_effects = active_run.cancellation_owner.handle().active_effects();
+    let active_tasks = active_run.cancellation_owner.handle().active_tasks();
+    let current_session_log_path = state.session.log_path.as_path();
+    let current_session = &mut state.session.current;
+    let detached_durable_controls = &mut state.session.detached_durable_controls;
+    if !request_persisted {
+        stop_control.fail_stage(WorkerShutdownStage::CancellationRequest);
+        active_run
+            .cancellation_owner
+            .handle()
+            .mark_cleanup_incomplete();
+        stop_control.stage(WorkerShutdownStage::SessionReload);
+        if let Some(session) = cancellation_session.take().or_else(|| {
+            load_active_run_session(
+                &root_config.agent.runtime_provider,
+                &root_config.agent.model,
+                current_session_log_path,
+                url_capability_registrar.clone(),
+                image_attachment_resolver.clone(),
+                tool_artifact_store.clone(),
+                &background_runs,
+                &cancellation_scope_id,
+            )
+            .ok()
+        }) {
             *current_session = Some(session);
             detached_durable_controls.clear();
         }
@@ -255,7 +308,11 @@ pub(in crate::runner) fn cancel_active_run(
         return;
     }
     stop_control.stage(WorkerShutdownStage::CancellationFinalization);
-    if let Err(error) =
+    let finalization_stage = active_run
+        .cancellation_owner
+        .handle()
+        .begin_cleanup_stage(sigil_kernel::RunCleanupStage::AuditPersistence);
+    let finalized =
         active_run
             .cancellation_recorder
             .append_finalized(&RunCancellationFinalizedEntry {
@@ -267,8 +324,10 @@ pub(in crate::runner) fn cancel_active_run(
                 active_tasks,
                 reason: terminal_reason.clone(),
                 finalized_at_ms: current_unix_time_ms(),
-            })
-    {
+            });
+    finalization_stage.finish(finalized.is_ok());
+    if let Err(error) = finalized {
+        stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
         active_run
             .cancellation_owner
             .handle()
@@ -279,14 +338,22 @@ pub(in crate::runner) fn cancel_active_run(
         return;
     }
     stop_control.stage(WorkerShutdownStage::SessionReload);
-    match load_active_run_session(
-        &root_config.agent.runtime_provider,
-        &root_config.agent.model,
-        current_session_log_path,
-        url_capability_registrar,
-        image_attachment_resolver,
-        tool_artifact_store,
-    ) {
+    let reloaded_session = cancellation_session.take().map_or_else(
+        || {
+            load_active_run_session(
+                &root_config.agent.runtime_provider,
+                &root_config.agent.model,
+                current_session_log_path,
+                url_capability_registrar,
+                image_attachment_resolver,
+                tool_artifact_store,
+                &background_runs,
+                &cancellation_scope_id,
+            )
+        },
+        Ok,
+    );
+    match reloaded_session {
         Ok(session) => {
             let mut session = session;
             // A successful reload already contains every control persisted while the run owned
@@ -308,8 +375,20 @@ pub(in crate::runner) fn cancel_active_run(
                 } else {
                     None
                 };
+            let audit_stage = active_run
+                .cancellation_owner
+                .handle()
+                .begin_cleanup_stage(sigil_kernel::RunCleanupStage::AuditPersistence);
             let audit_result =
                 append_mcp_elicitation_audits(&mut session, &active_run.elicitation_audit_buffer);
+            audit_stage.finish(audit_result.is_ok());
+            if audit_result.is_err() {
+                stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
+                active_run
+                    .cancellation_owner
+                    .handle()
+                    .mark_cleanup_incomplete();
+            }
             if let Some(event) = durable_revision_terminal.as_ref() {
                 deliver_durable_revision_terminal_after_audit(
                     event,
@@ -335,6 +414,11 @@ pub(in crate::runner) fn cancel_active_run(
                     reason,
                 )
             {
+                stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
+                active_run
+                    .cancellation_owner
+                    .handle()
+                    .mark_cleanup_incomplete();
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                     "failed to append cancelled agent state: {error:#}"
                 )));
@@ -359,7 +443,7 @@ pub(in crate::runner) fn cancel_active_run(
                 ) => append_interrupted_task_state(
                     &mut session,
                     &mut cancel_handler,
-                    Some(task_id),
+                    task_id,
                     "task run stopped from TUI; task remains available to continue",
                 ),
                 (
@@ -390,7 +474,7 @@ pub(in crate::runner) fn cancel_active_run(
                 ) => append_interrupted_task_state(
                     &mut session,
                     &mut cancel_handler,
-                    Some(task_id),
+                    task_id,
                     &terminal_reason,
                 ),
                 (
@@ -400,6 +484,11 @@ pub(in crate::runner) fn cancel_active_run(
                 ) => Ok(()),
             };
             if let Err(error) = task_state {
+                stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
+                active_run
+                    .cancellation_owner
+                    .handle()
+                    .mark_cleanup_incomplete();
                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 *current_session = Some(session);
                 return;
@@ -414,6 +503,11 @@ pub(in crate::runner) fn cancel_active_run(
                             )
                         })
             {
+                stop_control.fail_stage(WorkerShutdownStage::CancellationFinalization);
+                active_run
+                    .cancellation_owner
+                    .handle()
+                    .mark_cleanup_incomplete();
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!(
                     "failed to persist the cancelled public run terminal: {error:#}"
                 )));
@@ -502,7 +596,72 @@ pub(in crate::runner) fn cancel_active_run(
             let _ = message_tx.send(message);
         }
         Err(error) => {
+            stop_control.fail_stage(WorkerShutdownStage::SessionReload);
+            active_run
+                .cancellation_owner
+                .handle()
+                .mark_cleanup_incomplete();
             let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+        }
+    }
+}
+
+/// Keep the root owner on this worker while the UI remains independently responsive. A closing
+/// flag can arrive during an ordinary Cancel/Pause, so stop independent owners before joining
+/// this run; no shutdown command needs to pass through the blocked command queue first.
+fn wait_for_cancelled_run(
+    handle: &mut tokio::task::JoinHandle<()>,
+    owner: &RunCancellationOwner,
+    runtime: &tokio::runtime::Runtime,
+    state: &mut WorkerLoopState,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    notice_at: Instant,
+) -> Result<(), tokio::task::JoinError> {
+    let mut joined = None;
+    let mut join_stage = Some(
+        owner
+            .handle()
+            .begin_cleanup_stage(sigil_kernel::RunCleanupStage::ThreadJoin),
+    );
+    let mut notice_sent = false;
+    let mut independent_stops_requested = false;
+    loop {
+        if !independent_stops_requested && state.stop_control.is_closing() {
+            super::shutdown::request_independent_worker_stops(state);
+            independent_stops_requested = true;
+        }
+        if owner.is_quiescent()
+            && let Some(result) = joined.take()
+        {
+            return result;
+        }
+        if !notice_sent && Instant::now() >= notice_at {
+            let _ = message_tx.send(WorkerMessage::Notice(
+                "cancellation is still cleaning up; waiting for owned tasks and effects to finish"
+                    .to_owned(),
+            ));
+            notice_sent = true;
+        }
+        if joined.is_none() {
+            if let Ok(result) = runtime.block_on(async {
+                tokio::time::timeout(RUN_STOP_OBSERVATION_INTERVAL, &mut *handle).await
+            }) {
+                join_stage
+                    .take()
+                    .expect("the owned root is joined exactly once")
+                    .finish(result.is_ok());
+                // Preserve a real panic immediately while still waiting for independently
+                // registered cleanup to finish. A timeout never changes this failure latch.
+                if result.is_err() {
+                    owner.handle().mark_cleanup_incomplete();
+                    state
+                        .stop_control
+                        .fail_stage(WorkerShutdownStage::RunQuiescence);
+                }
+                joined = Some(result);
+            }
+        } else {
+            runtime.block_on(owner.wait_for_quiescence(RUN_STOP_OBSERVATION_INTERVAL));
         }
     }
 }
@@ -535,7 +694,6 @@ pub(in crate::runner) fn revision_terminal_worker_message(
                     final_text: final_text.clone(),
                     tool_calls: 0,
                     final_message_id: None,
-                    completion_claim: None,
                 },
                 entries,
             }
@@ -620,9 +778,21 @@ fn load_active_run_session(
     registrar: Option<Arc<dyn UserUrlCapabilityRegistrar>>,
     image_attachment_resolver: Option<Arc<dyn ImageAttachmentResolver>>,
     tool_artifact_store: Option<sigil_kernel::ToolArtifactStore>,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    live_cancellation_scope_id: &str,
 ) -> std::result::Result<Session, String> {
-    let mut session = load_session(provider_name, model_name, session_log_path)
-        .map_err(|error| format!("failed to reload active-run session: {error:#}"))?;
+    let live_background_agent_threads = background_runs
+        .thread_ids()
+        .map_err(|error| format!("failed to inspect active background-agent owner: {error:#}"))?;
+    let store = JsonlSessionStore::new(session_log_path)
+        .map_err(|error| format!("failed to reopen active-run session: {error:#}"))?
+        .with_live_background_agent_threads(live_background_agent_threads)
+        .with_live_run_cancellation_scopes(std::collections::BTreeSet::from([
+            live_cancellation_scope_id.to_owned(),
+        ]));
+    let mut session =
+        Session::load_from_store(provider_name.to_owned(), model_name.to_owned(), store)
+            .map_err(|error| format!("failed to reload active-run session: {error:#}"))?;
     let registrar = registrar.ok_or_else(|| {
         "active run lost its session URL capability registrar attachment".to_owned()
     })?;

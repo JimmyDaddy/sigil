@@ -7,7 +7,7 @@ const EXACT_PROMPT_REQUIRED_HASH_PREFIX: &str = "exact-required:";
 pub(in crate::runner) type ExactConversationPromptStore =
     BTreeMap<ConversationInputQueueId, SecretString>;
 
-/// Scheduler-safe preparation for the oldest still-pending task guidance item.
+/// Safe-point preparation for the oldest still-pending direct Task guidance item.
 pub(in crate::runner) enum TaskGuidancePreparation {
     NoQueuedGuidance,
     Waiting {
@@ -35,7 +35,6 @@ impl std::fmt::Debug for PreparedTaskGuidanceCandidate {
             .debug_struct("PreparedTaskGuidanceCandidate")
             .field("queue_id", &self.promotion.queue_id)
             .field("task_id", &self.promotion.task_id)
-            .field("plan_version", &self.promotion.plan_version)
             .field("dispatch_run_id", &self.promotion.dispatch_run_id)
             .field("source_frontier", &self.source_frontier)
             .field("exact_guidance", &"<process-local>")
@@ -88,8 +87,8 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
     let task_facts = if let Some(task) = snapshot.task_guidance_state(task_id) {
         Some((
             task.status(),
+            task.direct_execution_admitted(),
             task.latest_plan_version(),
-            task.accepted_plan_version(),
         ))
     } else if snapshot.task_guidance_may_be_incomplete() {
         let canonical = session
@@ -99,17 +98,24 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
                 "task guidance canonical fallback requires a durable session store".to_owned()
             })?;
         canonical.tasks.get(task_id).map(|task| {
-            let accepted_plan_version = task.latest_plan_version.filter(|plan_version| {
-                task.plans
-                    .get(plan_version)
-                    .is_some_and(|plan| plan.status == TaskPlanStatus::Accepted)
-            });
-            (task.status, task.latest_plan_version, accepted_plan_version)
+            let direct_execution_admitted =
+                task.direct_execution_admission
+                    .as_ref()
+                    .is_some_and(|admission| {
+                        admission
+                            .validate()
+                            .is_ok_and(|()| admission.matches_objective(&task.objective))
+                    });
+            (
+                task.status,
+                direct_execution_admitted,
+                task.latest_plan_version,
+            )
         })
     } else {
         None
     };
-    let Some((task_status, latest_plan_version, accepted_plan_version)) = task_facts else {
+    let Some((task_status, direct_execution_admitted, latest_plan_version)) = task_facts else {
         return Ok(TaskGuidancePreparation::Terminal {
             queue_id,
             status: ConversationInputStatus::Rejected,
@@ -134,16 +140,31 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
             ),
         });
     }
-    let Some(plan_version) = latest_plan_version else {
-        return Ok(TaskGuidancePreparation::Waiting {
+    if !direct_execution_admitted || latest_plan_version.is_some() {
+        return Ok(TaskGuidancePreparation::Terminal {
             queue_id,
-            reason: "task guidance is waiting for an accepted task plan".to_owned(),
+            status: ConversationInputStatus::Rejected,
+            reason: "task guidance requires a current direct Task without a TaskPlan".to_owned(),
         });
-    };
-    if accepted_plan_version != Some(plan_version) {
+    }
+    if task_status == TaskRunStatus::Running {
         return Ok(TaskGuidancePreparation::Waiting {
             queue_id,
-            reason: "task guidance is waiting for the latest plan review".to_owned(),
+            reason: "task guidance is waiting for the direct Task to reach a resumable point"
+                .to_owned(),
+        });
+    }
+    if !matches!(
+        task_status,
+        TaskRunStatus::Started
+            | TaskRunStatus::Paused
+            | TaskRunStatus::Failed
+            | TaskRunStatus::Interrupted
+    ) {
+        return Ok(TaskGuidancePreparation::Terminal {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: "task guidance target is not a resumable direct Task".to_owned(),
         });
     }
 
@@ -194,7 +215,6 @@ pub(in crate::runner) fn prepare_next_task_guidance_candidate(
         queue_id,
         expected_queue_revision: revision,
         task_id: task_id.clone(),
-        plan_version,
         source_turn,
         prompt_hash: item.queued.prompt_hash.clone(),
         exact_prompt_required: projected.exact_prompt_required,
@@ -382,6 +402,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
     memory_config: &MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<ReasoningEffort>,
     traffic_partition_key: Option<String>,
@@ -391,6 +412,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_candidate(
         exact_prompts,
         workspace_root,
         memory_config,
+        conversation_contract,
         tools,
         None,
         default_reasoning_effort,
@@ -412,6 +434,7 @@ fn prepare_next_queued_conversation_candidate_with_target_max_tokens<F>(
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
     memory_config: &MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     target_max_tokens: Option<u32>,
     default_reasoning_effort: Option<ReasoningEffort>,
@@ -529,18 +552,9 @@ where
     let mut exact_user_message = ModelMessage::user(exact_prompt.clone());
     exact_user_message.id = durable_message_id;
     let background_ready_context = queued_background_ready_transient_context(Some(session));
-    let automatic_routing = tools
-        .iter()
-        .any(|tool| tool.name == sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME)
-        && tools
-            .iter()
-            .any(|tool| tool.name == sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME);
     let mut transient_messages = vec![exact_user_message];
-    if automatic_routing {
-        transient_messages.insert(
-            0,
-            ModelMessage::system(sigil_kernel::conversation_route_routing_contract_material()),
-        );
+    if let Some(contract) = conversation_contract {
+        transient_messages.insert(0, ModelMessage::system(contract));
     }
     transient_messages.extend(background_ready_context.clone());
     let runtime_context = resolve_runtime_context(&exact_prompt);
@@ -593,6 +607,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
     memory_config: &MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<ReasoningEffort>,
     traffic_partition_key: Option<String>,
@@ -603,6 +618,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission(
         exact_prompts,
         workspace_root,
         memory_config,
+        conversation_contract,
         tools,
         default_reasoning_effort,
         traffic_partition_key,
@@ -620,6 +636,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission_wit
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
     memory_config: &MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<ReasoningEffort>,
     traffic_partition_key: Option<String>,
@@ -632,6 +649,7 @@ pub(in crate::runner) fn prepare_next_queued_conversation_pressure_admission_wit
         exact_prompts,
         workspace_root,
         memory_config,
+        conversation_contract,
         tools,
         default_reasoning_effort,
         traffic_partition_key,
@@ -650,6 +668,7 @@ fn prepare_next_queued_conversation_pressure_admission_with_context<F>(
     exact_prompts: &ExactConversationPromptStore,
     workspace_root: &Path,
     memory_config: &MemoryConfig,
+    conversation_contract: Option<&'static str>,
     tools: Vec<sigil_kernel::ToolSpec>,
     default_reasoning_effort: Option<ReasoningEffort>,
     traffic_partition_key: Option<String>,
@@ -670,6 +689,7 @@ where
         exact_prompts,
         workspace_root,
         memory_config,
+        conversation_contract,
         tools,
         target_max_tokens,
         default_reasoning_effort,
@@ -826,11 +846,19 @@ pub(in crate::runner) fn cancel_queued_conversation_input(
     queue_id: ConversationInputQueueId,
 ) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
-    if durable_queue_item_status(&entries, &queue_id) == Some(ConversationInputStatus::Cancelled) {
+    let already_cancelled =
+        durable_queue_item_status(&entries, &queue_id) == Some(ConversationInputStatus::Cancelled);
+    if already_cancelled
+        && !current_session
+            .as_ref()
+            .is_some_and(Session::has_application_operation)
+    {
         exact_prompts.remove(&queue_id);
         return Ok(entries);
     }
-    ensure_queue_item_is_mutable(&entries, &queue_id)?;
+    if !already_cancelled {
+        ensure_queue_item_is_mutable(&entries, &queue_id)?;
+    }
     let entries = append_conversation_queue_control_entries(
         session_log_path,
         current_session,
@@ -901,10 +929,28 @@ pub(in crate::runner) fn move_queued_conversation_input(
         return Err(QueueOperationFailure::UnknownItem { queue_id });
     };
     let after_queue_id = match direction {
-        QueueMoveDirection::Up if index == 0 => return Ok(entries),
+        QueueMoveDirection::Up
+            if index == 0
+                && !current_session
+                    .as_ref()
+                    .is_some_and(Session::has_application_operation) =>
+        {
+            return Ok(entries);
+        }
+        QueueMoveDirection::Up if index == 0 => None,
         QueueMoveDirection::Up if index == 1 => None,
         QueueMoveDirection::Up => Some(projection.items[index - 2].queued.queue_id.clone()),
-        QueueMoveDirection::Down if index + 1 >= projection.items.len() => return Ok(entries),
+        QueueMoveDirection::Down if index + 1 >= projection.items.len() => {
+            if !current_session
+                .as_ref()
+                .is_some_and(Session::has_application_operation)
+            {
+                return Ok(entries);
+            }
+            index
+                .checked_sub(1)
+                .map(|previous| projection.items[previous].queued.queue_id.clone())
+        }
         QueueMoveDirection::Down => Some(projection.items[index + 1].queued.queue_id.clone()),
     };
     append_conversation_queue_control_entries(
@@ -966,7 +1012,11 @@ pub(in crate::runner) fn set_conversation_queue_paused(
     paused: bool,
 ) -> std::result::Result<Vec<SessionLogEntry>, QueueOperationFailure> {
     let entries = read_conversation_queue_entries(session_log_path, current_session)?;
-    if ConversationQueueProjection::from_entries(&entries).paused == paused {
+    if ConversationQueueProjection::from_entries(&entries).paused == paused
+        && !current_session
+            .as_ref()
+            .is_some_and(Session::has_application_operation)
+    {
         return Ok(entries);
     }
     append_conversation_queue_control_entries(

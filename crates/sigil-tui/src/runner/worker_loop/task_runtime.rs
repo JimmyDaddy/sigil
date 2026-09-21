@@ -50,26 +50,6 @@ pub(in crate::runner) struct TaskContinueSpawn {
     pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
 }
 
-pub(in crate::runner) struct TaskPlannerInputSpawn {
-    pub(in crate::runner) run_id: u64,
-    pub(in crate::runner) session: Session,
-    pub(in crate::runner) task_id: TaskId,
-    pub(in crate::runner) task_id_value: String,
-    pub(in crate::runner) parent_session_ref: SessionRef,
-    pub(in crate::runner) objective: String,
-    pub(in crate::runner) route: sigil_kernel::AgentUserInputRouteEntryV1,
-    pub(in crate::runner) command: sigil_kernel::UserInputDecisionCommandV1,
-    pub(in crate::runner) task_runtime: TaskRoleRuntime,
-    pub(in crate::runner) max_plan_steps: usize,
-    pub(in crate::runner) task_result_tx: WorkerEventPayloadSender<RunTaskResult>,
-    pub(in crate::runner) approval_rx: mpsc::Receiver<ApprovalSignal>,
-    pub(in crate::runner) handler: ChannelEventHandler,
-    pub(in crate::runner) elicitation_audit_buffer: McpElicitationAuditBuffer,
-    pub(in crate::runner) cancellation_handle: RunCancellationHandle,
-    pub(in crate::runner) cancellation_task_guard: RunTaskGuard,
-    pub(in crate::runner) tool_artifact_read_budget: ToolArtifactReadBudgetV1,
-}
-
 pub(in crate::runner) struct SkillChildRunSpawn {
     pub(in crate::runner) run_id: u64,
     pub(in crate::runner) session: Session,
@@ -231,87 +211,6 @@ pub(in crate::runner) fn spawn_task_continue(
             &terminal_objective,
             &terminal_cancellation,
             continuation_entry_frontier,
-            result,
-        );
-        let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
-            Ok(()) => result,
-            Err(error) => Err(error),
-        };
-        send_task_result(
-            run_id,
-            session,
-            task_id_value,
-            result,
-            task_result_tx,
-            &mut handler,
-            terminal_cancellation.is_cancel_requested(),
-        );
-    })
-}
-
-pub(in crate::runner) fn spawn_task_planner_input(
-    runtime: &tokio::runtime::Runtime,
-    spawn: TaskPlannerInputSpawn,
-) -> tokio::task::JoinHandle<()> {
-    runtime.spawn(async move {
-        let TaskPlannerInputSpawn {
-            run_id,
-            mut session,
-            task_id,
-            task_id_value,
-            parent_session_ref,
-            objective,
-            route,
-            command,
-            task_runtime,
-            max_plan_steps,
-            task_result_tx,
-            approval_rx,
-            mut handler,
-            elicitation_audit_buffer,
-            cancellation_handle,
-            cancellation_task_guard,
-            tool_artifact_read_budget,
-        } = spawn;
-        let _cancellation_task_guard = cancellation_task_guard;
-        let terminal_cancellation = cancellation_handle.clone();
-        let TaskRoleRuntime {
-            orchestrator,
-            planner_options,
-            executor_options,
-            subagent_read_options,
-            subagent_write_options,
-        } = task_runtime;
-        let orchestrator = orchestrator
-            .with_cancellation(cancellation_handle)
-            .with_tool_artifact_read_budget(tool_artifact_read_budget);
-        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-        let result = orchestrator
-            .resume_planner_after_user_input(
-                &mut session,
-                SequentialTaskRequest {
-                    task_id: task_id.clone(),
-                    parent_session_ref: parent_session_ref.clone(),
-                    objective: objective.clone(),
-                },
-                route,
-                command,
-                planner_options,
-                executor_options,
-                subagent_read_options,
-                subagent_write_options,
-                max_plan_steps,
-                &mut handler,
-                &mut approval_handler,
-            )
-            .await
-            .map(|output| output.status);
-        let result = finalize_task_root(
-            &mut session,
-            &task_id,
-            &parent_session_ref,
-            &objective,
-            &terminal_cancellation,
             result,
         );
         let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
@@ -541,7 +440,7 @@ pub(in crate::runner) async fn run_task_orchestration(
 }
 
 // Construct the orchestration future outside the caller's poll frame. Task handoff and
-// planner discovery share a root call stack, so nested by-value futures exhaust its budget.
+// direct execution share a root call stack, so nested by-value futures exhaust its budget.
 pub(in crate::runner) fn run_admitted_task_orchestration<'a, A>(
     session: &'a mut Session,
     request: AdmittedTaskRunOrchestration<'a>,
@@ -809,10 +708,8 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
     )?;
     let child_role = skill_child_agent_role(&loaded.descriptor);
     let TaskRoleRuntime {
-        orchestrator,
-        subagent_read_options,
-        subagent_write_options,
-        ..
+        direct_task_runtime,
+        executor_options,
     } = build_skill_child_role_runtime(
         &root_config,
         &options,
@@ -825,40 +722,23 @@ pub(in crate::runner) async fn run_skill_child_orchestration(
             .ok_or_else(|| "skill execution requires the managed verification route".to_owned())?,
     )
     .await?;
-    let orchestrator = orchestrator
+    let direct_task_runtime = direct_task_runtime
         .with_cancellation(cancellation_handle)
         .with_tool_artifact_read_budget(tool_artifact_read_budget.clone());
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
         .map_err(|error| format!("{error:#}"))?;
-    let child_input = AgentRunInput::without_persisted_user_message(vec![
-        loaded.transient_context,
-        ModelMessage::user(skill_invocation_prompt(&skill_id, &arguments)),
-    ])
-    .with_tool_artifact_read_budget(tool_artifact_read_budget);
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-    orchestrator
-        .run_direct_child_session(
+    let objective = format!("{objective}\n\nInvoke skill {skill_id} with arguments: {arguments}");
+    direct_task_runtime
+        .run(
             session,
-            SequentialTaskRequest {
+            DirectTaskRequest {
                 task_id,
                 parent_session_ref,
                 objective,
             },
-            TaskStepSpec {
-                step_id: TaskStepId::new("invoke_skill").map_err(|error| format!("{error:#}"))?,
-                title: format!("invoke agent {skill_id}"),
-                display_name: Some(skill_id.clone()),
-                detail: Some("direct user-invoked agent".to_owned()),
-                role: child_role,
-                depends_on: Vec::new(),
-                intent_refs: Vec::new(),
-                mode: None,
-                isolation: None,
-            },
-            child_input,
-            subagent_read_options,
-            subagent_write_options,
+            executor_options.clone(),
             handler,
             &mut approval_handler,
         )
@@ -1135,151 +1015,46 @@ pub(in crate::runner) async fn build_skill_child_role_runtime(
     role_provider_builder: &dyn TaskRoleProviderBuilder,
     verification_execution_port: Arc<dyn sigil_kernel::verification::VerificationExecutionPortV1>,
 ) -> std::result::Result<TaskRoleRuntime, String> {
-    let planner_provider = role_provider_builder
-        .build(root_config, AgentRole::Planner)
+    let provider = role_provider_builder
+        .build(root_config, child_role)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let executor_provider = role_provider_builder
-        .build(root_config, AgentRole::Executor)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let synthesis_provider = role_provider_builder
-        .build(root_config, AgentRole::Planner)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let subagent_read_provider = role_provider_builder
-        .build(root_config, AgentRole::SubagentRead)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let subagent_write_provider = role_provider_builder
-        .build(root_config, AgentRole::SubagentWrite)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
-    let planner_registry =
-        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
-            .into_registry();
-    let executor_registry =
-        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
-            .into_registry();
-    let subagent_read_registry = if child_role == AgentRole::SubagentRead {
-        sigil_runtime::build_role_skill_tool_registry(
-            base_registry,
-            root_config,
-            AgentRole::SubagentRead,
-            skill,
-        )
-    } else {
-        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentRead)
-    }
+    let registry = sigil_runtime::build_role_skill_tool_registry(
+        base_registry,
+        root_config,
+        child_role,
+        skill,
+    )
     .into_registry();
-    let subagent_write_registry = if child_role == AgentRole::SubagentWrite {
-        sigil_runtime::build_role_skill_tool_registry(
-            base_registry,
-            root_config,
-            AgentRole::SubagentWrite,
-            skill,
-        )
-    } else {
-        sigil_runtime::build_role_tool_registry(
-            base_registry,
-            root_config,
-            AgentRole::SubagentWrite,
-        )
-    }
-    .into_registry();
-    let workspace_root = options.workspace_root.clone();
-    let interaction_mode = options.interaction_mode;
-    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_task_roles(
+    let executor = sigil_runtime::configured_agent(root_config, provider, registry)
+        .map_err(|error| format!("{error:#}"))?;
+    let executor_options = sigil_runtime::build_role_run_options(
+        root_config,
+        options.workspace_root.clone(),
+        options.interaction_mode,
+        child_role,
+    );
+    let executor_options = match options.tool_authority.clone() {
+        Some(authority) => executor_options.with_tool_authority(authority),
+        None => executor_options,
+    };
+    let direct_agent_tool_runtime = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    );
+    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new_with_executor(
         agent_supervisor,
-        sigil_runtime::configured_agent(root_config, planner_provider, planner_registry)
-            .map_err(|error| format!("{error:#}"))?,
-        sigil_runtime::configured_agent(root_config, executor_provider, executor_registry)
-            .map_err(|error| format!("{error:#}"))?,
-        sigil_runtime::configured_agent(
-            root_config,
-            subagent_read_provider,
-            subagent_read_registry,
-        )
-        .map_err(|error| format!("{error:#}"))?,
-        sigil_runtime::configured_agent(
-            root_config,
-            subagent_write_provider,
-            subagent_write_registry,
-        )
-        .map_err(|error| format!("{error:#}"))?,
-        sigil_runtime::configured_agent(root_config, synthesis_provider, ToolRegistry::new())
-            .map_err(|error| format!("{error:#}"))?,
+        executor,
     )
-    .with_provider_route_concurrency_limit(configured_provider_route_concurrency_limit(
-        &root_config.task,
-    ))
-    .with_planner_discovery_policy(
-        root_config.task.multi_agent_mode,
-        root_config.task.max_planning_research_agents,
-    )
-    .with_integration_verification_port(verification_execution_port.clone());
-    let tool_authority = options.tool_authority.clone();
-    let mut planner_options = sigil_runtime::build_role_run_options(
-        root_config,
-        workspace_root.clone(),
-        interaction_mode,
-        AgentRole::Planner,
-    );
-    let mut executor_options = sigil_runtime::build_role_run_options(
-        root_config,
-        workspace_root.clone(),
-        interaction_mode,
-        AgentRole::Executor,
-    );
-    let mut subagent_read_options = sigil_runtime::build_role_run_options(
-        root_config,
-        workspace_root.clone(),
-        interaction_mode,
-        AgentRole::SubagentRead,
-    );
-    let mut subagent_write_options = sigil_runtime::build_role_run_options(
-        root_config,
-        workspace_root,
-        interaction_mode,
-        AgentRole::SubagentWrite,
-    );
-    if let Some(tool_authority) = tool_authority {
-        planner_options = planner_options.with_tool_authority(Arc::clone(&tool_authority));
-        executor_options = executor_options.with_tool_authority(Arc::clone(&tool_authority));
-        subagent_read_options =
-            subagent_read_options.with_tool_authority(Arc::clone(&tool_authority));
-        subagent_write_options = subagent_write_options.with_tool_authority(tool_authority);
-    }
+    .with_direct_agent_tool_runtime(direct_agent_tool_runtime)
+    .with_provider_route_concurrency_limit(root_config.task.max_concurrent_provider_routes.max(1));
+    let direct_task_runtime = DirectTaskRuntime::new_with_child_runner(child_runner)
+        .with_verification_execution_port(verification_execution_port);
     Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(child_runner)
-            .with_max_parallel_read_steps(configured_max_parallel_read_steps(&root_config.task))
-            .with_max_parallel_changeset_steps(configured_max_parallel_changeset_steps(
-                &root_config.task,
-            ))
-            .with_verification_execution_port(verification_execution_port),
-        planner_options,
+        direct_task_runtime,
         executor_options,
-        subagent_read_options,
-        subagent_write_options,
     })
-}
-
-pub(in crate::runner) fn configured_max_parallel_read_steps(
-    config: &sigil_kernel::TaskConfig,
-) -> usize {
-    config.max_parallel_read_steps.max(1)
-}
-
-pub(in crate::runner) fn configured_max_parallel_changeset_steps(
-    config: &sigil_kernel::TaskConfig,
-) -> usize {
-    config.max_parallel_changeset_steps.max(1)
-}
-
-pub(in crate::runner) fn configured_provider_route_concurrency_limit(
-    config: &sigil_kernel::TaskConfig,
-) -> usize {
-    configured_max_parallel_read_steps(config).max(configured_max_parallel_changeset_steps(config))
 }
 
 pub(in crate::runner) fn skill_child_agent_role(skill: &SkillDescriptor) -> AgentRole {
@@ -1438,7 +1213,6 @@ pub(in crate::runner) type RejectPlanRequest = sigil_runtime::RejectPlanRequest;
 /// RFC-0067 result of one typed Run command plus its first admission attempt.
 pub(in crate::runner) struct AdoptedPlanRun {
     pub(in crate::runner) receipt: sigil_runtime::PlanApprovalReceiptV2,
-    pub(in crate::runner) admission: sigil_kernel::TaskAdmissionOutcomeV1,
     pub(in crate::runner) entry: sigil_kernel::TaskCreatedFromPlanEntry,
     pub(in crate::runner) entries: Vec<sigil_kernel::SessionLogEntry>,
 }
@@ -1491,8 +1265,6 @@ pub(in crate::runner) fn adopt_plan_run(
         session_id: session.session_scope_id().to_owned(),
         plan_id: plan_id.clone(),
         expected_plan_hash,
-        // RFC-0069 approval binds the reviewable Plan, not an advisory precompile cache.
-        expected_candidate_hash: String::new(),
         expected_durable_frontier: session.durable_frontier_sequence(),
         start_mode,
         permission: match permission_grant {
@@ -1512,10 +1284,6 @@ pub(in crate::runner) fn adopt_plan_run(
         current_unix_time_ms(),
     )
     .map_err(|rejection| sigil_runtime::plan_run_rejection_message(&rejection))?;
-    let admission = sigil_runtime::PlanExecutionService::direct_execution_outcome(
-        &receipt,
-        current_unix_time_ms(),
-    );
     let entry = session
         .plan_artifact_projection()
         .tasks_created
@@ -1526,7 +1294,6 @@ pub(in crate::runner) fn adopt_plan_run(
     let entries = session.entries().to_vec();
     Ok(AdoptedPlanRun {
         receipt,
-        admission,
         entry,
         entries,
     })
@@ -1640,7 +1407,7 @@ pub(in crate::runner) fn append_paused_task_state(
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         session,
         handler,
-        Some(&task_id),
+        &task_id,
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Paused,
         "task paused from TUI",
     )
@@ -1651,19 +1418,15 @@ pub(in crate::runner) fn append_paused_task_state(
 pub(in crate::runner) fn append_interrupted_task_state(
     session: &mut Session,
     handler: &mut ChannelEventHandler,
-    task_id: Option<&str>,
+    task_id: &str,
     reason: &str,
 ) -> std::result::Result<(), String> {
-    let task_id = task_id
-        .map(|value| {
-            TaskId::new(value.to_owned())
-                .map_err(|error| format!("invalid active task id: {error}"))
-        })
-        .transpose()?;
+    let task_id = TaskId::new(task_id.to_owned())
+        .map_err(|error| format!("invalid active task id: {error}"))?;
     sigil_runtime::agent_supervisor::task_execution::append_task_stop_state(
         session,
         handler,
-        task_id.as_ref(),
+        &task_id,
         sigil_runtime::agent_supervisor::task_execution::TaskStopDisposition::Interrupted,
         reason,
     )
@@ -1707,7 +1470,7 @@ pub(in crate::runner) fn session_ref_for_log_path(
 pub(in crate::runner) fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
     vec![
         ModelMessage::system(
-            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v2 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. Each step must include id, title, role, depends_on, mode, isolation, target_paths, suggested_checks, notes, and acceptance; detail, display_name, risk, and intent_aliases are optional. Use the same role/mode/isolation values as task_plan_update. Use [] for empty arrays. Dependencies must reference step ids in the same block. When the requested outcome contains multiple independently meaningful product or user outcomes that should remain separately reviewable or removable, use your semantic judgment to add a top-level intents array. Each intent must contain intent_alias, title, statement, acceptance_criteria, and depends_on_aliases; each criterion must contain criterion_alias, statement, and required. Bind affected steps with intent_aliases. Every write step in an intent-enabled plan must bind exactly one alias; read and review steps may bind zero or more. Do not create intents by mechanically copying every implementation step. Omit intents and intent_aliases when semantic decomposition would not help. Provider aliases are descriptive only: never emit runtime intent ids, stack versions, acceptance authority, or permission claims. If you are only summarizing, reviewing, or cannot produce executable steps, do not include a structured block.",
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete execution plan, but do not modify files, run write-capable tools, or execute the plan. Use only the read-only and plan-review tools advertised in the current request. If and only if you have a concrete executable plan, end with a fenced ```sigil-plan-v2 JSON block containing summary, steps, target_paths, suggested_checks, risk, and notes. Each step must include id, title, role, depends_on, mode, isolation, target_paths, suggested_checks, notes, and acceptance; detail, display_name, risk, and intent_aliases are optional. Use [] for empty arrays. Dependencies must reference step ids in the same block. When the requested outcome contains multiple independently meaningful product or user outcomes that should remain separately reviewable or removable, use your semantic judgment to add a top-level intents array. Each intent must contain intent_alias, title, statement, acceptance_criteria, and depends_on_aliases; each criterion must contain criterion_alias, statement, and required. Bind affected steps with intent_aliases. Every write step in an intent-enabled plan must bind exactly one alias; read and review steps may bind zero or more. Do not create intents by mechanically copying every implementation step. Omit intents and intent_aliases when semantic decomposition would not help. Provider aliases are descriptive only: never emit runtime intent ids, stack versions, acceptance authority, or permission claims. If you are only summarizing, reviewing, or cannot produce executable steps, do not include a structured block.",
         ),
         ModelMessage::user(prompt),
     ]
@@ -1730,17 +1493,15 @@ pub(in crate::runner) fn next_task_id(session: &Session) -> std::result::Result<
 pub(in crate::runner) fn resolve_continue_task(
     session: &Session,
     requested_task_id: Option<String>,
-) -> std::result::Result<(TaskId, String, String, bool), String> {
+) -> std::result::Result<(TaskId, String, String), String> {
     let task = sigil_runtime::agent_supervisor::task_execution::resolve_task_continuation(
         session,
         requested_task_id.as_deref(),
     )
     .map_err(|error| format!("{error:#}"))?;
-    let needs_planning = task.needs_planning();
     Ok((
         task.task_id.clone(),
         task.task_id.as_str().to_owned(),
         task.objective,
-        needs_planning,
     ))
 }

@@ -26,12 +26,12 @@ fn agent_run_result() -> AgentRunResult {
         final_text: "private reply canary".to_owned(),
         tool_calls: 0,
         final_message_id: None,
-        completion_claim: None,
     }
 }
 
 fn approval_message(call_id: &str) -> WorkerMessage {
     WorkerMessage::Event(Box::new(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity(call_id),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -73,6 +73,7 @@ fn approval_message(call_id: &str) -> WorkerMessage {
 
 fn approval_resolved_message(call_id: &str) -> WorkerMessage {
     WorkerMessage::Event(Box::new(RunEvent::ToolApprovalResolved {
+        display_call_id: None,
         call_id: call_id.to_owned(),
         approval_request_id: format!("approval-{call_id}"),
         approved: true,

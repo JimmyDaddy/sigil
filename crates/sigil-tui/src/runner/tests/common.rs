@@ -14,12 +14,9 @@ use futures::{Stream, StreamExt, stream};
 use sigil_kernel::{
     Agent, AgentConfig, CompactionConfig, ConnectionId, ControlEntry, McpServerConfig,
     MemoryConfig, ModelRef, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningStreamSupport, RootConfig, SessionConfig, SessionLogEntry,
-    TASK_COMPLETION_CLAIM_SCHEMA_VERSION, TASK_COMPLETION_CLAIM_TOOL_NAME,
-    TaskCompletionClaimSubjectV1, TaskCompletionRequirementOutcomeV1,
-    TaskCompletionRequirementSourceV1, TaskConfig, TaskRoutingPolicy, Tool, ToolAccess, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
-    WorkspaceConfig,
+    ReasoningStreamSupport, RootConfig, SessionConfig, SessionLogEntry, TaskConfig,
+    TaskRoutingPolicy, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::super::{
@@ -352,6 +349,8 @@ pub(super) fn test_authority_composition(
             )),
             &[
                 Channel::ApplicationControlLog,
+                Channel::ApplicationCommandIndex,
+                Channel::ApplicationControlRecovery,
                 Channel::SessionLog,
                 Channel::SessionLifecycleLog,
                 Channel::InputHistory,
@@ -431,7 +430,42 @@ pub(super) fn spawn_test_worker_with_role_provider_builder_and_authority<P>(
 where
     P: Provider + Send + Sync + 'static,
 {
-    let (event_tx, event_rx) = mpsc::channel();
+    spawn_test_worker_with_owned_terminal(
+        root_config,
+        session_log_path,
+        agent,
+        workspace_root,
+        role_provider_builder,
+        authority_composition,
+        authority_root,
+        None,
+        None,
+    )
+}
+
+pub(super) type TestWorkerEvents = (
+    mpsc::Sender<super::super::worker_event::WorkerEvent>,
+    mpsc::Receiver<super::super::worker_event::WorkerEvent>,
+);
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_test_worker_with_owned_terminal<P>(
+    root_config: RootConfig,
+    session_log_path: PathBuf,
+    agent: Agent<P>,
+    workspace_root: PathBuf,
+    role_provider_builder: Arc<dyn TaskRoleProviderBuilder>,
+    authority_composition: Arc<
+        sigil_runtime::r71_authority_composition::RuntimeAuthorityCompositionV1,
+    >,
+    authority_root: Option<tempfile::TempDir>,
+    terminal_control: Option<sigil_tools_builtin::TerminalTaskControlHandle>,
+    worker_events: Option<TestWorkerEvents>,
+) -> Result<TestWorker>
+where
+    P: Provider + Send + Sync + 'static,
+{
+    let (event_tx, event_rx) = worker_events.unwrap_or_else(mpsc::channel);
     let (urgent_tx, urgent_rx) = mpsc::channel();
     let command_tx = WorkerCommandSender::new(event_tx.clone(), urgent_tx);
     let stop_control = command_tx.stop_control();
@@ -502,7 +536,7 @@ where
                     managed_verification_execution,
                     managed_plan_review_child_resources,
                 },
-                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, None)
+                WorkerLoopTerminalRuntime::new(terminal_lifecycle_router, terminal_control)
                     .with_stop_control(stop_control),
                 Some(managed_storage_writer),
                 Some(managed_artifact_store),
@@ -602,19 +636,6 @@ impl TaskRoleProviderBuilder for FailingRoleProviderBuilder {
     }
 }
 
-pub(super) fn planned_role_provider_builder_with_stream_start_signal(
-    plans: Vec<StreamPlan>,
-) -> (Arc<dyn TaskRoleProviderBuilder>, mpsc::Receiver<()>) {
-    let (stream_started_tx, stream_started_rx) = mpsc::channel();
-    (
-        Arc::new(PlannedRoleProviderBuilder {
-            plans: Arc::new(Mutex::new(VecDeque::from(plans))),
-            stream_started: Some(stream_started_tx),
-        }),
-        stream_started_rx,
-    )
-}
-
 struct PlannedRoleProviderBuilder {
     plans: Arc<Mutex<VecDeque<StreamPlan>>>,
     stream_started: Option<mpsc::Sender<()>>,
@@ -664,7 +685,7 @@ impl Provider for PlannedProvider {
 
     async fn stream(
         &self,
-        request: sigil_kernel::CompletionRequest,
+        _request: sigil_kernel::CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let plan = self
             .plans
@@ -674,12 +695,7 @@ impl Provider for PlannedProvider {
             .unwrap_or(StreamPlan::Pending);
         let stream: Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> = match plan {
             StreamPlan::Chunks(chunks) => {
-                let (chunks, synthetic_claim) =
-                    self.inject_completion_claim_if_needed(request, chunks);
-                // Synthetic claim turns are an internal fixture detail. Keep the dispatch signal
-                // aligned with the scripted plan queue so tests continue to observe one signal
-                // per planned planning or execution request.
-                if !synthetic_claim && let Some(stream_started) = &self.stream_started {
+                if let Some(stream_started) = &self.stream_started {
                     let _ = stream_started.send(());
                 }
                 Box::pin(stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>)))
@@ -708,159 +724,6 @@ impl Provider for PlannedProvider {
         };
         Ok(stream)
     }
-}
-
-struct CompletionClaimBinding {
-    subject: TaskCompletionClaimSubjectV1,
-    attempt_id: String,
-    sources: Vec<TaskCompletionRequirementSourceV1>,
-}
-
-impl PlannedProvider {
-    fn inject_completion_claim_if_needed(
-        &self,
-        request: sigil_kernel::CompletionRequest,
-        chunks: Vec<ProviderChunk>,
-    ) -> (Vec<ProviderChunk>, bool) {
-        let Some(binding) = completion_claim_binding(&request) else {
-            return (chunks, false);
-        };
-        let has_claim = chunks.iter().any(|chunk| {
-            matches!(
-                chunk,
-                ProviderChunk::ToolCallStart { name, .. }
-                    | ProviderChunk::ToolCallComplete(ToolCall { name, .. })
-                    if name == TASK_COMPLETION_CLAIM_TOOL_NAME
-            )
-        });
-        let has_other_tool = chunks.iter().any(|chunk| {
-            matches!(
-                chunk,
-                ProviderChunk::ToolCallStart { name, .. }
-                    | ProviderChunk::ToolCallComplete(ToolCall { name, .. })
-                    if name != TASK_COMPLETION_CLAIM_TOOL_NAME
-            )
-        });
-        let has_text = chunks
-            .iter()
-            .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if !text.is_empty()));
-        if has_claim || has_other_tool || !has_text {
-            return (chunks, false);
-        }
-
-        let claim = scripted_completion_claim_chunks_from_binding(binding);
-        self.plans
-            .lock()
-            .expect("plans mutex should not be poisoned")
-            .push_front(StreamPlan::Chunks(chunks));
-        (claim, true)
-    }
-}
-
-/// Builds one model-owned completion claim for a text-only scripted task turn. The production
-/// loop deliberately requests a final provider turn after the claim tool result; callers return
-/// this claim first and let their existing scripted response run on the following request.
-pub(super) fn scripted_completion_claim_chunks(
-    request: &sigil_kernel::CompletionRequest,
-    call_id_prefix: &str,
-) -> Option<Vec<ProviderChunk>> {
-    completion_claim_binding(request).map(|binding| {
-        scripted_completion_claim_chunks_from_binding_with_prefix(binding, call_id_prefix)
-    })
-}
-
-fn scripted_completion_claim_chunks_from_binding(
-    binding: CompletionClaimBinding,
-) -> Vec<ProviderChunk> {
-    scripted_completion_claim_chunks_from_binding_with_prefix(binding, "completion-claim")
-}
-
-fn scripted_completion_claim_chunks_from_binding_with_prefix(
-    binding: CompletionClaimBinding,
-    call_id_prefix: &str,
-) -> Vec<ProviderChunk> {
-    let call_id = format!(
-        "{call_id_prefix}-{}",
-        binding.attempt_id.chars().take(40).collect::<String>()
-    );
-    let args = serde_json::json!({
-        "schema_version": TASK_COMPLETION_CLAIM_SCHEMA_VERSION,
-        "subject": binding.subject,
-        "attempt_id": binding.attempt_id,
-        "evidence_frontier": format!("sha256:{}", "0".repeat(64)),
-        "status": "completed",
-        "requirements": binding.sources.into_iter().map(|source| serde_json::json!({
-            "source": source,
-            "required": true,
-            "outcome": TaskCompletionRequirementOutcomeV1::Fulfilled,
-            "artifact_refs": [],
-            "event_refs": [],
-            "explanation": "",
-        })).collect::<Vec<_>>(),
-        "artifact_refs": [],
-        "explanation": "",
-    });
-    let args_json = serde_json::to_string(&args).expect("completion claim fixture is serializable");
-    vec![
-        ProviderChunk::ToolCallStart {
-            id: call_id.clone(),
-            name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
-        },
-        ProviderChunk::ToolCallArgsDelta {
-            id: call_id.clone(),
-            delta: args_json.clone(),
-        },
-        ProviderChunk::ToolCallComplete(ToolCall {
-            id: call_id,
-            name: TASK_COMPLETION_CLAIM_TOOL_NAME.to_owned(),
-            args_json,
-        }),
-        ProviderChunk::Done,
-    ]
-}
-
-fn completion_claim_binding(
-    request: &sigil_kernel::CompletionRequest,
-) -> Option<CompletionClaimBinding> {
-    if !request
-        .tools
-        .iter()
-        .any(|tool| tool.name == TASK_COMPLETION_CLAIM_TOOL_NAME)
-    {
-        return None;
-    }
-    if request.messages.iter().any(|message| {
-        message
-            .tool_calls
-            .iter()
-            .any(|call| call.name == TASK_COMPLETION_CLAIM_TOOL_NAME)
-    }) {
-        return None;
-    }
-    let material = request.messages.iter().find_map(|message| {
-        let content = message.content.as_deref()?;
-        content
-            .contains("Task completion claim binding")
-            .then_some(content)
-    })?;
-    let subject = material
-        .lines()
-        .find_map(|line| line.strip_prefix("subject="))
-        .and_then(|value| serde_json::from_str(value).ok())?;
-    let attempt_id = material
-        .lines()
-        .find_map(|line| line.strip_prefix("attempt_id="))?
-        .trim()
-        .to_owned();
-    let sources = material
-        .lines()
-        .find_map(|line| line.strip_prefix("allowed requirement source templates="))
-        .and_then(|value| serde_json::from_str(value).ok())?;
-    Some(CompletionClaimBinding {
-        subject,
-        attempt_id,
-        sources,
-    })
 }
 
 pub(super) struct ApprovalFlowProvider;

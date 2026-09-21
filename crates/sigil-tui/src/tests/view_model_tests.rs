@@ -1311,6 +1311,7 @@ fn footer_hints_show_agent_background_shortcut_while_waiting() -> anyhow::Result
 fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-approval"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,
@@ -1422,6 +1423,7 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.runtime.is_busy = true;
     app.handle(RunEvent::ToolApprovalRequested {
+        display_call_id: None,
         approval_identity: test_approval_identity("call-approval"),
         effects: std::collections::BTreeSet::new(),
         analysis: sigil_kernel::ToolAnalysisStatus::Complete,

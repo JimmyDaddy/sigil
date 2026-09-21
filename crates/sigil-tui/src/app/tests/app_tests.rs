@@ -269,6 +269,7 @@ fn sync_agent_task(
             sigil_kernel::AgentThreadStatus::Completed
         }
         sigil_kernel::TaskChildSessionStatus::Failed => sigil_kernel::AgentThreadStatus::Failed,
+        sigil_kernel::TaskChildSessionStatus::Blocked => sigil_kernel::AgentThreadStatus::Blocked,
         sigil_kernel::TaskChildSessionStatus::Cancelled => {
             sigil_kernel::AgentThreadStatus::Cancelled
         }

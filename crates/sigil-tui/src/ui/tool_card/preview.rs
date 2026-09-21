@@ -22,7 +22,7 @@ pub(super) use terminal::*;
 
 pub(super) fn tool_has_preview(summary: &ToolCardRender) -> bool {
     terminal_task_tool(summary)
-        || (tool_name_matches(&summary.tool_name, "bash")
+        || (command_tool(summary)
             && call_argument(summary, "command").is_some_and(|command| !command.trim().is_empty()))
         || !summary.preview_lines.is_empty()
         || summary.preview_value.is_some()
@@ -37,7 +37,7 @@ pub(super) fn render_tool_expanded_preview_body_with_palette(
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if tool_name_matches(&summary.tool_name, "bash") {
+    if command_tool(summary) {
         lines.extend(render_bash_command_section_with_palette(
             summary,
             accent,
@@ -145,11 +145,11 @@ pub(super) fn render_tool_preview_body_with_palette(
     {
         return lines;
     }
-    if tool_name_matches(&summary.tool_name, "bash") {
-        return render_bash_preview_with_palette(summary, accent, palette);
-    }
     if terminal_task_tool(summary) {
         return render_terminal_task_preview_with_palette(summary, accent, palette);
+    }
+    if command_tool(summary) {
+        return render_bash_preview_with_palette(summary, accent, palette);
     }
     if agent_tool(summary) {
         return render_agent_tool_preview(

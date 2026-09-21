@@ -90,6 +90,7 @@ impl WorkerLoopTerminalRuntime {
 
 pub(in crate::runner) struct WorkerLoopSessionAttachment {
     pub(in crate::runner) log_path: PathBuf,
+    runtime_ready: Option<sigil_kernel::SessionRuntimeReadyV1>,
     pub(in crate::runner) lease: Option<
         Arc<sigil_runtime::interactive_session_attachment::InteractiveSessionAttachmentLease>,
     >,
@@ -103,8 +104,17 @@ impl WorkerLoopSessionAttachment {
     ) -> Self {
         Self {
             log_path,
+            runtime_ready: None,
             lease: Some(Arc::new(lease)),
         }
+    }
+
+    pub(in crate::runner) fn with_runtime_ready(
+        mut self,
+        binding: Option<sigil_kernel::SessionRuntimeReadyV1>,
+    ) -> Self {
+        self.runtime_ready = binding;
+        self
     }
 
     pub(in crate::runner) fn from_shared(
@@ -115,6 +125,7 @@ impl WorkerLoopSessionAttachment {
     ) -> Self {
         Self {
             log_path,
+            runtime_ready: None,
             lease: Some(lease),
         }
     }
@@ -143,6 +154,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
 {
     let WorkerLoopSessionAttachment {
         log_path: session_log_path,
+        runtime_ready,
         lease: attachment_lease,
     } = session_attachment;
     let provider_capabilities = agent.provider_capabilities();
@@ -173,12 +185,25 @@ pub(in crate::runner) fn run_worker_loop<P>(
         Some(Arc::new(
             sigil_runtime::ControlledImageAttachmentCache::new(attachment_paths.attachments_root),
         ));
+    let background_agent_runs = match attachment_lease.as_ref() {
+        Some(attachment) => match attachment.agent_tool_background_runs() {
+            Ok(runs) => runs,
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                    "failed to load session background-agent owner: {error:#}"
+                )));
+                return;
+            }
+        },
+        None => sigil_runtime::AgentToolBackgroundRuns::default(),
+    };
     super::super::spawn::send_startup_notice(&message_tx, "opening durable session");
-    let mut initial_session = match load_session_with_runtime_attachments(
+    let mut initial_session = match load_session_with_runtime_attachments_and_background_owner(
         &root_config.agent.runtime_provider,
         &root_config.agent.model,
         &session_log_path,
         None,
+        Some(&background_agent_runs),
     ) {
         Ok(mut session) => {
             if let Err(error) = sigil_runtime::bind_session_composition(&mut session, &root_config)
@@ -203,16 +228,26 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     &message_tx,
                     "checking workspace recovery state",
                 );
+                let live_worktree_ids = match background_agent_runs.active_worktree_ids() {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                            "failed to inspect live isolated-agent ownership: {error:#}"
+                        )));
+                        return;
+                    }
+                };
                 match runtime.block_on(
-                    sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup(
+                    sigil_runtime::isolated_workspace::reconcile_isolated_workspace_cleanup_excluding(
                         &mut session,
                         &workspace_root,
+                        &live_worktree_ids,
                     ),
                 ) {
                     Ok(report) if report.inspected > 0 => {
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} require review",
-                        report.inspected, report.removed, report.already_missing, report.failed
+                        "reconciled {} isolated task workspace(s): {} removed, {} already missing, {} retained for recovery, {} require review",
+                        report.inspected, report.removed, report.already_missing, report.retained, report.failed
                     )));
                     }
                     Ok(_) => {}
@@ -329,6 +364,15 @@ pub(in crate::runner) fn run_worker_loop<P>(
         event_tx.clone(),
         Some(initial_session.session_scope_id().to_owned()),
     );
+    if let Err(error) = background_agent_runs.set_event_sink(Arc::new(WorkerAgentEventSink {
+        sender: message_tx.clone(),
+        wake_coalescer: wake_coalescer.clone(),
+    })) {
+        let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+            "failed to attach background-agent event owner: {error:#}"
+        )));
+        return;
+    }
     let agent_supervisor = if task_orchestration_enabled {
         super::super::spawn::send_startup_notice(&message_tx, "loading agent profiles");
         Some(
@@ -342,6 +386,7 @@ pub(in crate::runner) fn run_worker_loop<P>(
                     sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
                     provider_capabilities.clone(),
                 )
+                .with_background_runs(background_agent_runs.clone())
                 .with_event_sink(Arc::new(WorkerSupervisorEventSink {
                     wake_coalescer: wake_coalescer.clone(),
                 })),
@@ -354,11 +399,6 @@ pub(in crate::runner) fn run_worker_loop<P>(
     } else {
         None
     };
-    let background_agent_runs =
-        sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
-            sender: message_tx.clone(),
-            wake_coalescer: wake_coalescer.clone(),
-        }));
     let mut state = WorkerLoopState::new_with_optional_attachment(
         session_log_path,
         Some(initial_session),
@@ -423,7 +463,10 @@ pub(in crate::runner) fn run_worker_loop<P>(
         return;
     }
     state.run.pending_task_handoffs = pending_task_handoffs;
-    let _ = message_tx.send(WorkerMessage::WorkerReady);
+    let _ = message_tx.send(match runtime_ready {
+        Some(binding) => WorkerMessage::RuntimeReady(binding),
+        None => WorkerMessage::WorkerReady,
+    });
 
     loop {
         state.stop_control.stage(WorkerShutdownStage::WorkerLoop);

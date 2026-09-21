@@ -70,6 +70,15 @@ pub(super) fn render_session_log_entry(entry: &SessionLogEntry) -> String {
 
 pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> String {
     match control {
+        ControlEntry::ProviderDiagnostic(diagnostic) => {
+            format!("[ctl] provider diagnostic {diagnostic:?}")
+        }
+        ControlEntry::ApplicationOperationPreparedV1(_) => {
+            "application operation prepared".to_owned()
+        }
+        ControlEntry::ApplicationOperationCommittedV1(_) => {
+            "application operation committed".to_owned()
+        }
         ControlEntry::SessionCompositionBound(entry) => format!(
             "[ctl] session composition core {} with {} enhancements",
             entry.core_contract_version,
@@ -143,6 +152,14 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             "[ctl] session route rebound {provider_name}/{}/{}",
             resolved_model_route.model_ref.connection_id, resolved_model_route.model_ref.model_id
         ),
+        ControlEntry::SessionRuntimeTransitionV1(entry) => {
+            let phase = match entry.transition {
+                sigil_kernel::SessionRuntimeTransitionPhaseV1::Intent { .. } => "intent",
+                sigil_kernel::SessionRuntimeTransitionPhaseV1::Configured { .. } => "configured",
+                sigil_kernel::SessionRuntimeTransitionPhaseV1::Activated { .. } => "activated",
+            };
+            format!("[ctl] session runtime {phase}")
+        }
         ControlEntry::SessionRouteTrustBound { .. } => "[ctl] session route trust bound".to_owned(),
         ControlEntry::ContinuationStateSaved(state) => format!(
             "[ctl] cont {} msg={}",
@@ -423,28 +440,20 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.scope.workspace_paths.len(),
             truncate_session_view_text(entry.workspace_snapshot_id.as_deref().unwrap_or("-"), 16)
         ),
-        ControlEntry::TaskCreatedFromPlan(entry) => {
-            let plan_state = if entry.task_plan_version == 0 {
-                "task_plan=none".to_owned()
-            } else {
-                format!(
-                    "task_plan=v{} mappings={}",
-                    entry.task_plan_version,
-                    entry.step_mapping.len()
-                )
-            };
-            format!(
-                "[ctl] task from plan plan={} task={} {} stale={}",
-                entry.plan_id.as_str(),
-                entry.task_id.as_str(),
-                plan_state,
-                truncate_session_view_text(entry.stale_reason.as_deref().unwrap_or("-"), 48)
-            )
-        }
+        ControlEntry::TaskCreatedFromPlan(entry) => format!(
+            "[ctl] task from plan plan={} task={}",
+            entry.plan_id.as_str(),
+            entry.task_id.as_str()
+        ),
         ControlEntry::TaskDirectExecutionAdmittedV1(entry) => format!(
             "[ctl] task direct execution admitted task={} admission={}",
             entry.task_id.as_str(),
             truncate_session_view_text(&entry.admission_id, 24)
+        ),
+        ControlEntry::TaskDirectRequirementsBoundV1(entry) => format!(
+            "Direct requirements bound: {} ({} items)",
+            entry.task_id.as_str(),
+            entry.requirements.len()
         ),
         ControlEntry::TaskDirectExecutionAttemptV1(entry) => format!(
             "[ctl] task direct execution attempt task={} ordinal={} status={:?}",
@@ -457,61 +466,6 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.task_id.as_str(),
             entry.revision,
             entry.items.len()
-        ),
-        ControlEntry::ExecutablePlanCandidatePreparedV1(candidate) => format!(
-            "[ctl] plan candidate {} task={} steps={} hash={}",
-            candidate.plan_id.as_str(),
-            candidate.task_id.as_str(),
-            candidate.task_plan.steps.len(),
-            truncate_session_view_text(&candidate.candidate_hash, 16)
-        ),
-        ControlEntry::PlanReadyCommittedV1(marker) => format!(
-            "[ctl] plan ready {} candidate={} attempt={}",
-            marker.plan_id.as_str(),
-            truncate_session_view_text(&marker.candidate_hash, 16),
-            marker.attempt_id
-        ),
-        ControlEntry::PlanCompileFailedV1(failure) => format!(
-            "[ctl] plan compile failed {} code={} step={}",
-            failure.plan_id.as_str(),
-            failure.reason_code,
-            failure.affected_step.as_deref().unwrap_or("-")
-        ),
-        ControlEntry::PlanExecutionAdoptedV1(adoption) => format!(
-            "[ctl] plan adopted {} task={} candidate={} command={} mode={:?}",
-            adoption.plan_id.as_str(),
-            adoption.task_id.as_str(),
-            truncate_session_view_text(&adoption.candidate_hash, 16),
-            adoption.command_id,
-            adoption.start_mode
-        ),
-        ControlEntry::TaskMaterializationAttemptStartedV1(attempt) => format!(
-            "[ctl] task preparation started task={} generation={} plan={} compiler={}",
-            attempt.task_id.as_str(),
-            attempt.generation,
-            truncate_session_view_text(&attempt.plan_hash, 16),
-            truncate_session_view_text(&attempt.compiler_contract_fingerprint, 16)
-        ),
-        ControlEntry::TaskMaterializationPreparedV1(materialization) => format!(
-            "[ctl] task materialized {} task={} candidate={} command={} mode={:?}",
-            materialization.plan_id.as_str(),
-            materialization.task_id.as_str(),
-            truncate_session_view_text(&materialization.candidate_hash, 16),
-            materialization.command_id,
-            materialization.start_mode
-        ),
-        ControlEntry::TaskMaterializationBlockedV1(blocked) => format!(
-            "[ctl] task preparation blocked task={} generation={} code={} blocker={}",
-            blocked.task_id.as_str(),
-            blocked.generation,
-            blocked.blocker.reason_code.as_str(),
-            truncate_session_view_text(&blocked.blocker_id, 24)
-        ),
-        ControlEntry::TaskAdmissionAttemptedV1(attempt) => format!(
-            "[ctl] task admission {} ordinal={} outcome={:?}",
-            attempt.task_id.as_str(),
-            attempt.ordinal,
-            attempt.outcome
         ),
         ControlEntry::TaskRun(run) => format!(
             "[ctl] task {} status={}",
@@ -530,11 +484,9 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             format!("[ctl] task handoff resolved decision={:?}", entry.decision)
         }
         ControlEntry::TaskContinuationSelected(entry) => format!(
-            "[ctl] task continuation selected task={} plan={}",
+            "[ctl] direct task continuation selected task={} control={:?}",
             entry.task_id.as_str(),
-            entry
-                .plan_version
-                .map_or_else(|| "none".to_owned(), |version| format!("v{version}"))
+            entry.control
         ),
         ControlEntry::TaskRunTargetSelected(entry) => format!(
             "[ctl] task run target selected task={} plan={}",
@@ -564,20 +516,6 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.plan_version,
             entry.contract_count
         ),
-        ControlEntry::TaskGuidanceApplied(applied) => format!(
-            "[ctl] task guidance applied task={} plan=v{} targets={} reason={:?}",
-            applied.task_id.as_str(),
-            applied.plan_version,
-            applied.target_step_ids.len(),
-            applied.reason
-        ),
-        ControlEntry::TaskGuidanceMaterialized(entry) => format!(
-            "[ctl] task guidance materialized task={} plan=v{} targets={} exact_required={}",
-            entry.task_id.as_str(),
-            entry.plan_version,
-            entry.target_step_ids.len(),
-            entry.exact_prompt_required
-        ),
         ControlEntry::TaskStep(step) => format!(
             "[ctl] step {} v{}:{} status={}",
             step.task_id.as_str(),
@@ -585,27 +523,12 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             step.step_id.as_str(),
             step.status.as_str()
         ),
-        ControlEntry::TaskStepCheckpointV2(entry) => format!(
-            "[ctl] step checkpoint {} v{}:{} turn={} no_progress={}",
-            entry.task_id.as_str(),
-            entry.plan_version,
-            entry.step_id.as_str(),
-            entry.model_turn,
-            entry.no_progress_count
-        ),
         ControlEntry::TaskParticipantAttempt(attempt) => format!(
             "[ctl] participant {} purpose={:?} ordinal={} status={:?}",
             attempt.task_id.as_str(),
             attempt.purpose,
             attempt.ordinal,
             attempt.status
-        ),
-        ControlEntry::TaskParticipantRetryScheduled(retry) => format!(
-            "[ctl] participant retry {} ordinal={} after={}ms failed={}",
-            retry.task_id.as_str(),
-            retry.retry_ordinal,
-            retry.retry_after_ms,
-            truncate_session_view_text(retry.failed_attempt_id.as_str(), 32)
         ),
         ControlEntry::TaskParticipantResult(result) => format!(
             "[ctl] participant result {} terminal={} summary={} changed={}",
@@ -616,11 +539,6 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
                 .unwrap_or("unavailable"),
             truncate_session_view_text(&result.summary, 64),
             result.changed_paths.len()
-        ),
-        ControlEntry::TaskFinalAnswerCommitted(entry) => format!(
-            "[ctl] task final {} message={}",
-            entry.task_id.as_str(),
-            truncate_session_view_text(&entry.message_id, 32)
         ),
         ControlEntry::OrchestrationRouteDisabled(entry) => format!(
             "[ctl] orchestration route disabled route={} build={} invariant={:?} report={}",
@@ -1036,10 +954,9 @@ pub(in crate::app) fn render_control_entry_line(control: &ControlEntry) -> Strin
             entry.capability_descriptors.len()
         ),
         ControlEntry::TaskGuidancePromoted(entry) => format!(
-            "[ctl] queue {} task guidance promoted task={} plan=v{} run={}",
+            "[ctl] queue {} task guidance promoted task={} run={}",
             entry.queue_id.as_str(),
             entry.task_id.as_str(),
-            entry.plan_version,
             truncate_session_view_text(&entry.dispatch_run_id, 24)
         ),
         ControlEntry::ConversationRouteDecisionRecorded(decision) => {
@@ -1405,6 +1322,7 @@ pub(super) fn task_child_session_status_label(
 ) -> &'static str {
     match status {
         sigil_kernel::TaskChildSessionStatus::Started => "started",
+        sigil_kernel::TaskChildSessionStatus::Blocked => "blocked",
         sigil_kernel::TaskChildSessionStatus::Completed => "completed",
         sigil_kernel::TaskChildSessionStatus::Failed => "failed",
         sigil_kernel::TaskChildSessionStatus::Cancelled => "cancelled",
@@ -1743,15 +1661,9 @@ pub(super) fn delegation_authority_record_label(
             plan_version,
             step_id.as_str()
         ),
-        sigil_kernel::DelegationAuthorityRecord::TaskOrchestrator { task_id, phase } => format!(
-            "task_orchestrator:{}:{}",
-            task_id.as_str(),
-            match phase {
-                sigil_kernel::TaskOrchestratorPhase::Planner => "planner",
-                sigil_kernel::TaskOrchestratorPhase::PlannerDiscovery => "planner_discovery",
-                sigil_kernel::TaskOrchestratorPhase::Synthesis => "synthesis",
-            }
-        ),
+        sigil_kernel::DelegationAuthorityRecord::DirectTask { task_id } => {
+            format!("direct_task:{}", task_id.as_str())
+        }
         sigil_kernel::DelegationAuthorityRecord::ModelProactive => "model_proactive".to_owned(),
         sigil_kernel::DelegationAuthorityRecord::SystemRecovery => "system_recovery".to_owned(),
     }
@@ -1777,6 +1689,7 @@ pub(super) fn agent_terminal_status_label(
 ) -> &'static str {
     match status {
         sigil_kernel::AgentThreadTerminalStatus::Completed => "completed",
+        sigil_kernel::AgentThreadTerminalStatus::Blocked => "blocked",
         sigil_kernel::AgentThreadTerminalStatus::Failed => "failed",
         sigil_kernel::AgentThreadTerminalStatus::Cancelled => "cancelled",
         sigil_kernel::AgentThreadTerminalStatus::Interrupted => "interrupted",

@@ -391,53 +391,6 @@ fn integration_lifecycle_has_bounded_audit_lines() -> Result<()> {
 }
 
 #[test]
-fn participant_retry_audit_line_shows_bounded_schedule() -> Result<()> {
-    let task_id = sigil_kernel::TaskId::new("task_audit_retry")?;
-    let step_id = sigil_kernel::TaskStepId::new("inspect")?;
-    let failed_attempt_id = sigil_kernel::task_participant_attempt_id(
-        &task_id,
-        sigil_kernel::TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        1,
-    )?;
-    let retry_attempt_id = sigil_kernel::task_participant_attempt_id(
-        &task_id,
-        sigil_kernel::TaskParticipantPurpose::Step,
-        Some(1),
-        Some(&step_id),
-        2,
-    )?;
-    let line = render_control_entry_line(&ControlEntry::TaskParticipantRetryScheduled(
-        sigil_kernel::TaskParticipantRetryScheduledEntry {
-            task_id,
-            failed_attempt_id,
-            retry_attempt_id,
-            purpose: sigil_kernel::TaskParticipantPurpose::Step,
-            retry_ordinal: 2,
-            plan_version: Some(1),
-            step_id: Some(step_id),
-            route_fingerprint: format!("sha256:{}", "1".repeat(64)),
-            input_hash: "2".repeat(64),
-            scheduled_at_unix_ms: 1_000,
-            not_before_unix_ms: 2_500,
-            retry_after_ms: 1_500,
-            proof: sigil_kernel::TaskParticipantRetryProof::AdmissionRejectedBeforeDispatch {
-                zero_output: true,
-                zero_tool: true,
-                zero_effect: true,
-            },
-        },
-    ));
-
-    assert!(line.contains("participant retry task_audit_retry"));
-    assert!(line.contains("ordinal=2"));
-    assert!(line.contains("after=1500ms"));
-    assert!(line.contains("failed=attempt-"));
-    Ok(())
-}
-
-#[test]
 fn session_history_does_not_read_a_removed_raw_log_format() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session-removed-format.jsonl");
@@ -1981,12 +1934,11 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
 }
 
 #[test]
-fn restored_timeline_hides_internal_conversation_route_tool_cards() {
+fn restored_timeline_preserves_model_handoff_tool_cards() {
     let app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     let route_tools = [
-        sigil_kernel::CONTINUE_WITHOUT_TASK_PLANNING_TOOL_NAME,
         sigil_kernel::CONTINUE_EXISTING_TASK_TOOL_NAME,
-        sigil_kernel::REQUEST_TASK_PLANNING_TOOL_NAME,
+        sigil_kernel::START_TASK_TOOL_NAME,
         sigil_kernel::REQUEST_PLAN_REVIEW_TOOL_NAME,
     ];
     let entries = route_tools
@@ -1996,7 +1948,7 @@ fn restored_timeline_hides_internal_conversation_route_tool_cards() {
             v2_tool_result_entry(
                 &format!("call-route-{index}"),
                 tool_name,
-                "internal routing result",
+                "recorded handoff result",
                 ToolResultMeta::default(),
             )
         })
@@ -2004,7 +1956,11 @@ fn restored_timeline_hides_internal_conversation_route_tool_cards() {
 
     let restored = app.restored_timeline_entries_from_session_entries(&entries);
 
-    assert!(restored.is_empty());
+    assert_eq!(restored.len(), route_tools.len());
+    assert!(
+        restored.iter().all(|entry| entry.role == TimelineRole::Tool
+            && entry.text.contains("recorded handoff result"))
+    );
 }
 
 #[test]
@@ -2313,12 +2269,13 @@ fn render_session_control_entries_cover_remaining_labels() {
             subjects: Vec::new(),
             facets: vec![sigil_kernel::ToolApprovalSessionGrantFacet::Network],
             scope: sigil_kernel::ToolApprovalSessionGrantScope::NetworkReadTool,
-            containment_binding: sigil_kernel::ExecutionContainmentBindingV2 {
+            containment_binding: Some(sigil_kernel::ExecutionContainmentBindingV2 {
                 requested: sigil_kernel::ExecutionContainmentRequest::default(),
                 backend_identity_hash: "0".repeat(64),
                 backend_profile_hash: "1".repeat(64),
                 environment_binding_hash: "2".repeat(64),
-            },
+            }),
+            network_binding: None,
             policy_version: "sha256:approval-policy".to_owned(),
             expires: ToolApprovalSessionGrantExpiry::Session,
             granted_at_ms: 1,
