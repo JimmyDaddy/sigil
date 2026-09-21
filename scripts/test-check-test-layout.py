@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,6 +50,26 @@ class TestLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "crates directory is missing"):
                 check_layout.inline_test_modules(Path(directory))
+
+    def test_staged_mode_reads_index_blob_and_ignores_unstaged_fix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("fn live() {}\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+            source.write_text("fn live() {}\n\nmod tests {\n}\n", encoding="utf-8")
+            subprocess.run(["git", "add", str(source)], cwd=root, check=True)
+            source.write_text("fn live() {}\n", encoding="utf-8")
+
+            self.assertEqual(
+                check_layout.staged_inline_test_modules(root),
+                [(Path("crates/example/src/lib.rs"), 3)],
+            )
 
 
 if __name__ == "__main__":

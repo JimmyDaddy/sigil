@@ -117,6 +117,31 @@ def write_manifest(root: Path, kind: str, sites: list[dict[str, object]]) -> Non
 
 class SharedInventoryCheckerTests(unittest.TestCase):
     def setUp(self) -> None:
+        # These historical locations are isolated checker fixtures. Production no longer
+        # declares temporary recovery roots, but exact-locator rejection must stay covered.
+        fixture_contracts = tuple(
+            {
+                **dict(zip(generator.EXACT_LOCATOR_FIELDS, locator, strict=True)),
+                "class": site_class,
+                "owner": "AuthorityBootstrap",
+                "root_source": "ConfiguredPlatformBootstrapLocation",
+                "input_taint": "UserConfiguration",
+                "child_access": "None",
+                "admission_contract": "AuthorityBootstrapAdmission",
+                "resource_contract": f"AuthorityBootstrapObject({resource})",
+                "lifecycle_contract": "AuthorityBootstrapLifecycle",
+                "receipt_contract": "AuthorityBootstrapReceipt",
+            }
+            for locator, site_class, resource in zip(
+                RECOVERY_ROOT_LOCATORS,
+                ("managed-runtime-state", "managed-runtime-cache", "managed-execution-temp"),
+                ("StateAnchor", "CacheAnchor", "ExecutionTempAnchor"),
+                strict=True,
+            )
+        )
+        declaration_patch = patch.object(generator, "EXACT_RECOVERY_ROOT_SITES", fixture_contracts)
+        declaration_patch.start()
+        self.addCleanup(declaration_patch.stop)
         self.temporary_directory = tempfile.TemporaryDirectory(prefix="r71-inventories-")
         self.root = Path(self.temporary_directory.name)
         self.process_scan = scanned_site(
@@ -175,6 +200,15 @@ class SharedInventoryCheckerTests(unittest.TestCase):
         self.assertEqual(calls, 1)
         self.assertIn("local-process-inventory enforce: 1 sites verified", stdout)
         self.assertIn("local-resource-producer-inventory enforce: 3 sites verified", stdout)
+
+    def test_control_log_initialization_stays_with_the_managed_storage_authority(self) -> None:
+        site = scanned_site("sigil-resource-authority", "crates/sigil-resource-authority/src/control_log_recovery.rs", 1, "CreateOrOpenFile")
+        contract = generator.site_contract(site, generator.PRODUCER_RULES)
+        self.assertEqual(contract["owner"], "ResourceAuthority")
+        self.assertEqual(contract["child_access"], "ExactManagedGrant")
+        self.assertEqual(contract["admission_contract"], "ManagedStorageCurrentState")
+        self.assertEqual(contract["resource_contract"], "ManagedNamespace(ControlLogRecovery)")
+        self.assertEqual(contract["receipt_contract"], "ControlLogRecoveryState")
 
     def test_exact_recovery_root_contracts_freeze_all_fields(self) -> None:
         self.assertEqual(

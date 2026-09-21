@@ -33,18 +33,10 @@ TOOL_CALL_ID = "durable-user-input-call"
 FINAL_CANARY = "USER-INPUT-PTY-FINAL-CANARY-7316"
 TOOL_ARGUMENTS = json.dumps(
     {
-        "prompt": "Choose the compatibility boundary before implementation.",
         "questions": [
             {
                 "id": "compatibility",
-                "header": "Compatibility",
                 "question": QUESTION_PROMPT,
-                "required": True,
-                "field": {
-                    "kind": "text",
-                    "multiline": False,
-                    "max_chars": 80,
-                },
             }
         ],
     },

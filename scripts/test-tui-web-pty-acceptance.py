@@ -53,7 +53,7 @@ class WebPtyAcceptanceTests(unittest.TestCase):
             provider_requests,
             [
                 {
-                    "has_direct_route_tool": False,
+                    "has_optional_plan_tool": False,
                     "has_websearch_tool": False,
                     "has_tool_result": False,
                 }
@@ -67,16 +67,24 @@ class WebPtyAcceptanceTests(unittest.TestCase):
             "tools": [
                 {
                     "type": "function",
-                    "function": {"name": "continue_without_task_planning"},
+                    "function": {"name": "request_plan_review"},
                 }
             ],
         }
         ordinary_payload = {
             "messages": [],
             "tools": [
-                {"type": "function", "function": {"name": "websearch"}}
+                {"type": "function", "function": {"name": "websearch"}},
+                {"type": "function", "function": {"name": "request_plan_review"}},
             ],
         }
+        fixture = MODULE.FixtureState()
+        fixture.record_provider(ordinary_payload)
+        self.assertEqual(fixture.snapshot()[3], [{
+            "has_optional_plan_tool": True,
+            "has_websearch_tool": True,
+            "has_tool_result": False,
+        }])
         continuation_payload = {
             "messages": [
                 {
@@ -90,7 +98,7 @@ class WebPtyAcceptanceTests(unittest.TestCase):
 
         self.assertTrue(
             MODULE.provider_request_exposes_tool(
-                route_payload, "continue_without_task_planning"
+                route_payload, "request_plan_review"
             )
         )
         self.assertFalse(MODULE.provider_request_exposes_tool(route_payload, "websearch"))

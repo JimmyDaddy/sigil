@@ -36,7 +36,6 @@ ANSI_RE = re.compile(
 FINAL_ANSWER = "Fixture websearch completed."
 SEMANTIC_TITLE = "Fixture websearch validation"
 TOOL_CALL_ID = "fixture-websearch-call"
-ROUTING_CALL_ID = "fixture-direct-conversation-route"
 MAX_FIXTURE_REQUEST_BYTES = 1024 * 1024
 
 
@@ -76,10 +75,10 @@ class FixtureState:
             and tool["function"].get("name") == "websearch"
             for tool in tool_items
         )
-        has_direct_route_tool = any(
+        has_optional_plan_tool = any(
             isinstance(tool, dict)
             and isinstance(tool.get("function"), dict)
-            and tool["function"].get("name") == "continue_without_task_planning"
+            and tool["function"].get("name") == "request_plan_review"
             for tool in tool_items
         )
         has_tool_result = any(
@@ -91,7 +90,7 @@ class FixtureState:
         with self.lock:
             self.provider_requests.append(
                 {
-                    "has_direct_route_tool": has_direct_route_tool,
+                    "has_optional_plan_tool": has_optional_plan_tool,
                     "has_websearch_tool": has_websearch_tool,
                     "has_tool_result": has_tool_result,
                 }
@@ -244,13 +243,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self.fixture.semantic_title_completed.set()
             return
         self.fixture.record_provider(payload)
-        if provider_request_exposes_tool(payload, "continue_without_task_planning"):
-            self._send_tool_call(
-                ROUTING_CALL_ID,
-                "continue_without_task_planning",
-                '{"reason":"does_not_meet_task_planning_criteria"}',
-            )
-            return
         if provider_request_exposes_tool(payload, "websearch") and not provider_request_has_result(
             payload, TOOL_CALL_ID
         ):
@@ -700,11 +692,11 @@ def assert_acceptance(
         raise RuntimeError(
             f"fixture rejected an HTTP payload: {', '.join(protocol_error_kinds)}"
     )
-    if not provider_requests or not provider_requests[0]["has_direct_route_tool"]:
-        raise RuntimeError("initial provider request did not expose typed routing")
-    if not any(request["has_websearch_tool"] for request in provider_requests[1:]):
-        raise RuntimeError("ordinary provider request did not expose websearch")
-    if not any(request["has_tool_result"] for request in provider_requests[2:]):
+    if not provider_requests or not provider_requests[0]["has_optional_plan_tool"]:
+        raise RuntimeError("initial provider request did not expose optional planning")
+    if not provider_requests[0]["has_websearch_tool"]:
+        raise RuntimeError("initial provider request did not expose websearch")
+    if not any(request["has_tool_result"] for request in provider_requests[1:]):
         raise RuntimeError("no continuation provider request contained the websearch tool result")
     if semantic_title_requests != 1:
         raise RuntimeError(

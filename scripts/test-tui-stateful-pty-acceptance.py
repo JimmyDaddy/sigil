@@ -402,51 +402,29 @@ class StatefulSurfaceCampaignTests(unittest.TestCase):
         self.assertEqual(runner.wait_until.call_count, 1)
         self.assertTrue(runner.wait_until.call_args.kwargs["final_screen"])
 
-    def test_plan_fixture_recognizes_current_research_and_submit_only_turns(
-        self,
-    ) -> None:
-        research_payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": f"{MODULE.PLAN_RESEARCH_MARKER} Inspect first.",
-                }
-            ]
-        }
-        finalizer_payload = {
-            "messages": [{"role": "system", "content": "Finalize the recorded evidence."}],
+    def test_plan_fixture_uses_the_current_result_tool_in_the_ordinary_loop(self) -> None:
+        current_payload = {
+            "messages": [{"role": "system", "content": "Review this request."}],
             "tools": [
                 {
                     "type": "function",
-                    "function": {"name": "submit_plan_draft"},
+                    "function": {"name": "submit_plan_review_result"},
                 }
-            ]
+            ],
+        }
+        retired_payload = {
+            "messages": [{"role": "system", "content": "Review this request."}],
+            "tools": [
+                {"type": "function", "function": {"name": "submit_plan_draft"}}
+            ],
         }
 
-        self.assertTrue(MODULE.is_plan_mode_request(research_payload))
-        self.assertFalse(MODULE.advertises_tool(research_payload, "submit_plan_draft"))
-        self.assertTrue(MODULE.is_plan_mode_request(finalizer_payload))
-        self.assertTrue(MODULE.advertises_tool(finalizer_payload, "submit_plan_draft"))
-        draft = json.loads(MODULE.PLAN_DRAFT_ARGUMENTS)
-        self.assertEqual(draft["schema_version"], 2)
-        self.assertEqual(draft["summary"], MODULE.PLAN_SUMMARY_CANARY)
-        self.assertEqual(len(draft["steps"]), 1)
-        self.assertIn("```sigil-plan-v2", MODULE.PLAN_DRAFT_TEXT)
-        self.assertIn(MODULE.PLAN_SUMMARY_CANARY, MODULE.PLAN_DRAFT_TEXT)
-
-    def test_plan_fixture_keeps_legacy_plan_mode_compatibility(self) -> None:
-        self.assertTrue(
-            MODULE.is_plan_mode_request(
-                {
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": f"{MODULE.PLAN_MODE_MARKER} Inspect first.",
-                        }
-                    ]
-                }
-            )
-        )
+        self.assertTrue(MODULE.is_plan_mode_request(current_payload))
+        self.assertFalse(MODULE.is_plan_mode_request(retired_payload))
+        result = json.loads(MODULE.PLAN_REVIEW_RESULT_ARGUMENTS)
+        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["outcome"], "draft")
+        self.assertTrue(result["content"].startswith(MODULE.PLAN_SUMMARY_CANARY))
 
     def test_plan_fixture_does_not_misclassify_an_ordinary_conversation(self) -> None:
         self.assertFalse(

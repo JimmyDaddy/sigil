@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise model-owned auto handoff and parallel task execution through a real TUI PTY."""
+"""Exercise review-first Direct Task execution through a real TUI PTY."""
 
 from __future__ import annotations
 
@@ -30,236 +30,33 @@ SUPPORT_SPEC.loader.exec_module(SUPPORT)
 
 SCHEMA_VERSION = 1
 ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-MODEL_NAME = "orchestration-fixture-model"
-FINAL_CANARY = "ORCHESTRATION-PTY-FINAL-CANARY-7319"
-APPROVAL_FINAL_CANARY = "ORCHESTRATION-PTY-APPROVAL-FINAL-8427"
-USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-2486"
-APPROVAL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-3597"
+MODEL_NAME = "direct-task-fixture-model"
+FINAL_CANARY = "DIRECT-TASK-PTY-FINAL-CANARY-7319"
+APPROVAL_FINAL_CANARY = "DIRECT-TASK-PTY-APPROVAL-FINAL-8427"
+APPROVAL_USER_PROMPT = "DIRECT-TASK-PTY-OPAQUE-REQUEST-3597"
 APPROVAL_PATH = "approval-note.txt"
 APPROVAL_CONTENT = "approved task write\n"
 APPROVAL_TOOL_CALL_ID = "approval-write-call"
-CONTINUE_FINAL_CANARY = "ORCHESTRATION-PTY-CONTINUE-FINAL-9531"
-CONTINUE_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-4608"
-CANCEL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-5719"
-INTEGRATION_FINAL_CANARY = "ORCHESTRATION-PTY-INTEGRATION-FINAL-6842"
-INTEGRATION_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-6820"
+CONTINUE_FINAL_CANARY = "DIRECT-TASK-PTY-CONTINUE-FINAL-9531"
+CONTINUE_USER_PROMPT = "DIRECT-TASK-PTY-OPAQUE-REQUEST-4608"
+CANCEL_USER_PROMPT = "DIRECT-TASK-PTY-OPAQUE-REQUEST-5719"
+INTEGRATION_FINAL_CANARY = "DIRECT-TASK-PTY-INTEGRATION-FINAL-6842"
+INTEGRATION_USER_PROMPT = "DIRECT-TASK-PTY-OPAQUE-REQUEST-6820"
 INTEGRATION_PATHS = ("integration-a.txt", "integration-b.txt")
 INTEGRATION_TOOL_CALL_IDS = ("integration-write-a", "integration-write-b")
-TERMINAL_FINAL_CANARY = "ORCHESTRATION-PTY-TERMINAL-FINAL-7953"
-TERMINAL_USER_PROMPT = "ORCHESTRATION-PTY-OPAQUE-REQUEST-7931"
-TERMINAL_TASK_ID = "orchestration-pty-terminal"
+TERMINAL_FINAL_CANARY = "DIRECT-TASK-PTY-TERMINAL-FINAL-7953"
+TERMINAL_USER_PROMPT = "DIRECT-TASK-PTY-OPAQUE-REQUEST-7931"
+TERMINAL_TASK_ID = "direct-task-pty-terminal"
 TERMINAL_START_TOOL_CALL_ID = "terminal-start-call"
 TERMINAL_CANCEL_TOOL_CALL_ID = "terminal-cancel-call"
-TERMINAL_READY_CANARY = "ORCHESTRATION-PTY-TERMINAL-READY-8174"
-TERMINAL_PROGRESS_CANARY = "ORCHESTRATION-PTY-TERMINAL-PROGRESS-9285"
-READ_STEP_IDS = ("inspect_kernel", "inspect_runtime")
-READ_STEP_TITLES = ("Inspect kernel route", "Inspect runtime route")
-PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": READ_STEP_IDS[0],
-                "title": READ_STEP_TITLES[0],
-                "role": "subagent_read",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            },
-            {
-                "step_id": READ_STEP_IDS[1],
-                "title": READ_STEP_TITLES[1],
-                "role": "subagent_read",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            },
-        ],
-    },
-    separators=(",", ":"),
-)
-HANDOFF_ARGS = json.dumps(
-    {"reason_codes": ["parallel_research", "multi_stage_change"]},
-    separators=(",", ":"),
-)
+TERMINAL_READY_CANARY = "DIRECT-TASK-PTY-TERMINAL-READY-8174"
+TERMINAL_PROGRESS_CANARY = "DIRECT-TASK-PTY-TERMINAL-PROGRESS-9285"
 PLAN_REVIEW_ARGS = json.dumps(
     {"reason_codes": ["architectural_tradeoff"]},
     separators=(",", ":"),
 )
-def plan_draft_args(scenario: int) -> str:
-    steps_by_scenario = {
-        1: [
-            {
-                "step_id": READ_STEP_IDS[0],
-                "title": READ_STEP_TITLES[0],
-                "role": "subagent_read",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            },
-            {
-                "step_id": READ_STEP_IDS[1],
-                "title": READ_STEP_TITLES[1],
-                "role": "subagent_read",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            },
-        ],
-        2: [
-            {
-                "step_id": "write_note",
-                "title": "Write approved note",
-                "role": "executor",
-                "mode": "write",
-                "isolation": "sequential_workspace_write",
-            }
-        ],
-        3: [
-            {
-                "step_id": "continue_after_crash",
-                "title": "Continue after crash",
-                "role": "executor",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            }
-        ],
-        4: [
-            {
-                "step_id": "cancel_in_flight",
-                "title": "Cancel in-flight task",
-                "role": "executor",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            }
-        ],
-        5: [
-            {
-                "step_id": "integrate_a",
-                "title": "Propose integration A",
-                "role": "subagent_write",
-                "mode": "write",
-                "isolation": "worktree",
-            },
-            {
-                "step_id": "integrate_b",
-                "title": "Propose integration B",
-                "role": "subagent_write",
-                "mode": "write",
-                "isolation": "worktree",
-            },
-        ],
-        6: [
-            {
-                "step_id": "terminal_lifecycle",
-                "title": "Exercise persistent terminal lifecycle",
-                "role": "executor",
-                "mode": "write",
-                "isolation": "sequential_workspace_write",
-            }
-        ],
-    }
-    steps = steps_by_scenario.get(scenario)
-    if steps is None:
-        raise AcceptanceError(f"unexpected plan review scenario {scenario}")
-    return json.dumps(
-        {
-            "schema_version": 2,
-            "summary": f"Review scenario {scenario} before execution",
-            "steps": steps,
-            "target_paths": [],
-            "suggested_checks": [],
-            "risk": None,
-            "notes": [],
-        },
-        separators=(",", ":"),
-    )
-APPROVAL_PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": "write_note",
-                "title": "Write approved note",
-                "role": "executor",
-                "mode": "write",
-                "isolation": "sequential_workspace_write",
-            }
-        ],
-    },
-    separators=(",", ":"),
-)
 APPROVAL_WRITE_ARGS = json.dumps(
     {"path": APPROVAL_PATH, "content": APPROVAL_CONTENT},
-    separators=(",", ":"),
-)
-CONTINUE_PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": "continue_after_crash",
-                "title": "Continue after crash",
-                "role": "executor",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            }
-        ],
-    },
-    separators=(",", ":"),
-)
-CANCEL_PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": "cancel_in_flight",
-                "title": "Cancel in-flight task",
-                "role": "executor",
-                "mode": "read",
-                "isolation": "shared_read_only",
-            }
-        ],
-    },
-    separators=(",", ":"),
-)
-INTEGRATION_PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": "integrate_a",
-                "title": "Propose integration A",
-                "role": "subagent_write",
-                "mode": "write",
-                "isolation": "worktree",
-            },
-            {
-                "step_id": "integrate_b",
-                "title": "Propose integration B",
-                "role": "subagent_write",
-                "mode": "write",
-                "isolation": "worktree",
-            },
-        ],
-    },
-    separators=(",", ":"),
-)
-TERMINAL_PLAN_ARGS = json.dumps(
-    {
-        "plan_version": 1,
-        "status": "accepted",
-        "steps": [
-            {
-                "step_id": "terminal_lifecycle",
-                "title": "Exercise persistent terminal lifecycle",
-                "role": "executor",
-                "mode": "write",
-                "isolation": "sequential_workspace_write",
-            }
-        ],
-    },
     separators=(",", ":"),
 )
 TERMINAL_START_ARGS = json.dumps(
@@ -295,22 +92,19 @@ INTEGRATION_WRITE_ARGS = tuple(
 
 
 class AcceptanceError(RuntimeError):
-    """Raised when the orchestration PTY contract is violated."""
+    """Raised when the direct-task PTY contract is violated."""
 
 
 @dataclasses.dataclass(frozen=True)
 class SessionAudit:
     event_counts: dict[str, int]
-    completed_steps: tuple[str, ...]
     final_answer_count: int
     approval_final_answer_count: int
     continue_final_answer_count: int
     integration_final_answer_count: int
     terminal_final_answer_count: int
     task_final_count: int
-    approval_route_resolved_count: int
     approved_tool_call_count: int
-    terminal_approval_route_resolved_count: int
     approved_terminal_start_count: int
     terminal_start_completed_count: int
     terminal_cancel_completed_count: int
@@ -318,9 +112,7 @@ class SessionAudit:
     terminal_readiness_states: tuple[str, ...]
     terminal_max_output_bytes: int
     paused_task_run_count: int
-    interrupted_step_count: int
     interrupted_task_run_count: int
-    cancelled_task_run_count: int
     promotion_preview_count: int
     promotion_authority_count: int
     promoted_integration_count: int
@@ -336,8 +128,6 @@ class FixtureState:
     request_counts: dict[str, int] = dataclasses.field(default_factory=dict)
     request_order: list[str] = dataclasses.field(default_factory=list)
     protocol_errors: list[str] = dataclasses.field(default_factory=list)
-    active_reads: int = 0
-    max_concurrent_reads: int = 0
     expected_disconnects: int = 0
     crash_release: threading.Event = dataclasses.field(default_factory=threading.Event)
     cancel_release: threading.Event = dataclasses.field(default_factory=threading.Event)
@@ -355,19 +145,7 @@ class FixtureState:
             self.request_counts[kind] = self.request_counts.get(kind, 0) + 1
             request_number = self.request_counts[kind]
             self.request_order.append(kind)
-            if kind.startswith("read:"):
-                self.active_reads += 1
-                self.max_concurrent_reads = max(
-                    self.max_concurrent_reads,
-                    self.active_reads,
-                )
             return request_number
-
-    def finish_request(self, kind: str) -> None:
-        if not kind.startswith("read:"):
-            return
-        with self.lock:
-            self.active_reads -= 1
 
     def record_error(self, error: Exception) -> None:
         with self.lock:
@@ -423,13 +201,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 raise AcceptanceError(f"unexpected fixture path {self.path}")
             kind = classify_request(payload)
             request_number = self.fixture.start_request(kind)
-            if kind == "conversation":
-                self._send_tool_call(
-                    f"handoff-call-{request_number}",
-                    "request_task_planning",
-                    HANDOFF_ARGS,
-                )
-            elif kind == "routing:plan_review":
+            if kind == "routing:plan_review":
                 self._send_tool_call(
                     f"plan-review-call-{request_number}",
                     "request_plan_review",
@@ -445,93 +217,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
                         "content": f"Review scenario {request_number} before execution",
                     }),
                 )
-            elif kind == "plan_review":
-                self._send_tool_call(
-                    f"plan-draft-call-{request_number}",
-                    "submit_plan_draft",
-                    plan_draft_args(request_number),
-                )
-            elif kind == "planner":
-                arguments = {
-                    1: PLAN_ARGS,
-                    2: APPROVAL_PLAN_ARGS,
-                    3: CONTINUE_PLAN_ARGS,
-                    4: CANCEL_PLAN_ARGS,
-                    5: INTEGRATION_PLAN_ARGS,
-                    6: TERMINAL_PLAN_ARGS,
-                }.get(request_number)
-                if arguments is None:
-                    raise AcceptanceError(
-                        f"unexpected planner request {request_number}"
-                    )
-                self._send_tool_call(
-                    f"task-plan-call-{request_number}",
-                    "task_plan_update",
-                    arguments,
-                )
-            elif kind.startswith("read:"):
-                time.sleep(0.35)
-                step_id = kind.removeprefix("read:")
-                self._send_text(f"bounded result for {step_id}")
-            elif kind == "write:request":
-                self._send_tool_call(
-                    APPROVAL_TOOL_CALL_ID,
-                    "write_file",
-                    APPROVAL_WRITE_ARGS,
-                )
-            elif kind == "write:after_tool":
-                self._send_text("approved write completed")
-            elif kind == "continue:step":
-                if request_number == 1:
-                    if not self.fixture.crash_release.wait(timeout=30):
-                        raise TimeoutError("crash fixture was not released")
-                    self._send_text("obsolete pre-crash response")
-                else:
-                    self._send_text("resumed step completed")
-            elif kind == "cancel:step":
-                if not self.fixture.cancel_release.wait(timeout=30):
-                    raise TimeoutError("cancel fixture was not released")
-                self._send_text("obsolete cancelled response")
-            elif kind.startswith("integration:step:"):
-                suffix = kind.removeprefix("integration:step:")
-                index = {"a": 0, "b": 1}.get(suffix)
-                if index is None:
-                    raise AcceptanceError(f"unexpected integration step {kind}")
-                if has_tool_result(payload, INTEGRATION_TOOL_CALL_IDS[index]):
-                    self._send_text(f"integration step {suffix} complete")
-                else:
-                    self._send_tool_call(
-                        INTEGRATION_TOOL_CALL_IDS[index],
-                        "write_file",
-                        INTEGRATION_WRITE_ARGS[index],
-                    )
-            elif kind == "terminal:start":
-                self._send_tool_call(
-                    TERMINAL_START_TOOL_CALL_ID,
-                    "terminal_start",
-                    TERMINAL_START_ARGS,
-                )
-            elif kind == "terminal:after_start":
-                self._send_tool_call(
-                    TERMINAL_CANCEL_TOOL_CALL_ID,
-                    "terminal_cancel",
-                    TERMINAL_CANCEL_ARGS,
-                )
-            elif kind == "terminal:after_cancel":
-                self._send_text("persistent terminal lifecycle completed")
-            elif kind == "synthesis":
-                final = {
-                    1: FINAL_CANARY,
-                    2: APPROVAL_FINAL_CANARY,
-                    3: CONTINUE_FINAL_CANARY,
-                    4: INTEGRATION_FINAL_CANARY,
-                    5: TERMINAL_FINAL_CANARY,
-                }.get(request_number)
-                if final is None:
-                    raise AcceptanceError(
-                        f"unexpected synthesis request {request_number}"
-                    )
-                self._send_text(final)
             elif kind == "direct:read":
                 self._send_text(FINAL_CANARY)
             elif kind == "direct:write:request":
@@ -587,7 +272,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 raise AcceptanceError(f"unsupported request kind {kind}")
         except Exception as error:  # noqa: BLE001 - retain fixture diagnostics.
             expected_disconnect = (
-                kind in {"continue:step", "cancel:step", "direct:continue", "direct:cancel"}
+                kind in {"direct:continue", "direct:cancel"}
                 and request_number == 1
                 and isinstance(error, (BrokenPipeError, ConnectionResetError))
             )
@@ -600,9 +285,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
         finally:
-            if kind:
-                self.fixture.finish_request(kind)
-            if kind in {"cancel:step", "direct:cancel"}:
+            if kind == "direct:cancel":
                 self.fixture.cancel_settled.set()
 
     def _read_json(self) -> object:
@@ -681,7 +364,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Sigil's model-owned orchestration real-PTY acceptance.",
+        description="Run Sigil's model-owned direct-task real-PTY acceptance.",
     )
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument(
@@ -741,27 +424,6 @@ def has_tool_result(payload: object, call_id: str) -> bool:
     )
 
 
-TASK_STEP_IDS = (
-    *READ_STEP_IDS,
-    "write_note",
-    "continue_after_crash",
-    "cancel_in_flight",
-    "integrate_a",
-    "integrate_b",
-    "terminal_lifecycle",
-)
-
-
-def latest_task_step_id(text: str) -> str | None:
-    """Return the current step from a prompt that may include the approved plan."""
-    matches = [
-        (text.rfind(f"Step: {step_id}"), step_id)
-        for step_id in TASK_STEP_IDS
-    ]
-    position, step_id = max(matches)
-    return step_id if position >= 0 else None
-
-
 def current_direct_scenario(payload: object) -> int | None:
     """Fixture routing follows the latest user objective, excluding assistant/tool history."""
     if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
@@ -790,14 +452,6 @@ def classify_request(payload: object) -> str:
         return "routing:plan_review"
     if "submit_plan_review_result" in names:
         return "plan_review_research"
-    if "submit_plan_draft" in names:
-        return "plan_review"
-    if "request_task_planning" in names:
-        return "conversation"
-    if "task_plan_update" in names:
-        return "planner"
-    if "Produce the single user-visible final answer" in text:
-        return "synthesis"
     direct_scenario = current_direct_scenario(payload)
     if direct_scenario == 1:
         return "direct:read"
@@ -823,28 +477,7 @@ def classify_request(payload: object) -> str:
         if has_tool_result(payload, TERMINAL_START_TOOL_CALL_ID):
             return "direct:terminal:after_start"
         return "direct:terminal:start"
-    step_id = latest_task_step_id(text)
-    if step_id in READ_STEP_IDS and "Role: subagent_read" in text:
-        return f"read:{step_id}"
-    if step_id == "write_note" and "Role: executor" in text:
-        if has_tool_result(payload, APPROVAL_TOOL_CALL_ID):
-            return "write:after_tool"
-        return "write:request"
-    if step_id == "continue_after_crash" and "Role: executor" in text:
-        return "continue:step"
-    if step_id == "cancel_in_flight" and "Role: executor" in text:
-        return "cancel:step"
-    if step_id == "integrate_a" and "Role: subagent_write" in text:
-        return "integration:step:a"
-    if step_id == "integrate_b" and "Role: subagent_write" in text:
-        return "integration:step:b"
-    if step_id == "terminal_lifecycle" and "Role: executor" in text:
-        if has_tool_result(payload, TERMINAL_CANCEL_TOOL_CALL_ID):
-            return "terminal:after_cancel"
-        if has_tool_result(payload, TERMINAL_START_TOOL_CALL_ID):
-            return "terminal:after_start"
-        return "terminal:start"
-    raise AcceptanceError("provider request does not match a production orchestration role")
+    raise AcceptanceError("provider request does not match the Direct Task fixture contract")
 
 
 def managed_parent_session_files(root: Path) -> list[Path]:
@@ -914,7 +547,7 @@ cache_root = "{cache_root}"
 log_dir = "{session_dir}"
 
 [agent]
-connection = "orchestration-fixture"
+connection = "direct-task-fixture"
 model = "{MODEL_NAME}"
 max_turns = 8
 tool_timeout_secs = 10
@@ -948,8 +581,8 @@ keyboard_enhancement = "off"
 mouse_capture = true
 osc52_clipboard = false
 
-[connections.orchestration-fixture]
-label = "Orchestration fixture"
+[connections.direct-task-fixture]
+label = "Direct Task fixture"
 provider = "custom"
 protocol = "chat_completions"
 base_url = "{endpoint}"
@@ -962,16 +595,13 @@ credential = {{ source = "none" }}
 
 def read_session_audit(path: Path) -> SessionAudit:
     counts: dict[str, int] = {}
-    completed_steps: list[str] = []
     final_answer_count = 0
     approval_final_answer_count = 0
     continue_final_answer_count = 0
     integration_final_answer_count = 0
     terminal_final_answer_count = 0
     task_final_count = 0
-    approval_route_resolved_count = 0
     approved_tool_call_count = 0
-    terminal_approval_route_resolved_count = 0
     approved_terminal_start_count = 0
     terminal_start_completed_count = 0
     terminal_cancel_completed_count = 0
@@ -979,14 +609,11 @@ def read_session_audit(path: Path) -> SessionAudit:
     terminal_readiness_states: set[str] = set()
     terminal_max_output_bytes = 0
     paused_task_run_count = 0
-    interrupted_step_count = 0
     interrupted_task_run_count = 0
-    cancelled_task_run_count = 0
     promotion_preview_count = 0
     promotion_authority_count = 0
     promoted_integration_count = 0
     parent_verification_count = 0
-    approval_child_refs: set[str] = set()
     failed_run_count = 0
     cancelled_run_count = 0
 
@@ -1088,17 +715,6 @@ def read_session_audit(path: Path) -> SessionAudit:
             continue
         observe_tool_control(control)
         observe_terminal_control(control)
-        step = control.get("task_step")
-        if (
-            isinstance(step, dict)
-            and step.get("status") == "completed"
-            and isinstance(step.get("step_id"), str)
-        ):
-            completed_steps.append(step["step_id"])
-        if isinstance(step, dict) and step.get("status") == "interrupted":
-            interrupted_step_count += 1
-        if isinstance(control.get("task_final_answer_committed"), dict):
-            task_final_count += 1
         direct_attempt = control.get("task_direct_execution_attempt_v1")
         if (
             isinstance(direct_attempt, dict)
@@ -1111,8 +727,6 @@ def read_session_audit(path: Path) -> SessionAudit:
             paused_task_run_count += 1
         if isinstance(task_run, dict) and task_run.get("status") == "interrupted":
             interrupted_task_run_count += 1
-        if isinstance(task_run, dict) and task_run.get("status") == "cancelled":
-            cancelled_task_run_count += 1
         if isinstance(control.get("task_promotion_preview_recorded"), dict):
             promotion_preview_count += 1
         if isinstance(control.get("task_promotion_authority_consumed"), dict):
@@ -1122,43 +736,15 @@ def read_session_audit(path: Path) -> SessionAudit:
             promoted_integration_count += 1
         if isinstance(control.get("task_parent_verification_recorded"), dict):
             parent_verification_count += 1
-        approval_route = control.get("task_subagent_approval_route")
-        if isinstance(approval_route, dict) and approval_route.get("status") == "resolved":
-            call_id = approval_route.get("call_id")
-            if call_id == APPROVAL_TOOL_CALL_ID:
-                approval_route_resolved_count += 1
-            elif call_id == TERMINAL_START_TOOL_CALL_ID:
-                terminal_approval_route_resolved_count += 1
-            else:
-                continue
-            child_ref = approval_route.get("child_session_ref")
-            relative = child_ref.get("path") if isinstance(child_ref, dict) else None
-            if isinstance(relative, str):
-                approval_child_refs.add(relative)
-    for relative in approval_child_refs:
-        child_path = path.parent / relative
-        for raw_line in child_path.read_text(encoding="utf-8").splitlines():
-            record = json.loads(raw_line)
-            payload = record.get("payload")
-            entry = payload.get("session_log_entry") if isinstance(payload, dict) else None
-            control = entry.get("control") if isinstance(entry, dict) else None
-            if isinstance(control, dict):
-                observe_tool_control(control)
-                observe_terminal_control(control)
     return SessionAudit(
         event_counts=counts,
-        completed_steps=tuple(completed_steps),
         final_answer_count=final_answer_count,
         approval_final_answer_count=approval_final_answer_count,
         continue_final_answer_count=continue_final_answer_count,
         integration_final_answer_count=integration_final_answer_count,
         terminal_final_answer_count=terminal_final_answer_count,
         task_final_count=task_final_count,
-        approval_route_resolved_count=approval_route_resolved_count,
         approved_tool_call_count=approved_tool_call_count,
-        terminal_approval_route_resolved_count=(
-            terminal_approval_route_resolved_count
-        ),
         approved_terminal_start_count=approved_terminal_start_count,
         terminal_start_completed_count=terminal_start_completed_count,
         terminal_cancel_completed_count=terminal_cancel_completed_count,
@@ -1166,9 +752,7 @@ def read_session_audit(path: Path) -> SessionAudit:
         terminal_readiness_states=tuple(sorted(terminal_readiness_states)),
         terminal_max_output_bytes=terminal_max_output_bytes,
         paused_task_run_count=paused_task_run_count,
-        interrupted_step_count=interrupted_step_count,
         interrupted_task_run_count=interrupted_task_run_count,
-        cancelled_task_run_count=cancelled_task_run_count,
         promotion_preview_count=promotion_preview_count,
         promotion_authority_count=promotion_authority_count,
         promoted_integration_count=promoted_integration_count,
@@ -1191,7 +775,7 @@ def wait_for_audit(
         runner.read_available(0.01)
         files = managed_parent_session_files(session_dir)
         if len(files) > 1:
-            raise AcceptanceError("orchestration run created more than one parent session")
+            raise AcceptanceError("direct-task run created more than one parent session")
         if files:
             try:
                 audit = read_session_audit(files[0])
@@ -1210,148 +794,16 @@ def wait_for_audit(
     if last_audit is not None:
         suffix += (
             f"; observed finals={last_audit.task_final_count}, "
-            f"paused={last_audit.paused_task_run_count}, "
             f"interrupted_tasks={last_audit.interrupted_task_run_count}, "
-            f"cancelled_tasks={last_audit.cancelled_task_run_count}, "
             f"cancelled_runs={last_audit.cancelled_run_count}, "
             f"failed_runs={last_audit.failed_run_count}"
         )
-    raise TimeoutError(f"timed out waiting for durable orchestration completion{suffix}")
-
-
-def validate_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.event_counts.get("plan_draft_created", 0) != 1:
-        raise AcceptanceError(
-            "review-first baseline did not durably record one plan draft"
-        )
-    if audit.event_counts.get("orchestration_route_disabled", 0) != 0:
-        raise AcceptanceError("healthy orchestration unexpectedly triggered the route kill switch")
-    if tuple(sorted(audit.completed_steps)) != tuple(sorted(READ_STEP_IDS)):
-        raise AcceptanceError("durable task did not complete both parallel read steps exactly once")
-    if audit.final_answer_count != 1 or audit.task_final_count != 1:
-        raise AcceptanceError("task must commit one parent-visible final answer")
-    if audit.failed_run_count != 0:
-        raise AcceptanceError("orchestration run finalized with a failure")
-
-    expected_requests = {
-        "routing:plan_review": 1,
-        "plan_review": 1,
-        f"read:{READ_STEP_IDS[0]}": 1,
-        f"read:{READ_STEP_IDS[1]}": 1,
-        "synthesis": 1,
-        "title": 1,
-    }
-    if fixture.request_counts != expected_requests:
-        raise AcceptanceError(
-            f"unexpected provider request distribution {fixture.request_counts}"
-        )
-    if fixture.max_concurrent_reads != 2:
-        raise AcceptanceError(
-            "parallel read steps did not overlap at the provider boundary"
-        )
-    if fixture.protocol_errors:
-        raise AcceptanceError(
-            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
-        )
-
-
-def validate_approval_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.event_counts.get("plan_draft_created", 0) != 2:
-        raise AcceptanceError("approval phase did not durably record both plan drafts")
-    if audit.completed_steps.count("write_note") != 1:
-        raise AcceptanceError("approved write step did not complete exactly once")
-    if (
-        audit.approval_route_resolved_count != 1
-        or audit.approved_tool_call_count != 1
-    ):
-        raise AcceptanceError(
-            "write approval was not durably resolved once in both parent route and child audit"
-        )
-    if audit.final_answer_count != 1 or audit.approval_final_answer_count != 1:
-        raise AcceptanceError("approval phase violated the one-final-per-task contract")
-    if audit.task_final_count != 2 or audit.failed_run_count != 0:
-        raise AcceptanceError("approval task did not complete through the shared root terminal")
-    expected_requests = {
-        "routing:plan_review": 2,
-        "plan_review": 2,
-        f"read:{READ_STEP_IDS[0]}": 1,
-        f"read:{READ_STEP_IDS[1]}": 1,
-        "write:request": 1,
-        "write:after_tool": 1,
-        "synthesis": 2,
-        "title": 1,
-    }
-    if fixture.request_counts != expected_requests:
-        raise AcceptanceError(
-            f"unexpected approval provider request distribution {fixture.request_counts}"
-        )
-    if fixture.protocol_errors:
-        raise AcceptanceError(
-            f"fixture observed provider protocol errors: {fixture.protocol_errors}"
-        )
-
-
-def validate_continue_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.paused_task_run_count != 1 or audit.interrupted_step_count != 1:
-        raise AcceptanceError(
-            "crashed task did not persist one paused task and one interrupted step"
-        )
-    if audit.completed_steps.count("continue_after_crash") != 1:
-        raise AcceptanceError("continued task did not complete its interrupted step")
-    if audit.continue_final_answer_count != 1 or audit.task_final_count != 3:
-        raise AcceptanceError("continued task did not commit one unique parent final")
-    if fixture.request_counts.get("continue:step") != 2:
-        raise AcceptanceError("continued task did not dispatch once before and once after crash")
-    if fixture.request_counts.get("synthesis") != 3:
-        raise AcceptanceError("continued task synthesis did not run exactly once")
-
-
-def validate_cancel_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.cancelled_task_run_count != 1:
-        raise AcceptanceError("cancelled task did not persist exactly one cancelled terminal")
-    if audit.cancelled_run_count != 1:
-        raise AcceptanceError("cancelled task did not finalize exactly one cancelled run")
-    if audit.failed_run_count != 0:
-        raise AcceptanceError("cancelled task finalized with a hard failure")
-    if audit.completed_steps.count("cancel_in_flight") != 0:
-        raise AcceptanceError("cancelled in-flight step was incorrectly committed")
-    if audit.task_final_count != 3:
-        raise AcceptanceError("cancelled task incorrectly committed a parent final")
-    if fixture.request_counts.get("cancel:step") != 1:
-        raise AcceptanceError("cancelled task provider dispatch count is not exactly one")
-    if fixture.request_counts.get("synthesis") != 3:
-        raise AcceptanceError("cancelled task incorrectly reached synthesis")
-
-
-def validate_integration_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.promotion_preview_count != 1:
-        raise AcceptanceError("integration task did not produce one exact promotion preview")
-    if audit.promotion_authority_count != 1 or audit.promoted_integration_count != 1:
-        raise AcceptanceError("reviewed integration was not promoted by one exact authority")
-    if audit.parent_verification_count != 1:
-        raise AcceptanceError("reviewed integration has no authoritative parent verification")
-    if audit.integration_final_answer_count != 1 or audit.task_final_count != 4:
-        raise AcceptanceError("reviewed integration did not commit one unique parent final")
-    if fixture.request_counts.get("integration:step:a") != 2:
-        raise AcceptanceError("integration step A did not run one tool turn and one final turn")
-    if fixture.request_counts.get("integration:step:b") != 2:
-        raise AcceptanceError("integration step B did not run one tool turn and one final turn")
-    if fixture.request_counts.get("synthesis") != 4:
-        raise AcceptanceError("reviewed integration synthesis did not run exactly once")
+    raise TimeoutError(f"timed out waiting for durable Direct Task completion{suffix}")
 
 
 def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
-    if audit.event_counts.get("plan_draft_created", 0) != 6:
-        raise AcceptanceError("terminal phase did not durably record all six plan drafts")
-    # Direct Task execution records the plan step through its durable task attempt and terminal
-    # records rather than the legacy child-orchestration task_step projection. The unique terminal
-    # final below is therefore the direct route's completion marker.
     if audit.terminal_final_answer_count != 1:
         raise AcceptanceError("terminal lifecycle task did not complete exactly once")
-    # The shipping path is a direct Task: its approval is resolved in the parent session and the
-    # managed terminal records are attached to that same durable stream. The older child-role
-    # route used a separate task_subagent_approval projection, so requiring that projection here
-    # would make the production acceptance test assert an obsolete topology.
     if audit.approved_terminal_start_count != 1:
         raise AcceptanceError("terminal_start approval was not durably resolved exactly once")
     if (
@@ -1381,7 +833,7 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         raise AcceptanceError("terminal phase lost the prior user-cancelled run terminal")
     expected_requests = {
         "routing:plan_review": 6,
-        "plan_review": 6,
+        "plan_review_research": 6,
         "direct:read": 1,
         "direct:write:request": 1,
         "direct:write:after_tool": 1,
@@ -1395,8 +847,6 @@ def validate_terminal_audit(audit: SessionAudit, fixture: FixtureState) -> None:
         "direct:terminal:after_cancel": 1,
         "title": 1,
     }
-    if "plan_review_research" in fixture.request_counts:
-        expected_requests["plan_review_research"] = expected_requests.pop("plan_review")
     if fixture.request_counts != expected_requests:
         raise AcceptanceError(
             f"unexpected terminal provider request distribution {fixture.request_counts}"
@@ -2182,7 +1632,7 @@ def main() -> int:
         managed_session_dir = state_root / "managed" / "session-log"
         for directory in (workspace, state_root, cache_root, configured_session_dir):
             directory.mkdir()
-        (workspace / "README.md").write_text("orchestration fixture\n", encoding="utf-8")
+        (workspace / "README.md").write_text("direct-task fixture\n", encoding="utf-8")
         SUPPORT.generate_fixture_tls_identity(fixture_root)
         env = SUPPORT.isolated_environment(fixture_root)
         initialize_git_workspace(workspace, env)
@@ -2298,331 +1748,13 @@ def main() -> int:
         print(f"direct task PTY acceptance passed: {manifest_path}")
         return 0
 
-        # The legacy child-orchestration fixture below is retained for its unit-level contract
-        # helpers; production plan approval now intentionally uses the direct Task route.
-        submit_user_prompt(runner, USER_PROMPT)
-        # RFC-0063 ReviewFirst baseline: open the complete workbench first, then explicitly
-        # confirm its selected Run action. A single Enter must never skip plan review.
-        approve_review_first_plan(runner, deadline.remaining(), scenario=1)
-        session_path, audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.final_answer_count == 1
-            and value.task_final_count == 1,
-            deadline.remaining(),
-        )
-        settled_screen = runner.wait_until(
-            lambda text: FINAL_CANARY in text
-            and "Thinking..." not in text
-            and "Replying..." not in text,
-            deadline.remaining(),
-            "settled orchestration final answer",
-            final_screen=True,
-        )
-        if settled_screen.count(FINAL_CANARY) != 1:
-            raise AcceptanceError("TUI rendered the orchestration final answer more than once")
-        raw_text = runner.raw_text()
-        if READ_STEP_TITLES[0] not in raw_text or "0/2" not in raw_text:
-            raise AcceptanceError("TUI never rendered the parallel task batch progress")
-        validate_audit(audit, fixture)
-
-        submit_user_prompt(runner, APPROVAL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining(), scenario=2)
-
-        runner.wait_until(
-            lambda text: ("Approve action?" in text or "Review file changes" in text)
-            and "write_file" in text
-            and APPROVAL_PATH in text,
-            deadline.remaining(),
-            "task participant write approval",
-            final_screen=True,
-        )
-        runner.send("y")
-        session_path, approval_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.approval_final_answer_count == 1
-            and value.task_final_count == 2,
-            deadline.remaining(),
-        )
-        approval_screen = runner.wait_until(
-            lambda text: APPROVAL_FINAL_CANARY in text
-            and "Thinking..." not in text
-            and "Replying..." not in text,
-            deadline.remaining(),
-            "settled approved task final answer",
-            final_screen=True,
-        )
-        if approval_screen.count(APPROVAL_FINAL_CANARY) != 1:
-            raise AcceptanceError("TUI rendered the approved task final more than once")
-        if (workspace / APPROVAL_PATH).read_text(encoding="utf-8") != APPROVAL_CONTENT:
-            raise AcceptanceError("approved task write did not reach the workspace")
-        validate_approval_audit(approval_audit, fixture)
-        checkpoint_workspace(workspace, env, "record approved write fixture")
-
-        submit_user_prompt(runner, CONTINUE_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining(), scenario=3)
-
-        wait_for_fixture_request(
-            fixture,
-            "continue:step",
-            1,
-            runner,
-            deadline.remaining(),
-        )
-        runner.stop()
-        runner = None
-        fixture.crash_release.set()
-
-        runner = SUPPORT.PtyRunner(
-            [
-                str(frozen_binary),
-                "--config",
-                str(config_path),
-                "resume",
-                str(session_path),
-            ],
-            workspace,
-            env,
-            output_dir / "resume-process.log",
-        )
-        runner.start()
-        SUPPORT.wait_for_main_tui(runner, deadline.remaining())
-        session_path, interrupted_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.paused_task_run_count == 1
-            and value.interrupted_step_count == 1,
-            deadline.remaining(),
-        )
-        if interrupted_audit.task_final_count != 2:
-            raise AcceptanceError("crash-interrupted task committed a final before continue")
-        runner.type_text("/task continue")
-        runner.send("\r")
-        session_path, continue_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.continue_final_answer_count == 1
-            and value.task_final_count == 3,
-            deadline.remaining(),
-        )
-        continued_screen = runner.wait_until(
-            lambda text: CONTINUE_FINAL_CANARY in text
-            and "Thinking..." not in text
-            and "Replying..." not in text,
-            deadline.remaining(),
-            "settled continued task final answer",
-            final_screen=True,
-        )
-        if continued_screen.count(CONTINUE_FINAL_CANARY) != 1:
-            raise AcceptanceError("TUI rendered the continued task final more than once")
-        validate_continue_audit(continue_audit, fixture)
-
-        submit_user_prompt(runner, CANCEL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining(), scenario=4)
-
-        wait_for_fixture_request(
-            fixture,
-            "cancel:step",
-            1,
-            runner,
-            deadline.remaining(),
-        )
-        runner.send(b"\x1b")
-        session_path, cancel_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.cancelled_task_run_count == 1,
-            deadline.remaining(),
-        )
-        fixture.cancel_release.set()
-        if not fixture.cancel_settled.wait(timeout=deadline.remaining(5.0)):
-            raise AcceptanceError("cancelled provider request did not settle")
-        validate_cancel_audit(cancel_audit, fixture)
-        if fixture.protocol_errors:
-            raise AcceptanceError(
-                f"fixture observed provider protocol errors: {fixture.protocol_errors}"
-            )
-        runner.wait_until(
-            lambda text: "cancelled" in text.lower(),
-            deadline.remaining(),
-            "visible cancelled task state",
-            final_screen=True,
-        )
-
-        submit_user_prompt(runner, INTEGRATION_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining(), scenario=5)
-
-        session_path, review_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.promotion_preview_count == 1,
-            deadline.remaining(),
-        )
-        if (
-            review_audit.integration_final_answer_count != 0
-            or review_audit.task_final_count != 3
-            or review_audit.promotion_authority_count != 0
-        ):
-            raise AcceptanceError(
-                "integration task advanced past the exact user review boundary"
-            )
-        runner.wait_until(
-            lambda text: "Integration review" in text
-            and "ready · exact target bound" in text
-            and "review diff" in text,
-            deadline.remaining(),
-            "visible integration review card",
-            final_screen=True,
-        )
-        activate_screen_text_until(
-            runner,
-            "Integration review",
-            lambda text: "reviewed · exact diff loaded" in text
-            and "Enter accept integration" in text,
-            deadline.remaining(),
-            "loaded exact integration diff",
-        )
-        runner.send("\r")
-        session_path, integration_audit = wait_for_audit(
-            managed_session_dir,
-            runner,
-            lambda value: value.integration_final_answer_count == 1
-            and value.task_final_count == 4,
-            deadline.remaining(),
-        )
-        integration_screen = runner.wait_until(
-            lambda text: INTEGRATION_FINAL_CANARY in text
-            and "Thinking..." not in text
-            and "Replying..." not in text,
-            deadline.remaining(),
-            "settled integration task final answer",
-            final_screen=True,
-        )
-        if integration_screen.count(INTEGRATION_FINAL_CANARY) != 1:
-            raise AcceptanceError("TUI rendered the integration task final more than once")
-        validate_integration_audit(integration_audit, fixture)
-        for path, expected in zip(
-            INTEGRATION_PATHS,
-            ("integrated a\n", "integrated b\n"),
-            strict=True,
-        ):
-            if (workspace / path).read_text(encoding="utf-8") != expected:
-                raise AcceptanceError(f"reviewed integration did not promote {path}")
-
-        submit_user_prompt(runner, TERMINAL_USER_PROMPT)
-        approve_review_first_plan(runner, deadline.remaining(), scenario=6)
-
-        runner.wait_until(
-            lambda text: ("Approve action?" in text or "Review file changes" in text)
-            and "terminal_start" in text
-            and TERMINAL_READY_CANARY in text,
-            deadline.remaining(),
-            "structured terminal_start approval",
-            final_screen=True,
-        )
-        runner.send("y")
-        session_path, terminal_audit = wait_for_audit(
-            session_dir,
-            runner,
-            lambda value: value.terminal_final_answer_count == 1
-            and value.task_final_count == 5
-            and "cancelled" in value.terminal_task_statuses,
-            deadline.remaining(),
-        )
-        terminal_screen = runner.wait_until(
-            lambda text: TERMINAL_FINAL_CANARY in text
-            and TERMINAL_TASK_ID in text
-            and "status: cancelled" in text
-            and "Thinking..." not in text
-            and "Replying..." not in text,
-            deadline.remaining(),
-            "settled terminal lifecycle final answer and terminal state",
-            final_screen=True,
-        )
-        if terminal_screen.count(TERMINAL_FINAL_CANARY) != 1:
-            raise AcceptanceError("TUI rendered the terminal task final more than once")
-        validate_terminal_audit(terminal_audit, fixture)
-
-        runner.quit(timeout=deadline.remaining(10.0))
-        runner.stop()
-        runner = None
-
-        evidence_dir = output_dir / "sessions"
-        evidence_dir.mkdir(mode=0o700, exist_ok=True)
-        evidence_path = evidence_dir / "parent.jsonl"
-        shutil.copyfile(session_path, evidence_path)
-        manifest = {
-            "schema_version": SCHEMA_VERSION,
-            "campaign": "sigil-orchestration-tui-v1",
-            "status": "passed",
-            "started_at": started_at,
-            "finished_at": utc_now(),
-            "duration_ms": int((time.monotonic() - started) * 1000),
-            "binary": identity.as_dict(),
-            "checks": {
-                "model_owned_auto_handoff": True,
-                "parallel_read_provider_overlap": fixture.max_concurrent_reads,
-                "completed_step_count": len(audit.completed_steps),
-                "unique_parent_final_count": audit.final_answer_count,
-                "approved_write_count": approval_audit.approved_tool_call_count,
-                "continued_task_interruption_count": (
-                    continue_audit.interrupted_step_count
-                ),
-                "cancelled_task_count": cancel_audit.cancelled_task_run_count,
-                "reviewed_integration_promotion_count": (
-                    integration_audit.promoted_integration_count
-                ),
-                "approved_terminal_start_count": (
-                    terminal_audit.approved_terminal_start_count
-                ),
-                "terminal_start_completed_count": (
-                    terminal_audit.terminal_start_completed_count
-                ),
-                "terminal_cancel_completed_count": (
-                    terminal_audit.terminal_cancel_completed_count
-                ),
-                "terminal_readiness_ready": (
-                    "ready" in terminal_audit.terminal_readiness_states
-                ),
-                "terminal_output_progress_bytes": (
-                    terminal_audit.terminal_max_output_bytes
-                ),
-                "terminal_terminal_state": "cancelled",
-                "completed_task_count": terminal_audit.task_final_count,
-                "route_kill_switch_count": audit.event_counts.get(
-                    "orchestration_route_disabled",
-                    0,
-                ),
-            },
-            "evidence": {
-                "pty_log": "tui-process.log",
-                "resume_pty_log": "resume-process.log",
-                "session": "sessions/parent.jsonl",
-            },
-            "privacy": {
-                "raw_artifacts_local_only": True,
-                "automatic_upload": False,
-            },
-        }
-        manifest_path = output_dir / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        (output_dir / "manifest.sha256").write_text(
-            f"{SUPPORT.sha256_file(manifest_path)}  manifest.json\n",
-            encoding="utf-8",
-        )
-        print(f"orchestration PTY acceptance passed: {manifest_path}")
-        return 0
     except (
         AcceptanceError,
         OSError,
         TimeoutError,
         json.JSONDecodeError,
     ) as error:
-        print(f"orchestration PTY acceptance failed: {error}", file=sys.stderr)
+        print(f"direct-task PTY acceptance failed: {error}", file=sys.stderr)
         active_runner = runner_holder[0] if runner_holder[0] is not None else runner
         if active_runner is not None:
             try:

@@ -42,39 +42,25 @@ TOOL_CALL_ID = "stateful-write-call"
 CJK_PATH = "stateful-cjk-boundary.txt"
 CJK_CONTENT = "UTF-8 boundary regression 到"
 CJK_TOOL_CALL_ID = "stateful-cjk-read-call"
-PLAN_TOOL_CALL_ID = "stateful-plan-draft-call"
+PLAN_REVIEW_RESULT_TOOL_CALL_ID = "stateful-plan-review-result-call"
 PLAN_PROMPT = "review the stateful TUI rendering path without modifying files"
 PLAN_SUMMARY_CANARY = "STATEFUL-PLAN-PREVIEW-CANARY-5821"
-PLAN_MODE_MARKER = "Plan mode is active for this turn."
-PLAN_RESEARCH_MARKER = "You are running a read-only plan review for the current request."
-PLAN_FINALIZER_MARKER = (
-    "The research phase is complete and this is the single submit-only finalization turn."
-)
 QUEUED_FOLLOW_UP_PROMPT = "STATEFUL-QUEUED-FOLLOW-UP-PROMPT-7346"
 QUEUED_FOLLOW_UP_REPLY = "STATEFUL-QUEUED-FOLLOW-UP-REPLY-8462"
 HISTORY_HEAD_CANARY_PREFIX = "STATEFUL-HISTORY-HEAD-"
-PLAN_DRAFT_ARGUMENTS = json.dumps(
+PLAN_REVIEW_RESULT_ARGUMENTS = json.dumps(
     {
-        "schema_version": 2,
-        "summary": PLAN_SUMMARY_CANARY,
-        "steps": [
-            {
-                "step_id": "inspect_tui_rendering",
-                "title": "Inspect stateful TUI rendering",
-                "role": "subagent_read",
-                "mode": "read",
-                "isolation": "shared_read_only",
-                "target_paths": [EDIT_PATH],
-            }
-        ],
-        "target_paths": [EDIT_PATH],
-        "suggested_checks": [],
-        "risk": None,
-        "notes": [],
+        "schema_version": 1,
+        "outcome": "draft",
+        "content": (
+            f"{PLAN_SUMMARY_CANARY}\n\n"
+            "Review the stateful TUI rendering path. Inspect the current implementation, "
+            "confirm the relevant files, and propose a safe implementation and verification "
+            "sequence. This proposal grants no execution authority."
+        ),
     },
     separators=(",", ":"),
 )
-PLAN_DRAFT_TEXT = f"```sigil-plan-v2\n{PLAN_DRAFT_ARGUMENTS}\n```"
 
 
 def history_head_canary(request_index: int) -> str:
@@ -402,28 +388,7 @@ def advertises_tool(payload: object, name: str) -> bool:
 
 
 def is_plan_mode_request(payload: object) -> bool:
-    request = payload if isinstance(payload, dict) else {}
-    # The submit-only finalizer is capability-bound even when its prompt wording evolves. The
-    # research turn has no submit tool, so retain explicit markers for both the current durable
-    # workbench and the pre-workbench `/plan` protocol used by older release binaries.
-    if advertises_tool(payload, "submit_plan_draft"):
-        return True
-    messages = request.get("messages")
-    if not isinstance(messages, list):
-        return False
-    return any(
-        isinstance(message, dict)
-        and isinstance(message.get("content"), str)
-        and any(
-            marker in message["content"]
-            for marker in (
-                PLAN_RESEARCH_MARKER,
-                PLAN_FINALIZER_MARKER,
-                PLAN_MODE_MARKER,
-            )
-        )
-        for message in messages
-    )
+    return advertises_tool(payload, "submit_plan_review_result")
 
 
 @dataclasses.dataclass
@@ -631,32 +596,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 return
             if is_plan_mode_request(payload):
                 self.fixture.record_plan_request()
-                if advertises_tool(payload, "submit_plan_draft"):
-                    self._send_sse(
-                        {
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": 0,
-                                        "id": PLAN_TOOL_CALL_ID,
-                                        "type": "function",
-                                        "function": {
-                                            "name": "submit_plan_draft",
-                                            "arguments": PLAN_DRAFT_ARGUMENTS,
-                                        },
-                                    }
-                                ]
-                            },
-                            "finish_reason": "tool_calls",
-                        }
-                    )
-                else:
-                    self._send_sse(
-                        {
-                            "delta": {"content": PLAN_DRAFT_TEXT},
-                            "finish_reason": "stop",
-                        }
-                    )
+                self._send_sse(
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": PLAN_REVIEW_RESULT_TOOL_CALL_ID,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "submit_plan_review_result",
+                                        "arguments": PLAN_REVIEW_RESULT_ARGUMENTS,
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                )
                 return
             request_index = self.fixture.record_request(payload)
             if request_index <= 3:

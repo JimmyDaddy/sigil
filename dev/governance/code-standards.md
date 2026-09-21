@@ -77,18 +77,24 @@
 - `spawn_blocking` 只用于会自行结束的阻塞工作；长期常驻的阻塞 loop / worker 优先使用专用线程，并提供明确的退出路径
 - 后台任务不能“放飞不管”；需要有明确 owner、`JoinHandle`、取消信号或收尾路径
 - 跨层 agent 调用必须控制原生线程栈占用；大型 Future 的构造临时值不得长期叠加在父级 `poll` 栈帧中。需要时使用私有构造函数返回 boxed Future 或拆分执行阶段，并通过完整调用链验证；仅在调用处增加 `.boxed()` 或调大线程栈不能代替验证。
-- run/task/agent取消必须使用唯一root owner与可复制child handle；所有forward effect在最后责任边界取得RAII permit，取消后不得再取得新permit。cleanup/rollback/reap使用独立cleanup permit；只有启动前冻结的scope/coverage下owned task与permit全部归零才能记录`Cancelled`，deadline超时只能记录`Interrupted`/cleanup-incomplete。有限native停止不能表述为全树静止；具体资源结算与强要求见[RFC-0071 §1.1](../docs/rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)
+- run/task/agent取消必须使用唯一root owner与可复制child handle；所有forward effect在最后责任边界取得RAII permit，取消后不得再取得新permit。cleanup/rollback/reap使用独立cleanup permit；只有启动前冻结的scope/coverage下owned task与permit全部归零、必要资源与审计结算成功才能记录`Cancelled`。响应/慢退出提示阈值耗尽只表示仍在清理，保留原owner与未终结Requested；不得据此设置永久清理失败、丢弃JoinHandle或写成功终态。确实需要在无法确认清理时终结，只能记录`Interrupted`/cleanup-incomplete；已经发布的历史终态不得改写。正常退出由显式协调流程等真实join并汇总最终结果，Drop只保留异常兜底。有限native停止不能表述为全树静止；具体资源结算与强要求见[RFC-0071 §1.1](../docs/rfcs/0071-unified-resource-authority-and-sandbox-lifecycle-v1.md#11-进程覆盖与资源结算的分级保证2026-08-31修订)与[退出清理](../docs/tui-shutdown-settlement.md)。
 
 ### 2.6 用户自然语言与语义决策边界
 
 - production code 禁止通过中英文关键词、固定短语、locale alias、正则或模糊字符串匹配，从用户 prompt / guidance / message 中推断意图并选择工具、方法、模式、Plan / Task 路由、继续/取消/审批或其他功能行为
 - 需要理解用户语义时，必须由模型通过受限 typed tool / JSON schema 输出选择；host 只能校验 enum、durable state、host-owned id/hash/generation、权限、安全边界、资源前置条件和幂等/CAS，不得从原始自然语言重建、修正或覆盖模型的 typed 决定
-- 若普通工具执行前必须先做语义分流，使用独立 routing microturn 或等价的 typed model decision；无效输出只能按有界 retry、typed neutral fallback 或显式失败处理，不能降级为关键词表
+- 普通 Auto 新请求首轮直接提供当前权限允许的业务工具；`request_plan_review`、`start_task` 和 exact-bound continuation/action 作为同一普通工具面的可选 typed 操作。不得增加必经的正向或负向路由回合；没有调用操作工具就不改变 Plan/Task 状态。绑定选择必须使用 host 冻结的 exact object identity；无效输出只能按有界 retry、typed neutral fallback 或显式失败处理，不能降级为关键词表
 - typed 决定建立后，后续 adapter 不得再次读取 prompt 文案来改变同一决定。测试必须证明：改变 prompt 的语言、礼貌词或同义表达不会绕过 host authority；相同文案也不能覆盖模型返回的 typed choice
 - 允许的字符串解析仅限明确语法和非语义安全职责，例如 `/command`、`@agent`、配置/协议 enum、工具参数中的显式 literal search、路径/标识符检索、secret/credential/PII 防护、markup/provider error 解析和纯展示格式化。这些解析结果不得被复用为用户意图路由
 - `python3 scripts/check-no-prompt-phrase-routing.py` 是最低静态门禁；它不替代 code review。新增自然语言输入链路时必须人工沿数据流确认没有通过重命名局部变量或封装 helper 绕过本规范
 
-### 2.7 公开接口与 Rustdoc
+### 2.7 参数输入兼容边界
+
+- 所有 JSON、TOML、query、IPC、MCP 和持久化输入只投影当前版本实际消费的字段；未知字段（包括已退休字段）必须忽略，不得因为字段集合是超集而拒绝请求。
+- 当前真正需要的字段仍必须校验存在性、类型、枚举/标签、范围、权限、身份、哈希、代数和资源绑定；忽略未知字段不能绕过这些语义校验。
+- 应用边界的 OpenAPI/JSON Schema 不得用 `additionalProperties: false` 让 host 拒绝含未知字段的输入。provider 私有 tool schema 可以按远端模型 API 的约束限制模型生成的参数，但它不是 host 的参数校验器；host 收到调用后仍只投影并校验自己消费的字段。
+
+### 2.8 公开接口与 Rustdoc
 
 - 新增跨 crate 的公共类型、trait、函数时，至少写清楚它的职责和边界
 - 会返回错误、可能 panic、或有调用前提的公共接口，应补 `Errors`、`Panics`、`Safety` 等对应说明
@@ -106,7 +112,7 @@
 - 公共类型修改时，必须先判断是否仍适合未来多 provider 复用
 - provider-hosted 能力只能通过中立 `HostedToolKind` / model capability 表达；hosted-enabled turn 的 text/reasoning/summary/evidence 必须先进入 hard-capped transient buffer，并在 runtime finalizer 完成 URL/source/citation 安全投影后才允许进入 session、`RunEvent` 或前端 handler
 - provider-hosted raw URL、title、query 与 remote source id 必须使用无 serde 实现且 redacted `Debug` 的 secret carrier；request bytes 开始发送后禁止 adapter 内透明 retry，provider 成功但未实际使用 hosted tool 必须记录 `NotUsed`；kernel 只有在旧 physical attempt 已 terminal、同一 logical turn 仍持有并校验 exact frozen request、无 durable output/client-tool/mutating effect 且 retry budget允许时，才可签发新的 physical attempt，进程重启后 process-local fingerprint不能替代 durable-frontier reconstruction
-- runtime/TUI adapter 必须把 typed execution error 保留到 Task root finalizer，不能先格式化为字符串再猜状态；verification或role-runtime构建在participant dispatch前失败时属于zero-dispatch preflight blocker，Task保持`Paused`并可用同一durable authority继续，只有已经进入不可恢复执行边界的错误才写`Failed`
+- runtime/TUI adapter 必须把 typed execution error 保留到 Task root finalizer，不能先格式化为字符串再猜状态；verification或role-runtime构建在child dispatch前失败时属于zero-dispatch preflight blocker，Task保持`Paused`并可用同一durable authority继续，只有已经进入不可恢复执行边界的错误才写`Failed`
 
 ### 3.2 `sigil-provider-deepseek`
 
@@ -127,9 +133,10 @@
 - 写文件类工具默认提供 `preview`，尤其是 `write_file`、`edit_file`
 - 由 LSP、远端服务或其他外部 planner 生成的写入不得在 `execute` 阶段重新规划；必须先 materialize 不可变 prepared artifact，让完整目标 subjects 参与 permission/approval，再由一次性 envelope 按值消费执行
 - prepared mutation 的 source/target hash、workspace revision、args、policy 与 approval 任一漂移都必须在首个写入前 fail closed；多文件补偿回滚仍须走 RFC-0002 CAS/审计，不能宣称为 crash-atomic transaction
-- `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
-- `bash` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
-- 受控 `bash` 的审批环境哈希与实际执行请求必须使用同一封闭环境映射。`CARGO_HOME`、`RUSTUP_HOME` 优先采用显式父进程值，缺失时从父 `HOME` 派生工具链根；不得继承父 `HOME`、任意凭据环境变量或 shell startup 变量。执行 `HOME` 仍由 authority 的临时资源提供，工具链根变化必须使旧审批绑定失效，不能在审批后由 adapter 静默补入未绑定的环境值。
+- 模型可见的命令启动入口统一为 `exec_command`；命令族仅用于结构化权限分析，不得重建有限/持久工具分流门禁。PTY、本次等待预算、进程总时限分别建模。命令参数完成后的安全展示不依赖审批或输出；工具调用返回不能替代进程退出与 cleanup receipt。具体见[统一命令执行](../docs/unified-command-execution.md)。
+- `exec_command` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
+- `exec_command` 只能通过测试覆盖的保守路径动态降级为 `Read`：内置只读 family、`tree-sitter-bash` 结构解析后的 readonly spec，或明确的只读 fast path。新增 readonly spec 必须同时覆盖允许样例和 mutating/unsupported 反例；复杂 shell 语法、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute` 或 `ask`。
+- 受控 `exec_command` 的审批环境哈希与实际执行请求必须使用同一封闭环境映射。`CARGO_HOME`、`RUSTUP_HOME` 优先采用显式父进程值，缺失时从父 `HOME` 派生工具链根；不得继承父 `HOME`、任意凭据环境变量或 shell startup 变量。执行 `HOME` 仍由 authority 的临时资源提供，工具链根变化必须使旧审批绑定失效，不能在审批后由 adapter 静默补入未绑定的环境值。
 - 所有current-schema工具结果必须通过`ToolResultRecordedV3`拆成immutable policy-safe artifact、bounded model view和bounded display view；artifact body不得进入JSONL、control entry、run event或Desktop IPC。V2只保留历史契约说明和旧格式拒绝fixture，被替代的生产legacy decoder随对应整改包删除，不再作为新writer或治理目标；数据影响遵守工程规范§3.4
 - 工具若可能产生大输出，优先使用 `ToolContext::create_policy_safe_tool_output_sink()` 流式捕获；bounded inline adapter 只允许受限 fallback，超过 hard guard 必须显式 `Unavailable`，不得通过提高 stored-event 上限兜底
 - model / display 只暴露 session-scoped opaque artifact ref，不暴露绝对路径、workspace 路径或 content-addressed filename；后续读取统一使用 typed selector、共享预算、hash 校验和 body-free audit receipt
@@ -139,8 +146,8 @@
 - workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
 - 任意 workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`；runtime-owned scratch 必须建模为独立 `RuntimeScratch` subject/trust zone，不能伪装成 `Workspace`，也不能误送入 arbitrary external-directory gate
 - Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
-- `$SIGIL_SCRATCH_DIR` 必须按 session scope id 推导 session-scoped 命名空间（`<scratch root>/sessions/<session scope id>`），不得把 workspace-wide scratch root 直接注入给 child；bash、terminal_start、TUI 维护与 Desktop/application runtime 共用同一推导规则
-- scratch 命名空间在写入前必须 owner-only（Windows 复用 `secure_private_path_permissions` 的受保护 owner-only DACL），并执行 per-session 配额与 workspace 硬上限计量；计量必须拒绝 symlink、以总条目/字节预算限制工作量，不能把普通目录深度作为 namespace 有效性条件；配额/计量失败必须结构化、可诊断，禁止静默转用系统 `/tmp`
+- `$SIGIL_SCRATCH_DIR` 必须按 session scope id 推导 session-scoped 命名空间（`<scratch root>/sessions/<session scope id>`），不得把 workspace-wide scratch root 直接注入给 child；统一命令执行、TUI 维护与 Desktop/application runtime 共用同一推导规则
+- scratch 命名空间在写入前必须 owner-only（Windows 复用 `secure_private_path_permissions` 的受保护 owner-only DACL）；no-follow 计量由 RA 以总条目预算限制工作量，不能把普通目录深度作为 namespace 有效性条件。普通 shell/terminal 的 ensure 不以历史用量或计量失败拒绝启动；计量不可用必须报告 Unknown 并保留上次成功值，不能静默归零。受管 writer 的新增写入仍须先取得实际容量，lease、权限与 OS 写入结果继续有效，禁止静默转用系统 `/tmp`
 - scratch TTL GC 只能删除无 active tool/terminal lease 的命名空间，删除与 lease 获取必须在同一注册表锁内完成；session 删除必须同时回收该 session 的 scratch 命名空间
 - 工具失败必须结构化返回，不能 panic；pipe 读取失败、artifact/capture 存储失败与磁盘耗尽不得压缩成同一个通用 reader error，资源耗尽必须带稳定 code 和可执行恢复提示
 - 长时间 workspace check 在启动前必须做有界磁盘余量预检；capture 存储失败时继续 drain 已启动的 child process，并把 artifact 标记为 unavailable，不能把存储失败伪装成命令执行失败
